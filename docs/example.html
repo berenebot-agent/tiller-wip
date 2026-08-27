@@ -1,0 +1,2971 @@
+<!DOCTYPE html>
+<!-- saved from url=(0026)https://example.org/admin -->
+<html lang="en"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Dashboard - Example Organisation</title>
+    <link rel="stylesheet" href="./example_files/style.css">
+</head>
+<body>
+    <nav>
+        <div class="nav-inner">
+            <a href="https://example.org/" class="brand">Example Organisation</a>
+            <div class="nav-links">
+                
+                    
+                        <a href="https://example.org/admin">Admin Dashboard</a>
+                    
+                    <a href="https://example.org/">My PMFs</a>
+                    <a href="https://example.org/form/new">New PMF</a>
+                    <a href="https://example.org/profile" class="nav-user">person10@example.com</a>
+                    <form method="POST" action="https://example.org/logout" style="display:inline">
+                        
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                        <button type="submit" class="btn-link">Logout</button>
+                    </form>
+                
+            </div>
+        </div>
+    </nav>
+    <main>
+        
+            
+        
+        
+<div class="dashboard">
+    <div class="dashboard-header">
+        <h1>Admin Dashboard</h1>
+        <div class="admin-actions">
+            <a href="https://example.org/admin/users" class="btn btn-secondary">Users</a>
+            <a href="https://example.org/admin/cost-centres" class="btn btn-secondary">Manage Cost Centres</a>
+            <a href="https://example.org/admin/settings" class="btn btn-secondary">Admin Settings</a>
+            <a href="https://example.org/admin/upload-group-results" class="btn btn-secondary">Bulk Upload Group Results</a>
+        </div>
+    </div>
+
+    <div class="filter-bar">
+        <form method="GET" action="https://example.org/admin" class="filter-form">
+            <label>Status:</label>
+            <select name="status" onchange="this.form.submit()">
+                <option value="">All</option>
+                <option value="draft">Draft</option>
+                <option value="submitted">Submitted</option>
+                <option value="hospital_approval">Hospital FD Approved</option>
+                <option value="hospital_ceo_approved">Hospital CEO Approved</option>
+                <option value="rejected">Rejected</option>
+                <option value="sent_to_group">Sent to Group</option>
+                <option value="group_approved">Approved by Group</option>
+                <option value="archived">Archived</option>
+            </select>
+        </form>
+    </div>
+
+    
+
+    
+    
+        
+    
+        
+    
+        
+    
+        
+    
+        
+    
+        
+    
+
+    
+    <form method="POST" action="https://example.org/admin/generate-pdf" id="batch-form">
+        
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+    </form>
+        <div class="batch-actions">
+            <button type="button" class="btn btn-secondary" onclick="toggleSelectAll()">Select All</button>
+            <button form="batch-form" type="submit" class="btn btn-primary" onclick="return confirmDownload()">Download Selected PDFs</button>
+            <button form="batch-form" type="submit" class="btn btn-primary" formaction="/admin/mark-sent-to-group" onclick="return confirmMarkSent()">Mark Selected as Sent to Group</button>
+            <button form="batch-form" type="submit" class="btn btn-primary" formaction="/admin/mark-group-approved" onclick="return confirmGroupApproved()">Mark Selected as Approved by Group</button>
+            
+            <button form="batch-form" type="submit" class="btn btn-secondary" formaction="/admin/archive" onclick="return confirmArchive()">Archive Selected</button>
+            
+        </div>
+        <table class="form-table">
+            <thead>
+                <tr>
+                    <th>Cost Centre</th>
+                    <th class="checkbox-cell"><label class="checkbox-hitbox"><input type="checkbox" id="select-all" onchange="toggleAll(this)"></label></th>
+                    <th>ID</th>
+                    <th>Position Title</th>
+                    <th>Manager</th>
+                    <th>Status</th>
+                    <th>Category</th>
+                    <th>Submitted</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+    
+    
+    
+                <tr class="group-header">
+                    <td colspan="9">
+                        <span class="group-label">Submitted</span>
+                        <span class="count-badge">13</span>
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/129&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="129" class="form-check"></label></td>
+                    <td>129</td>
+                    <td>Recovery Registered Nurse</td>
+                    <td><span title="person2@example.com | Clinical Nurse Manager">Person 1</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>13:51:26 27-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/129/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/129/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="129">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/128&#39;)">
+                    <td>Cost Centre 2</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="128" class="form-check"></label></td>
+                    <td>128</td>
+                    <td>Hopitality Receptionist</td>
+                    <td><span title="person21@example.com | Coordinator Medical Centres">Person 19</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>16:15:45 25-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/128/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/128/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="128">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/126&#39;)">
+                    <td>Cost Centre 3</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="126" class="form-check"></label></td>
+                    <td>126</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person6@example.com | Nurse Unit Manager">Person 6</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:49:42 20-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/126/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/126/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="126">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/125&#39;)">
+                    <td>Cost Centre 3</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="125" class="form-check"></label></td>
+                    <td>125</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person6@example.com | Nurse Unit Manager">Person 6</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:44:39 20-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/125/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/125/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="125">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/124&#39;)">
+                    <td>Cost Centre 3</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="124" class="form-check"></label></td>
+                    <td>124</td>
+                    <td>Rregistered Nurse</td>
+                    <td><span title="person6@example.com | Nurse Unit Manager">Person 6</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:40:32 20-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/124/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/124/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="124">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/123&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="123" class="form-check"></label></td>
+                    <td>123</td>
+                    <td>Theatre Setup Assistant</td>
+                    <td><span title="person28@example.com | Theatre Resources Manager">Person 28</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:41:14 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/123/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/123/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="123">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/122&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="122" class="form-check"></label></td>
+                    <td>122</td>
+                    <td>Theatre Setup Assistant</td>
+                    <td><span title="person28@example.com | Theatre Resources Manager">Person 28</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:39:04 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/122/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/122/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="122">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/121&#39;)">
+                    <td>Cost Centre 7</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="121" class="form-check"></label></td>
+                    <td>121</td>
+                    <td>RMO</td>
+                    <td><span title="person24@example.com | A/Manager Medical Services">Person 22</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>F - Fixed term to permanent</td>
+                    <td>15:19:40 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/121/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/121/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="121">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/120&#39;)">
+                    <td>Cost Centre 8</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="120" class="form-check"></label></td>
+                    <td>120</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person1@example.com | Acting NUM">Person 39</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>11:09:33 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/120/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/120/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="120">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/119&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="119" class="form-check"></label></td>
+                    <td>119</td>
+                    <td>Patient Care Assistant</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>G - Casual to part time/permanent</td>
+                    <td>10:57:24 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/119/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/119/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="119">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/118&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="118" class="form-check"></label></td>
+                    <td>118</td>
+                    <td>Enrolled Nurse Specialist</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>10:54:19 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/118/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/118/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="118">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/107&#39;)">
+                    <td>Cost Centre 5</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="107" class="form-check"></label></td>
+                    <td>107</td>
+                    <td>Programs Coordinator</td>
+                    <td><span title="person12@example.com | Nurse Unit Manager">Person 10</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>11:47:13 14-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/107/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/107/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="107">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/106&#39;)">
+                    <td>Cost Centre 5</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="106" class="form-check"></label></td>
+                    <td>106</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person12@example.com | Nurse Unit Manager">Person 10</span></td>
+                    <td>
+                        
+<span class="badge badge-submitted">Submitted</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>11:44:40 14-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/106/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as FD</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/106/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="106">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+    
+    
+    
+    
+                <tr class="group-header">
+                    <td colspan="9">
+                        <span class="group-label">Hospital FD Approved</span>
+                        <span class="count-badge">2</span>
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/109&#39;)">
+                    <td>Cost Centre 6</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="109" class="form-check"></label></td>
+                    <td>109</td>
+                    <td>Sterilisation Technician 3</td>
+                    <td><span title="person26@example.com | Cost Centre 6 Coordinator">Person 24</span></td>
+                    <td>
+                        
+<span class="badge badge-hospital_approval">Hospital FD Approved</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>13:52:37 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/109/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as CEO</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/109/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="109">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/108&#39;)">
+                    <td>Cost Centre 6</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="108" class="form-check"></label></td>
+                    <td>108</td>
+                    <td>Sterilisation Technician 3</td>
+                    <td><span title="person26@example.com | Cost Centre 6 Coordinator">Person 24</span></td>
+                    <td>
+                        
+<span class="badge badge-hospital_approval">Hospital FD Approved</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>13:52:02 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/108/approve" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Approve as CEO</button>
+                            </form>
+                            <form method="POST" action="https://example.org/form/108/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="108">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+    
+    
+    
+    
+                <tr class="group-header">
+                    <td colspan="9">
+                        <span class="group-label">Hospital CEO Approved</span>
+                        <span class="count-badge">3</span>
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/104&#39;)">
+                    <td>Cost Centre 6</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="104" class="form-check"></label></td>
+                    <td>104</td>
+                    <td>Sterilisation Technician 1</td>
+                    <td><span title="person26@example.com | Cost Centre 6 Coordinator">Person 24</span></td>
+                    <td>
+                        
+<span class="badge badge-hospital_ceo_approved">Hospital CEO Approved</span>
+
+                        
+                    </td>
+                    <td>C - Position reclassification</td>
+                    <td>12:45:16 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/104/mark-sent-to-group" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Mark Sent to Group</button>
+                            </form>
+                            
+                            <form method="POST" action="https://example.org/form/104/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="104">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                            
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/110&#39;)">
+                    <td>Cost Centre 6</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="110" class="form-check"></label></td>
+                    <td>110</td>
+                    <td>Sterilisation Technician 1</td>
+                    <td><span title="person26@example.com | Cost Centre 6 Coordinator">Person 24</span></td>
+                    <td>
+                        
+<span class="badge badge-hospital_ceo_approved">Hospital CEO Approved</span>
+
+                        
+                    </td>
+                    <td>C - Position reclassification</td>
+                    <td>12:44:40 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/110/mark-sent-to-group" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Mark Sent to Group</button>
+                            </form>
+                            
+                            <form method="POST" action="https://example.org/form/110/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="110">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                            
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/111&#39;)">
+                    <td>Cost Centre 6</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="111" class="form-check"></label></td>
+                    <td>111</td>
+                    <td>Sterilisation Technician 1</td>
+                    <td><span title="person26@example.com | Cost Centre 6 Coordinator">Person 24</span></td>
+                    <td>
+                        
+<span class="badge badge-hospital_ceo_approved">Hospital CEO Approved</span>
+
+                        
+                    </td>
+                    <td>C - Position reclassification</td>
+                    <td>12:43:57 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                        <div class="inline-action">
+                            <form method="POST" action="https://example.org/form/111/mark-sent-to-group" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <button type="button" class="btn btn-small btn-approve" onclick="event.stopPropagation(); approveForm(this)">Mark Sent to Group</button>
+                            </form>
+                            
+                            <form method="POST" action="https://example.org/form/111/reject" style="display:inline">
+                                
+<input type="hidden" name="csrf_token" value="7f11749a63c96d0870a7830afa08ed5d48c80473df650118e3a0d45a74bb34fe">
+
+                                <input type="hidden" name="form_id_display" value="111">
+                                <input type="hidden" name="rejection_comment" value="">
+                                <button type="button" class="btn btn-small btn-reject" onclick="event.stopPropagation(); doReject(this)">Reject</button>
+                            </form>
+                            
+                        </div>
+                        
+                    </td>
+                </tr>
+        
+    
+    
+    
+    
+    
+    
+    
+                <tr class="group-header">
+                    <td colspan="9">
+                        <span class="group-label">Approved by Group</span>
+                        <span class="count-badge">104</span>
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/127&#39;)">
+                    <td>Cost Centre 33</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="127" class="form-check"></label></td>
+                    <td>127</td>
+                    <td>Cost Centre 33</td>
+                    <td><span title="person10@example.com | Personifier">Person 4</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>23:55:07 23-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/78&#39;)">
+                    <td>Cost Centre 9</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="78" class="form-check"></label></td>
+                    <td>78</td>
+                    <td>ED SMP</td>
+                    <td><span title="person37@example.com | ED Director">Person 35</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>09:27:31 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/114&#39;)">
+                    <td>Cost Centre 10</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="114" class="form-check"></label></td>
+                    <td>114</td>
+                    <td>Patient Admnistration Assistant</td>
+                    <td><span title="person38@example.com | Manager Patient Admissions">Person 36</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>09:27:31 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/115&#39;)">
+                    <td>Cost Centre 10</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="115" class="form-check"></label></td>
+                    <td>115</td>
+                    <td>Patient Administration Assistant</td>
+                    <td><span title="person38@example.com | Manager Patient Admissions">Person 36</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>09:27:31 19-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/91&#39;)">
+                    <td>-</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="91" class="form-check"></label></td>
+                    <td>91</td>
+                    <td>Pastoral Practitioner</td>
+                    <td><span title="person25@example.com | Manager Pastoral Services">Person 23</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>-</td>
+                    <td>16:21:26 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/93&#39;)">
+                    <td>Cost Centre 11</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="93" class="form-check"></label></td>
+                    <td>93</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person16@example.com | DDON">Person 14</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>16:21:26 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/103&#39;)">
+                    <td>Cost Centre 12</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="103" class="form-check"></label></td>
+                    <td>103</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person20@example.com | Nurse Unit Manager">Person 18</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>16:21:26 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/105&#39;)">
+                    <td>Cost Centre 5</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="105" class="form-check"></label></td>
+                    <td>105</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person12@example.com | Nurse Unit Manager">Person 10</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>16:21:26 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/112&#39;)">
+                    <td>Cost Centre 3</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="112" class="form-check"></label></td>
+                    <td>112</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person6@example.com | Nurse Unit Manager">Person 6</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>16:21:26 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/116&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="116" class="form-check"></label></td>
+                    <td>116</td>
+                    <td>PCA</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>16:21:26 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/117&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="117" class="form-check"></label></td>
+                    <td>117</td>
+                    <td>Orthopaedic Technician</td>
+                    <td><span title="person28@example.com | Theatre Resources Manager">Person 28</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>16:21:05 18-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/73&#39;)">
+                    <td>Cost Centre 14</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="73" class="form-check"></label></td>
+                    <td>73</td>
+                    <td>Case Management Coordinator</td>
+                    <td><span title="person11@example.com | Allied Health Manager">Person 9</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/75&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="75" class="form-check"></label></td>
+                    <td>75</td>
+                    <td>Clinical Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/76&#39;)">
+                    <td>Cost Centre 15</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="76" class="form-check"></label></td>
+                    <td>76</td>
+                    <td>PCA</td>
+                    <td><span title="person36@example.com | Nurse Manager">Person 34</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/77&#39;)">
+                    <td>Cost Centre 16</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="77" class="form-check"></label></td>
+                    <td>77</td>
+                    <td>Business Analyst</td>
+                    <td><span title="person22@example.com | Commissioning Director, Orthonova">Person 20</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/79&#39;)">
+                    <td>Cost Centre 17</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="79" class="form-check"></label></td>
+                    <td>79</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person18@example.com | ED Nurse Unit Manager">Person 16</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/80&#39;)">
+                    <td>Cost Centre 18</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="80" class="form-check"></label></td>
+                    <td>80</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person3@example.com | NUM">Person 2</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/81&#39;)">
+                    <td>Cost Centre 19</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="81" class="form-check"></label></td>
+                    <td>81</td>
+                    <td>Clinical Educator</td>
+                    <td><span title="person15@example.com | Learning and Development Coordinator">Person 13</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/82&#39;)">
+                    <td>Cost Centre 20</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="82" class="form-check"></label></td>
+                    <td>82</td>
+                    <td>Security Officer</td>
+                    <td><span title="person4@example.com | Manager Cost Centre 20 and Parking">Person 3</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>G - Casual to part time/permanent</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/83&#39;)">
+                    <td>Cost Centre 11</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="83" class="form-check"></label></td>
+                    <td>83</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person7@example.com | Nurse Unit Manager">Person 7</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/84&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="84" class="form-check"></label></td>
+                    <td>84</td>
+                    <td>Scrub / Scout Coordinator</td>
+                    <td><span title="person13@example.com | Clinical Nurse Manager">Person 11</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/85&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="85" class="form-check"></label></td>
+                    <td>85</td>
+                    <td>Clinical Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>C - Position reclassification</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/86&#39;)">
+                    <td>Cost Centre 11</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="86" class="form-check"></label></td>
+                    <td>86</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person7@example.com | Nurse Unit Manager">Person 7</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/87&#39;)">
+                    <td>Cost Centre 21</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="87" class="form-check"></label></td>
+                    <td>87</td>
+                    <td>EN to RN</td>
+                    <td><span title="person17@example.com | Nurse Manager">Person 15</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/88&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="88" class="form-check"></label></td>
+                    <td>88</td>
+                    <td>Graduate Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>F - Fixed term to permanent</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/89&#39;)">
+                    <td>Cost Centre 22</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="89" class="form-check"></label></td>
+                    <td>89</td>
+                    <td>Senior Occupational Therapist</td>
+                    <td><span title="person11@example.com | Allied Health Manager">Person 9</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/90&#39;)">
+                    <td>Cost Centre 17</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="90" class="form-check"></label></td>
+                    <td>90</td>
+                    <td>Nurse Unit Manager</td>
+                    <td><span title="person27@example.com | DDON Specialist Services">Person 26</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/92&#39;)">
+                    <td>Cost Centre 11</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="92" class="form-check"></label></td>
+                    <td>92</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person16@example.com | DDON">Person 14</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/94&#39;)">
+                    <td>Cost Centre 23</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="94" class="form-check"></label></td>
+                    <td>94</td>
+                    <td>Volunteer Coordinator</td>
+                    <td><span title="person35@example.com | Acting Director Business &amp; Service Development">Person 25</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/95&#39;)">
+                    <td>Cost Centre 11</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="95" class="form-check"></label></td>
+                    <td>95</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person16@example.com | DDON">Person 14</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/96&#39;)">
+                    <td>Cost Centre 11</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="96" class="form-check"></label></td>
+                    <td>96</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person7@example.com | Nurse Unit Manager">Person 7</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>F - Fixed term to permanent</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/97&#39;)">
+                    <td>Cost Centre 11</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="97" class="form-check"></label></td>
+                    <td>97</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person7@example.com | Nurse Unit Manager">Person 7</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>F - Fixed term to permanent</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/98&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="98" class="form-check"></label></td>
+                    <td>98</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/99&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="99" class="form-check"></label></td>
+                    <td>99</td>
+                    <td>Anaesthetic Registered Nurse</td>
+                    <td><span title="person2@example.com | Clinical Nurse Manager">Person 1</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>-</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/100&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="100" class="form-check"></label></td>
+                    <td>100</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/101&#39;)">
+                    <td>Cost Centre 24</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="101" class="form-check"></label></td>
+                    <td>101</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person14@example.com | Nurse Manager">Person 12</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/102&#39;)">
+                    <td>Cost Centre 24</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="102" class="form-check"></label></td>
+                    <td>102</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person14@example.com | Nurse Manager">Person 12</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>08:33:33 13-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/10&#39;)">
+                    <td>Cost Centre 16</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="10" class="form-check"></label></td>
+                    <td>10</td>
+                    <td>Senior Project Manager</td>
+                    <td><span title="person29@example.com | Director, Redevelopment">Person 27</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>14:24:31 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/9&#39;)">
+                    <td>Cost Centre 6</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="9" class="form-check"></label></td>
+                    <td>9</td>
+                    <td>Manager Hospital Redevelopment Projects</td>
+                    <td><span title="person29@example.com | Director, Redevelopment">Person 27</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>14:23:30 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/66&#39;)">
+                    <td>Cost Centre 9</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="66" class="form-check"></label></td>
+                    <td>66</td>
+                    <td>ED Consultant</td>
+                    <td><span title="person30@example.com | ED Administrator">Person 29</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>G - Casual to part time/permanent</td>
+                    <td>14:21:31 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/67&#39;)">
+                    <td>Cost Centre 25</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="67" class="form-check"></label></td>
+                    <td>67</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person1@example.com | Acting NUM">Person 39</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>14:21:31 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/68&#39;)">
+                    <td>Cost Centre 16</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="68" class="form-check"></label></td>
+                    <td>68</td>
+                    <td>Manager Hospital Redevelopment Projects</td>
+                    <td><span title="person5@example.com | Director Corporate Services">Person 5</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>H - Change reporting line/org</td>
+                    <td>14:21:31 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/69&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="69" class="form-check"></label></td>
+                    <td>69</td>
+                    <td>Anaesthetic Nurse</td>
+                    <td><span title="person2@example.com | Clinical Nurse Manager">Person 1</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>14:21:31 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/70&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="70" class="form-check"></label></td>
+                    <td>70</td>
+                    <td>Anaesthetic Registered Nurse</td>
+                    <td><span title="person2@example.com | Clinical Nurse Manager">Person 1</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>14:21:31 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/74&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="74" class="form-check"></label></td>
+                    <td>74</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>14:21:31 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/18&#39;)">
+                    <td>Cost Centre 22</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="18" class="form-check"></label></td>
+                    <td>18</td>
+                    <td>Speech Pathologist</td>
+                    <td><span title="person11@example.com | Allied Health Manager">Person 9</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>14:20:08 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/30&#39;)">
+                    <td>Cost Centre 18</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="30" class="form-check"></label></td>
+                    <td>30</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person3@example.com | NUM">Person 2</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>14:20:08 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/33&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="33" class="form-check"></label></td>
+                    <td>33</td>
+                    <td>PACU RN</td>
+                    <td><span title="person32@example.com | Nurse Unit Manager">Person 31</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>14:20:08 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/34&#39;)">
+                    <td>Cost Centre 27</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="34" class="form-check"></label></td>
+                    <td>34</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person39@example.com | Nurse Unit Manager">Person 37</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>F - Fixed term to permanent</td>
+                    <td>14:20:08 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/50&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="50" class="form-check"></label></td>
+                    <td>50</td>
+                    <td>Anaesthetic Technician</td>
+                    <td><span title="person2@example.com | Clinical Nurse Manager">Person 1</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>14:20:08 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/64&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="64" class="form-check"></label></td>
+                    <td>64</td>
+                    <td>Registered Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>B - New position (no existing PD)</td>
+                    <td>14:20:08 04-Aug-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/65&#39;)">
+                    <td>Cost Centre 27</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="65" class="form-check"></label></td>
+                    <td>65</td>
+                    <td>Untitled</td>
+                    <td><span title="person39@example.com | Nurse Unit Manager">Person 37</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>C - Position reclassification</td>
+                    <td>14:23:55 30-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/72&#39;)">
+                    <td>Cost Centre 28</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="72" class="form-check"></label></td>
+                    <td>72</td>
+                    <td>Hospital Coordinator</td>
+                    <td><span title="person40@example.com | DDON Inpatient Services">Person 38</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>13:50:07 28-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/71&#39;)">
+                    <td>Cost Centre 28</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="71" class="form-check"></label></td>
+                    <td>71</td>
+                    <td>Hospital Coordinator</td>
+                    <td><span title="person40@example.com | DDON Inpatient Services">Person 38</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>13:49:57 28-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/17&#39;)">
+                    <td>Cost Centre 29</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="17" class="form-check"></label></td>
+                    <td>17</td>
+                    <td>Ward Host</td>
+                    <td><span title="person19@example.com | Cateirng Manager">Person 17</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>G - Casual to part time/permanent</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/29&#39;)">
+                    <td>Cost Centre 30</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="29" class="form-check"></label></td>
+                    <td>29</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person9@example.com | Nurse Manager">Person 40</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/31&#39;)">
+                    <td>Cost Centre 17</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="31" class="form-check"></label></td>
+                    <td>31</td>
+                    <td>Patient Care Assistant</td>
+                    <td><span title="person18@example.com | ED Nurse Unit Manager">Person 16</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/32&#39;)">
+                    <td>Cost Centre 12</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="32" class="form-check"></label></td>
+                    <td>32</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person20@example.com | Nurse Unit Manager">Person 18</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/35&#39;)">
+                    <td>Cost Centre 27</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="35" class="form-check"></label></td>
+                    <td>35</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person39@example.com | Nurse Unit Manager">Person 37</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/36&#39;)">
+                    <td>Cost Centre 27</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="36" class="form-check"></label></td>
+                    <td>36</td>
+                    <td>Clinical Nurse - Recovery</td>
+                    <td><span title="person39@example.com | Nurse Unit Manager">Person 37</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/37&#39;)">
+                    <td>Cost Centre 22</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="37" class="form-check"></label></td>
+                    <td>37</td>
+                    <td>Senior Occupational Therapist</td>
+                    <td><span title="person11@example.com | Allied Health Manager">Person 9</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/38&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="38" class="form-check"></label></td>
+                    <td>38</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person16@example.com | DDON">Person 14</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/39&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="39" class="form-check"></label></td>
+                    <td>39</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person16@example.com | DDON">Person 14</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/41&#39;)">
+                    <td>Cost Centre 19</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="41" class="form-check"></label></td>
+                    <td>41</td>
+                    <td>Clinical Educator</td>
+                    <td><span title="person15@example.com | Learning and Development Coordinator">Person 13</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/42&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="42" class="form-check"></label></td>
+                    <td>42</td>
+                    <td>Registered Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/43&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="43" class="form-check"></label></td>
+                    <td>43</td>
+                    <td>Registered Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/44&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="44" class="form-check"></label></td>
+                    <td>44</td>
+                    <td>Registered Nurse/Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/45&#39;)">
+                    <td>Cost Centre 7</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="45" class="form-check"></label></td>
+                    <td>45</td>
+                    <td>Manager Medical Services</td>
+                    <td><span title="person24@example.com | A/Manager Medical Services">Person 22</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/46&#39;)">
+                    <td>Cost Centre 7</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="46" class="form-check"></label></td>
+                    <td>46</td>
+                    <td>Director of Clinician &amp; Physician Training</td>
+                    <td><span title="person24@example.com | A/Manager Medical Services">Person 22</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/47&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="47" class="form-check"></label></td>
+                    <td>47</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person8@example.com | EA">Person 8</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>F - Fixed term to permanent</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/48&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="48" class="form-check"></label></td>
+                    <td>48</td>
+                    <td>Registered Nurse Scrub Scout</td>
+                    <td><span title="person8@example.com | EA">Person 8</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/49&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="49" class="form-check"></label></td>
+                    <td>49</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person8@example.com | EA">Person 8</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/51&#39;)">
+                    <td>Cost Centre 12</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="51" class="form-check"></label></td>
+                    <td>51</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person20@example.com | Nurse Unit Manager">Person 18</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/52&#39;)">
+                    <td>Cost Centre 31</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="52" class="form-check"></label></td>
+                    <td>52</td>
+                    <td>PCA</td>
+                    <td><span title="person23@example.com | Nurse Unit Manager">Person 21</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/53&#39;)">
+                    <td>Cost Centre 21</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="53" class="form-check"></label></td>
+                    <td>53</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person17@example.com | Nurse Manager">Person 15</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/54&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="54" class="form-check"></label></td>
+                    <td>54</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/55&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="55" class="form-check"></label></td>
+                    <td>55</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/56&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="56" class="form-check"></label></td>
+                    <td>56</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person32@example.com | Nurse Unit Manager">Person 31</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/57&#39;)">
+                    <td>Cost Centre 1</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="57" class="form-check"></label></td>
+                    <td>57</td>
+                    <td>Scrub Scout Coordinator</td>
+                    <td><span title="person13@example.com | Clinical Nurse Manager">Person 11</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/58&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="58" class="form-check"></label></td>
+                    <td>58</td>
+                    <td>RN</td>
+                    <td><span title="person32@example.com | Nurse Unit Manager">Person 31</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/59&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="59" class="form-check"></label></td>
+                    <td>59</td>
+                    <td>RN</td>
+                    <td><span title="person32@example.com | Nurse Unit Manager">Person 31</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/60&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="60" class="form-check"></label></td>
+                    <td>60</td>
+                    <td>RN</td>
+                    <td><span title="person32@example.com | Nurse Unit Manager">Person 31</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/61&#39;)">
+                    <td>Cost Centre 13</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="61" class="form-check"></label></td>
+                    <td>61</td>
+                    <td>Clinical Midwife</td>
+                    <td><span title="person34@example.com | Manager Midwifery Services">Person 33</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>C - Position reclassification</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/62&#39;)">
+                    <td>Cost Centre 22</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="62" class="form-check"></label></td>
+                    <td>62</td>
+                    <td>Senior Occupational Therapy</td>
+                    <td><span title="person11@example.com | Allied Health Manager">Person 9</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/63&#39;)">
+                    <td>Cost Centre 22</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="63" class="form-check"></label></td>
+                    <td>63</td>
+                    <td>Senior Occupational Therapist</td>
+                    <td><span title="person11@example.com | Allied Health Manager">Person 9</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>15:19:14 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/40&#39;)">
+                    <td>Cost Centre 26</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="40" class="form-check"></label></td>
+                    <td>40</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person16@example.com | DDON">Person 14</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>14:38:11 23-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/22&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="22" class="form-check"></label></td>
+                    <td>22</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person31@example.com | Nurse Manager">Person 30</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>10:48:59 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/20&#39;)">
+                    <td>Cost Centre 27</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="20" class="form-check"></label></td>
+                    <td>20</td>
+                    <td>PCA</td>
+                    <td><span title="person39@example.com | Nurse Unit Manager">Person 37</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>10:48:50 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/19&#39;)">
+                    <td>Cost Centre 22</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="19" class="form-check"></label></td>
+                    <td>19</td>
+                    <td>Senior Dietitian</td>
+                    <td><span title="person11@example.com | Allied Health Manager">Person 9</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>10:48:40 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/16&#39;)">
+                    <td>Cost Centre 16</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="16" class="form-check"></label></td>
+                    <td>16</td>
+                    <td>Director of Corporate Services</td>
+                    <td><span title="person8@example.com | EA">Person 8</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>10:48:06 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/14&#39;)">
+                    <td>Cost Centre 8</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="14" class="form-check"></label></td>
+                    <td>14</td>
+                    <td>PCA</td>
+                    <td><span title="person40@example.com | DDON Inpatient Services">Person 38</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>10:47:49 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/13&#39;)">
+                    <td>Cost Centre 8</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="13" class="form-check"></label></td>
+                    <td>13</td>
+                    <td>RN</td>
+                    <td><span title="person40@example.com | DDON Inpatient Services">Person 38</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>10:47:25 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/12&#39;)">
+                    <td>Cost Centre 12</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="12" class="form-check"></label></td>
+                    <td>12</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person27@example.com | DDON Specialist Services">Person 26</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>10:46:52 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/23&#39;)">
+                    <td>Cost Centre 31</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="23" class="form-check"></label></td>
+                    <td>23</td>
+                    <td>Enrolled Nurse</td>
+                    <td><span title="person23@example.com | Nurse Unit Manager">Person 21</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>L - Other</td>
+                    <td>10:46:40 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/24&#39;)">
+                    <td>Cost Centre 16</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="24" class="form-check"></label></td>
+                    <td>24</td>
+                    <td>Director Business &amp; Service Development</td>
+                    <td><span title="person8@example.com | EA">Person 8</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>10:46:18 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/25&#39;)">
+                    <td>Cost Centre 12</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="25" class="form-check"></label></td>
+                    <td>25</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person20@example.com | Nurse Unit Manager">Person 18</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>10:46:11 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/11&#39;)">
+                    <td>Cost Centre 18</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="11" class="form-check"></label></td>
+                    <td>11</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person40@example.com | DDON Inpatient Services">Person 38</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>R - Recruitment to fill vacant existing position</td>
+                    <td>10:45:37 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/8&#39;)">
+                    <td>Cost Centre 4</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="8" class="form-check"></label></td>
+                    <td>8</td>
+                    <td>Registered Nurse</td>
+                    <td><span title="person40@example.com | DDON Inpatient Services">Person 38</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>10:45:20 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/26&#39;)">
+                    <td>Cost Centre 23</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="26" class="form-check"></label></td>
+                    <td>26</td>
+                    <td>Manager Business Development</td>
+                    <td><span title="person8@example.com | EA">Person 8</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>10:45:03 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/27&#39;)">
+                    <td>Cost Centre 23</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="27" class="form-check"></label></td>
+                    <td>27</td>
+                    <td>Senior business development coordinator</td>
+                    <td><span title="person8@example.com | EA">Person 8</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>10:44:38 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/28&#39;)">
+                    <td>Cost Centre 21</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="28" class="form-check"></label></td>
+                    <td>28</td>
+                    <td>Clinical Nurse</td>
+                    <td><span title="person17@example.com | Nurse Manager">Person 15</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>J - Change hours/FTE</td>
+                    <td>10:44:20 10-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/7&#39;)">
+                    <td>Cost Centre 32</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="7" class="form-check"></label></td>
+                    <td>7</td>
+                    <td>Clinical Nurse Specialist (CNS)</td>
+                    <td><span title="person33@example.com | Director of Finance">Person 32</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>A - Additional position (existing PD)</td>
+                    <td>13:14:49 03-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/6&#39;)">
+                    <td>Cost Centre 22</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="6" class="form-check"></label></td>
+                    <td>6</td>
+                    <td>Acting Allied Health Manager</td>
+                    <td><span title="person33@example.com | Director of Finance">Person 32</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>E - Extension to fixed term</td>
+                    <td>13:14:45 03-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+                <tr onclick="handleRowClick(event, &#39;/form/5&#39;)">
+                    <td>Cost Centre 14</td>
+                    <td class="checkbox-cell" onclick="event.stopPropagation()"><label class="checkbox-hitbox"><input form="batch-form" type="checkbox" name="form_ids" value="5" class="form-check"></label></td>
+                    <td>5</td>
+                    <td>Team Leader</td>
+                    <td><span title="person33@example.com | Director of Finance">Person 32</span></td>
+                    <td>
+                        
+<span class="badge badge-group_approved">Approved by Group</span>
+
+                        
+                    </td>
+                    <td>F - Fixed term to permanent</td>
+                    <td>13:14:36 03-Jul-26</td>
+                    <td class="actions-cell">
+                        
+                    </td>
+                </tr>
+        
+    
+    
+    
+    
+    
+            </tbody>
+        </table>
+    
+</div>
+
+<script>
+function toggleAll(source) {
+    document.querySelectorAll('.form-check').forEach(cb => cb.checked = source.checked);
+}
+function confirmDownload() {
+    const checked = document.querySelectorAll('.form-check:checked');
+    if (checked.length === 0) { alert('Please select at least one form.'); return false; }
+    return true;
+}
+function confirmMarkSent() {
+    const checked = document.querySelectorAll('.form-check:checked');
+    if (checked.length === 0) { alert('Please select at least one form.'); return false; }
+    return confirm('Mark selected forms as Sent to Group?');
+}
+function confirmGroupApproved() {
+    const checked = document.querySelectorAll('.form-check:checked');
+    if (checked.length === 0) { alert('Please select at least one form.'); return false; }
+    return confirm('Mark selected forms as Approved by Group?');
+}
+function toggleSelectAll() {
+    const allChecked = document.querySelectorAll('.form-check:checked').length === document.querySelectorAll('.form-check').length;
+    document.querySelectorAll('.form-check').forEach(cb => cb.checked = !allChecked);
+    document.getElementById('select-all').checked = !allChecked;
+}
+function confirmArchive() {
+    const checked = document.querySelectorAll('.form-check:checked');
+    if (checked.length === 0) { alert('Please select at least one form.'); return false; }
+    return confirm('Archive selected forms? They will be hidden from the default view.');
+}
+function confirmUnarchive() {
+    const checked = document.querySelectorAll('.form-check:checked');
+    if (checked.length === 0) { alert('Please select at least one form.'); return false; }
+    return confirm('Unarchive selected forms? They will reappear in the default view.');
+}
+</script>
+
+    </main>
+
+<div id="page-loader" style="display:none">
+    <video id="loader-video" muted="" playsinline="" preload="auto" width="600">
+        <source src="/static/EMR_blockbuster_v3.mp4" type="video/mp4">
+    </video>
+</div>
+
+<div id="reject-modal" class="modal" style="display:none">
+    <div class="modal-content">
+        <h3>Reject Form</h3>
+        <p class="modal-form-id">Form #<span id="modal-form-id"></span></p>
+        <textarea id="modal-reason" rows="4" placeholder="Enter rejection reason..." required=""></textarea>
+        <div class="modal-actions">
+            <button type="button" onclick="closeRejectModal()" class="btn btn-secondary">Cancel</button>
+            <button type="button" onclick="submitReject()" class="btn btn-reject" id="modal-reject-btn">Reject</button>
+        </div>
+    </div>
+</div>
+
+<script>
+function handleRowClick(event, url) {
+    if (event.target.tagName === 'A' || event.target.tagName === 'BUTTON' || event.target.tagName === 'INPUT') return;
+    if (event.target.closest('a') || event.target.closest('button') || event.target.closest('input')) return;
+    window.location.href = url;
+}
+var _pendingRejectForm = null;
+var _pendingRejectBtn = null;
+
+function doReject(btn) {
+    const form = btn.closest('form');
+    const formId = form.querySelector('[name="form_id_display"]')?.value || '';
+    document.getElementById('modal-form-id').textContent = formId;
+    document.getElementById('modal-reason').value = '';
+    document.getElementById('reject-modal').style.display = 'flex';
+    _pendingRejectForm = form;
+    _pendingRejectBtn = btn;
+}
+
+function closeRejectModal() {
+    document.getElementById('reject-modal').style.display = 'none';
+    _pendingRejectForm = null;
+    _pendingRejectBtn = null;
+}
+
+function submitReject() {
+    const reason = document.getElementById('modal-reason').value.trim();
+    if (!reason) { alert('A rejection reason is required.'); return; }
+    if (!_pendingRejectForm) return;
+    _pendingRejectForm.querySelector('[name="rejection_comment"]').value = reason;
+    if (_pendingRejectBtn) {
+        _watchFormSubmit(_pendingRejectBtn, 'Reject', 'Rejecting\u2026', 15000);
+    } else {
+        _pendingRejectForm.submit();
+    }
+}
+
+var _approveTimers = [];
+function _reEnableBtn(btn, originalText) {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    btn.classList.remove('btn-busy');
+}
+function _watchFormSubmit(btn, originalText, busyText, timeoutMs) {
+    btn.textContent = busyText;
+    btn.disabled = true;
+    btn.classList.add('btn-busy');
+    btn.closest('form').submit();
+    // If the page hasn't navigated away within timeoutMs, the request stalled.
+    var t = setTimeout(function() {
+        _reEnableBtn(btn, originalText);
+        alert('The request timed out. The server may be busy (e.g. a PDF batch is running). Please try again.');
+    }, timeoutMs || 15000);
+    _approveTimers.push(t);
+}
+function approveForm(btn) {
+    var originalText = btn.textContent;
+    _watchFormSubmit(btn, originalText, 'Approving\u2026', 15000);
+}
+function toggleArchived(event) {
+    var header = event.currentTarget;
+    var rows = header.parentElement.querySelectorAll('.archived-row');
+    var arrow = header.querySelector('.archived-arrow');
+    var expanded = header.getAttribute('data-expanded') === 'true';
+    for (var i = 0; i < rows.length; i++) {
+        rows[i].style.display = expanded ? 'none' : 'table-row';
+    }
+    header.setAttribute('data-expanded', expanded ? 'false' : 'true');
+    arrow.innerHTML = expanded ? '&#9654;' : '&#9660;';
+}
+
+(function() {
+    var showLoader = true;
+    if (!showLoader) return;
+
+    var loader = document.getElementById('page-loader');
+    var video = document.getElementById('loader-video');
+
+    function showLoaderAndWait(callback) {
+        loader.style.display = 'flex';
+        video.currentTime = 0;
+        var handled = false;
+        video.onended = function() {
+            if (handled) return;
+            handled = true;
+            callback();
+        };
+        video.play().catch(function() {
+            setTimeout(callback, 2350);
+        });
+    }
+
+    document.querySelectorAll('[data-show-overlay]').forEach(function(el) {
+        el.addEventListener('click', function(e) {
+            var form = el.closest('form');
+            if (!form) return;
+            e.preventDefault();
+            // Native form.submit() drops the clicked button's name/value, so
+            // re-inject it as a hidden field to preserve the intended action.
+            var prev = form.querySelector('input[name="' + el.name + '"][data-overlay-injected]');
+            if (prev) prev.value = el.value;
+            else {
+                var hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = el.name;
+                hidden.value = el.value;
+                hidden.setAttribute('data-overlay-injected', '1');
+                form.appendChild(hidden);
+            }
+            showLoaderAndWait(function() {
+                form.submit();
+            });
+        });
+    });
+})();
+</script>
+<script type="module" src="./example_files/v3d52b47920f24c319d37e2661827c42b1787588026925" integrity="sha512-d9sL6GJLXn6fInD1+TVXhTcQOsmxeHfmHAvwGDIxp5TO+uo1fiWW7mHomMj4MLRlCsJDTqXzWLHJFFlPCEIj/A==" data-cf-beacon="{&quot;version&quot;:&quot;2024.11.0&quot;,&quot;token&quot;:&quot;3f197a4531c54edbbb4bd53a0049e88b&quot;,&quot;r&quot;:1}" crossorigin="anonymous"></script>
+
+</body></html>

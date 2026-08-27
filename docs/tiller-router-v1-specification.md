@@ -904,6 +904,8 @@ V1 MUST include an HTTP admin UI.
 
 The UI SHOULD remain intentionally small.
 
+The UI SHOULD generally be skinned like the reference `docs/example.html` (layout, styling, and visual language), deviating only where a V1 requirement makes it necessary.
+
 Required primary sections:
 
 1. Providers.
