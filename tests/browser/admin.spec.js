@@ -18,6 +18,8 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
 
   const secret = page.locator('#secret-value');
   await expect(secret).toHaveText(/^sk-tr-[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}$/);
+  await page.getByRole('button', { name: 'Copy' }).click();
+  await expect(page.locator('#copy-state')).toHaveText('Copied to clipboard.');
   await page.getByRole('button', { name: 'I have stored the key' }).click();
   await expect(secret).toHaveText('');
   await expect(page.locator('#clients-body tr')).toHaveCount(1);
