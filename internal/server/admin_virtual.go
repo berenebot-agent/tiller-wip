@@ -180,6 +180,7 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		GroupID          string `json:"group_id"`
+		GroupName        string `json:"group_name"`
 		Name             string `json:"name"`
 		TargetProviderID string `json:"target_provider_id"`
 		TargetModelID    string `json:"target_model_id"`
@@ -200,14 +201,42 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	groupID := input.GroupID
+	if groupID == "" {
+		groupName := strings.TrimSpace(input.GroupName)
+		if groupName == "" {
+			adminError(w, 400, "invalid_request", "A virtual group is required; provide group_id or group_name.")
+			return
+		}
+		groupID, err = id.New()
+		if err != nil {
+			adminError(w, 500, "internal_error", "Could not create virtual model.")
+			return
+		}
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'virtual',?)`, groupName, groupID)
+		if err == nil {
+			_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_provider_groups(id,name,created_at,updated_at) VALUES(?,?,?,?)`, groupID, groupName, now, now)
+		}
+		if err == nil {
+			_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'virtual',?,0,? FROM client_keys`, groupID, now)
+		}
+		if err != nil {
+			if database.IsConstraint(err) {
+				adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
+			} else {
+				adminError(w, 500, "database_error", "Could not create virtual model.")
+			}
+			return
+		}
+	}
 	var valid int
 	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE id=? AND provider_id=?`, input.TargetModelID, input.TargetProviderID).Scan(&valid); err != nil || valid != 1 {
 		adminError(w, 400, "invalid_target", "Target model does not belong to the selected provider.")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_models(id,virtual_group_id,name,target_provider_id,target_provider_model_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, virtualID, input.GroupID, input.Name, input.TargetProviderID, input.TargetModelID, now, now)
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_models(id,virtual_group_id,name,target_provider_id,target_provider_model_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, virtualID, groupID, input.Name, input.TargetProviderID, input.TargetModelID, now, now)
 	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT c.id,'virtual',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='virtual' AND d.group_id=?`, virtualID, now, now, input.GroupID)
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT c.id,'virtual',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='virtual' AND d.group_id=?`, virtualID, now, now, groupID)
 	}
 	if err != nil || tx.Commit() != nil {
 		if database.IsConstraint(err) {
