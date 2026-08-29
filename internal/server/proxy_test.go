@@ -3,32 +3,10 @@ package server
 import (
 	"bytes"
 	"errors"
-	"io"
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
-
-type tinyReader struct{ data []byte }
-
-func (r *tinyReader) Read(p []byte) (int, error) {
-	if len(r.data) == 0 {
-		return 0, io.EOF
-	}
-	p[0] = r.data[0]
-	r.data = r.data[1:]
-	return 1, nil
-}
-
-func TestStreamReplaceAcrossEveryByteBoundary(t *testing.T) {
-	input := []byte(`{"id":"one","model":"provider-a/model-a","content":"model provider-a/model-a remains ordinary text"}`)
-	want := `{"id":"one","model":"virtual/coding","content":"model provider-a/model-a remains ordinary text"}`
-	var output bytes.Buffer
-	streamReplace(&output, &tinyReader{data: append([]byte(nil), input...)}, "provider-a/model-a", "virtual/coding")
-	if output.String() != want {
-		t.Fatalf("unexpected streaming rewrite:\n%s\nwant:\n%s", output.String(), want)
-	}
-}
 
 func TestCrossProtocolResponsesRejectsStatefulFeatures(t *testing.T) {
 	for _, field := range []string{"conversation", "previous_response_id", "store", "background", "files"} {

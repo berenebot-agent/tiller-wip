@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
 
@@ -98,15 +99,44 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		inferenceError(w, 400, "invalid_request_error", "model_required", "A model identifier is required.", incoming == providers.ProtocolMessages)
 		return
 	}
+	// Begin request logging once a valid client + model is present. The row is
+	// built up as the request progresses and written once, synchronously, in a
+	// deferred best-effort insert that never fails the request.
+	row := &logRow{
+		clientKeyID:     identity.ID,
+		requestedModel:  requested,
+		protocol:        string(incoming),
+		clientRequestID: newRequestID(),
+		createdAt:       database.Now(),
+	}
+	var stream bool
+	if json.Unmarshal(raw["stream"], &stream) == nil {
+		row.streaming = stream
+	}
+	start := time.Now()
+	defer func() {
+		row.latencyMs = time.Since(start).Milliseconds()
+		s.writeLog(context.Background(), row)
+	}()
+	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
+
 	route, err := s.resolveRoute(r.Context(), identity.ID, requested)
 	if err == sql.ErrNoRows {
+		row.httpStatus = 404
+		row.errorText = strPtr("model_not_found")
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", incoming == providers.ProtocolMessages)
 		return
 	} else if err != nil {
+		row.httpStatus = 500
+		row.errorText = strPtr("database_error")
 		inferenceError(w, 500, "server_error", "database_error", "Could not resolve the model.", incoming == providers.ProtocolMessages)
 		return
 	}
+	row.resolvedProvider = &route.Provider.Name
+	row.resolvedModel = &route.UpstreamModelID
 	if !route.Available {
+		row.httpStatus = 503
+		row.errorText = strPtr("model_unavailable")
 		inferenceError(w, 503, "service_unavailable_error", "model_unavailable", "The resolved model target is unavailable.", incoming == providers.ProtocolMessages)
 		return
 	}
@@ -119,6 +149,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		} else if providers.Supports(route.Provider.Protocols, providers.ProtocolResponses) {
 			target = providers.ProtocolResponses
 		} else {
+			row.httpStatus = 503
+			row.errorText = strPtr("protocol_unavailable")
 			inferenceError(w, 503, "service_unavailable_error", "protocol_unavailable", "The provider has no compatible protocol surface.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -129,8 +161,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if err != nil {
 			var unsupported unsupportedFeature
 			if errors.As(err, &unsupported) {
+				row.httpStatus = 400
+				row.errorText = strPtr("unsupported_feature")
 				inferenceError(w, 400, "invalid_request_error", "unsupported_feature", unsupported.Error(), incoming == providers.ProtocolMessages)
 			} else {
+				row.httpStatus = 400
+				row.errorText = strPtr("translation_error")
 				inferenceError(w, 400, "invalid_request_error", "translation_error", err.Error(), incoming == providers.ProtocolMessages)
 			}
 			return
@@ -141,6 +177,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	}
 	endpoint, err := providers.Endpoint(route.Provider, target)
 	if err != nil {
+		row.httpStatus = 502
+		row.errorText = strPtr("invalid_upstream")
 		inferenceError(w, 502, "api_error", "invalid_upstream", "The upstream endpoint is invalid.", incoming == providers.ProtocolMessages)
 		return
 	}
@@ -148,6 +186,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	defer cancel()
 	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		row.httpStatus = 502
+		row.errorText = strPtr("invalid_upstream")
 		inferenceError(w, 502, "api_error", "invalid_upstream", "The upstream endpoint is invalid.", incoming == providers.ProtocolMessages)
 		return
 	}
@@ -163,31 +203,57 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			status = http.StatusGatewayTimeout
 			code = "upstream_timeout"
 		}
+		row.httpStatus = status
+		row.errorText = strPtr(code)
 		inferenceError(w, status, "api_error", code, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
 		return
 	}
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
+	if v := resp.Header.Get("Request-Id"); v != "" {
+		row.providerRequestID = &v
+	} else if v := resp.Header.Get("X-Request-Id"); v != "" {
+		row.providerRequestID = &v
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		row.httpStatus = resp.StatusCode
+		row.errorText = strPtr(fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode))
 		inferenceError(w, resp.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode), incoming == providers.ProtocolMessages)
 		return
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.WriteHeader(resp.StatusCode)
 	idle := time.AfterFunc(5*time.Minute, cancel)
 	defer idle.Stop()
 	reader := &idleReader{reader: resp.Body, timer: idle}
+	usage := &usageCapture{}
 	if translated {
-		if err := translateResponse(w, reader, incoming, target, route); err != nil {
+		w.WriteHeader(resp.StatusCode)
+		row.httpStatus = resp.StatusCode
+		if err := translateResponse(w, reader, incoming, target, route, usage); err != nil {
 			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
 		}
+		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
 		return
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		rewriteSSE(w, reader, route.UpstreamModelID, route.RequestedModel)
+		w.WriteHeader(resp.StatusCode)
+		row.httpStatus = resp.StatusCode
+		rewriteSSE(w, reader, route.UpstreamModelID, route.RequestedModel, usage)
+		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
 		return
 	}
-	streamReplace(w, reader, route.UpstreamModelID, route.RequestedModel)
+	// Non-streaming JSON body: read fully to extract usage, then rewrite.
+	body, err = io.ReadAll(io.LimitReader(reader, 64<<20))
+	if err != nil {
+		row.httpStatus = 502
+		row.errorText = strPtr("upstream_read_error")
+		return
+	}
+	extractUsage(body, usage)
+	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
+	w.WriteHeader(resp.StatusCode)
+	row.httpStatus = resp.StatusCode
+	_, _ = w.Write(rewriteModelBytes(body, route.UpstreamModelID, route.RequestedModel))
 }
 
 type idleReader struct {
@@ -218,7 +284,7 @@ func isTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string) {
+func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) {
 	reader := bufio.NewReader(r)
 	flusher, _ := w.(http.Flusher)
 	for {
@@ -233,6 +299,11 @@ func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string) 
 				} else {
 					var value any
 					if json.Unmarshal(payload, &value) == nil {
+						if m, ok := value.(map[string]any); ok {
+							if u, ok := m["usage"].(map[string]any); ok {
+								setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
+							}
+						}
 						rewriteModel(value, upstream, requested)
 						if encoded, e := json.Marshal(value); e == nil {
 							prefix := line[:bytes.Index(line, []byte("data:"))]
@@ -270,59 +341,6 @@ func rewriteModel(value any, upstream, requested string) {
 	case []any:
 		for _, item := range v {
 			rewriteModel(item, upstream, requested)
-		}
-	}
-}
-
-func streamReplace(w io.Writer, r io.Reader, upstream, requested string) {
-	patterns := [][]byte{[]byte(`"model":"` + upstream + `"`), []byte(`"model": "` + upstream + `"`)}
-	replacements := [][]byte{[]byte(`"model":"` + requested + `"`), []byte(`"model": "` + requested + `"`)}
-	max := 0
-	for _, p := range patterns {
-		if len(p) > max {
-			max = len(p)
-		}
-	}
-	carry := []byte{}
-	buffer := make([]byte, 32<<10)
-	for {
-		n, err := r.Read(buffer)
-		if n > 0 {
-			data := append(carry, buffer[:n]...)
-			safe := len(data) - max + 1
-			if safe < 0 {
-				safe = 0
-			}
-			position := 0
-			for position < safe {
-				foundAt, foundPattern := -1, -1
-				for index, pattern := range patterns {
-					if offset := bytes.Index(data[position:], pattern); offset >= 0 && (foundAt < 0 || position+offset < foundAt) {
-						foundAt, foundPattern = position+offset, index
-					}
-				}
-				if foundAt < 0 || foundAt >= safe {
-					break
-				}
-				_, _ = w.Write(data[position:foundAt])
-				_, _ = w.Write(replacements[foundPattern])
-				position = foundAt + len(patterns[foundPattern])
-			}
-			if position < safe {
-				_, _ = w.Write(data[position:safe])
-			}
-			carryStart := safe
-			if position > carryStart {
-				carryStart = position
-			}
-			carry = append([]byte(nil), data[carryStart:]...)
-		}
-		if err != nil {
-			for index, p := range patterns {
-				carry = bytes.ReplaceAll(carry, p, replacements[index])
-			}
-			_, _ = w.Write(carry)
-			return
 		}
 	}
 }

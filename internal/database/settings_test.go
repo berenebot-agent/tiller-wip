@@ -1,0 +1,52 @@
+package database
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+)
+
+func TestSettingsAccessors(t *testing.T) {
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	// Seeded defaults from migration 004.
+	enabled, retention, err := db.GetLoggingDefaults(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !enabled {
+		t.Fatalf("default logging should be enabled, got %v", enabled)
+	}
+	if retention != 30 {
+		t.Fatalf("default retention should be 30, got %d", retention)
+	}
+
+	if err := db.SetSetting(ctx, SettingDefaultLoggingEnabled, "false"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetSetting(ctx, SettingDefaultRetentionDays, "7"); err != nil {
+		t.Fatal(err)
+	}
+	enabled, retention, err = db.GetLoggingDefaults(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabled {
+		t.Fatalf("logging should now be disabled, got %v", enabled)
+	}
+	if retention != 7 {
+		t.Fatalf("retention should now be 7, got %d", retention)
+	}
+
+	if v, err := db.GetBool(ctx, SettingDefaultLoggingEnabled); err != nil || v {
+		t.Fatalf("GetBool: %v %v", v, err)
+	}
+	if v, err := db.GetInt(ctx, SettingDefaultRetentionDays); err != nil || v != 7 {
+		t.Fatalf("GetInt: %v %v", v, err)
+	}
+}

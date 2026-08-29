@@ -23,7 +23,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.locator('#clients-body tr')).toHaveCount(1);
 
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.getByRole('button', { name: 'Backup / System' }).click();
+  await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#health-state')).toHaveText('READY');
   await expect(page.locator('.danger-note')).toContainText('recoverable provider API credentials');
 

@@ -1,6 +1,6 @@
 # TODO — Per-Client Token-Level Request Logging
 
-**Status:** Planned (grilled & scoped, not yet implemented)
+**Status:** Implemented (2026-08-29)
 **Date:** 2026-08-29
 **Feature:** Roadmap v2-core Phase A (§4) — Metadata-only request audit, surfaced as a per-client "Activity" view.
 
@@ -33,14 +33,14 @@
 | Q12 | Log **every request that reaches `proxy` with a valid client + model, including failures** — `http_status` reflects outcome; `resolved_provider`/`resolved_model` NULL when resolution failed. |
 | Q13 | **Synchronous** log write (best-effort: failed insert logs nothing, never fails the request). |
 | Q14 | Activity shows provider error text (nullable `error_text` column) in addition to HTTP status. |
-| Q15 | Request logs include a client-visible request ID (`client_request_id`, nullable) when one exists. |
+| Q15 | Request logs include a router-generated request ID (`client_request_id`), returned to the client in a response header. Always present. |
 | — | Rename the "System" tab to **"Settings"** (UI label change only; will hold more settings in future). |
 
 ---
 
 ## 3. Migrations
 
-### 3.1 `internal/database/migrations/002_request_logs.sql`
+### 3.1 `internal/database/migrations/003_request_logs.sql`
 
 ```sql
 CREATE TABLE request_logs (
@@ -56,7 +56,7 @@ CREATE TABLE request_logs (
     input_tokens       INTEGER,
     output_tokens      INTEGER,
     provider_request_id TEXT,
-    client_request_id  TEXT,
+    client_request_id  TEXT NOT NULL,
     error_text         TEXT,
     created_at         TEXT NOT NULL
 ) STRICT;
@@ -66,9 +66,9 @@ CREATE INDEX request_logs_created ON request_logs(created_at);
 
 - `resolved_provider`/`resolved_model` are **names**, not IDs.
 - `ON DELETE CASCADE` — deleting a client key deletes its logs.
-- `input_tokens`/`output_tokens`/`provider_request_id`/`client_request_id`/`error_text` nullable (unknown for streaming best-effort / early failures).
+- `input_tokens`/`output_tokens`/`provider_request_id`/`error_text` nullable (unknown for streaming best-effort / early failures). `client_request_id` is always present (router-generated).
 
-### 3.2 `internal/database/migrations/003_settings.sql`
+### 3.2 `internal/database/migrations/004_settings.sql`
 
 ```sql
 CREATE TABLE settings (
@@ -82,7 +82,7 @@ Seeded with two keys:
 - `default_logging_enabled` = `"1"`
 - `default_retention_days` = `"30"`
 
-### 3.3 `internal/database/migrations/004_client_log_config.sql`
+### 3.3 `internal/database/migrations/005_client_log_config.sql`
 
 ```sql
 ALTER TABLE client_keys ADD COLUMN logging_enabled INTEGER NOT NULL DEFAULT 1 CHECK (logging_enabled IN (0,1));
@@ -147,14 +147,14 @@ Register both under `requireAdmin`.
 
 ## 9. Proxy Write Path (Synchronous)
 
-In `proxy` (`internal/server/client.go:78`):
+In `proxy` (`internal/server/client.go:83`):
 - Build a `logRow` struct: client id, requested model, resolved provider/model (names), protocol, streaming, http_status, latency_ms, input/output tokens, provider_request_id, client_request_id, error_text, created_at.
 - **Log every request that reaches `proxy` with a valid client + model, including failures.** `http_status` reflects outcome; `resolved_provider`/`resolved_model` NULL when resolution failed.
 - **Error text:** capture a short provider/upstream error message into `error_text` on failure (never a prompt/response body, never credentials). NULL on success.
-- **Client-visible request ID:** capture the client-supplied request ID (e.g. OpenAI `request_id` / Anthropic `x-request-id`) into `client_request_id` when one exists; NULL otherwise.
+- **Client-visible request ID:** the router generates its own request ID per request, returns it to the client in a response header, and stores it in `client_request_id`. Always present. (Decision: router-generated, not provider-echoed, not client-supplied.)
 - Write once before returning — refactor the many early returns to funnel through a single deferred/end write.
 - **Best-effort:** a failed insert logs nothing and does not fail the request.
-- **Token extraction:** parse `usage` from the response body in-memory, discard the body, log only the numbers. For streaming, best-effort parse of the final SSE chunk's `usage`; `NULL` if absent. Touches `rewriteSSE` / `streamReplace` (`client.go:216` / `client.go:272`) to capture usage before it is rewritten/streamed.
+- **Token extraction:** parse `usage` from the response body in-memory, discard the body, log only the numbers. For streaming, best-effort parse of the final SSE chunk's `usage`; `NULL` if absent. Touches `rewriteSSE` / `streamReplace` (`client.go:221` / `client.go:277`) to capture usage before it is rewritten/streamed.
 
 ---
 
@@ -167,7 +167,7 @@ In `proxy` (`internal/server/client.go:78`):
 
 ## 11. UI — Activity Dialog
 
-- In `renderClients` (`app.js:132`): add an **Activity** button per client row.
+- In `renderClients` (`app.js:186`): add an **Activity** button per client row.
 - New dialog (mirroring the permissions dialog): read-only table of that client's log rows (timestamp, requested model, resolved provider/model, protocol, streaming, status, latency, tokens, provider request id, client request id, error text), with a search filter and pagination, plus a **Clear logs** action (confirm dialog).
 - Client edit dialog: add `logging_enabled` toggle + `retention_days` number field.
 
@@ -184,5 +184,6 @@ In `proxy` (`internal/server/client.go:78`):
 
 ## 13. Open Items (need sign-off before coding)
 
-- **`synchronous=NORMAL` tuning** for the DSN (optional, ~10x faster WAL writes). Flagged; not changing without explicit approval.
-- **Settings tab rename** touches the nav/view id — a UI label change, not a model/provider rename, so within bounds. Confirmed desired.
+- **`synchronous=NORMAL` tuning** for the DSN (optional, ~10x faster WAL writes). **Resolved 2026-08-29: leave the default.** No DSN change.
+- **Settings tab rename** touches the nav/view id — a UI label change, not a model/provider rename, so within bounds. **Confirmed desired.**
+- **`client_request_id` source** — **Resolved 2026-08-29: router-generated**, returned to the client in a response header.

@@ -10,20 +10,22 @@ import (
 )
 
 type clientKeyView struct {
-	ID          string  `json:"id"`
-	Name        string  `json:"name"`
-	Description string  `json:"description"`
-	Fingerprint string  `json:"fingerprint"`
-	Enabled     bool    `json:"enabled"`
-	CreatedAt   string  `json:"created_at"`
-	RotatedAt   *string `json:"rotated_at"`
-	UpdatedAt   string  `json:"updated_at"`
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	Description    string  `json:"description"`
+	Fingerprint    string  `json:"fingerprint"`
+	Enabled        bool    `json:"enabled"`
+	LoggingEnabled bool    `json:"logging_enabled"`
+	RetentionDays  int     `json:"retention_days"`
+	CreatedAt      string  `json:"created_at"`
+	RotatedAt      *string `json:"rotated_at"`
+	UpdatedAt      string  `json:"updated_at"`
 }
 
 func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,name,description,secret_fingerprint,enabled,created_at,rotated_at,updated_at FROM client_keys WHERE name LIKE ? OR description LIKE ? ORDER BY name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,name,description,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,rotated_at,updated_at FROM client_keys WHERE name LIKE ? OR description LIKE ? ORDER BY name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list client keys.")
 		return
@@ -32,12 +34,13 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 	data := []clientKeyView{}
 	for rows.Next() {
 		var v clientKeyView
-		var enabled int
-		if rows.Scan(&v.ID, &v.Name, &v.Description, &v.Fingerprint, &enabled, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt) != nil {
+		var enabled, loggingEnabled int
+		if rows.Scan(&v.ID, &v.Name, &v.Description, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt) != nil {
 			adminError(w, 500, "database_error", "Could not list client keys.")
 			return
 		}
 		v.Enabled = scanBool(enabled)
+		v.LoggingEnabled = scanBool(loggingEnabled)
 		data = append(data, v)
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
@@ -62,6 +65,11 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "internal_error", "Could not generate client key.")
 		return
 	}
+	loggingEnabled, retentionDays, err := s.db.GetLoggingDefaults(r.Context())
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not create client key.")
+		return
+	}
 	now := database.Now()
 	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -69,7 +77,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO client_keys(id,name,description,selector,secret_hash,secret_fingerprint,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)`, clientID, input.Name, input.Description, generated.Selector, generated.Hash, generated.Fingerprint, now, now)
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO client_keys(id,name,description,selector,secret_hash,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?,?,?)`, clientID, input.Name, input.Description, generated.Selector, generated.Hash, generated.Fingerprint, boolInt(loggingEnabled), retentionDays, now, now)
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT ?,'real',id,0,? FROM providers`, clientID, now)
 	}
@@ -95,12 +103,18 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name        *string `json:"name"`
-		Description *string `json:"description"`
-		Enabled     *bool   `json:"enabled"`
+		Name           *string `json:"name"`
+		Description    *string `json:"description"`
+		Enabled        *bool   `json:"enabled"`
+		LoggingEnabled *bool   `json:"logging_enabled"`
+		RetentionDays  *int    `json:"retention_days"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	if input.RetentionDays != nil && *input.RetentionDays < 1 {
+		adminError(w, 400, "invalid_retention", "Retention must be at least 1 day.")
 		return
 	}
 	clientID := r.PathValue("id")
@@ -111,8 +125,8 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var name, description string
-	var enabled int
-	if err = tx.QueryRowContext(r.Context(), `SELECT name,description,enabled FROM client_keys WHERE id=?`, clientID).Scan(&name, &description, &enabled); err == sql.ErrNoRows {
+	var enabled, loggingEnabled, retentionDays int
+	if err = tx.QueryRowContext(r.Context(), `SELECT name,description,enabled,logging_enabled,retention_days FROM client_keys WHERE id=?`, clientID).Scan(&name, &description, &enabled, &loggingEnabled, &retentionDays); err == sql.ErrNoRows {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	} else if err != nil {
@@ -128,7 +142,13 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	if input.Enabled != nil {
 		enabled = boolInt(*input.Enabled)
 	}
-	_, err = tx.ExecContext(r.Context(), `UPDATE client_keys SET name=?,description=?,enabled=?,updated_at=? WHERE id=?`, name, description, enabled, database.Now(), clientID)
+	if input.LoggingEnabled != nil {
+		loggingEnabled = boolInt(*input.LoggingEnabled)
+	}
+	if input.RetentionDays != nil {
+		retentionDays = *input.RetentionDays
+	}
+	_, err = tx.ExecContext(r.Context(), `UPDATE client_keys SET name=?,description=?,enabled=?,logging_enabled=?,retention_days=?,updated_at=? WHERE id=?`, name, description, enabled, loggingEnabled, retentionDays, database.Now(), clientID)
 	if err != nil || tx.Commit() != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")

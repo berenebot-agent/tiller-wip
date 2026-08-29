@@ -256,7 +256,7 @@ func chatToResponsesRequest(chat map[string]any) map[string]any {
 	return out
 }
 
-func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute) error {
+func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
 	reader := bufio.NewReader(r)
 	prefix, err := reader.Peek(1)
 	if err != nil {
@@ -267,6 +267,7 @@ func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target prov
 		if err != nil {
 			return err
 		}
+		extractUsage(body, usage)
 		translated, err := translateNonstreamResponse(body, incoming, target, route.RequestedModel)
 		if err != nil {
 			return err
@@ -274,7 +275,7 @@ func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target prov
 		_, err = w.Write(translated)
 		return err
 	}
-	return translateSSE(w, reader, incoming, target, route.RequestedModel)
+	return translateSSE(w, reader, incoming, target, route.RequestedModel, usage)
 }
 
 func translateNonstreamResponse(body []byte, incoming, target providers.Protocol, model string) ([]byte, error) {
@@ -405,7 +406,7 @@ func chatResponseToResponses(chat map[string]any, model string) map[string]any {
 	return map[string]any{"id": chat["id"], "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": model, "output": output, "usage": usage}
 }
 
-func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string) error {
+func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
 	flusher, _ := w.(http.Flusher)
 	state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model}
 	for {
@@ -420,6 +421,7 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 		if len(data) > 0 && string(data) != "[DONE]" {
 			var payload map[string]any
 			if json.Unmarshal(data, &payload) == nil {
+				captureStreamUsage(payload, target, usage)
 				deltas, done := canonicalDeltas(event, payload, target, state)
 				for _, delta := range deltas {
 					writeTranslatedEvent(w, incoming, state, delta)

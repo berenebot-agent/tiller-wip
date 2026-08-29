@@ -53,7 +53,24 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler()}, nil
 }
 
-func (s *Server) StartBackground(ctx context.Context) { s.providers.StartScheduler(ctx) }
+func (s *Server) StartBackground(ctx context.Context) {
+	s.providers.StartScheduler(ctx)
+	go s.startLogPruner(ctx)
+}
+
+func (s *Server) startLogPruner(ctx context.Context) {
+	s.pruneRequestLogs(ctx) // run once at startup
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.pruneRequestLogs(ctx)
+		}
+	}
+}
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -86,6 +103,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/admin/client-keys/{id}/rotate", s.requireAdmin(http.HandlerFunc(s.rotateClientKey)))
 	mux.Handle("GET /api/admin/client-keys/{id}/permissions", s.requireAdmin(http.HandlerFunc(s.getPermissions)))
 	mux.Handle("PUT /api/admin/client-keys/{id}/permissions", s.requireAdmin(http.HandlerFunc(s.updatePermissions)))
+	mux.Handle("GET /api/admin/client-keys/{id}/activity", s.requireAdmin(http.HandlerFunc(s.listActivity)))
+	mux.Handle("DELETE /api/admin/client-keys/{id}/activity", s.requireAdmin(http.HandlerFunc(s.clearActivity)))
+	mux.Handle("GET /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.getSettings)))
+	mux.Handle("PUT /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.updateSettings)))
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
 	mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
