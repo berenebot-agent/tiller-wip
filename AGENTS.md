@@ -5,7 +5,7 @@ Guardrails for any coding agent working in this repository. This file does not r
 ## Source of truth
 
 - `tiller-router-v1-specification.md` is the **frozen** V1 spec. Frozen means frozen: do not add, soften, or reinterpret requirements in it. If something seems missing or wrong, stop and flag it — don't silently patch the spec or work around it in code.
-- `tiller-router-roadmap.md` describes deferred work. Nothing in it is authorized for implementation unless a human explicitly asks for that specific roadmap item by name.
+- `tiller-router-roadmap-v2-core.md` describes deferred core work (active phases plus a Deferred Backlog). `tiller-router-roadmap-saas-multiuser.md` describes deferred multi-user/SaaS work. Nothing in either is authorized for implementation unless a human explicitly asks for that specific roadmap item by name.
 - If the two documents conflict, or if a request conflicts with either, stop and ask rather than picking one.
 
 ## Scope discipline
