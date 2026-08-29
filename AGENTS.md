@@ -25,6 +25,13 @@ Guardrails for any coding agent working in this repository. This file does not r
 - Approved deviation (2026-08-29, testing): `docker-compose.yml` is the single compose file and publishes `0.0.0.0:${TILLER_TEST_PORT:-8080}:8080` for direct LAN access. This is a deliberate, human-approved exception to the "base publishes no host port" design in README §31. Do not silently remove it, and do not extend it to other ports. Reverse-proxy networking is deferred; when it returns, the router should join the external proxy network and stop publishing a host port.
 - Don't require Docker socket access or privileged mode.
 
+## Toolchain — Go runs in Docker, never on the host
+
+- Go is intentionally **not** installed on the host. `go` is not on PATH and `go: command not found` is expected, not an error. Do not install Go on the host and do not treat the missing host Go as a problem to fix.
+- Every Go command (build, test, vet, mod tidy, etc.) must run inside the `golang:1.26.7-alpine` image, e.g. `docker run --rm -v "$PWD:/src" -w /src golang:1.26.7-alpine go test ./...`
+- The integration/browser/compatibility tests are fully containerized and need no host Go at all — see `tests/compatibility/run.sh` and `tests/browser`.
+- If a script or tool invokes bare `go` on the host, that is the bug — point it at the Docker wrapper instead of installing Go.
+
 ## Security guardrails
 
 - Never re-display, log, or expose provider credentials or client API keys in plaintext after creation — including in error messages, stack traces, and debug output.
