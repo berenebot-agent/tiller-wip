@@ -22,6 +22,7 @@ Guardrails for any coding agent working in this repository. This file does not r
 - All persistent state lives under `./data`. If you add any new persistent file, it goes under `./data` and must survive a container restart and a directory move to a different host with no other changes.
 - No Kubernetes artifacts of any kind (manifests, Helm, operators). This is Compose-only.
 - Don't add anything that requires a host-published port when a reverse-proxy Docker network is in use.
+- Approved deviation (2026-08-29, testing): the base `docker-compose.yml` publishes `0.0.0.0:${TILLER_TEST_PORT:-8080}:8080` for LAN access during testing. This is a deliberate, human-approved exception to the "base publishes no host port" design in README §31. Do not silently remove it, and do not extend it to other ports or to `0.0.0.0` exposure in the proxy override.
 - Don't require Docker socket access or privileged mode.
 
 ## Security guardrails

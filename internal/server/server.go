@@ -1,0 +1,277 @@
+package server
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/config"
+	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/providers"
+	webassets "github.com/tiller-router/tiller-router/internal/web"
+)
+
+const sessionCookie = "tiller_admin_session"
+
+type Server struct {
+	config    config.Config
+	db        *database.DB
+	clients   *auth.ClientAuthenticator
+	sessions  *auth.SessionStore
+	providers *providers.Manager
+	logger    *slog.Logger
+	assets    http.Handler
+}
+
+type contextKey string
+
+const (
+	adminSessionKey contextKey = "admin-session"
+	clientKey       contextKey = "client"
+)
+
+func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, error) {
+	clients, err := auth.NewClientAuthenticator(db.SQL)
+	if err != nil {
+		return nil, err
+	}
+	sessions, err := auth.NewSessionStore()
+	if err != nil {
+		return nil, err
+	}
+	registry := providers.NewRegistry()
+	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler()}, nil
+}
+
+func (s *Server) StartBackground(ctx context.Context) { s.providers.StartScheduler(ctx) }
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health/live", s.live)
+	mux.HandleFunc("GET /health/ready", s.ready)
+	mux.HandleFunc("POST /api/admin/session", s.login)
+	mux.Handle("GET /api/admin/session", s.requireAdmin(http.HandlerFunc(s.sessionStatus)))
+	mux.Handle("DELETE /api/admin/session", s.requireAdmin(http.HandlerFunc(s.logout)))
+	mux.Handle("GET /api/admin/provider-types", s.requireAdmin(http.HandlerFunc(s.providerTypes)))
+	mux.Handle("GET /api/admin/providers", s.requireAdmin(http.HandlerFunc(s.listProviders)))
+	mux.Handle("POST /api/admin/providers", s.requireAdmin(http.HandlerFunc(s.createProvider)))
+	mux.Handle("PATCH /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.updateProvider)))
+	mux.Handle("DELETE /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.deleteProvider)))
+	mux.Handle("PUT /api/admin/providers/{id}/credential", s.requireAdmin(http.HandlerFunc(s.replaceProviderCredential)))
+	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireAdmin(http.HandlerFunc(s.refreshProvider)))
+	mux.Handle("GET /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.listProviderModels)))
+	mux.Handle("GET /api/admin/models", s.requireAdmin(http.HandlerFunc(s.listAllModels)))
+	mux.Handle("GET /api/admin/virtual-groups", s.requireAdmin(http.HandlerFunc(s.listVirtualGroups)))
+	mux.Handle("POST /api/admin/virtual-groups", s.requireAdmin(http.HandlerFunc(s.createVirtualGroup)))
+	mux.Handle("PATCH /api/admin/virtual-groups/{id}", s.requireAdmin(http.HandlerFunc(s.updateVirtualGroup)))
+	mux.Handle("DELETE /api/admin/virtual-groups/{id}", s.requireAdmin(http.HandlerFunc(s.deleteVirtualGroup)))
+	mux.Handle("GET /api/admin/virtual-models", s.requireAdmin(http.HandlerFunc(s.listVirtualModels)))
+	mux.Handle("POST /api/admin/virtual-models", s.requireAdmin(http.HandlerFunc(s.createVirtualModel)))
+	mux.Handle("PATCH /api/admin/virtual-models/{id}", s.requireAdmin(http.HandlerFunc(s.updateVirtualModel)))
+	mux.Handle("DELETE /api/admin/virtual-models/{id}", s.requireAdmin(http.HandlerFunc(s.deleteVirtualModel)))
+	mux.Handle("GET /api/admin/client-keys", s.requireAdmin(http.HandlerFunc(s.listClientKeys)))
+	mux.Handle("POST /api/admin/client-keys", s.requireAdmin(http.HandlerFunc(s.createClientKey)))
+	mux.Handle("PATCH /api/admin/client-keys/{id}", s.requireAdmin(http.HandlerFunc(s.updateClientKey)))
+	mux.Handle("DELETE /api/admin/client-keys/{id}", s.requireAdmin(http.HandlerFunc(s.deleteClientKey)))
+	mux.Handle("POST /api/admin/client-keys/{id}/rotate", s.requireAdmin(http.HandlerFunc(s.rotateClientKey)))
+	mux.Handle("GET /api/admin/client-keys/{id}/permissions", s.requireAdmin(http.HandlerFunc(s.getPermissions)))
+	mux.Handle("PUT /api/admin/client-keys/{id}/permissions", s.requireAdmin(http.HandlerFunc(s.updatePermissions)))
+	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
+	mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
+	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
+	mux.Handle("POST /v1/chat/completions", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolChat) }), false))
+	mux.Handle("POST /v1/responses", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolResponses) }), false))
+	mux.Handle("POST /v1/messages", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolMessages) }), true))
+	mux.Handle("/", s.assets)
+	return s.securityHeaders(s.requestLog(mux))
+}
+
+func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"status": "live"})
+}
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	if err := s.db.Ready(r.Context()); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "not_ready"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
+}
+
+func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	var input struct{ Username, Password string }
+	if err := decodeJSON(w, r, &input); err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !auth.EqualCredential(input.Username, s.config.AdminUsername) || !auth.EqualCredential(input.Password, s.config.AdminPassword) {
+		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid administrator credentials.")
+		return
+	}
+	session, err := s.sessions.Create()
+	if err != nil {
+		adminError(w, 500, "internal_error", "Could not create session.")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: session.Token, Path: "/", HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+}
+
+func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
+	session := r.Context().Value(adminSessionKey).(auth.Session)
+	writeJSON(w, 200, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+}
+func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(sessionCookie); err == nil {
+		s.sessions.Delete(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(sessionCookie)
+		if err != nil {
+			adminError(w, 401, "unauthorized", "Administrator authentication required.")
+			return
+		}
+		session, ok := s.sessions.Get(cookie.Value)
+		if !ok {
+			adminError(w, 401, "unauthorized", "Administrator authentication required.")
+			return
+		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.sessions.CheckCSRF(session, r.Header.Get("X-CSRF-Token")) {
+			adminError(w, 403, "csrf_failed", "A valid CSRF token is required.")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), adminSessionKey, session)))
+	})
+}
+
+func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw := bearerToken(r.Header.Get("Authorization"))
+		if raw == "" && anthropic {
+			raw = r.Header.Get("x-api-key")
+		}
+		identity, ok := s.clients.Authenticate(raw)
+		if !ok {
+			inferenceError(w, 401, "authentication_error", "invalid_api_key", "Invalid API key.", anthropic)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientKey, identity)))
+	})
+}
+
+func (s *Server) secureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return s.config.TrustProxy && strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
+}
+
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		s.logger.Info("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+	})
+}
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return errors.New("request body must be valid JSON")
+	}
+	return nil
+}
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+func adminError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}})
+}
+func inferenceError(w http.ResponseWriter, status int, errType, code, message string, anthropic bool) {
+	if anthropic {
+		writeJSON(w, status, map[string]any{"type": "error", "error": map[string]any{"type": errType, "message": message, "code": code}})
+		return
+	}
+	writeJSON(w, status, map[string]any{"error": map[string]any{"type": errType, "code": code, "message": message}})
+}
+func bearerToken(header string) string {
+	parts := strings.Fields(header)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		return parts[1]
+	}
+	return ""
+}
+
+func pagination(r *http.Request) (limit, offset int, search string) {
+	limit = 50
+	if _, err := fmt.Sscanf(r.URL.Query().Get("limit"), "%d", &limit); err != nil || limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	_, _ = fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset)
+	if offset < 0 {
+		offset = 0
+	}
+	search = strings.TrimSpace(r.URL.Query().Get("search"))
+	return
+}
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+func nullableString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
+}
+func scanBool(v int) bool { return v != 0 }
+
+func (s *Server) exportBackup(w http.ResponseWriter, r *http.Request) {
+	dir := filepath.Join(s.config.DataDir, "backups")
+	path, err := s.db.Backup(r.Context(), dir)
+	if err != nil {
+		adminError(w, 500, "backup_failed", "Could not create a consistent backup.")
+		return
+	}
+	defer os.Remove(path)
+	w.Header().Set("Content-Type", mime.TypeByExtension(".db"))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(path)))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Tiller-Secret-Material", "provider-credentials")
+	http.ServeFile(w, r, path)
+}
+
+var _ = sql.ErrNoRows

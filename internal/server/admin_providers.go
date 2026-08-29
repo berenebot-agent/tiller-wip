@@ -1,0 +1,324 @@
+package server
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/id"
+	"github.com/tiller-router/tiller-router/internal/providers"
+)
+
+type providerView struct {
+	ID                   string               `json:"id"`
+	Name                 string               `json:"name"`
+	Type                 string               `json:"type"`
+	BaseURL              string               `json:"base_url"`
+	Enabled              bool                 `json:"enabled"`
+	Protocols            []providers.Protocol `json:"protocols"`
+	CredentialConfigured bool                 `json:"credential_configured"`
+	LastRefreshAt        *string              `json:"last_refresh_at"`
+	NextRefreshAt        *string              `json:"next_refresh_at"`
+	LastRefreshError     *string              `json:"last_refresh_error"`
+	CreatedAt            string               `json:"created_at"`
+	UpdatedAt            string               `json:"updated_at"`
+	ModelCount           int                  `json:"model_count"`
+	AvailableModelCount  int                  `json:"available_model_count"`
+}
+
+func (s *Server) providerTypes(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, 200, map[string]any{"data": providers.Descriptors()})
+}
+
+func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
+	limit, offset, search := pagination(r)
+	pattern := "%" + search + "%"
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT p.id,p.name,p.type,p.base_url,p.enabled,p.protocols,p.credential_secret IS NOT NULL,p.last_refresh_at,p.next_refresh_at,p.last_refresh_error,p.created_at,p.updated_at,count(m.id),coalesce(sum(CASE WHEN m.available=1 THEN 1 ELSE 0 END),0) FROM providers p LEFT JOIN provider_models m ON m.provider_id=p.id WHERE p.name LIKE ? OR p.type LIKE ? GROUP BY p.id ORDER BY p.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not list providers.")
+		return
+	}
+	defer rows.Close()
+	data := []providerView{}
+	for rows.Next() {
+		var v providerView
+		var enabled, configured int
+		var raw string
+		if err := rows.Scan(&v.ID, &v.Name, &v.Type, &v.BaseURL, &enabled, &raw, &configured, &v.LastRefreshAt, &v.NextRefreshAt, &v.LastRefreshError, &v.CreatedAt, &v.UpdatedAt, &v.ModelCount, &v.AvailableModelCount); err != nil {
+			adminError(w, 500, "database_error", "Could not list providers.")
+			return
+		}
+		v.Enabled = scanBool(enabled)
+		v.CredentialConfigured = scanBool(configured)
+		v.Protocols = providers.DecodeProtocols(raw)
+		data = append(data, v)
+	}
+	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
+}
+
+func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Name       string               `json:"name"`
+		Type       string               `json:"type"`
+		BaseURL    string               `json:"base_url"`
+		Credential string               `json:"credential"`
+		Enabled    *bool                `json:"enabled"`
+		Protocols  []providers.Protocol `json:"protocols"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		adminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	descriptor, ok := providers.Lookup(input.Type)
+	if !ok {
+		adminError(w, 400, "invalid_provider_type", "Unknown provider type.")
+		return
+	}
+	if input.BaseURL == "" {
+		input.BaseURL = descriptor.DefaultBaseURL
+	}
+	input.BaseURL = strings.TrimRight(input.BaseURL, "/")
+	if input.BaseURL == "" || providers.ValidateBaseURL(input.BaseURL) != nil {
+		adminError(w, 400, "invalid_base_url", "A valid provider base URL is required.")
+		return
+	}
+	if descriptor.CredentialNeeded && input.Credential == "" {
+		adminError(w, 400, "credential_required", "This provider requires an API credential.")
+		return
+	}
+	protocols := descriptor.Protocols
+	if (input.Type == "generic-openai" || input.Type == "vllm") && len(input.Protocols) > 0 {
+		protocols = input.Protocols
+	}
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	providerID, err := id.New()
+	if err != nil {
+		adminError(w, 500, "internal_error", "Could not create provider.")
+		return
+	}
+	now := database.Now()
+	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not create provider.")
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'real',?)`, input.Name, providerID); err == nil {
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, providerID, input.Name, input.Type, input.BaseURL, nullableString(input.Credential), boolInt(enabled), providers.EncodeProtocols(protocols), now, now)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'real',?,0,? FROM client_keys`, providerID, now)
+	}
+	if err != nil || tx.Commit() != nil {
+		if database.IsConstraint(err) {
+			adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
+		} else {
+			adminError(w, 500, "database_error", "Could not create provider.")
+		}
+		return
+	}
+	refreshCtx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	refreshErr := s.providers.Refresh(refreshCtx, providerID)
+	status := http.StatusCreated
+	message := ""
+	if refreshErr != nil {
+		message = "Provider was saved, but initial discovery failed."
+	}
+	writeJSON(w, status, map[string]any{"id": providerID, "name": input.Name, "credential_configured": input.Credential != "", "refresh_error": message})
+}
+
+func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
+	providerID := r.PathValue("id")
+	var input struct {
+		Name            *string              `json:"name"`
+		BaseURL         *string              `json:"base_url"`
+		Enabled         *bool                `json:"enabled"`
+		Protocols       []providers.Protocol `json:"protocols"`
+		ConfirmBreaking bool                 `json:"confirm_breaking_change"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		adminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not update provider.")
+		return
+	}
+	defer tx.Rollback()
+	var oldName, providerType string
+	if err = tx.QueryRowContext(r.Context(), `SELECT name,type FROM providers WHERE id=?`, providerID).Scan(&oldName, &providerType); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	} else if err != nil {
+		adminError(w, 500, "database_error", "Could not update provider.")
+		return
+	}
+	if input.Name != nil && *input.Name != oldName {
+		if !input.ConfirmBreaking {
+			adminError(w, 409, "breaking_change_confirmation_required", "Renaming changes every client-facing model ID. Confirm the breaking change.")
+			return
+		}
+		name := strings.TrimSpace(*input.Name)
+		_, err = tx.ExecContext(r.Context(), `UPDATE namespaces SET name=? WHERE entity_id=? AND kind='real'`, name, providerID)
+	}
+	if err == nil && input.BaseURL != nil {
+		base := strings.TrimRight(*input.BaseURL, "/")
+		if providers.ValidateBaseURL(base) != nil {
+			adminError(w, 400, "invalid_base_url", "A valid provider base URL is required.")
+			return
+		}
+		_, err = tx.ExecContext(r.Context(), `UPDATE providers SET base_url=?,updated_at=? WHERE id=?`, base, database.Now(), providerID)
+	}
+	if err == nil && input.Enabled != nil {
+		_, err = tx.ExecContext(r.Context(), `UPDATE providers SET enabled=?,updated_at=? WHERE id=?`, boolInt(*input.Enabled), database.Now(), providerID)
+	}
+	if err == nil && len(input.Protocols) > 0 && (providerType == "generic-openai" || providerType == "vllm") {
+		_, err = tx.ExecContext(r.Context(), `UPDATE providers SET protocols=?,updated_at=? WHERE id=?`, providers.EncodeProtocols(input.Protocols), database.Now(), providerID)
+	}
+	if err != nil || tx.Commit() != nil {
+		if database.IsConstraint(err) {
+			adminError(w, 409, "name_conflict", "That provider-group name is already in use.")
+		} else {
+			adminError(w, 500, "database_error", "Could not update provider.")
+		}
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Credential string `json:"credential"`
+	}
+	if decodeJSON(w, r, &input) != nil || input.Credential == "" {
+		adminError(w, 400, "credential_required", "A non-empty credential is required.")
+		return
+	}
+	result, err := s.db.SQL.ExecContext(r.Context(), `UPDATE providers SET credential_secret=?,updated_at=? WHERE id=?`, input.Credential, database.Now(), r.PathValue("id"))
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not replace credential.")
+		return
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
+	defer cancel()
+	if err := s.providers.Refresh(ctx, r.PathValue("id")); err != nil {
+		adminError(w, 502, "refresh_failed", "Refresh failed; the previous catalogue and permissions were preserved.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"status": "refreshed"})
+}
+
+func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
+	providerID := r.PathValue("id")
+	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
+		return
+	}
+	defer tx.Rollback()
+	var refs int
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models WHERE target_provider_id=?`, providerID).Scan(&refs); err != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
+		return
+	}
+	if refs > 0 {
+		adminError(w, 409, "provider_in_use", "Repoint or delete dependent virtual models first.")
+		return
+	}
+	var name string
+	if err = tx.QueryRowContext(r.Context(), `SELECT name FROM providers WHERE id=?`, providerID).Scan(&name); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	}
+	_, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='real' AND model_id IN (SELECT id FROM provider_models WHERE provider_id=?)`, providerID)
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `DELETE FROM client_group_defaults WHERE group_kind='real' AND group_id=?`, providerID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_models WHERE provider_id=?`, providerID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `DELETE FROM providers WHERE id=?`, providerID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `DELETE FROM namespaces WHERE entity_id=? AND kind='real'`, providerID)
+	}
+	if err != nil || tx.Commit() != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
+		return
+	}
+	w.WriteHeader(204)
+}
+
+type modelView struct {
+	ID               string `json:"id"`
+	ProviderID       string `json:"provider_id"`
+	ProviderName     string `json:"provider_name"`
+	UpstreamModelID  string `json:"upstream_model_id"`
+	CanonicalModelID string `json:"canonical_model_id"`
+	DisplayName      string `json:"display_name"`
+	Available        bool   `json:"available"`
+	FirstSeenAt      string `json:"first_seen_at"`
+	LastSeenAt       string `json:"last_seen_at"`
+}
+
+func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request) {
+	s.listModelsQuery(w, r, `m.provider_id=?`, []any{r.PathValue("id")})
+}
+func (s *Server) listAllModels(w http.ResponseWriter, r *http.Request) {
+	s.listModelsQuery(w, r, `1=1`, nil)
+}
+func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where string, args []any) {
+	limit, offset, search := pagination(r)
+	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.available,m.first_seen_at,m.last_seen_at FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
+	pattern := "%" + search + "%"
+	args = append(args, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), query, args...)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not list models.")
+		return
+	}
+	defer rows.Close()
+	data := []modelView{}
+	for rows.Next() {
+		var v modelView
+		var available int
+		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &available, &v.FirstSeenAt, &v.LastSeenAt) != nil {
+			adminError(w, 500, "database_error", "Could not list models.")
+			return
+		}
+		v.Available = scanBool(available)
+		data = append(data, v)
+	}
+	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
+}
+
+func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
+	var providersCount, available, retired, broken int
+	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM providers`).Scan(&providersCount)
+	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=1`).Scan(&available)
+	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=0`).Scan(&retired)
+	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE m.available=0 OR p.enabled=0`).Scan(&broken)
+	writeJSON(w, 200, map[string]any{"status": "ready", "providers": providersCount, "available_models": available, "retired_models": retired, "broken_virtual_models": broken})
+}
+
+var _ = json.Valid

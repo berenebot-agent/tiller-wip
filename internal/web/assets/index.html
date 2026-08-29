@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Tiller Router — Control Panel</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="login-shell" id="login-shell">
+    <section class="login-card" aria-labelledby="login-title">
+      <div class="router-mark" aria-hidden="true"><i></i><i></i><i></i></div>
+      <p class="eyebrow">ROUTING CONTROL / V1</p>
+      <h1 id="login-title">Tiller Router</h1>
+      <p class="login-copy">One endpoint. Deliberate model access. Deterministic routes.</p>
+      <form id="login-form" class="stack-form">
+        <label>Administrator <input name="username" autocomplete="username" required autofocus></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+        <p class="form-error" id="login-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" type="submit">Enter control panel</button>
+      </form>
+      <p class="login-foot">Session state is local to this router process.</p>
+    </section>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <nav class="topbar" aria-label="Primary">
+      <div class="nav-inner">
+        <button class="brand" data-view="providers" aria-label="Tiller Router home"><span class="brand-symbol"><i></i><i></i><i></i></span><span>TILLER <b>ROUTER</b></span></button>
+        <div class="nav-links" id="nav-links">
+          <button data-view="providers" class="active">Providers</button>
+          <button data-view="models">Real Models</button>
+          <button data-view="virtual">Virtual Models</button>
+          <button data-view="clients">Client Keys</button>
+          <button data-view="system">Backup / System</button>
+        </div>
+        <div class="nav-meta"><span class="system-state"><i></i><span id="top-status">READY</span></span><span id="admin-name"></span><button class="btn-link" id="logout">Logout</button></div>
+        <button class="mobile-menu" id="mobile-menu" aria-label="Toggle navigation" aria-expanded="false">Menu</button>
+      </div>
+    </nav>
+
+    <main>
+      <div id="flash" class="flash" role="status" aria-live="polite" hidden></div>
+
+      <section class="view active" id="view-providers" aria-labelledby="providers-title">
+        <header class="dashboard-header"><div><p class="eyebrow">UPSTREAM REGISTRY</p><h1 id="providers-title">Providers</h1><p>Credentials are write-only. Catalogue refreshes never erase the last known-good state.</p></div><button class="btn btn-primary" id="add-provider">+ Add provider</button></header>
+        <div class="metric-strip" id="provider-metrics"></div>
+        <div class="filter-bar"><label class="search-field"><span>Filter</span><input id="provider-search" type="search" placeholder="Provider name or type"></label><span class="filter-note">Refresh cadence: approximately 24 hours</span></div>
+        <div class="table-shell"><table class="form-table"><thead><tr><th>Provider</th><th>Type / surface</th><th>Catalogue</th><th>Last refresh</th><th>State</th><th class="actions-head">Actions</th></tr></thead><tbody id="providers-body"></tbody></table><div class="empty-state" id="providers-empty" hidden><span>00</span><h2>No providers configured</h2><p>Add the first upstream; it remains stored even if initial discovery fails.</p></div></div>
+      </section>
+
+      <section class="view" id="view-models" aria-labelledby="models-title">
+        <header class="dashboard-header"><div><p class="eyebrow">DISCOVERED CATALOGUE</p><h1 id="models-title">Real Models</h1><p>Canonical IDs combine the provider namespace with the provider-native model identity.</p></div><button class="btn btn-secondary" data-refresh-view="models">Reload catalogue</button></header>
+        <div class="filter-bar"><label class="search-field"><span>Search</span><input id="model-search" type="search" placeholder="Canonical or upstream model ID"></label><label class="inline-check"><input type="checkbox" id="show-retired" checked> Show retired</label></div>
+        <div class="table-shell"><table class="form-table model-table"><thead><tr><th>Canonical model ID</th><th>Provider-native ID</th><th>Provider</th><th>Availability</th><th>First seen</th></tr></thead><tbody id="models-body"></tbody></table><div class="empty-state" id="models-empty" hidden><span>∅</span><h2>No matching models</h2><p>Refresh a provider catalogue or adjust the filter.</p></div></div>
+      </section>
+
+      <section class="view" id="view-virtual" aria-labelledby="virtual-title">
+        <header class="dashboard-header"><div><p class="eyebrow">STABLE CLIENT IDENTITIES</p><h1 id="virtual-title">Virtual Models</h1><p>Each visible identity resolves to exactly one real target. Remaps apply to new requests immediately.</p></div><div class="header-actions"><button class="btn btn-secondary" id="add-virtual-group">+ Group</button><button class="btn btn-primary" id="add-virtual-model">+ Virtual model</button></div></header>
+        <div class="route-legend"><span><i class="virtual-node"></i> Client-facing identity</span><b>→</b><span><i class="real-node"></i> Resolved upstream target</span><em>No fallback or health-based rerouting</em></div>
+        <div class="filter-bar"><label class="search-field"><span>Search</span><input id="virtual-search" type="search" placeholder="Virtual or target model"></label></div>
+        <div class="table-shell"><table class="form-table route-table"><thead><tr><th>Virtual identity</th><th class="route-arrow"></th><th>Resolved target</th><th>State</th><th class="actions-head">Actions</th></tr></thead><tbody id="virtual-body"></tbody></table><div class="empty-state" id="virtual-empty" hidden><span>→</span><h2>No virtual routes</h2><p>Create a group, then map a stable virtual model identity.</p></div></div>
+        <section class="subpanel"><div class="subpanel-head"><div><h2>Virtual provider groups</h2><p>Group names share the same namespace as real providers.</p></div></div><div class="chip-list" id="virtual-groups"></div></section>
+      </section>
+
+      <section class="view" id="view-clients" aria-labelledby="clients-title">
+        <header class="dashboard-header"><div><p class="eyebrow">CATALOGUE ACCESS CONTROL</p><h1 id="clients-title">Client Keys</h1><p>Secrets are Argon2id-hashed and shown once. Every model permission begins OFF.</p></div><button class="btn btn-primary" id="add-client">+ Create client key</button></header>
+        <div class="notice feeder-notice"><span>FEEDER RULE</span><p><b>New models default</b> affects only models added in future. It never changes an existing model permission.</p></div>
+        <div class="filter-bar"><label class="search-field"><span>Search</span><input id="client-search" type="search" placeholder="Client name or description"></label></div>
+        <div class="table-shell"><table class="form-table"><thead><tr><th>Client</th><th>Key fingerprint</th><th>Created / rotated</th><th>State</th><th class="actions-head">Actions</th></tr></thead><tbody id="clients-body"></tbody></table><div class="empty-state" id="clients-empty" hidden><span>KEY</span><h2>No client keys</h2><p>Create a key, copy its secret once, then grant individual model access.</p></div></div>
+      </section>
+
+      <section class="view" id="view-system" aria-labelledby="system-title">
+        <header class="dashboard-header"><div><p class="eyebrow">OPERATIONS / RECOVERY</p><h1 id="system-title">Backup &amp; System</h1><p>Readiness depends on SQLite and migrations—not upstream provider availability.</p></div><button class="btn btn-secondary" data-refresh-view="system">Refresh status</button></header>
+        <div class="system-grid"><article class="system-card"><div class="card-index">01</div><h2>Runtime status</h2><div class="health-dial"><span id="health-state">—</span><small>ROUTER</small></div><dl id="health-metrics"></dl></article><article class="system-card backup-card"><div class="card-index">02</div><h2>Consistent SQLite export</h2><p>Exports use SQLite’s consistent snapshot mechanism and include all configuration, permissions, catalogues, and key hashes.</p><div class="danger-note"><b>SECRET MATERIAL</b><span>The backup contains recoverable provider API credentials. Store and transmit it accordingly. Client secrets remain unrecoverable.</span></div><a class="btn btn-primary" href="/api/admin/backup/export" id="download-backup">Download encrypted-transport backup</a></article><article class="system-card"><div class="card-index">03</div><h2>Deployment contract</h2><ul class="check-list"><li>Single Compose service</li><li>SQLite under <code>/data</code></li><li>Bind mount only</li><li>Non-root scratch runtime</li><li>No Docker socket</li><li>No privileged mode</li></ul></article></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="form-dialog"><form method="dialog" id="entity-form"><header><div><p class="eyebrow" id="dialog-eyebrow">CONFIGURE</p><h2 id="dialog-title">Entity</h2></div><button class="dialog-close" value="cancel" aria-label="Close">×</button></header><div id="dialog-fields" class="dialog-fields"></div><p class="form-error" id="dialog-error" role="alert"></p><footer><button class="btn btn-secondary" value="cancel">Cancel</button><button class="btn btn-primary" id="dialog-submit" value="default">Save</button></footer></form></dialog>
+
+  <dialog id="secret-dialog" class="secret-dialog"><section><header><div><p class="eyebrow">ONE-TIME SECRET</p><h2>Copy this key now</h2></div></header><p>This plaintext key will not be shown again. Closing this window does not preserve it.</p><div class="secret-box"><code id="secret-value"></code><button class="btn btn-secondary" id="copy-secret">Copy</button></div><p class="copy-state" id="copy-state" aria-live="polite"></p><footer><button class="btn btn-primary" id="close-secret">I have stored the key</button></footer></section></dialog>
+
+  <dialog id="confirm-dialog" class="confirm-dialog"><form method="dialog"><header><div><p class="eyebrow" id="confirm-eyebrow">CONFIRM CHANGE</p><h2 id="confirm-title">Are you sure?</h2></div></header><p id="confirm-copy"></p><label class="confirm-check" id="confirm-check-wrap" hidden><input type="checkbox" id="confirm-check"> <span>I understand this changes client-facing model IDs.</span></label><p class="form-error" id="confirm-error"></p><footer><button class="btn btn-secondary" value="cancel">Cancel</button><button class="btn btn-danger" value="confirm" id="confirm-action">Confirm</button></footer></form></dialog>
+
+  <dialog id="permissions-dialog" class="permissions-dialog"><section><header><div><p class="eyebrow">CLIENT CATALOGUE</p><h2 id="permissions-title">Permissions</h2></div><button class="dialog-close" id="close-permissions" aria-label="Close">×</button></header><div class="notice feeder-notice compact"><span>FEEDER RULE</span><p>The group switch applies only to models discovered or created later.</p></div><label class="search-field permission-search"><span>Filter models</span><input id="permission-search" type="search" placeholder="Model ID"></label><div id="permission-groups" class="permission-groups"></div><p class="form-error" id="permissions-error"></p><footer><button class="btn btn-secondary" id="cancel-permissions">Cancel</button><button class="btn btn-primary" id="save-permissions">Save permissions</button></footer></section></dialog>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

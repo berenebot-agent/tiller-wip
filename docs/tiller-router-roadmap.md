@@ -167,12 +167,10 @@ Rotation design should be considered before implementation.
 
 ## 4.2 Hash-hardening options for client keys
 
-V1 stores hash-only client secrets.
+V1 stores hash-only client secrets using Argon2id and a non-secret selector.
 
 Future improvements may include:
 
-- Memory-hard KDF if justified.
-- Key prefixes/identifiers for faster lookup.
 - Multiple valid key hashes during planned rotations.
 
 ---
@@ -506,22 +504,15 @@ Before restoring:
 
 ## 12.1 Additional native adapters
 
-Potential providers:
+The expanded V1 registry now covers API-key based Gemini, Azure OpenAI,
+Bedrock endpoints, Groq, Mistral, xAI, Together, Fireworks, Cerebras,
+Perplexity, NVIDIA NIM, Hugging Face Inference, Cloudflare Workers AI,
+Alibaba/Qwen, MiniMax, and common self-hosted OpenAI-compatible servers.
 
-- Google Gemini.
-- Vertex AI.
-- AWS Bedrock.
-- Azure OpenAI.
-- Groq.
-- Mistral.
-- xAI.
-- Together.
-- Fireworks.
-- Cerebras.
-- Cloudflare AI Gateway.
-- Other OpenAI-compatible providers.
-
-Prefer generic OpenAI compatibility where it is sufficient.
+Still-deferred native authentication/transport work includes Vertex service
+accounts, AWS SigV4/Converse, Azure Entra ID, Gemini Interactions, native
+Cohere, and subscription OAuth. Prefer generic OpenAI compatibility where it
+is sufficient.
 
 ---
 

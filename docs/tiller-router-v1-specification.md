@@ -1,6 +1,7 @@
 # Tiller Router — V1 Implementation Specification
 
 **Status:** Frozen MVP specification  
+**Approved implementation revision:** Expanded provider registry, Argon2id key selectors, and native/stateless protocol boundary (2026-08-28)
 **Project name:** Tiller Router  
 **Runtime project path:** `/opt/tiller-router`  
 **Primary implementation target:** Single Dockerized service with embedded SQLite persistence and HTTP admin UI  
@@ -205,19 +206,37 @@ when exposed directly by Tiller Router.
 
 ## 4.2 Required provider types
 
-V1 SHOULD support a practical list of common provider types.
+V1 MUST provide a registry for the following API-key based provider types:
 
-Minimum target set:
-
-- OpenAI.
-- OpenAI Responses/Codex-compatible usage.
+- OpenAI, including Responses/Codex-compatible usage.
 - Anthropic.
 - OpenRouter.
-- Ollama local.
-- Ollama Cloud if API-compatible and available.
+- Ollama Local and Ollama Cloud.
 - DeepSeek.
 - GLM / Z.ai.
-- Generic OpenAI-compatible provider.
+- Google Gemini API.
+- Azure OpenAI.
+- Amazon Bedrock API-key endpoints (not SigV4/Converse).
+- Groq.
+- Mistral.
+- xAI.
+- Together.
+- Fireworks.
+- Cerebras.
+- Perplexity.
+- NVIDIA NIM.
+- Hugging Face Inference.
+- Cloudflare Workers AI.
+- Alibaba/Qwen.
+- MiniMax.
+- Generic OpenAI-compatible providers.
+- vLLM.
+- LM Studio.
+- llama.cpp.
+
+Provider authentication in V1 is API-key based only. Vertex service accounts,
+AWS SigV4/Converse, Azure Entra ID, Gemini Interactions, native Cohere, and
+subscription OAuth are not part of V1.
 
 The generic OpenAI-compatible provider is important and MUST support:
 
@@ -360,7 +379,23 @@ Codex - Build Host
 
 Client API keys MUST be **hash-only** after creation.
 
-The hash algorithm MUST be a memory-hard KDF (argon2id preferred; bcrypt or scrypt are acceptable alternatives). A plain fast hash (e.g. unsalted SHA-256) MUST NOT be used, since these are bearer credentials with real upstream spend behind them. Roadmap §6.1 hash-hardening options (key prefixes, multiple valid hashes during rotation) build on this V1 baseline rather than replacing it.
+The hash algorithm MUST be Argon2id with a 64 MiB memory cost, 3 iterations,
+and 4 lanes. A plain fast hash (e.g. unsalted SHA-256) MUST NOT be used, since
+these are bearer credentials with real upstream spend behind them. Roadmap
+§4.2 hash-hardening options (multiple valid hashes during rotation) build on
+this V1 baseline rather than replacing it.
+
+Keys MUST use the form:
+
+```text
+sk-tr-<random-selector>.<32-byte-random-secret>
+```
+
+The selector is a short non-secret lookup identifier and MUST be stored beside
+the Argon2id PHC hash. It is not an authentication secret and MUST NOT be
+treated as proof of possession. Authentication MUST verify the secret against
+the stored hash in constant time. The complete plaintext key is shown once and
+MUST never be stored.
 
 Required behavior:
 
@@ -810,6 +845,25 @@ Translation MUST preserve:
 
 Protocol translation is part of V1 because the intended clients include OpenAI/Codex-style and Anthropic-style agents.
 
+## 11.4 Native pass-through and stateless translation boundary
+
+When a provider declares native support for the incoming Chat Completions,
+Responses, or Messages surface, Tiller Router MUST prefer native pass-through
+and limit mutation to routing, credentials, safe headers, and protocol-safe
+model identity rewriting.
+
+Cross-protocol translation is stateless. A cross-protocol request MUST reject
+features that require provider-owned state or a provider-hosted execution
+environment, including Responses `conversation`, `previous_response_id`,
+storage, files, background mode, MCP, and provider-hosted tools. The rejection
+MUST use the client protocol's error envelope, HTTP `400`, and machine-readable
+code `unsupported_feature`.
+
+Native Responses pass-through MUST preserve stateful request fields and
+provider-hosted tool declarations. Translation MUST preserve only fields that
+are representable in the canonical message/tool/event model and MUST never
+silently discard an unsupported requested feature.
+
 ---
 
 # 12. Provider Adapter Contract
@@ -1203,7 +1257,7 @@ Because client keys are hash-only, exported backups MUST NOT make existing clien
 
 A restored database preserves valid client-key authentication because the hashes are preserved.
 
-**Provider credential exposure in exports.** Provider-credential encryption at rest is deferred to the roadmap (§4.3, §23). Until it exists, provider credentials are stored in a recoverable form and are therefore included in backup exports in that same recoverable form — unlike client keys, they are NOT reduced to a non-recoverable hash. A V1 backup file MUST be treated as a secret on par with the provider credentials themselves. The admin UI/API documentation MUST state this plainly (e.g. "This backup file contains recoverable provider API credentials; store and transmit it accordingly") wherever the export/download action is presented, so this isn't a silent surprise to the administrator.
+**Provider credential exposure in exports.** Provider-credential encryption at rest is deferred to the roadmap (§4.1) and is also called out in §23 below. Until it exists, provider credentials are stored in a recoverable form and are therefore included in backup exports in that same recoverable form — unlike client keys, they are NOT reduced to a non-recoverable hash. A V1 backup file MUST be treated as a secret on par with the provider credentials themselves. The admin UI/API documentation MUST state this plainly (e.g. "This backup file contains recoverable provider API credentials; store and transmit it accordingly") wherever the export/download action is presented, so this isn't a silent surprise to the administrator.
 
 ---
 
@@ -1624,4 +1678,3 @@ Tiller Router V1 is done when:
 - SQLite persistence and backup work.
 - All critical acceptance tests pass.
 - No roadmap feature has been allowed to materially expand V1 scope.
-

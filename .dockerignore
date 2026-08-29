@@ -1,0 +1,5 @@
+.git
+data/*
+!data/.gitkeep
+docs/example_files
+tests/browser/node_modules
