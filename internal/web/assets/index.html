@@ -78,7 +78,7 @@
     </main>
   </div>
 
-  <dialog id="form-dialog"><form method="dialog" id="entity-form"><header><div><p class="eyebrow" id="dialog-eyebrow">CONFIGURE</p><h2 id="dialog-title">Entity</h2></div><button class="dialog-close" value="cancel" aria-label="Close">×</button></header><div id="dialog-fields" class="dialog-fields"></div><p class="form-error" id="dialog-error" role="alert"></p><footer><button class="btn btn-secondary" value="cancel">Cancel</button><button class="btn btn-primary" id="dialog-submit" value="default">Save</button></footer></form></dialog>
+  <dialog id="form-dialog"><form method="dialog" id="entity-form"><header><div><p class="eyebrow" id="dialog-eyebrow">CONFIGURE</p><h2 id="dialog-title">Entity</h2></div><button class="dialog-close" value="cancel" formnovalidate aria-label="Close">×</button></header><div id="dialog-fields" class="dialog-fields"></div><p class="form-error" id="dialog-error" role="alert"></p><footer><button class="btn btn-secondary" value="cancel" formnovalidate>Cancel</button><button class="btn btn-primary" id="dialog-submit" value="default">Save</button></footer></form></dialog>
 
   <dialog id="secret-dialog" class="secret-dialog"><section><header><div><p class="eyebrow">ONE-TIME SECRET</p><h2>Copy this key now</h2></div></header><p>This plaintext key will not be shown again. Closing this window does not preserve it.</p><div class="secret-box"><code id="secret-value"></code><button class="btn btn-secondary" id="copy-secret">Copy</button></div><p class="copy-state" id="copy-state" aria-live="polite"></p><footer><button class="btn btn-primary" id="close-secret">I have stored the key</button></footer></section></dialog>
 
