@@ -143,8 +143,8 @@ function combobox({ input, hidden, options, placeholder, onSelect }) {
   input.parentNode.appendChild(list);
   let items = [], active = -1, open = false;
   const close = () => { open = false; list.hidden = true; input.setAttribute('aria-expanded', 'false'); active = -1; };
-  const render = () => {
-    const term = input.value.trim().toLowerCase();
+  const render = (showAll = false) => {
+    const term = showAll ? '' : input.value.trim().toLowerCase();
     items = options.filter(opt => !term || opt.label.toLowerCase().includes(term));
     list.innerHTML = items.map((opt, i) => `<li role="option" data-i="${i}" ${i === active ? 'aria-selected="true"' : ''}>${h(opt.label)}${opt.muted ? '<small> — retired</small>' : ''}</li>`).join('');
     list.hidden = !items.length; open = !list.hidden; input.setAttribute('aria-expanded', String(open));
@@ -152,9 +152,9 @@ function combobox({ input, hidden, options, placeholder, onSelect }) {
   };
   const select = i => { const opt = items[i]; if (!opt) return; hidden.value = opt.value; input.value = opt.label; onSelect?.(opt); close(); };
   input.addEventListener('input', () => { if (hidden.value && !options.some(o => o.value === hidden.value && o.label === input.value)) hidden.value = ''; active = -1; render(); });
-  input.addEventListener('focus', () => { if (!open) render(); });
+  input.addEventListener('click', () => { if (open) close(); else render(true); });
   input.addEventListener('keydown', event => {
-    if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); render(); return; }
+    if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); render(true); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); active = Math.min(active + 1, items.length - 1); render(); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); active = Math.max(active - 1, 0); render(); }
     else if (event.key === 'Enter') { event.preventDefault(); if (active >= 0) select(active); }
