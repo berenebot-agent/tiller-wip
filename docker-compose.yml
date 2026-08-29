@@ -1,11 +1,12 @@
 services:
   tiller-router:
+    container_name: tiller-router
     build:
       context: .
       args:
         TILLER_UID: ${TILLER_UID:-65532}
         TILLER_GID: ${TILLER_GID:-65532}
-    container_name: tiller-router
+    
     restart: unless-stopped
     environment:
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
