@@ -36,7 +36,7 @@ _, provider = admin("POST", "/api/admin/providers", {"name": "compat", "type": "
 provider_id = provider["id"]
 _, model_page = admin("GET", f"/api/admin/providers/{provider_id}/models")
 model_id = model_page["data"][0]["id"]
-_, group = admin("POST", "/api/admin/virtual-groups", {"name": "main"}, csrf)
+_, group = admin("POST", "/api/admin/virtual-groups", {"name": "virtual"}, csrf)
 _, virtual = admin("POST", "/api/admin/virtual-models", {"group_id": group["id"], "name": "coding", "target_provider_id": provider_id, "target_model_id": model_id}, csrf)
 _, client_key = admin("POST", "/api/admin/client-keys", {"name": "SDK compatibility"}, csrf)
 secret = client_key["secret"]
@@ -44,25 +44,25 @@ admin("PUT", f"/api/admin/client-keys/{client_key['id']}/permissions", {"default
 
 openai = OpenAI(base_url=BASE + "/v1", api_key=secret)
 models = openai.models.list()
-assert [model.id for model in models.data] == ["main/coding"]
-chat = openai.chat.completions.create(model="main/coding", messages=[{"role": "user", "content": "hello"}])
-assert chat.model == "main/coding" and chat.choices[0].message.content == "hello"
-chat_text = "".join(chunk.choices[0].delta.content or "" for chunk in openai.chat.completions.create(model="main/coding", messages=[{"role": "user", "content": "hello"}], stream=True) if chunk.choices)
+assert [model.id for model in models.data] == ["virtual/coding"]
+chat = openai.chat.completions.create(model="virtual/coding", messages=[{"role": "user", "content": "hello"}])
+assert chat.model == "virtual/coding" and chat.choices[0].message.content == "hello"
+chat_text = "".join(chunk.choices[0].delta.content or "" for chunk in openai.chat.completions.create(model="virtual/coding", messages=[{"role": "user", "content": "hello"}], stream=True) if chunk.choices)
 assert chat_text == "hello"
-response = openai.responses.create(model="main/coding", input="hello")
-assert response.model == "main/coding" and response.output_text == "hello"
-response_events = list(openai.responses.create(model="main/coding", input="hello", stream=True))
+response = openai.responses.create(model="virtual/coding", input="hello")
+assert response.model == "virtual/coding" and response.output_text == "hello"
+response_events = list(openai.responses.create(model="virtual/coding", input="hello", stream=True))
 assert any(event.type == "response.output_text.delta" and event.delta == "hello" for event in response_events)
 assert response_events[-1].type == "response.completed"
 
 anthropic = Anthropic(base_url=BASE, api_key=secret)
-message = anthropic.messages.create(model="main/coding", max_tokens=32, messages=[{"role": "user", "content": "hello"}])
-assert message.model == "main/coding" and message.content[0].text == "hello"
-with anthropic.messages.stream(model="main/coding", max_tokens=32, messages=[{"role": "user", "content": "hello"}]) as stream:
+message = anthropic.messages.create(model="virtual/coding", max_tokens=32, messages=[{"role": "user", "content": "hello"}])
+assert message.model == "virtual/coding" and message.content[0].text == "hello"
+with anthropic.messages.stream(model="virtual/coding", max_tokens=32, messages=[{"role": "user", "content": "hello"}]) as stream:
     assert "".join(stream.text_stream) == "hello"
 
 with tempfile.TemporaryDirectory() as codex_home:
-    pathlib.Path(codex_home, "config.toml").write_text(f'''model = "main/coding"
+    pathlib.Path(codex_home, "config.toml").write_text(f'''model = "virtual/coding"
 model_provider = "tiller"
 approval_policy = "never"
 sandbox_mode = "read-only"
@@ -94,9 +94,9 @@ with tempfile.TemporaryDirectory() as opencode_home:
             "npm": "@ai-sdk/openai-compatible",
             "name": "Tiller Router",
             "options": {"baseURL": BASE + "/v1", "apiKey": secret},
-            "models": {"main/coding": {"name": "Main / Coding"}},
+            "models": {"virtual/coding": {"name": "Virtual / Coding"}},
         }},
-        "model": "tiller/main/coding",
+        "model": "tiller/virtual/coding",
     }))
     opencode_env = os.environ.copy()
     opencode_env["HOME"] = opencode_home
@@ -117,10 +117,10 @@ with tempfile.TemporaryDirectory() as claude_home:
         "HOME": claude_home,
         "ANTHROPIC_BASE_URL": BASE,
         "ANTHROPIC_AUTH_TOKEN": secret,
-        "ANTHROPIC_MODEL": "main/coding",
+        "ANTHROPIC_MODEL": "virtual/coding",
     })
     result = subprocess.run(
-        ["claude", "-p", "Return exactly hello", "--model", "main/coding", "--output-format", "text"],
+        ["claude", "-p", "Return exactly hello", "--model", "virtual/coding", "--output-format", "text"],
         cwd=claude_home,
         env=claude_env,
         capture_output=True,

@@ -1,6 +1,6 @@
 # Client configuration
 
-Replace `https://router.example.com` with the reverse-proxy URL, `main/coding`
+Replace `https://router.example.com` with the reverse-proxy URL, `virtual/coding`
 with a model visible to the client key, and every placeholder secret with a
 one-time Tiller client key.
 
@@ -32,7 +32,7 @@ providers:
     api: https://router.example.com/v1
     key_env: TILLER_ROUTER_KEY
     transport: chat_completions
-    default_model: main/coding
+    default_model: virtual/coding
 ```
 
 Codex/Responses:
@@ -43,7 +43,7 @@ providers:
     api: https://router.example.com/v1
     key_env: TILLER_ROUTER_KEY
     transport: codex_responses
-    default_model: main/coding
+    default_model: virtual/coding
 ```
 
 Anthropic Messages:
@@ -54,7 +54,7 @@ providers:
     api: https://router.example.com
     key_env: TILLER_ROUTER_KEY
     transport: anthropic_messages
-    default_model: main/coding
+    default_model: virtual/coding
 ```
 
 Select the named provider with `hermes model`. Hermes documents these transport
@@ -78,12 +78,12 @@ OpenCode should offer:
         "apiKey": "{env:TILLER_ROUTER_KEY}"
       },
       "models": {
-        "main/coding": { "name": "Main / Coding" },
-        "main/general": { "name": "Main / General" }
+        "virtual/coding": { "name": "Virtual / Coding" },
+        "virtual/general": { "name": "Virtual / General" }
       }
     }
   },
-  "model": "tiller/main/coding"
+  "model": "tiller/virtual/coding"
 }
 ```
 
@@ -101,7 +101,7 @@ export TILLER_ROUTER_KEY='sk-tr-REPLACE_ONCE'
 ```
 
 ```toml
-model = "main/coding"
+model = "virtual/coding"
 model_provider = "tiller"
 
 [model_providers.tiller]
@@ -125,7 +125,7 @@ background mode, MCP, and provider-hosted tools with `unsupported_feature`.
 ```sh
 export ANTHROPIC_BASE_URL='https://router.example.com'
 export ANTHROPIC_AUTH_TOKEN='sk-tr-REPLACE_ONCE'
-export ANTHROPIC_MODEL='main/coding'
+export ANTHROPIC_MODEL='virtual/coding'
 claude
 ```
 
@@ -148,7 +148,7 @@ client = OpenAI(
 )
 
 for event in client.responses.create(
-    model="main/coding",
+    model="virtual/coding",
     input="Return one sentence.",
     stream=True,
 ):
@@ -170,7 +170,7 @@ client = Anthropic(
 )
 
 message = client.messages.create(
-    model="main/coding",
+    model="virtual/coding",
     max_tokens=256,
     messages=[{"role": "user", "content": "Return one sentence."}],
 )
@@ -192,7 +192,7 @@ Streaming Chat Completions:
 curl -N https://router.example.com/v1/chat/completions \
   -H 'Authorization: Bearer sk-tr-REPLACE_ONCE' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"main/coding","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"virtual/coding","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 Anthropic Messages:
@@ -202,5 +202,5 @@ curl -fsS https://router.example.com/v1/messages \
   -H 'x-api-key: sk-tr-REPLACE_ONCE' \
   -H 'anthropic-version: 2023-06-01' \
   -H 'Content-Type: application/json' \
-  -d '{"model":"main/coding","max_tokens":128,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"virtual/coding","max_tokens":128,"messages":[{"role":"user","content":"Hello"}]}'
 ```

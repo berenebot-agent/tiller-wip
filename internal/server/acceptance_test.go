@@ -192,7 +192,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	}
 	isolatedClientID := payload["id"].(string)
 	isolatedSecret := payload["secret"].(string)
-	status, payload, _ = api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "main"})
+	status, payload, _ = api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
 	if status != 201 {
 		t.Fatalf("group: %d %v", status, payload)
 	}
@@ -265,7 +265,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 		t.Fatalf("models: %d %v", resp.StatusCode, catalogue)
 	}
 	data := catalogue["data"].([]any)
-	if len(data) != 1 || data[0].(map[string]any)["id"] != "main/coding" {
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "virtual/coding" {
 		t.Fatalf("catalogue leaked or omitted models: %v", data)
 	}
 	if data[0].(map[string]any)["context_length"] != float64(128000) {
@@ -287,16 +287,16 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	if resp.StatusCode != 404 {
 		t.Fatalf("guessed hidden model returned %d", resp.StatusCode)
 	}
-	resp, result := clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
-	if resp.StatusCode != 200 || result["model"] != "main/coding" {
+	resp, result := clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 || result["model"] != "virtual/coding" {
 		t.Fatalf("virtual response: %d %v", resp.StatusCode, result)
 	}
 	status, payload, _ = api.request("PATCH", "/api/admin/virtual-models/"+virtualID, map[string]any{"target_provider_id": providerID, "target_model_id": modelIDs["model-b"]})
 	if status != 204 {
 		t.Fatalf("remap: %d %v", status, payload)
 	}
-	resp, result = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "messages": []any{map[string]any{"role": "user", "content": "again"}}})
-	if resp.StatusCode != 200 || result["model"] != "main/coding" {
+	resp, result = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "messages": []any{map[string]any{"role": "user", "content": "again"}}})
+	if resp.StatusCode != 200 || result["model"] != "virtual/coding" {
 		t.Fatalf("remap response: %d %v", resp.StatusCode, result)
 	}
 	mu.Lock()
@@ -309,22 +309,22 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 		t.Fatalf("remapped models: %d %v", resp.StatusCode, remappedCatalogue)
 	}
 	remappedData := remappedCatalogue["data"].([]any)
-	if len(remappedData) != 1 || remappedData[0].(map[string]any)["id"] != "main/coding" {
+	if len(remappedData) != 1 || remappedData[0].(map[string]any)["id"] != "virtual/coding" {
 		t.Fatalf("remapped catalogue leaked or omitted models: %v", remappedData)
 	}
 	if remappedData[0].(map[string]any)["context_length"] != float64(262144) {
 		t.Fatalf("remap did not propagate the new target context length: %v", remappedData[0])
 	}
-	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "stream"}}})
+	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "stream"}}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("stream status %d", resp.StatusCode)
 	}
 	line, err := bufio.NewReader(resp.Body).ReadString('\n')
 	resp.Body.Close()
-	if err != nil || !strings.Contains(line, "main/coding") || !strings.Contains(line, "first") {
+	if err != nil || !strings.Contains(line, "virtual/coding") || !strings.Contains(line, "first") {
 		t.Fatalf("stream did not preserve virtual identity: %q %v", line, err)
 	}
-	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "tool-stream"}}})
+	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "tool-stream"}}})
 	toolStream, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if err != nil || !bytes.Contains(toolStream, []byte(`"id":"call_1"`)) || !bytes.Contains(toolStream, []byte(`"finish_reason":"tool_calls"`)) {
@@ -343,19 +343,19 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 			t.Fatalf("tool stream emitted invalid JSON: %q", value)
 		}
 	}
-	resp, _ = clientCall(clientSecret, "POST", "/v1/responses", map[string]any{"model": "main/coding", "stream": true, "input": "protocol-stream"})
+	resp, _ = clientCall(clientSecret, "POST", "/v1/responses", map[string]any{"model": "virtual/coding", "stream": true, "input": "protocol-stream"})
 	responseEvent, err := bufio.NewReader(resp.Body).ReadString('\n')
 	resp.Body.Close()
 	if err != nil || responseEvent != "event: response.created\n" {
 		t.Fatalf("responses streaming did not start correctly: %q %v", responseEvent, err)
 	}
-	resp, _ = clientCall(clientSecret, "POST", "/v1/messages", map[string]any{"model": "main/coding", "stream": true, "max_tokens": 32, "messages": []any{map[string]any{"role": "user", "content": "protocol-stream"}}})
+	resp, _ = clientCall(clientSecret, "POST", "/v1/messages", map[string]any{"model": "virtual/coding", "stream": true, "max_tokens": 32, "messages": []any{map[string]any{"role": "user", "content": "protocol-stream"}}})
 	messageEvent, err := bufio.NewReader(resp.Body).ReadString('\n')
 	resp.Body.Close()
 	if err != nil || messageEvent != "event: message_start\n" {
 		t.Fatalf("messages streaming did not start correctly: %q %v", messageEvent, err)
 	}
-	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "cancel-me"}}})
+	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "cancel-me"}}})
 	_, _ = bufio.NewReader(resp.Body).ReadString('\n')
 	resp.Body.Close()
 	select {
@@ -448,7 +448,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	if resp.StatusCode != 200 || len(catalogue["data"].([]any)) != 0 {
 		t.Fatalf("broken virtual model was not hidden: %d %v", resp.StatusCode, catalogue)
 	}
-	resp, _ = clientCall(newSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "messages": []any{map[string]any{"role": "user", "content": "broken"}}})
+	resp, _ = clientCall(newSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "messages": []any{map[string]any{"role": "user", "content": "broken"}}})
 	if resp.StatusCode != 503 {
 		t.Fatalf("broken virtual target returned %d instead of 503", resp.StatusCode)
 	}
@@ -469,7 +469,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	}
 	upstream.CloseClientConnections()
 	upstream.Close()
-	resp, _ = clientCall(newSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "messages": []any{map[string]any{"role": "user", "content": "outage"}}})
+	resp, _ = clientCall(newSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "messages": []any{map[string]any{"role": "user", "content": "outage"}}})
 	if resp.StatusCode != 502 {
 		t.Fatalf("provider outage returned %d instead of 502", resp.StatusCode)
 	}

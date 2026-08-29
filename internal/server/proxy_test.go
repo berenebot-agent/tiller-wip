@@ -22,9 +22,9 @@ func (r *tinyReader) Read(p []byte) (int, error) {
 
 func TestStreamReplaceAcrossEveryByteBoundary(t *testing.T) {
 	input := []byte(`{"id":"one","model":"provider-a/model-a","content":"model provider-a/model-a remains ordinary text"}`)
-	want := `{"id":"one","model":"main/coding","content":"model provider-a/model-a remains ordinary text"}`
+	want := `{"id":"one","model":"virtual/coding","content":"model provider-a/model-a remains ordinary text"}`
 	var output bytes.Buffer
-	streamReplace(&output, &tinyReader{data: append([]byte(nil), input...)}, "provider-a/model-a", "main/coding")
+	streamReplace(&output, &tinyReader{data: append([]byte(nil), input...)}, "provider-a/model-a", "virtual/coding")
 	if output.String() != want {
 		t.Fatalf("unexpected streaming rewrite:\n%s\nwant:\n%s", output.String(), want)
 	}
@@ -32,7 +32,7 @@ func TestStreamReplaceAcrossEveryByteBoundary(t *testing.T) {
 
 func TestCrossProtocolResponsesRejectsStatefulFeatures(t *testing.T) {
 	for _, field := range []string{"conversation", "previous_response_id", "store", "background", "files"} {
-		body := []byte(`{"model":"main/coding","input":"hello","` + field + `":"value"}`)
+		body := []byte(`{"model":"virtual/coding","input":"hello","` + field + `":"value"}`)
 		_, err := translateRequest(body, providers.ProtocolResponses, providers.ProtocolChat, "real-model")
 		var unsupported unsupportedFeature
 		if !errors.As(err, &unsupported) {
@@ -42,7 +42,7 @@ func TestCrossProtocolResponsesRejectsStatefulFeatures(t *testing.T) {
 }
 
 func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
-	body := []byte(`{"model":"main/coding","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_123","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Perth\"}"}}]},{"role":"tool","tool_call_id":"call_123","content":"sunny"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`)
+	body := []byte(`{"model":"virtual/coding","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_123","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Perth\"}"}}]},{"role":"tool","tool_call_id":"call_123","content":"sunny"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`)
 	messages, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolMessages, "claude-real")
 	if err != nil {
 		t.Fatal(err)
@@ -59,7 +59,7 @@ func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
 }
 
 func FuzzProtocolRequestParser(f *testing.F) {
-	f.Add([]byte(`{"model":"main/coding","messages":[]}`))
+	f.Add([]byte(`{"model":"virtual/coding","messages":[]}`))
 	f.Add([]byte(`{"input":"hello"}`))
 	f.Fuzz(func(t *testing.T, body []byte) {
 		_, _ = translateRequest(body, providers.ProtocolChat, providers.ProtocolMessages, "target")

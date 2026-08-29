@@ -16,13 +16,13 @@ func TestMigrationsAndSharedNamespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := Now()
-	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('main','real','p1')`); err != nil {
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('virtual','real','p1')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('p1','main','generic-openai','http://example.test/v1',1,'["chat"]',?,?)`, now, now); err != nil {
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('p1','virtual','generic-openai','http://example.test/v1',1,'["chat"]',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('main','virtual','g1')`); !IsConstraint(err) {
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('virtual','virtual','g1')`); !IsConstraint(err) {
 		t.Fatalf("shared namespace collision was not rejected: %v", err)
 	}
 }
