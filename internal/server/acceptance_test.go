@@ -79,7 +79,14 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 			}
 			data := make([]any, 0, len(models))
 			for _, model := range models {
-				data = append(data, map[string]any{"id": model})
+				entry := map[string]any{"id": model}
+				switch model {
+				case "model-a":
+					entry["context_length"] = 128000
+				case "model-b":
+					entry["context_length"] = 262144
+				}
+				data = append(data, entry)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
 			return
@@ -261,6 +268,9 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	if len(data) != 1 || data[0].(map[string]any)["id"] != "main/coding" {
 		t.Fatalf("catalogue leaked or omitted models: %v", data)
 	}
+	if data[0].(map[string]any)["context_length"] != float64(128000) {
+		t.Fatalf("catalogue did not surface the target context length: %v", data[0])
+	}
 	status, payload, _ = api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"enabled": false})
 	if status != 204 {
 		t.Fatalf("disable client: %d %v", status, payload)
@@ -294,6 +304,17 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 		t.Fatalf("immediate remap did not reach A then B: %v", reached)
 	}
 	mu.Unlock()
+	resp, remappedCatalogue := clientCall(clientSecret, "GET", "/v1/models", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("remapped models: %d %v", resp.StatusCode, remappedCatalogue)
+	}
+	remappedData := remappedCatalogue["data"].([]any)
+	if len(remappedData) != 1 || remappedData[0].(map[string]any)["id"] != "main/coding" {
+		t.Fatalf("remapped catalogue leaked or omitted models: %v", remappedData)
+	}
+	if remappedData[0].(map[string]any)["context_length"] != float64(262144) {
+		t.Fatalf("remap did not propagate the new target context length: %v", remappedData[0])
+	}
 	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "main/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "stream"}}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("stream status %d", resp.StatusCode)

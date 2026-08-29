@@ -20,10 +20,10 @@ import (
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical FROM (
-	SELECT p.name||'/'||m.upstream_model_id canonical FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length FROM (
+	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	SELECT g.name||'/'||v.name canonical, m.context_length FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 ) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
@@ -33,8 +33,13 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	data := []map[string]any{}
 	for rows.Next() {
 		var modelID string
-		if rows.Scan(&modelID) == nil {
-			data = append(data, map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"})
+		var contextLength sql.NullInt64
+		if rows.Scan(&modelID, &contextLength) == nil {
+			entry := map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"}
+			if contextLength.Valid && contextLength.Int64 > 0 {
+				entry["context_length"] = contextLength.Int64
+			}
+			data = append(data, entry)
 		}
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})

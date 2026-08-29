@@ -78,6 +78,43 @@ func TestPagedDiscovery(t *testing.T) {
 	}
 }
 
+func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"name": "qwen3.5:397b"}, map[string]any{"name": "llama3:8b"}}})
+		case "/api/show":
+			var input map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&input)
+			switch input["model"] {
+			case "qwen3.5:397b":
+				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{"llama.context_length": 262144}, "parameters": map[string]any{"num_ctx": 4096}})
+			case "llama3:8b":
+				// No trained context reported; fall back to runtime num_ctx.
+				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{}, "parameters": map[string]any{"num_ctx": 8192}})
+			default:
+				http.Error(w, "unknown model", 404)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "ollama-local", BaseURL: upstream.URL, Credential: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("unexpected model count: %v", models)
+	}
+	if models[0].ID != "qwen3.5:397b" || models[0].ContextLength != 262144 {
+		t.Fatalf("qwen3.5:397b context not captured: %+v", models[0])
+	}
+	if models[1].ID != "llama3:8b" || models[1].ContextLength != 8192 {
+		t.Fatalf("llama3:8b num_ctx fallback not captured: %+v", models[1])
+	}
+}
+
 func TestValidateBaseURL(t *testing.T) {
 	for _, invalid := range []string{"file:///etc/passwd", "https://user:secret@example.com", "javascript:alert(1)", "https:///missing"} {
 		if ValidateBaseURL(invalid) == nil {

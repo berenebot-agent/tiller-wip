@@ -1,6 +1,7 @@
 package providers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -87,7 +88,10 @@ type Instance struct {
 	Protocols                           []Protocol
 }
 
-type Model struct{ ID, DisplayName string }
+type Model struct {
+	ID, DisplayName string
+	ContextLength   int
+}
 
 type Registry struct{ client *http.Client }
 
@@ -147,8 +151,12 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 		}
 		var payload struct {
 			Data []struct {
-				ID, Name    string
-				DisplayName string `json:"display_name"`
+				ID, Name       string
+				DisplayName    string `json:"display_name"`
+				ContextLength  int    `json:"context_length"`
+				ContextWindow  int    `json:"context_window"`
+				MaxModelLen    int    `json:"max_model_len"`
+				MaxInputTokens int    `json:"max_input_tokens"`
 			} `json:"data"`
 			HasMore bool   `json:"has_more"`
 			LastID  string `json:"last_id"`
@@ -170,7 +178,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			if display == "" {
 				display = item.Name
 			}
-			result = append(result, Model{ID: modelID, DisplayName: display})
+			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens)})
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break
@@ -215,10 +223,37 @@ func (r *Registry) discoverOllama(ctx context.Context, provider Instance) ([]Mod
 			modelID = item.Model
 		}
 		if modelID != "" {
-			out = append(out, Model{ID: modelID, DisplayName: modelID})
+			out = append(out, Model{ID: modelID, DisplayName: modelID, ContextLength: r.ollamaContextLength(ctx, provider, modelID)})
 		}
 	}
 	return out, nil
+}
+
+func (r *Registry) ollamaContextLength(ctx context.Context, provider Instance, modelID string) int {
+	showEndpoint, err := appendEndpoint(provider.BaseURL, "api/show")
+	if err != nil {
+		return 0
+	}
+	body, _ := json.Marshal(map[string]string{"model": modelID})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, showEndpoint, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	ApplyRequestAuth(req, provider)
+	var payload struct {
+		ModelInfo  map[string]any `json:"model_info"`
+		Parameters map[string]any `json:"parameters"`
+	}
+	if err := r.doJSON(req, &payload); err != nil {
+		return 0
+	}
+	// llama.context_length is the model's trained context window.
+	if n, ok := coerceInt(payload.ModelInfo["llama.context_length"]); ok {
+		return n
+	}
+	// Fall back to the runtime num_ctx from the Modelfile.
+	if n, ok := coerceInt(payload.Parameters["num_ctx"]); ok {
+		return n
+	}
+	return 0
 }
 
 func (r *Registry) discoverHuggingFace(ctx context.Context, provider Instance) ([]Model, error) {
@@ -228,6 +263,9 @@ func (r *Registry) discoverHuggingFace(ctx context.Context, provider Instance) (
 	var payload []struct {
 		ID      string `json:"id"`
 		ModelID string `json:"modelId"`
+		Config  struct {
+			MaxPositionEmbeddings int `json:"max_position_embeddings"`
+		} `json:"config"`
 	}
 	if err := r.doJSON(req, &payload); err != nil {
 		return nil, err
@@ -239,7 +277,7 @@ func (r *Registry) discoverHuggingFace(ctx context.Context, provider Instance) (
 			modelID = item.ModelID
 		}
 		if modelID != "" {
-			out = append(out, Model{ID: modelID, DisplayName: modelID})
+			out = append(out, Model{ID: modelID, DisplayName: modelID, ContextLength: item.Config.MaxPositionEmbeddings})
 		}
 	}
 	return out, nil
@@ -253,7 +291,12 @@ func (r *Registry) discoverCloudflare(ctx context.Context, provider Instance) ([
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	ApplyRequestAuth(req, provider)
 	var payload struct {
-		Result []struct{ Name, ID string } `json:"result"`
+		Result []struct {
+			Name, ID       string
+			ContextLength  int `json:"context_length"`
+			MaxInputTokens int `json:"max_input_tokens"`
+			MaxModelLen    int `json:"max_model_len"`
+		} `json:"result"`
 	}
 	if err := r.doJSON(req, &payload); err != nil {
 		return nil, err
@@ -265,7 +308,7 @@ func (r *Registry) discoverCloudflare(ctx context.Context, provider Instance) ([
 			modelID = item.ID
 		}
 		if modelID != "" {
-			out = append(out, Model{ID: modelID, DisplayName: modelID})
+			out = append(out, Model{ID: modelID, DisplayName: modelID, ContextLength: firstPositive(item.ContextLength, item.MaxInputTokens, item.MaxModelLen)})
 		}
 	}
 	return out, nil
@@ -376,4 +419,32 @@ func Supports(protocols []Protocol, protocol Protocol) bool {
 		}
 	}
 	return false
+}
+
+func firstPositive(values ...int) int {
+	for _, v := range values {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func coerceInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		if n > 0 && n == float64(int(n)) {
+			return int(n), true
+		}
+	case int:
+		if n > 0 {
+			return n, true
+		}
+	case string:
+		var parsed int
+		if _, err := fmt.Sscanf(n, "%d", &parsed); err == nil && parsed > 0 {
+			return parsed, true
+		}
+	}
+	return 0, false
 }

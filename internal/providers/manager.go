@@ -76,7 +76,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 			if err != nil {
 				return err
 			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,1,?,?,?,?)`, modelID, providerID, model.ID, model.DisplayName, now, now, now, now); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?,?)`, modelID, providerID, model.ID, model.DisplayName, nullableInt(model.ContextLength), now, now, now, now); err != nil {
 				return err
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at)
@@ -85,7 +85,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 			}
 		} else if err != nil {
 			return err
-		} else if _, err = tx.ExecContext(ctx, `UPDATE provider_models SET display_name=?,available=1,last_seen_at=?,updated_at=? WHERE id=?`, model.DisplayName, now, now, modelID); err != nil {
+		} else if _, err = tx.ExecContext(ctx, `UPDATE provider_models SET display_name=?,context_length=?,available=1,last_seen_at=?,updated_at=? WHERE id=?`, model.DisplayName, nullableInt(model.ContextLength), now, now, modelID); err != nil {
 			return err
 		}
 	}
@@ -182,4 +182,11 @@ func safeRefreshError(err error) string {
 		msg = msg[:1000]
 	}
 	return msg
+}
+
+func nullableInt(v int) any {
+	if v <= 0 {
+		return nil
+	}
+	return v
 }
