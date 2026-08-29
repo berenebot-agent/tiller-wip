@@ -3,6 +3,8 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'providers', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [] };
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
+const VIEWS = ['providers', 'models', 'virtual', 'clients', 'system'];
+const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'providers'); return VIEWS.includes(v) ? v : 'providers'; };
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -21,7 +23,7 @@ async function api(path, options = {}) {
   return payload;
 }
 
-function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; }
+function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/providers'); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; navigate(state.view); }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
@@ -36,11 +38,12 @@ $('#login-form').addEventListener('submit', async event => {
 $('#logout').addEventListener('click', async () => { try { await api('/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
 
 async function navigate(view) {
-  state.view = view; $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); $('#nav-links').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false');
+  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); $('#nav-links').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false');
   try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'system') await loadSystem(); }
   catch (error) { flash(errorMessage(error), 'error'); }
 }
 $$('[data-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.view)));
+window.addEventListener('popstate', () => navigate(viewFromHash()));
 $('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 
@@ -160,4 +163,4 @@ $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#se
 
 document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); const input = $(`#view-${state.view} input[type="search"]`); input?.focus(); } });
 
-(async function initialise() { try { const session = await api('/api/admin/session'); showApp(session); } catch { showLogin(); } })();
+(async function initialise() { state.view = viewFromHash(); try { const session = await api('/api/admin/session'); showApp(session); } catch { showLogin(); } })();
