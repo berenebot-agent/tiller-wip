@@ -20,26 +20,17 @@ and no prompt or response logging.
    chown 65532:65532 data
    ```
 
-3. Copy `.env.example` to `.env`, replace both administrator credentials, and
-   set the reverse-proxy network name.
+3. Copy `.env.example` to `.env` and replace both administrator credentials.
 4. Build and start the one service:
 
    ```sh
-   docker compose -f docker-compose.yml -f docker-compose.proxy.yml up -d --build
+   docker compose up -d --build
    ```
 
-The base Compose file publishes no host port. The proxy override joins the
-existing external network named by `TILLER_PROXY_NETWORK`. Configure the
-reverse proxy to send HTTPS traffic to `tiller-router:8080`. Do not configure
-the proxy to buffer SSE responses.
-
-For loopback-only testing:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.test.yml up -d --build
-```
-
-This publishes only `127.0.0.1:${TILLER_TEST_PORT:-8080}`.
+The router is currently published on `0.0.0.0:${TILLER_TEST_PORT:-8080}` for
+direct LAN access. Reverse-proxy networking is deferred; when it returns, the
+router should join the external proxy network and stop publishing a host port.
+Do not configure a proxy to buffer SSE responses.
 
 ## First configuration
 

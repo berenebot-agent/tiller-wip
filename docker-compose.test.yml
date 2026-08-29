@@ -1,4 +1,0 @@
-services:
-  tiller-router:
-    ports:
-      - 127.0.0.1:${TILLER_TEST_PORT:-8080}:8080
