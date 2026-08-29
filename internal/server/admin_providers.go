@@ -290,6 +290,10 @@ func (s *Server) listAllModels(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where string, args []any) {
 	limit, offset, search := pagination(r)
+	if r.URL.Query().Get("all") == "1" {
+		limit = 100000 // return the full catalogue (e.g. for the virtual-model target selector)
+		offset = 0
+	}
 	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.available,m.first_seen_at,m.last_seen_at FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
 	pattern := "%" + search + "%"
 	args = append(args, pattern, pattern, limit, offset)
