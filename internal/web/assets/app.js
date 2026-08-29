@@ -5,7 +5,7 @@ const collapsedModels = new Set(); const collapsedVirtual = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
-const mtok = n => n ? (n / 1e6).toFixed(2) : '—';
+const mtok = n => n ? `<span class="mtok">${(n / 1e6).toFixed(2)}<small>Mtok</small></span>` : '—';
 const VIEWS = ['providers', 'models', 'virtual', 'clients', 'settings'];
 const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'providers'); return VIEWS.includes(v) ? v : 'providers'; };
 
