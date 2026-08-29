@@ -85,11 +85,20 @@ func (s *Server) updateVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_request", err.Error())
 		return
 	}
-	if !input.ConfirmBreaking {
+	groupID := r.PathValue("id")
+	var oldName string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT name FROM namespaces WHERE entity_id=? AND kind='virtual'`, groupID).Scan(&oldName); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Virtual group not found.")
+		return
+	} else if err != nil {
+		adminError(w, 500, "database_error", "Could not rename virtual group.")
+		return
+	}
+	if strings.TrimSpace(input.Name) != oldName && !input.ConfirmBreaking {
 		adminError(w, 409, "breaking_change_confirmation_required", "Renaming changes every client-facing virtual model ID. Confirm the breaking change.")
 		return
 	}
-	result, err := s.db.SQL.ExecContext(r.Context(), `UPDATE namespaces SET name=? WHERE entity_id=? AND kind='virtual'`, strings.TrimSpace(input.Name), r.PathValue("id"))
+	result, err := s.db.SQL.ExecContext(r.Context(), `UPDATE namespaces SET name=? WHERE entity_id=? AND kind='virtual'`, strings.TrimSpace(input.Name), groupID)
 	if err != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "That provider-group name is already in use.")
