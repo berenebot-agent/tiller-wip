@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 )
 
 type Config struct {
@@ -14,7 +13,6 @@ type Config struct {
 	AdminPassword string
 	DataDir       string
 	ListenAddr    string
-	PublicURL     string
 	TrustProxy    bool
 }
 
@@ -24,7 +22,6 @@ func Load() (Config, error) {
 		AdminPassword: os.Getenv("TILLER_ADMIN_PASSWORD"),
 		DataDir:       envDefault("TILLER_DATA_DIR", "/data"),
 		ListenAddr:    envDefault("TILLER_LISTEN_ADDR", ":8080"),
-		PublicURL:     strings.TrimRight(os.Getenv("TILLER_PUBLIC_URL"), "/"),
 	}
 	if raw := os.Getenv("TILLER_TRUST_PROXY_HEADERS"); raw != "" {
 		v, err := strconv.ParseBool(raw)
