@@ -162,7 +162,7 @@ function combobox({ input, hidden, options, placeholder, onSelect }) {
   });
   list.addEventListener('mousedown', event => { event.preventDefault(); const li = event.target.closest('li[data-i]'); if (li) select(Number(li.dataset.i)); });
   input.addEventListener('blur', () => setTimeout(close, 120));
-  return { setOptions: next => { options = next; if (hidden.value && !options.some(o => o.value === hidden.value)) { hidden.value = ''; input.value = ''; } active = -1; render(); }, select };
+  return { setOptions: next => { options = next; if (hidden.value && !options.some(o => o.value === hidden.value)) { hidden.value = ''; input.value = ''; } active = -1; close(); }, select };
 }
 function virtualModelFields(model) {
   const groupOptions = state.groups.map(group => `<option value="${h(group.id)}" ${model?.group_id === group.id ? 'selected' : ''}>${h(group.name)}</option>`).join('');
