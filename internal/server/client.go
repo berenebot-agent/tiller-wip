@@ -53,6 +53,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 type resolvedRoute struct {
 	Provider                        providers.Instance
 	UpstreamModelID, RequestedModel string
+	NativeProtocol                  providers.Protocol
 	Virtual, Available              bool
 	RoutingMode                     string
 	Targets                         []resolvedRoute
@@ -77,7 +78,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		if err != nil {
 			return resolvedRoute{}, err
 		}
-		rows, e := tx.QueryContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, virtualID)
+		rows, e := tx.QueryContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, virtualID)
 		if e != nil {
 			return resolvedRoute{}, e
 		}
@@ -86,11 +87,15 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			var target resolvedRoute
 			var protocols string
 			var enabled, available int
-			if e = rows.Scan(&target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &target.UpstreamModelID, &available); e != nil {
+			var nativeProtocol sql.NullString
+			if e = rows.Scan(&target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available); e != nil {
 				return resolvedRoute{}, e
 			}
 			target.Provider.Enabled = scanBool(enabled)
 			target.Provider.Protocols = providers.DecodeProtocols(protocols)
+			if nativeProtocol.Valid {
+				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
+			}
 			target.Available = target.Provider.Enabled && scanBool(available)
 			target.Virtual = true
 			target.RequestedModel = requested
@@ -110,12 +115,16 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	}
 	var protocols string
 	var enabled, modelAvailable int
-	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.upstream_model_id,m.available FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &route.UpstreamModelID, &modelAvailable)
+	var nativeProtocol sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable)
 	if err != nil {
 		return resolvedRoute{}, err
 	}
 	route.Provider.Enabled = scanBool(enabled)
 	route.Provider.Protocols = providers.DecodeProtocols(protocols)
+	if nativeProtocol.Valid {
+		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
+	}
 	route.RequestedModel = requested
 	route.Virtual = false
 	route.Available = route.Provider.Enabled && scanBool(modelAvailable)
@@ -185,14 +194,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var target providers.Protocol
 	var translated bool
 	var cancel context.CancelFunc
+	protocolUnavailable := false
 	for _, candidate := range candidates {
 		attemptStart := time.Now()
 		if !candidate.Available {
 			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
 			continue
 		}
-		target = compatibleProtocol(candidate.Provider.Protocols, incoming)
+		target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
 		if target == "" {
+			protocolUnavailable = true
 			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
 			continue
 		}
@@ -291,6 +302,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		break
 	}
 	if resp == nil {
+		if protocolUnavailable {
+			row.httpStatus = 400
+			row.errorText = strPtr("protocol_unavailable")
+			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
+			return
+		}
 		row.httpStatus = 503
 		row.errorText = strPtr("virtual_model_unavailable")
 		inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
@@ -407,7 +424,10 @@ func fallbackStatus(status int) bool {
 	return status == 401 || status == 403 || status == 404 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
 }
 
-func compatibleProtocol(protocols []providers.Protocol, incoming providers.Protocol) providers.Protocol {
+func compatibleProtocol(protocols []providers.Protocol, native providers.Protocol, incoming providers.Protocol) providers.Protocol {
+	if native != "" {
+		return native
+	}
 	if providers.Supports(protocols, incoming) {
 		return incoming
 	}

@@ -57,6 +57,8 @@ var descriptors = []Descriptor{
 	{Type: "cloudflare-ai", Label: "Cloudflare Workers AI", BaseURLRequired: true, CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "cloudflare"},
 	{Type: "alibaba-qwen", Label: "Alibaba / Qwen", DefaultBaseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "minimax", Label: "MiniMax", DefaultBaseURL: "https://api.minimax.io/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
+	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
+	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "lm-studio", Label: "LM Studio", DefaultBaseURL: "http://host.docker.internal:1234/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -92,6 +94,37 @@ type Model struct {
 	ID, DisplayName string
 	ContextLength   int
 	MaxOutputTokens int
+	NativeProtocol  Protocol
+}
+
+var openCodeZenProtocolByModel = map[string]Protocol{
+	"gpt-5.6-sol": ProtocolResponses, "gpt-5.6-terra": ProtocolResponses, "gpt-5.6-luna": ProtocolResponses,
+	"gpt-5.5": ProtocolResponses, "gpt-5.5-pro": ProtocolResponses, "gpt-5.4": ProtocolResponses,
+	"gpt-5.4-pro": ProtocolResponses, "gpt-5.4-mini": ProtocolResponses, "gpt-5.4-nano": ProtocolResponses,
+	"gpt-5.3-codex": ProtocolResponses, "gpt-5.3-codex-spark": ProtocolResponses, "gpt-5.2": ProtocolResponses,
+	"gpt-5.2-codex": ProtocolResponses, "gpt-5.1": ProtocolResponses, "gpt-5.1-codex": ProtocolResponses,
+	"gpt-5.1-codex-max": ProtocolResponses, "gpt-5.1-codex-mini": ProtocolResponses, "gpt-5": ProtocolResponses,
+	"gpt-5-codex": ProtocolResponses, "gpt-5-nano": ProtocolResponses, "grok-4.6": ProtocolResponses,
+	"grok-4.5": ProtocolResponses, "grok-build-0.1": ProtocolResponses, "muse-spark-1.2": ProtocolResponses,
+	"muse-spark-1.2-contributor-free": ProtocolResponses,
+	"claude-fable-5":                  ProtocolMessages, "claude-opus-5": ProtocolMessages, "claude-opus-4.8": ProtocolMessages,
+	"claude-opus-4.7": ProtocolMessages, "claude-opus-4.6": ProtocolMessages, "claude-opus-4.5": ProtocolMessages,
+	"claude-sonnet-5": ProtocolMessages, "claude-sonnet-4.6": ProtocolMessages, "claude-sonnet-4.5": ProtocolMessages,
+	"claude-haiku-4.5": ProtocolMessages, "qwen3.7-max": ProtocolMessages, "qwen3.7-plus": ProtocolMessages,
+	"qwen3.6-plus": ProtocolMessages, "qwen3.5-plus": ProtocolMessages,
+}
+
+func nativeProtocol(providerType, modelID string) Protocol {
+	if providerType == "opencode-zen" {
+		if protocol, ok := openCodeZenProtocolByModel[modelID]; ok {
+			return protocol
+		}
+		return ProtocolChat
+	}
+	if providerType == "opencode-go" {
+		return ProtocolChat
+	}
+	return ""
 }
 
 type Registry struct{ client *http.Client }
@@ -191,7 +224,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			if provider.Type == "openrouter" {
 				maxOutputTokens = firstPositive(maxOutputTokens, item.TopProvider.MaxCompletionTokens)
 			}
-			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens})
+			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID)})
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break

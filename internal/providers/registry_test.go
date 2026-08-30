@@ -10,9 +10,84 @@ import (
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
-	for _, providerType := range []string{"openai", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
+	for _, providerType := range []string{"openai", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
 		if _, ok := Lookup(providerType); !ok {
 			t.Errorf("missing provider type %s", providerType)
+		}
+	}
+}
+
+func TestOpenCodeNativeProtocols(t *testing.T) {
+	zen := map[string]Protocol{
+		"gpt-5.5":           ProtocolResponses,
+		"claude-opus-4.6":   ProtocolMessages,
+		"deepseek-v4-flash": ProtocolChat,
+		"unknown-model":     ProtocolChat,
+	}
+	for modelID, want := range zen {
+		if got := nativeProtocol("opencode-zen", modelID); got != want {
+			t.Errorf("Zen model %q protocol = %q, want %q", modelID, got, want)
+		}
+	}
+	if got := nativeProtocol("opencode-go", "any-model"); got != ProtocolChat {
+		t.Fatalf("Go model protocol = %q, want %q", got, ProtocolChat)
+	}
+	if got := nativeProtocol("opencode-zen", "unknown-model"); got != ProtocolChat {
+		t.Fatalf("unknown Zen model protocol = %q, want %q", got, ProtocolChat)
+	}
+}
+
+func TestOpenCodeDescriptors(t *testing.T) {
+	for _, test := range []struct {
+		providerType string
+		url          string
+	}{
+		{"opencode-zen", "https://opencode.ai/zen/v1"},
+		{"opencode-go", "https://opencode.ai/zen/go/v1"},
+	} {
+		descriptor, ok := Lookup(test.providerType)
+		if !ok {
+			t.Fatalf("missing descriptor %q", test.providerType)
+		}
+		if descriptor.DefaultBaseURL != test.url || !descriptor.CredentialNeeded || len(descriptor.Protocols) != 3 {
+			t.Errorf("unexpected %q descriptor: %+v", test.providerType, descriptor)
+		}
+	}
+}
+
+func TestOpenCodeDiscoveryAssignsNativeProtocols(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("discovery path = %q, want /v1/models", r.URL.Path)
+			http.Error(w, "wrong path", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer secret" {
+			t.Errorf("discovery credential missing")
+			http.Error(w, "missing credential", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"id": "gpt-5.5"},
+			map[string]any{"id": "claude-opus-4.6"},
+			map[string]any{"id": "deepseek-v4-flash"},
+			map[string]any{"id": "unlisted-model"},
+		}})
+	}))
+	defer upstream.Close()
+
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "opencode-zen", BaseURL: upstream.URL + "/v1", Credential: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]Protocol, len(models))
+	for _, model := range models {
+		got[model.ID] = model.NativeProtocol
+	}
+	want := map[string]Protocol{"gpt-5.5": ProtocolResponses, "claude-opus-4.6": ProtocolMessages, "deepseek-v4-flash": ProtocolChat, "unlisted-model": ProtocolChat}
+	for modelID, protocol := range want {
+		if got[modelID] != protocol {
+			t.Errorf("model %q protocol = %q, want %q", modelID, got[modelID], protocol)
 		}
 	}
 }

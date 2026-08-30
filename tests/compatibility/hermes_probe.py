@@ -30,9 +30,9 @@ _, session = admin("POST", "/api/admin/session", {"username": "admin", "password
 csrf = session["csrf_token"]
 _, provider = admin("POST", "/api/admin/providers", {"name": "hermes", "type": "generic-openai", "base_url": "http://127.0.0.1:18081/v1", "protocols": ["chat", "responses", "messages"]}, csrf)
 _, models = admin("GET", f"/api/admin/providers/{provider['id']}/models")
-_, group = admin("POST", "/api/admin/virtual-groups", {"name": "virtual"}, csrf)
+_, group = admin("POST", "/api/admin/virtual-groups", {"name": "hermes-virtual"}, csrf)
 _, virtual = admin("POST", "/api/admin/virtual-models", {"group_id": group["id"], "name": "coding", "target_provider_id": provider["id"], "target_model_id": models["data"][0]["id"]}, csrf)
-_, key = admin("POST", "/api/admin/client-keys", {"name": "Hermes compatibility"}, csrf)
+_, key = admin("POST", "/api/admin/client-keys", {"name": "Hermes compatibility restart"}, csrf)
 admin("PUT", f"/api/admin/client-keys/{key['id']}/permissions", {"defaults": [], "permissions": [{"kind": "virtual", "model_id": virtual["id"], "enabled": True}]}, csrf)
 
 with tempfile.TemporaryDirectory() as home:
@@ -43,24 +43,24 @@ with tempfile.TemporaryDirectory() as home:
     api: {BASE}/v1
     key_env: TILLER_ROUTER_KEY
     transport: chat_completions
-    default_model: virtual/coding
+    default_model: hermes-virtual/coding
   tiller-responses:
     api: {BASE}/v1
     key_env: TILLER_ROUTER_KEY
     transport: codex_responses
-    default_model: virtual/coding
+    default_model: hermes-virtual/coding
   tiller-messages:
     api: {BASE}
     key_env: TILLER_ROUTER_KEY
     transport: anthropic_messages
-    default_model: virtual/coding
+    default_model: hermes-virtual/coding
 ''')
     env = os.environ.copy()
     env["HOME"] = home
     env["TILLER_ROUTER_KEY"] = key["secret"]
     for provider_name in ("tiller-chat", "tiller-responses", "tiller-messages"):
         result = subprocess.run(
-            ["hermes", "--oneshot", "Return exactly hello", "--provider", provider_name, "--model", "virtual/coding", "--ignore-rules"],
+            ["hermes", "--oneshot", "Return exactly hello", "--provider", provider_name, "--model", "hermes-virtual/coding", "--ignore-rules"],
             cwd=home,
             env=env,
             capture_output=True,

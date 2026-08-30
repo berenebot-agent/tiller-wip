@@ -8,6 +8,18 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
 
+func TestCompatibleProtocolPrefersNativeModelProtocol(t *testing.T) {
+	if got := compatibleProtocol([]providers.Protocol{providers.ProtocolChat, providers.ProtocolResponses, providers.ProtocolMessages}, providers.ProtocolResponses, providers.ProtocolChat); got != providers.ProtocolResponses {
+		t.Fatalf("native protocol was not selected: got %q", got)
+	}
+	if got := compatibleProtocol([]providers.Protocol{providers.ProtocolChat, providers.ProtocolResponses, providers.ProtocolMessages}, providers.ProtocolChat, providers.ProtocolResponses); got != providers.ProtocolChat {
+		t.Fatalf("native Chat protocol was not selected: got %q", got)
+	}
+	if got := compatibleProtocol([]providers.Protocol{providers.ProtocolChat}, "", providers.ProtocolResponses); got != providers.ProtocolChat {
+		t.Fatalf("provider translation protocol was not selected: got %q", got)
+	}
+}
+
 func TestCrossProtocolResponsesRejectsStatefulFeatures(t *testing.T) {
 	for _, field := range []string{"conversation", "previous_response_id", "store", "background", "files"} {
 		body := []byte(`{"model":"virtual/coding","input":"hello","` + field + `":"value"}`)
