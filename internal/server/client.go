@@ -392,7 +392,7 @@ func isTimeout(err error) bool {
 }
 
 func fallbackStatus(status int) bool {
-	return status == 401 || status == 403 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
+	return status == 401 || status == 403 || status == 404 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
 }
 
 func compatibleProtocol(protocols []providers.Protocol, incoming providers.Protocol) providers.Protocol {
