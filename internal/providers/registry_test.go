@@ -63,7 +63,7 @@ func TestPagedDiscovery(t *testing.T) {
 			t.Error("credential header missing")
 		}
 		if r.URL.Query().Get("after") == "first" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "model-b"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "model-b", "max_output_tokens": 4096}}})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "model-a"}}, "has_more": true, "last_id": "first"})
@@ -75,6 +75,26 @@ func TestPagedDiscovery(t *testing.T) {
 	}
 	if requests != 2 || len(models) != 2 || models[0].ID != "model-a" || models[1].ID != "model-b" {
 		t.Fatalf("unexpected discovery: requests=%d models=%v", requests, models)
+	}
+	if models[0].MaxOutputTokens != 0 || models[1].MaxOutputTokens != 4096 {
+		t.Fatalf("unexpected output-token metadata: models=%v", models)
+	}
+}
+
+func TestOpenRouterDiscoveryCapturesTopProviderOutputLimit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"id": "model-a", "top_provider": map[string]any{"max_completion_tokens": 8192}},
+			map[string]any{"id": "model-b", "top_provider": map[string]any{}},
+		}})
+	}))
+	defer upstream.Close()
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "openrouter", BaseURL: upstream.URL + "/api/v1", Credential: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 || models[0].MaxOutputTokens != 8192 || models[1].MaxOutputTokens != 0 {
+		t.Fatalf("unexpected OpenRouter output metadata: %+v", models)
 	}
 }
 

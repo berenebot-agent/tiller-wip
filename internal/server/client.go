@@ -21,10 +21,10 @@ import (
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length FROM (
-	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens FROM (
+	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical, m.context_length FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	SELECT g.name||'/'||v.name canonical, m.context_length, m.max_output_tokens FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 ) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
@@ -35,10 +35,14 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var modelID string
 		var contextLength sql.NullInt64
-		if rows.Scan(&modelID, &contextLength) == nil {
+		var maxOutputTokens sql.NullInt64
+		if rows.Scan(&modelID, &contextLength, &maxOutputTokens) == nil {
 			entry := map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"}
 			if contextLength.Valid && contextLength.Int64 > 0 {
 				entry["context_length"] = contextLength.Int64
+			}
+			if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
+				entry["max_output_tokens"] = maxOutputTokens.Int64
 			}
 			data = append(data, entry)
 		}

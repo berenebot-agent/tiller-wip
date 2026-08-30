@@ -277,6 +277,7 @@ type modelView struct {
 	CanonicalModelID string `json:"canonical_model_id"`
 	DisplayName      string `json:"display_name"`
 	ContextLength    *int64 `json:"context_length"`
+	MaxOutputTokens  *int64 `json:"max_output_tokens"`
 	Available        bool   `json:"available"`
 	FirstSeenAt      string `json:"first_seen_at"`
 	LastSeenAt       string `json:"last_seen_at"`
@@ -294,7 +295,7 @@ func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where s
 		limit = 100000 // return the full catalogue (e.g. for the virtual-model target selector)
 		offset = 0
 	}
-	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.available,m.first_seen_at,m.last_seen_at FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
+	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.max_output_tokens,m.available,m.first_seen_at,m.last_seen_at FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
 	pattern := "%" + search + "%"
 	args = append(args, pattern, pattern, limit, offset)
 	rows, err := s.db.SQL.QueryContext(r.Context(), query, args...)
@@ -307,7 +308,7 @@ func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where s
 	for rows.Next() {
 		var v modelView
 		var available int
-		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &v.ContextLength, &available, &v.FirstSeenAt, &v.LastSeenAt) != nil {
+		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &v.ContextLength, &v.MaxOutputTokens, &available, &v.FirstSeenAt, &v.LastSeenAt) != nil {
 			adminError(w, 500, "database_error", "Could not list models.")
 			return
 		}

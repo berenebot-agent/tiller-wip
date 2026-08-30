@@ -83,8 +83,10 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 				switch model {
 				case "model-a":
 					entry["context_length"] = 128000
+					entry["max_output_tokens"] = 16384
 				case "model-b":
 					entry["context_length"] = 262144
+					entry["max_output_tokens"] = 32768
 				}
 				data = append(data, entry)
 			}
@@ -271,6 +273,9 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	if data[0].(map[string]any)["context_length"] != float64(128000) {
 		t.Fatalf("catalogue did not surface the target context length: %v", data[0])
 	}
+	if data[0].(map[string]any)["max_output_tokens"] != float64(16384) {
+		t.Fatalf("catalogue did not surface the target output limit: %v", data[0])
+	}
 	status, payload, _ = api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"enabled": false})
 	if status != 204 {
 		t.Fatalf("disable client: %d %v", status, payload)
@@ -314,6 +319,9 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	}
 	if remappedData[0].(map[string]any)["context_length"] != float64(262144) {
 		t.Fatalf("remap did not propagate the new target context length: %v", remappedData[0])
+	}
+	if remappedData[0].(map[string]any)["max_output_tokens"] != float64(32768) {
+		t.Fatalf("remap did not propagate the new target output limit: %v", remappedData[0])
 	}
 	resp, _ = clientCall(clientSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "stream"}}})
 	if resp.StatusCode != 200 {

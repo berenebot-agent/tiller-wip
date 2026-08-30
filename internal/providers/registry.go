@@ -91,6 +91,7 @@ type Instance struct {
 type Model struct {
 	ID, DisplayName string
 	ContextLength   int
+	MaxOutputTokens int
 }
 
 type Registry struct{ client *http.Client }
@@ -151,12 +152,16 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 		}
 		var payload struct {
 			Data []struct {
-				ID, Name       string
-				DisplayName    string `json:"display_name"`
-				ContextLength  int    `json:"context_length"`
-				ContextWindow  int    `json:"context_window"`
-				MaxModelLen    int    `json:"max_model_len"`
-				MaxInputTokens int    `json:"max_input_tokens"`
+				ID, Name        string
+				DisplayName     string `json:"display_name"`
+				ContextLength   int    `json:"context_length"`
+				ContextWindow   int    `json:"context_window"`
+				MaxModelLen     int    `json:"max_model_len"`
+				MaxInputTokens  int    `json:"max_input_tokens"`
+				MaxOutputTokens int    `json:"max_output_tokens"`
+				TopProvider     struct {
+					MaxCompletionTokens int `json:"max_completion_tokens"`
+				} `json:"top_provider"`
 			} `json:"data"`
 			HasMore bool   `json:"has_more"`
 			LastID  string `json:"last_id"`
@@ -178,7 +183,11 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			if display == "" {
 				display = item.Name
 			}
-			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens)})
+			maxOutputTokens := item.MaxOutputTokens
+			if provider.Type == "openrouter" {
+				maxOutputTokens = firstPositive(maxOutputTokens, item.TopProvider.MaxCompletionTokens)
+			}
+			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens})
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break
