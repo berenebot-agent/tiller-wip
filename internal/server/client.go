@@ -273,6 +273,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			response.Body.Close()
 			attemptCancel()
 			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			// An upstream HTTP response is an upstream failure regardless of
+			// status. Ordered virtual routes try their next target by default;
+			// router-side failures (for example translation errors) are handled
+			// before this point and must not be hidden by fallback.
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
@@ -421,7 +425,7 @@ func isTimeout(err error) bool {
 }
 
 func fallbackStatus(status int) bool {
-	return status == 401 || status == 403 || status == 404 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
+	return status < 200 || status >= 300
 }
 
 func compatibleProtocol(protocols []providers.Protocol, native providers.Protocol, incoming providers.Protocol) providers.Protocol {
