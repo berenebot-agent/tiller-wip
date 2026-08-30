@@ -29,7 +29,16 @@ type logRow struct {
 	providerRequestID *string
 	clientRequestID   string
 	errorText         *string
+	fallbackUsed      bool
+	fallbackReason    *string
+	attempts          []requestAttempt
 	createdAt         string
+}
+
+type requestAttempt struct {
+	provider, model, result, failureClass string
+	httpStatus                            int
+	latencyMs                             int64
 }
 
 // writeLog persists a request log row. It is best-effort: a failed insert logs
@@ -43,8 +52,28 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
 		return
 	}
-	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.createdAt)
+	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
+	for i, attempt := range row.attempts {
+		attemptID, err := id.New()
+		if err != nil {
+			continue
+		}
+		_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt)
+	}
+}
+
+func nullInt(v int) any {
+	if v == 0 {
+		return nil
+	}
+	return v
+}
+func nullString(v string) any {
+	if v == "" {
+		return nil
+	}
+	return v
 }
 
 // pruneRequestLogs deletes request logs older than each client's retention

@@ -2,12 +2,64 @@ package server
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 )
+
+type virtualTargetInput struct {
+	ProviderModelID string `json:"provider_model_id"`
+	Enabled         bool   `json:"enabled"`
+}
+
+func validateVirtualTargets(mode string, targets []virtualTargetInput) error {
+	if mode != "fixed" && mode != "ordered_fallback" {
+		return fmt.Errorf("routing_mode must be fixed or ordered_fallback")
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("at least one target is required")
+	}
+	seen, active := map[string]bool{}, 0
+	for _, target := range targets {
+		if target.ProviderModelID == "" {
+			return fmt.Errorf("every target needs provider_model_id")
+		}
+		if seen[target.ProviderModelID] {
+			return fmt.Errorf("duplicate target model")
+		}
+		seen[target.ProviderModelID] = true
+		if target.Enabled {
+			active++
+		}
+	}
+	if mode == "fixed" && active != 1 {
+		return fmt.Errorf("Fixed mode requires exactly one enabled target")
+	}
+	return nil
+}
+
+func replaceVirtualTargets(r *http.Request, tx *sql.Tx, virtualID string, targets []virtualTargetInput, now string) error {
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM virtual_model_targets WHERE virtual_model_id=?`, virtualID); err != nil {
+		return err
+	}
+	for i, target := range targets {
+		var exists int
+		if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE id=?`, target.ProviderModelID).Scan(&exists); err != nil || exists != 1 {
+			return fmt.Errorf("invalid target model")
+		}
+		targetID, err := id.New()
+		if err != nil {
+			return err
+		}
+		if _, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_model_targets(id,virtual_model_id,provider_model_id,position,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, targetID, virtualID, target.ProviderModelID, i+1, boolInt(target.Enabled), now, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 type virtualGroupView struct {
 	ID         string `json:"id"`
@@ -148,25 +200,43 @@ func (s *Server) deleteVirtualGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 type virtualModelView struct {
-	ID                    string `json:"id"`
-	GroupID               string `json:"group_id"`
-	GroupName             string `json:"group_name"`
-	Name                  string `json:"name"`
-	CanonicalModelID      string `json:"canonical_model_id"`
-	TargetProviderID      string `json:"target_provider_id"`
-	TargetProviderName    string `json:"target_provider_name"`
-	TargetModelID         string `json:"target_model_id"`
-	TargetUpstreamModelID string `json:"target_upstream_model_id"`
-	Available             bool   `json:"available"`
-	Warning               string `json:"warning,omitempty"`
-	CreatedAt             string `json:"created_at"`
-	UpdatedAt             string `json:"updated_at"`
+	ID                    string              `json:"id"`
+	GroupID               string              `json:"group_id"`
+	GroupName             string              `json:"group_name"`
+	Name                  string              `json:"name"`
+	CanonicalModelID      string              `json:"canonical_model_id"`
+	TargetProviderID      string              `json:"target_provider_id"`
+	TargetProviderName    string              `json:"target_provider_name"`
+	TargetModelID         string              `json:"target_model_id"`
+	TargetUpstreamModelID string              `json:"target_upstream_model_id"`
+	RoutingMode           string              `json:"routing_mode"`
+	Targets               []virtualTargetView `json:"targets"`
+	ContextLength         *int64              `json:"context_length"`
+	MaxOutputTokens       *int64              `json:"max_output_tokens"`
+	Available             bool                `json:"available"`
+	Warning               string              `json:"warning,omitempty"`
+	CreatedAt             string              `json:"created_at"`
+	UpdatedAt             string              `json:"updated_at"`
+}
+
+type virtualTargetView struct {
+	ID              string `json:"id"`
+	ProviderModelID string `json:"provider_model_id"`
+	ProviderID      string `json:"provider_id"`
+	ProviderName    string `json:"provider_name"`
+	UpstreamModelID string `json:"upstream_model_id"`
+	Position        int    `json:"position"`
+	Enabled         bool   `json:"enabled"`
+	Available       bool   `json:"available"`
+	Warning         string `json:"warning,omitempty"`
+	ContextLength   *int64 `json:"context_length"`
+	MaxOutputTokens *int64 `json:"max_output_tokens"`
 }
 
 func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.id,g.name,v.name,g.name||'/'||v.name,p.id,p.name,m.id,m.upstream_model_id,(p.enabled=1 AND m.available=1),CASE WHEN p.enabled=0 THEN 'Target provider is disabled' WHEN m.available=0 THEN 'Target model is retired' ELSE '' END,v.created_at,v.updated_at FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN providers p ON p.id=v.target_provider_id JOIN provider_models m ON m.id=v.target_provider_model_id WHERE g.name LIKE ? OR v.name LIKE ? OR p.name LIKE ? OR m.upstream_model_id LIKE ? ORDER BY g.name,v.name LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.id,g.name,v.name,g.name||'/'||v.name,v.routing_mode,v.created_at,v.updated_at FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE g.name LIKE ? OR v.name LIKE ? OR EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND (p.name LIKE ? OR m.upstream_model_id LIKE ?)) ORDER BY g.name,v.name LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list virtual models.")
 		return
@@ -175,27 +245,69 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 	data := []virtualModelView{}
 	for rows.Next() {
 		var v virtualModelView
-		var available int
-		if rows.Scan(&v.ID, &v.GroupID, &v.GroupName, &v.Name, &v.CanonicalModelID, &v.TargetProviderID, &v.TargetProviderName, &v.TargetModelID, &v.TargetUpstreamModelID, &available, &v.Warning, &v.CreatedAt, &v.UpdatedAt) != nil {
+		if rows.Scan(&v.ID, &v.GroupID, &v.GroupName, &v.Name, &v.CanonicalModelID, &v.RoutingMode, &v.CreatedAt, &v.UpdatedAt) != nil {
 			adminError(w, 500, "database_error", "Could not list virtual models.")
 			return
 		}
-		v.Available = scanBool(available)
+		v.Targets, _ = s.virtualTargets(r, v.ID)
+		for _, target := range v.Targets {
+			if target.Enabled && target.Available {
+				v.Available = true
+			}
+			if v.TargetProviderID == "" {
+				v.TargetProviderID, v.TargetProviderName, v.TargetModelID, v.TargetUpstreamModelID = target.ProviderID, target.ProviderName, target.ProviderModelID, target.UpstreamModelID
+				v.ContextLength, v.MaxOutputTokens = target.ContextLength, target.MaxOutputTokens
+			}
+			if target.Warning != "" {
+				v.Warning = target.Warning
+			}
+		}
 		data = append(data, v)
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
+func (s *Server) virtualTargets(r *http.Request, virtualID string) ([]virtualTargetView, error) {
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.id,t.provider_model_id,p.id,p.name,m.upstream_model_id,t.position,t.enabled,(p.enabled=1 AND m.available=1),CASE WHEN t.enabled=0 THEN 'Target is disabled' WHEN p.enabled=0 THEN 'Target provider is disabled' WHEN m.available=0 THEN 'Target model is retired' ELSE '' END,m.context_length,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position`, virtualID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	data := []virtualTargetView{}
+	for rows.Next() {
+		var v virtualTargetView
+		var enabled, available int
+		if err := rows.Scan(&v.ID, &v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.Position, &enabled, &available, &v.Warning, &v.ContextLength, &v.MaxOutputTokens); err != nil {
+			return nil, err
+		}
+		v.Enabled, v.Available = scanBool(enabled), scanBool(available)
+		data = append(data, v)
+	}
+	return data, rows.Err()
+}
+
 func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		GroupID          string `json:"group_id"`
-		GroupName        string `json:"group_name"`
-		Name             string `json:"name"`
-		TargetProviderID string `json:"target_provider_id"`
-		TargetModelID    string `json:"target_model_id"`
+		GroupID          string               `json:"group_id"`
+		GroupName        string               `json:"group_name"`
+		Name             string               `json:"name"`
+		TargetProviderID string               `json:"target_provider_id"`
+		TargetModelID    string               `json:"target_model_id"`
+		RoutingMode      string               `json:"routing_mode"`
+		Targets          []virtualTargetInput `json:"targets"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	if len(input.Targets) == 0 && input.TargetModelID != "" {
+		input.Targets = []virtualTargetInput{{ProviderModelID: input.TargetModelID, Enabled: true}}
+	}
+	if input.RoutingMode == "" {
+		input.RoutingMode = "fixed"
+	}
+	if err := validateVirtualTargets(input.RoutingMode, input.Targets); err != nil {
+		adminError(w, 400, "invalid_targets", err.Error())
 		return
 	}
 	virtualID, err := id.New()
@@ -238,12 +350,16 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var valid int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE id=? AND provider_id=?`, input.TargetModelID, input.TargetProviderID).Scan(&valid); err != nil || valid != 1 {
-		adminError(w, 400, "invalid_target", "Target model does not belong to the selected provider.")
+	primary := input.Targets[0].ProviderModelID
+	var primaryProvider string
+	if err = tx.QueryRowContext(r.Context(), `SELECT provider_id FROM provider_models WHERE id=?`, primary).Scan(&primaryProvider); err != nil {
+		adminError(w, 400, "invalid_target", "Target model does not exist.")
 		return
 	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_models(id,virtual_group_id,name,target_provider_id,target_provider_model_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, virtualID, groupID, input.Name, input.TargetProviderID, input.TargetModelID, now, now)
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_models(id,virtual_group_id,name,target_provider_id,target_provider_model_id,routing_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, virtualID, groupID, input.Name, primaryProvider, primary, input.RoutingMode, now, now)
+	if err == nil {
+		err = replaceVirtualTargets(r, tx, virtualID, input.Targets, now)
+	}
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT c.id,'virtual',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='virtual' AND d.group_id=?`, virtualID, now, now, groupID)
 	}
@@ -260,10 +376,13 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name             *string `json:"name"`
-		TargetProviderID *string `json:"target_provider_id"`
-		TargetModelID    *string `json:"target_model_id"`
-		ConfirmBreaking  bool    `json:"confirm_breaking_change"`
+		Name             *string              `json:"name"`
+		TargetProviderID *string              `json:"target_provider_id"`
+		TargetModelID    *string              `json:"target_model_id"`
+		ConfirmBreaking  bool                 `json:"confirm_breaking_change"`
+		RoutingMode      *string              `json:"routing_mode"`
+		Targets          []virtualTargetInput `json:"targets"`
+		FixedTargetID    string               `json:"fixed_target_id"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -276,8 +395,8 @@ func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	var oldName, currentProvider, currentModel string
-	if err = tx.QueryRowContext(r.Context(), `SELECT name,target_provider_id,target_provider_model_id FROM virtual_models WHERE id=?`, modelID).Scan(&oldName, &currentProvider, &currentModel); err == sql.ErrNoRows {
+	var oldName, currentProvider, currentModel, currentMode string
+	if err = tx.QueryRowContext(r.Context(), `SELECT name,target_provider_id,target_provider_model_id,routing_mode FROM virtual_models WHERE id=?`, modelID).Scan(&oldName, &currentProvider, &currentModel, &currentMode); err == sql.ErrNoRows {
 		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	} else if err != nil {
@@ -294,16 +413,42 @@ func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 	if input.TargetModelID != nil {
 		currentModel = *input.TargetModelID
 	}
-	var valid int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE id=? AND provider_id=?`, currentModel, currentProvider).Scan(&valid); err != nil || valid != 1 {
-		adminError(w, 400, "invalid_target", "Target model does not belong to the selected provider.")
+	if len(input.Targets) == 0 && (input.TargetProviderID != nil || input.TargetModelID != nil) {
+		input.Targets = []virtualTargetInput{{ProviderModelID: currentModel, Enabled: true}}
+	}
+	newMode := currentMode
+	if input.RoutingMode != nil {
+		newMode = *input.RoutingMode
+	}
+	if newMode == "fixed" && currentMode == "ordered_fallback" && (input.FixedTargetID == "" || len(input.Targets) == 0) {
+		adminError(w, 400, "fixed_target_required", "Choose the target that remains active in Fixed mode.")
 		return
+	}
+	if len(input.Targets) > 0 {
+		if input.FixedTargetID != "" {
+			for i := range input.Targets {
+				input.Targets[i].Enabled = input.Targets[i].ProviderModelID == input.FixedTargetID
+			}
+		}
+		if err := validateVirtualTargets(newMode, input.Targets); err != nil {
+			adminError(w, 400, "invalid_targets", err.Error())
+			return
+		}
+		currentModel = input.Targets[0].ProviderModelID
+		if err = tx.QueryRowContext(r.Context(), `SELECT provider_id FROM provider_models WHERE id=?`, currentModel).Scan(&currentProvider); err != nil {
+			adminError(w, 400, "invalid_target", "Target model does not exist.")
+			return
+		}
 	}
 	newName := oldName
 	if input.Name != nil {
 		newName = *input.Name
 	}
-	_, err = tx.ExecContext(r.Context(), `UPDATE virtual_models SET name=?,target_provider_id=?,target_provider_model_id=?,updated_at=? WHERE id=?`, newName, currentProvider, currentModel, database.Now(), modelID)
+	now := database.Now()
+	_, err = tx.ExecContext(r.Context(), `UPDATE virtual_models SET name=?,target_provider_id=?,target_provider_model_id=?,routing_mode=?,updated_at=? WHERE id=?`, newName, currentProvider, currentModel, newMode, now, modelID)
+	if err == nil && len(input.Targets) > 0 {
+		err = replaceVirtualTargets(r, tx, modelID, input.Targets, now)
+	}
 	if err != nil || tx.Commit() != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "model_conflict", "That virtual model name already exists in the group.")

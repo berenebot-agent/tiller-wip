@@ -478,8 +478,8 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	upstream.CloseClientConnections()
 	upstream.Close()
 	resp, _ = clientCall(newSecret, "POST", "/v1/chat/completions", map[string]any{"model": "virtual/coding", "messages": []any{map[string]any{"role": "user", "content": "outage"}}})
-	if resp.StatusCode != 502 {
-		t.Fatalf("provider outage returned %d instead of 502", resp.StatusCode)
+	if resp.StatusCode != 503 {
+		t.Fatalf("exhausted virtual targets returned %d instead of 503", resp.StatusCode)
 	}
 	resp, catalogue = clientCall(newSecret, "GET", "/v1/models", nil)
 	if resp.StatusCode != 200 || len(catalogue["data"].([]any)) != 1 {

@@ -5,6 +5,40 @@ import (
 	"net/http"
 )
 
+type requestAttemptView struct {
+	AttemptNumber int     `json:"attempt_number"`
+	Provider      string  `json:"provider"`
+	Model         string  `json:"model"`
+	Result        string  `json:"result"`
+	HTTPStatus    *int    `json:"http_status"`
+	FailureClass  *string `json:"failure_class"`
+	LatencyMs     int64   `json:"latency_ms"`
+	CreatedAt     string  `json:"created_at"`
+}
+
+func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at FROM request_attempts WHERE request_log_id=? ORDER BY attempt_number`, r.PathValue("id"))
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load request attempts.")
+		return
+	}
+	defer rows.Close()
+	data := []requestAttemptView{}
+	for rows.Next() {
+		var item requestAttemptView
+		if err := rows.Scan(&item.AttemptNumber, &item.Provider, &item.Model, &item.Result, &item.HTTPStatus, &item.FailureClass, &item.LatencyMs, &item.CreatedAt); err != nil {
+			adminError(w, 500, "database_error", "Could not load request attempts.")
+			return
+		}
+		data = append(data, item)
+	}
+	if err := rows.Err(); err != nil {
+		adminError(w, 500, "database_error", "Could not load request attempts.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": data})
+}
+
 type activityView struct {
 	ID                string  `json:"id"`
 	RequestedModel    string  `json:"requested_model"`
@@ -19,6 +53,9 @@ type activityView struct {
 	ProviderRequestID *string `json:"provider_request_id"`
 	ClientRequestID   string  `json:"client_request_id"`
 	ErrorText         *string `json:"error_text"`
+	AttemptCount      int     `json:"attempt_count"`
+	FallbackUsed      bool    `json:"fallback_used"`
+	FallbackReason    *string `json:"fallback_reason"`
 	CreatedAt         string  `json:"created_at"`
 }
 
@@ -31,7 +68,7 @@ func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,created_at FROM request_logs WHERE client_key_id=? AND (requested_model LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ?) ORDER BY created_at DESC LIMIT ? OFFSET ?`, clientID, pattern, pattern, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at FROM request_logs WHERE client_key_id=? AND (requested_model LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ?) ORDER BY created_at DESC LIMIT ? OFFSET ?`, clientID, pattern, pattern, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
@@ -40,12 +77,12 @@ func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
 	data := []activityView{}
 	for rows.Next() {
 		var v activityView
-		var streaming int
-		if err := rows.Scan(&v.ID, &v.RequestedModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.CreatedAt); err != nil {
+		var streaming, fallback int
+		if err := rows.Scan(&v.ID, &v.RequestedModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.AttemptCount, &fallback, &v.FallbackReason, &v.CreatedAt); err != nil {
 			adminError(w, 500, "database_error", "Could not load activity.")
 			return
 		}
-		v.Streaming = scanBool(streaming)
+		v.Streaming, v.FallbackUsed = scanBool(streaming), scanBool(fallback)
 		data = append(data, v)
 	}
 	// Guard: rows.Next() can terminate early on a row-iteration error without
@@ -75,7 +112,7 @@ type globalActivityView struct {
 func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE (ck.name LIKE ? OR rl.requested_model LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR coalesce(rl.resolved_model,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR rl.client_request_id LIKE ? OR coalesce(rl.provider_request_id,'') LIKE ? OR coalesce(rl.error_text,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE (ck.name LIKE ? OR rl.requested_model LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR coalesce(rl.resolved_model,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR rl.client_request_id LIKE ? OR coalesce(rl.provider_request_id,'') LIKE ? OR coalesce(rl.error_text,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
@@ -84,12 +121,12 @@ func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
 	data := []globalActivityView{}
 	for rows.Next() {
 		var v globalActivityView
-		var streaming int
-		if err := rows.Scan(&v.ID, &v.RequestedModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.CreatedAt, &v.ClientKeyID, &v.ClientName); err != nil {
+		var streaming, fallback int
+		if err := rows.Scan(&v.ID, &v.RequestedModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.AttemptCount, &fallback, &v.FallbackReason, &v.CreatedAt, &v.ClientKeyID, &v.ClientName); err != nil {
 			adminError(w, 500, "database_error", "Could not load activity.")
 			return
 		}
-		v.Streaming = scanBool(streaming)
+		v.Streaming, v.FallbackUsed = scanBool(streaming), scanBool(fallback)
 		data = append(data, v)
 	}
 	// Guard: rows.Next() can terminate early on a row-iteration error without

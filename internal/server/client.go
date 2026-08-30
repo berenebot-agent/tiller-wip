@@ -24,7 +24,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens FROM (
 	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical, m.context_length, m.max_output_tokens FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	SELECT g.name||'/'||v.name canonical, min(t.context_length), min(t.max_output_tokens) FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
 ) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
@@ -54,6 +54,8 @@ type resolvedRoute struct {
 	Provider                        providers.Instance
 	UpstreamModelID, RequestedModel string
 	Virtual, Available              bool
+	RoutingMode                     string
+	Targets                         []resolvedRoute
 }
 
 func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
@@ -63,21 +65,59 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	}
 	defer tx.Rollback()
 	var route resolvedRoute
+	// Direct real models remain single-target and never participate in fallback.
+	var direct int
+	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&direct)
+	if err != nil {
+		return resolvedRoute{}, err
+	}
+	if direct == 0 {
+		var virtualID string
+		err = tx.QueryRowContext(ctx, `SELECT v.id,v.routing_mode FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?`, clientID, requested).Scan(&virtualID, &route.RoutingMode)
+		if err != nil {
+			return resolvedRoute{}, err
+		}
+		rows, e := tx.QueryContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, virtualID)
+		if e != nil {
+			return resolvedRoute{}, e
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var target resolvedRoute
+			var protocols string
+			var enabled, available int
+			if e = rows.Scan(&target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &target.UpstreamModelID, &available); e != nil {
+				return resolvedRoute{}, e
+			}
+			target.Provider.Enabled = scanBool(enabled)
+			target.Provider.Protocols = providers.DecodeProtocols(protocols)
+			target.Available = target.Provider.Enabled && scanBool(available)
+			target.Virtual = true
+			target.RequestedModel = requested
+			route.Targets = append(route.Targets, target)
+		}
+		if e = rows.Err(); e != nil {
+			return resolvedRoute{}, e
+		}
+		route.Virtual, route.RequestedModel = true, requested
+		if len(route.Targets) > 0 {
+			route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
+		}
+		if err := tx.Commit(); err != nil {
+			return resolvedRoute{}, err
+		}
+		return route, nil
+	}
 	var protocols string
 	var enabled, modelAvailable int
-	var routeKind string
-	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.upstream_model_id,m.available,kind FROM (
-	SELECT p.id provider_id,m.id model_id,'real' kind FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?
-	UNION ALL
-	SELECT v.target_provider_id provider_id,v.target_provider_model_id model_id,'virtual' kind FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?
-) resolved JOIN providers p ON p.id=resolved.provider_id JOIN provider_models m ON m.id=resolved.model_id LIMIT 1`, clientID, requested, clientID, requested).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &route.UpstreamModelID, &modelAvailable, &routeKind)
+	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.upstream_model_id,m.available FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &route.UpstreamModelID, &modelAvailable)
 	if err != nil {
 		return resolvedRoute{}, err
 	}
 	route.Provider.Enabled = scanBool(enabled)
 	route.Provider.Protocols = providers.DecodeProtocols(protocols)
 	route.RequestedModel = requested
-	route.Virtual = routeKind == "virtual"
+	route.Virtual = false
 	route.Available = route.Provider.Enabled && scanBool(modelAvailable)
 	if err := tx.Commit(); err != nil {
 		return resolvedRoute{}, err
@@ -117,6 +157,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if json.Unmarshal(raw["stream"], &stream) == nil {
 		row.streaming = stream
 	}
+	originalBody := append([]byte(nil), body...)
 	start := time.Now()
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
@@ -136,82 +177,116 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		inferenceError(w, 500, "server_error", "database_error", "Could not resolve the model.", incoming == providers.ProtocolMessages)
 		return
 	}
-	row.resolvedProvider = &route.Provider.Name
-	row.resolvedModel = &route.UpstreamModelID
-	if !route.Available {
-		row.httpStatus = 503
-		row.errorText = strPtr("model_unavailable")
-		inferenceError(w, 503, "service_unavailable_error", "model_unavailable", "The resolved model target is unavailable.", incoming == providers.ProtocolMessages)
-		return
+	candidates := []resolvedRoute{route}
+	if route.Virtual {
+		candidates = route.Targets
 	}
-	target := incoming
-	if !providers.Supports(route.Provider.Protocols, incoming) {
-		if providers.Supports(route.Provider.Protocols, providers.ProtocolMessages) {
-			target = providers.ProtocolMessages
-		} else if providers.Supports(route.Provider.Protocols, providers.ProtocolChat) {
-			target = providers.ProtocolChat
-		} else if providers.Supports(route.Provider.Protocols, providers.ProtocolResponses) {
-			target = providers.ProtocolResponses
-		} else {
-			row.httpStatus = 503
-			row.errorText = strPtr("protocol_unavailable")
-			inferenceError(w, 503, "service_unavailable_error", "protocol_unavailable", "The provider has no compatible protocol surface.", incoming == providers.ProtocolMessages)
-			return
+	var resp *http.Response
+	var target providers.Protocol
+	var translated bool
+	var cancel context.CancelFunc
+	for _, candidate := range candidates {
+		attemptStart := time.Now()
+		if !candidate.Available {
+			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
+			continue
 		}
-	}
-	translated := target != incoming
-	if translated {
-		body, err = translateRequest(body, incoming, target, route.UpstreamModelID)
-		if err != nil {
-			var unsupported unsupportedFeature
-			if errors.As(err, &unsupported) {
-				row.httpStatus = 400
-				row.errorText = strPtr("unsupported_feature")
-				inferenceError(w, 400, "invalid_request_error", "unsupported_feature", unsupported.Error(), incoming == providers.ProtocolMessages)
-			} else {
+		target = compatibleProtocol(candidate.Provider.Protocols, incoming)
+		if target == "" {
+			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
+			continue
+		}
+		translated = target != incoming
+		attemptBody := append([]byte(nil), originalBody...)
+		if translated {
+			attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID)
+			if err != nil {
 				row.httpStatus = 400
 				row.errorText = strPtr("translation_error")
 				inferenceError(w, 400, "invalid_request_error", "translation_error", err.Error(), incoming == providers.ProtocolMessages)
+				return
 			}
-			return
+		} else {
+			var attemptRaw map[string]json.RawMessage
+			_ = json.Unmarshal(attemptBody, &attemptRaw)
+			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
+			attemptBody, _ = json.Marshal(attemptRaw)
 		}
-	} else {
-		raw["model"], _ = json.Marshal(route.UpstreamModelID)
-		body, _ = json.Marshal(raw)
+		endpoint, e := providers.Endpoint(candidate.Provider, target)
+		if e != nil {
+			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
+			continue
+		}
+		upstreamCtx, attemptCancel := context.WithCancel(r.Context())
+		req, e := http.NewRequestWithContext(upstreamCtx, http.MethodPost, endpoint, bytes.NewReader(attemptBody))
+		if e != nil {
+			attemptCancel()
+			continue
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "application/json, text/event-stream")
+		req.Header.Set("User-Agent", "Tiller-Router/1")
+		providers.ApplyRequestAuth(req, candidate.Provider)
+		response, e := s.providers.Registry().HTTPClient().Do(req)
+		if e != nil {
+			attemptCancel()
+			class := "upstream_unreachable"
+			if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
+				class = "upstream_timeout"
+			}
+			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			if !route.Virtual || r.Context().Err() != nil {
+				row.httpStatus = 502
+				row.errorText = strPtr(class)
+				inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+				return
+			}
+			row.fallbackUsed = true
+			row.fallbackReason = strPtr(class)
+			continue
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			class := fmt.Sprintf("http_%d", response.StatusCode)
+			response.Body.Close()
+			attemptCancel()
+			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			if !route.Virtual || !fallbackStatus(response.StatusCode) {
+				row.httpStatus = response.StatusCode
+				row.errorText = strPtr("upstream_error")
+				inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
+				return
+			}
+			row.fallbackUsed = true
+			row.fallbackReason = strPtr(class)
+			continue
+		}
+		if e = preflightResponse(response); e != nil {
+			response.Body.Close()
+			attemptCancel()
+			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: "upstream_read_error", latencyMs: time.Since(attemptStart).Milliseconds()})
+			if !route.Virtual || r.Context().Err() != nil {
+				row.httpStatus = 502
+				row.errorText = strPtr("upstream_read_error")
+				inferenceError(w, 502, "api_error", "upstream_read_error", "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+				return
+			}
+			row.fallbackUsed = true
+			row.fallbackReason = strPtr("upstream_read_error")
+			continue
+		}
+		route, resp, cancel = candidate, response, attemptCancel
+		row.attempts = append(row.attempts, requestAttempt{provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
+		break
 	}
-	endpoint, err := providers.Endpoint(route.Provider, target)
-	if err != nil {
-		row.httpStatus = 502
-		row.errorText = strPtr("invalid_upstream")
-		inferenceError(w, 502, "api_error", "invalid_upstream", "The upstream endpoint is invalid.", incoming == providers.ProtocolMessages)
+	if resp == nil {
+		row.httpStatus = 503
+		row.errorText = strPtr("virtual_model_unavailable")
+		inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
 		return
 	}
-	upstreamCtx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	req, err := http.NewRequestWithContext(upstreamCtx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		row.httpStatus = 502
-		row.errorText = strPtr("invalid_upstream")
-		inferenceError(w, 502, "api_error", "invalid_upstream", "The upstream endpoint is invalid.", incoming == providers.ProtocolMessages)
-		return
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	req.Header.Set("User-Agent", "Tiller-Router/1")
-	providers.ApplyRequestAuth(req, route.Provider)
-	resp, err := s.providers.Registry().HTTPClient().Do(req)
-	if err != nil {
-		status := http.StatusBadGateway
-		code := "upstream_unreachable"
-		if errors.Is(err, context.DeadlineExceeded) || isTimeout(err) {
-			status = http.StatusGatewayTimeout
-			code = "upstream_timeout"
-		}
-		row.httpStatus = status
-		row.errorText = strPtr(code)
-		inferenceError(w, status, "api_error", code, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
-		return
-	}
+	row.resolvedProvider = &route.Provider.Name
+	row.resolvedModel = &route.UpstreamModelID
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
 	if v := resp.Header.Get("Request-Id"); v != "" {
@@ -260,6 +335,34 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	_, _ = w.Write(rewriteModelBytes(body, route.UpstreamModelID, route.RequestedModel))
 }
 
+type bufferedReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r bufferedReadCloser) Close() error { return r.closer.Close() }
+
+// preflightResponse ensures a successful upstream response has produced data
+// before Tiller commits anything to the client. This preserves the no-splice
+// rule while allowing a different virtual target after a pre-output failure.
+func preflightResponse(resp *http.Response) error {
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		first := make([]byte, 1)
+		n, err := resp.Body.Read(first)
+		if n == 0 && err != nil {
+			return err
+		}
+		resp.Body = bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(first[:n]), resp.Body), closer: resp.Body}
+		return nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return err
+	}
+	resp.Body = bufferedReadCloser{Reader: bytes.NewReader(body), closer: resp.Body}
+	return nil
+}
+
 type idleReader struct {
 	reader io.Reader
 	timer  *time.Timer
@@ -286,6 +389,22 @@ func copySafeResponseHeaders(dst, src http.Header) {
 func isTimeout(err error) bool {
 	var netErr interface{ Timeout() bool }
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func fallbackStatus(status int) bool {
+	return status == 401 || status == 403 || status == 429 || status == 500 || status == 502 || status == 503 || status == 504
+}
+
+func compatibleProtocol(protocols []providers.Protocol, incoming providers.Protocol) providers.Protocol {
+	if providers.Supports(protocols, incoming) {
+		return incoming
+	}
+	for _, candidate := range []providers.Protocol{providers.ProtocolMessages, providers.ProtocolChat, providers.ProtocolResponses} {
+		if providers.Supports(protocols, candidate) {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) {

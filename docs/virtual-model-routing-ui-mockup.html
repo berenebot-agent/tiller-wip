@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Virtual model routing UI mockup</title>
+  <style>
+    :root { color-scheme: light; --ink:#18324a; --muted:#65788a; --line:#d8e1e8; --canvas:#f2f5f7; --blue:#2479b7; --blue-pale:#e8f3fa; --danger:#b74442; }
+    * { box-sizing:border-box } body { margin:0; background:var(--canvas); color:var(--ink); font:15px/1.45 ui-sans-serif,system-ui,sans-serif; }
+    main { width:min(760px,calc(100% - 32px)); margin:48px auto; background:#fff; border:1px solid var(--line); box-shadow:0 12px 35px #17345414; }
+    header { padding:28px 30px 22px; border-bottom:1px solid var(--line); } h1 { margin:0 0 5px; font:600 28px Georgia,serif; } p { margin:0; color:var(--muted); }
+    .content { padding:26px 30px 30px; } label { display:block; margin:0 0 20px; color:#43596c; font-size:12px; font-weight:700; } select,input { width:100%; height:42px; margin-top:6px; border:1px solid #b9c8d4; border-radius:4px; padding:0 12px; color:var(--ink); background:#fff; font:14px ui-sans-serif,system-ui,sans-serif; }
+    .view { display:none; } .view.active { display:block; } .hint { margin:-12px 0 22px; font-size:12px; }
+    .target { display:grid; grid-template-columns:34px minmax(0,1fr) 88px; gap:10px; align-items:center; min-height:57px; padding:10px 0; border-top:1px solid var(--line); }.target:first-of-type { border-top:0; }.target-index { color:#6b8193; font:700 11px ui-monospace,monospace; text-align:center; }.target input { margin:0; }.actions { display:grid; grid-template-columns:24px 24px 24px; gap:4px; align-items:center; justify-content:end; }.icon { width:24px; height:30px; border:0; border-radius:3px; background:transparent; color:#5d768a; font-size:18px; cursor:pointer; }.icon:hover,.icon:focus-visible { color:var(--blue); background:var(--blue-pale); outline:0; }.icon.remove:hover { color:var(--danger); background:#fbeaea; }.add-target { margin-top:9px; }
+    button.primary { height:35px; border:1px solid var(--blue); border-radius:4px; padding:0 12px; background:#fff; color:var(--blue); font-weight:700; cursor:pointer; }.primary:hover { background:var(--blue-pale); }.note { margin-top:18px; padding-top:15px; border-top:1px solid var(--line); font-size:12px; }.save { display:flex; justify-content:flex-end; gap:8px; margin-top:30px; padding-top:18px; border-top:1px solid var(--line); }.save button { height:39px; border:0; border-radius:4px; padding:0 16px; background:var(--blue); color:#fff; font-weight:700; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>Edit main/coding</h1><p>A stable client-facing identity. New requests use changes immediately.</p></header>
+    <form class="content">
+      <label>Routing mode
+        <select id="mode"><option value="fixed">Fixed</option><option value="fallback">Ordered fallback</option></select>
+      </label>
+
+      <section class="view active" id="fixed">
+        <input aria-label="Fixed target model" list="models" value="Anthropic / claude-sonnet-4" placeholder="Type a provider or model name…">
+        <p class="hint">One target only. If it is unavailable, this virtual model returns an error.</p>
+      </section>
+
+      <section class="view" id="fallback">
+        <div class="target"><span class="target-index">01</span><input aria-label="First target model" list="models" value="Anthropic / claude-sonnet-4" placeholder="Type a provider or model name…"><div class="actions"><button class="icon" title="Move up" type="button">↑</button><button class="icon" title="Move down" type="button">↓</button><button class="icon remove" title="Remove target" type="button">×</button></div></div>
+        <div class="target"><span class="target-index">02</span><input aria-label="Second target model" list="models" value="OpenRouter / anthropic/claude-sonnet-4" placeholder="Type a provider or model name…"><div class="actions"><button class="icon" title="Move up" type="button">↑</button><button class="icon" title="Move down" type="button">↓</button><button class="icon remove" title="Remove target" type="button">×</button></div></div>
+        <div class="target"><span class="target-index">03</span><input aria-label="Third target model" list="models" value="OpenAI / gpt-5" placeholder="Type a provider or model name…"><div class="actions"><button class="icon" title="Move up" type="button">↑</button><button class="icon" title="Move down" type="button">↓</button><button class="icon remove" title="Remove target" type="button">×</button></div></div>
+        <button class="primary add-target" type="button">+ Add target</button>
+      </section>
+
+      <p class="note">Fixed shows one type-ahead field. Ordered fallback stays as a single flat list.</p>
+      <footer class="save"><button type="button">Save routing</button></footer>
+    </form>
+  </main>
+  <datalist id="models"><option value="Anthropic / claude-sonnet-4"><option value="OpenRouter / anthropic/claude-sonnet-4"><option value="OpenAI / gpt-5"></datalist>
+  <script>
+    const mode = document.querySelector('#mode');
+    mode.addEventListener('change', () => { document.querySelector('#fixed').classList.toggle('active', mode.value === 'fixed'); document.querySelector('#fallback').classList.toggle('active', mode.value === 'fallback'); });
+  </script>
+</body>
+</html>
