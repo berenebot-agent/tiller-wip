@@ -100,7 +100,11 @@ func NewRegistry() *Registry {
 	transport := &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 120 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+		// Keep a stalled ordered-fallback target from consuming the client's
+		// entire request deadline. Once headers arrive, streaming may continue
+		// without this header timeout interrupting the response body.
+		ResponseHeaderTimeout: 15 * time.Second,
 		ExpectContinueTimeout: time.Second, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second,
 	}
 	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}

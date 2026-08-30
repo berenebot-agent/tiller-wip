@@ -235,7 +235,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				class = "upstream_timeout"
 			}
 			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
-			if !route.Virtual || r.Context().Err() != nil {
+			if r.Context().Err() != nil {
+				if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+					class = "client_timeout"
+				} else {
+					class = "client_cancelled"
+				}
+				row.httpStatus = 502
+				row.errorText = strPtr(class)
+				row.fallbackReason = strPtr(class)
+				inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
+				return
+			}
+			if !route.Virtual {
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
 				inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
