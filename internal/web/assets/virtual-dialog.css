@@ -1,0 +1,69 @@
+#form-dialog {
+  max-height: calc(100vh - 28px);
+  overflow: hidden;
+}
+
+#form-dialog form {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 28px);
+  overflow: hidden;
+}
+
+#form-dialog .dialog-fields {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#form-dialog form > header,
+#form-dialog form > footer {
+  flex: none;
+}
+
+/* Pickers escape the modal's scroll container so the catalogue can expand
+   over the viewport instead of being clipped inside the small dialog. */
+.combobox-list {
+  position: fixed;
+  max-height: min(360px, 55vh);
+  overflow-y: auto;
+}
+
+.target-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+}
+
+.route-table td:first-child .meta-line { display: block; }
+
+.attempt-sequence {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 220px;
+}
+
+.activity-attempt {
+  display: grid;
+  grid-template-columns: 25px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 7px;
+  border: 1px solid #d8e1e8;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+.attempt-failed { border-color: #e7c2c1; background: #fff8f8; }
+.attempt-success { border-color: #b9ddca; background: #f4fbf7; }
+.attempt-number { color: #6b8193; font: 700 10px var(--mono); }
+.attempt-route { min-width: 0; }
+.attempt-route code { display: block; overflow: hidden; text-overflow: ellipsis; }
+.attempt-route small { display: block; color: var(--muted); font-size: 10px; }
+.attempt-status { font: 700 11px var(--mono); }
+.attempt-latency { color: var(--muted); font: 10px var(--mono); }
+.attempt-failed .attempt-status { color: var(--red); }
+.attempt-success .attempt-status { color: var(--green); }
+.fallback-label { display: block; margin-top: 4px; color: var(--red); font: 700 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
