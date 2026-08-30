@@ -67,7 +67,7 @@ func (s *Server) usageByClient(r *http.Request, c1, c24, c7 string) (map[string]
 }
 
 func (s *Server) usageByVirtual(r *http.Request, c1, c24, c7 string) (map[string]usageWindows, error) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT requested_model, `+usageSelect+` FROM request_logs WHERE created_at >= ? GROUP BY requested_model`, c1, c24, c7, c7)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT vm.canonical, `+usageSelect+` FROM request_logs l JOIN (SELECT g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON vm.canonical = l.requested_model WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c24, c7, c7)
 	if err != nil {
 		return nil, err
 	}

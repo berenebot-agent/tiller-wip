@@ -225,6 +225,93 @@ func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
 	}
 }
 
+func TestRequestLogPrimaryKeyIsClientRequestID(t *testing.T) {
+	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
+	const n = 3
+	headers := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("request %d status %d", i, resp.StatusCode)
+		}
+		headers = append(headers, resp.Header.Get("X-Tiller-Request-Id"))
+	}
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity?limit=50", nil)
+	if status != 200 {
+		t.Fatalf("activity: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != n {
+		t.Fatalf("expected %d log rows, got %d (rows lost)", n, len(data))
+	}
+	// Activity is newest-first; headers were collected oldest-first.
+	seen := map[string]bool{}
+	for i, raw := range data {
+		row := raw.(map[string]any)
+		id, _ := row["id"].(string)
+		crid, _ := row["client_request_id"].(string)
+		if id == "" || id != crid {
+			t.Fatalf("row %d: id=%q client_request_id=%q (must be equal)", i, id, crid)
+		}
+		// Newest first: data[0] is the last request made.
+		want := headers[n-1-i]
+		if id != want {
+			t.Fatalf("row %d: stored id %q does not match X-Tiller-Request-Id %q", i, id, want)
+		}
+		if seen[id] {
+			t.Fatalf("duplicate stored id %q", id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestLoggingDisabledClientProducesNoRows(t *testing.T) {
+	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
+	// Disable logging for this client.
+	status, _, _ := api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"logging_enabled": false})
+	if status != 204 {
+		t.Fatalf("disable logging: %d", status)
+	}
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("request status %d", resp.StatusCode)
+	}
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != 200 {
+		t.Fatalf("activity: %d %v", status, payload)
+	}
+	if len(payload["data"].([]any)) != 0 {
+		t.Fatalf("logging-disabled client produced log rows: %v", payload["data"])
+	}
+}
+
+// TestWriteLogBestEffort verifies the best-effort logging contract: writeLog is
+// void, never fails the request, and never writes a row when logging is
+// disabled or the client is unknown. Forcing a real INSERT failure would
+// require weakening production code, so we assert the contract is preserved
+// instead: writeLog returns nothing and the request path is unaffected.
+func TestWriteLogBestEffort(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := &Server{db: db}
+	// nil row is a no-op.
+	s.writeLog(context.Background(), nil)
+	// A row for a client that does not exist hits the logging-disabled path and
+	// returns without writing.
+	s.writeLog(context.Background(), &logRow{clientKeyID: "does-not-exist", clientRequestID: "req-x", requestedModel: "m", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: "now"})
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("best-effort writeLog wrote rows: count=%d err=%v", count, err)
+	}
+}
+
 func TestActivitySearchAndClear(t *testing.T) {
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	for i := 0; i < 3; i++ {

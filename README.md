@@ -32,6 +32,11 @@ direct LAN access. Reverse-proxy networking is deferred; when it returns, the
 router should join the external proxy network and stop publishing a host port.
 Do not configure a proxy to buffer SSE responses.
 
+The container runs with a **read-only root filesystem** and all Linux
+capabilities dropped. Persistent state is written only beneath the `./data`
+bind mount; `/tmp` is an ephemeral tmpfs (64 MiB, `noexec,nosuid,nodev`) used
+for SQLite/runtime temporary files and is wiped on every restart.
+
 ## First configuration
 
 1. Open the HTTPS administrator URL and sign in with the environment-supplied
@@ -103,6 +108,9 @@ authenticated export.
   applied.
 - Routing is deterministic. There is no retry, fallback, health-based reroute,
   or alternate-model selection.
+- The container root filesystem is read-only with all Linux capabilities
+  dropped and `no-new-privileges` enforced; `/tmp` is an ephemeral tmpfs, so
+  nothing written there survives a restart.
 
 ## Client configuration
 

@@ -1,5 +1,61 @@
 const { test, expect } = require('@playwright/test');
 
+const ADMIN_USER = process.env.TILLER_BROWSER_ADMIN_USERNAME || 'admin';
+const ADMIN_PASS = process.env.TILLER_BROWSER_ADMIN_PASSWORD || 'browser-test-password';
+const MOCK_BASE = process.env.TILLER_BROWSER_MOCK_BASE_URL || 'http://127.0.0.1:18081/v1';
+// Control origin used to simulate upstream catalogue growth/shrink.
+const MOCK_CONTROL_BASE = MOCK_BASE.replace(/\/v1$/, '');
+
+async function login(page) {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
+  await page.getByLabel('Administrator').fill(ADMIN_USER);
+  await page.getByLabel('Password').fill(ADMIN_PASS);
+  await page.getByRole('button', { name: 'Enter control panel' }).click();
+  await expect(page.getByRole('heading', { name: 'Providers', exact: true })).toBeVisible();
+}
+
+async function adminCsrf(page) {
+  const res = await page.request.get('/api/admin/session');
+  expect(res.ok()).toBeTruthy();
+  return (await res.json()).csrf_token;
+}
+
+async function createProvider(page, csrf, name) {
+  const res = await page.request.post('/api/admin/providers', {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { name, type: 'generic-openai', base_url: MOCK_BASE }
+  });
+  expect(res.status()).toBe(201);
+  const body = await res.json();
+  expect(body.refresh_error).toBeFalsy();
+  return body;
+}
+
+async function createClient(page, csrf, name) {
+  const res = await page.request.post('/api/admin/client-keys', {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { name, description: 'browser permission test client' }
+  });
+  expect(res.status()).toBe(201);
+  return res.json();
+}
+
+async function mockAddModel(page, id) {
+  const res = await page.request.post(`${MOCK_CONTROL_BASE}/__/models/add/${id}`);
+  expect(res.ok()).toBeTruthy();
+}
+async function mockRemoveModel(page, id) {
+  const res = await page.request.post(`${MOCK_CONTROL_BASE}/__/models/remove/${id}`);
+  expect(res.ok()).toBeTruthy();
+}
+async function refreshProviderApi(page, csrf, providerId) {
+  const res = await page.request.post(`/api/admin/providers/${providerId}/refresh`, {
+    headers: { 'X-CSRF-Token': csrf }
+  });
+  expect(res.ok()).toBeTruthy();
+}
+
 test('admin login, responsive navigation, one-time secret, and system view', async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 700 });
   await page.goto('/');
@@ -32,4 +88,409 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+});
+
+test('permission edits survive filtering, and cancel/save semantics hold', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'browser-perm';
+  const modelId = `${providerName}/mock-model`;
+  const clientName = 'browser-perm-client';
+  await createProvider(page, csrf, providerName);
+  await createClient(page, csrf, clientName);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(clientRow).toBeVisible();
+
+  const openPermissions = async () => {
+    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await expect(page.locator('#permissions-dialog')).toBeVisible();
+  };
+  const modelCheckbox = page.getByLabel(`Enable ${modelId}`);
+  const feederCheckbox = page.locator('.permission-group', { hasText: providerName }).locator('input[data-group-id]');
+
+  // 1. Open, toggle a model and the group feeder.
+  await openPermissions();
+  await expect(modelCheckbox).toBeVisible();
+  await modelCheckbox.check();
+  await feederCheckbox.check();
+  await expect(modelCheckbox).toBeChecked();
+  await expect(feederCheckbox).toBeChecked();
+
+  // 2. Filter so the changed model disappears.
+  await page.locator('#permission-search').fill('zzz-no-match');
+  await expect(modelCheckbox).toBeHidden();
+
+  // 3. Clear the filter; both unsaved changes must remain.
+  await page.locator('#permission-search').fill('');
+  await expect(modelCheckbox).toBeVisible();
+  await expect(modelCheckbox).toBeChecked();
+  await expect(feederCheckbox).toBeChecked();
+
+  // 4. Cancel discards; reopening reloads from the API (both back to OFF).
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  await openPermissions();
+  await expect(modelCheckbox).not.toBeChecked();
+  await expect(feederCheckbox).not.toBeChecked();
+
+  // 5. Repeat, save, reopen, and verify persistence.
+  await modelCheckbox.check();
+  await feederCheckbox.check();
+  await page.getByRole('button', { name: 'Save permissions' }).click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  await openPermissions();
+  await expect(modelCheckbox).toBeChecked();
+  await expect(feederCheckbox).toBeChecked();
+});
+
+test('permission bulk enable/disable applies only to current available models', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'bulk-perm';
+  const clientName = 'bulk-perm-client';
+  const canonical = id => `${providerName}/${id}`;
+
+  const provider = await createProvider(page, csrf, providerName);
+  await createClient(page, csrf, clientName);
+
+  // Grow the mock upstream catalogue, then retire one model, so the provider
+  // ends up with: mock-model (available), bulk-extra (available),
+  // bulk-retired (retired/unavailable).
+  await mockAddModel(page, 'bulk-extra');
+  await mockAddModel(page, 'bulk-retired');
+  await refreshProviderApi(page, csrf, provider.id);
+  await mockRemoveModel(page, 'bulk-retired');
+  await refreshProviderApi(page, csrf, provider.id);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(clientRow).toBeVisible();
+
+  const openPermissions = async () => {
+    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await expect(page.locator('#permissions-dialog')).toBeVisible();
+  };
+  const model = id => page.getByLabel(`Enable ${canonical(id)}`);
+  const feederCheckbox = page.locator('.permission-group', { hasText: providerName }).locator('input[data-group-id]');
+  const enableCurrent = page.getByRole('button', { name: 'Enable current' });
+  const disableCurrent = page.getByRole('button', { name: 'Disable current' });
+  const search = page.locator('#permission-search');
+  const cancel = page.getByRole('button', { name: 'Cancel' });
+  const save = page.getByRole('button', { name: 'Save permissions' });
+
+  // 1. Enable all AVAILABLE models with no filter; retired and feeder untouched.
+  await openPermissions();
+  await expect(model('mock-model')).toBeVisible();
+  await expect(model('bulk-extra')).toBeVisible();
+  await expect(model('bulk-retired')).toBeVisible();
+  await expect(feederCheckbox).not.toBeChecked();
+  await enableCurrent.click();
+  await expect(model('mock-model')).toBeChecked();
+  await expect(model('bulk-extra')).toBeChecked();
+  await expect(model('bulk-retired')).not.toBeChecked();
+  await expect(feederCheckbox).not.toBeChecked();
+
+  // 2. With a filter, disable only the matching AVAILABLE model.
+  await search.fill('bulk-extra');
+  await disableCurrent.click();
+  await expect(model('bulk-extra')).not.toBeChecked();
+  await expect(model('mock-model')).toBeChecked();    // available but not matching filter
+  await expect(model('bulk-retired')).not.toBeChecked(); // retired and not matching
+  await search.fill('');
+  await expect(model('bulk-extra')).not.toBeChecked();
+  await expect(model('mock-model')).toBeChecked();
+
+  // 3+5. Cancel discards bulk changes; reopening refetches (all back OFF).
+  await cancel.click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  await openPermissions();
+  await expect(model('mock-model')).not.toBeChecked();
+  await expect(model('bulk-extra')).not.toBeChecked();
+  await expect(model('bulk-retired')).not.toBeChecked();
+
+  // 6. Save persists bulk changes; retired models still untouched.
+  await enableCurrent.click();
+  await save.click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  await openPermissions();
+  await expect(model('mock-model')).toBeChecked();
+  await expect(model('bulk-extra')).toBeChecked();
+  await expect(model('bulk-retired')).not.toBeChecked();
+
+  // 7. A newly discovered model follows the feeder, not any prior bulk action.
+  await feederCheckbox.check();
+  await save.click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  await mockAddModel(page, 'bulk-new');
+  await refreshProviderApi(page, csrf, provider.id);
+  await openPermissions();
+  await expect(model('bulk-new')).toBeChecked();   // feeder applied at discovery
+  await expect(feederCheckbox).toBeChecked();      // feeder persisted
+
+  // Cleanup: remove mock extras so unrelated later providers stay isolated.
+  await cancel.click();
+  await mockRemoveModel(page, 'bulk-extra');
+  await mockRemoveModel(page, 'bulk-new');
+});
+
+test('reopening permissions clears the stale filter so bulk actions scope to all models', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'reopen-perm';
+  const clientName = 'reopen-perm-client';
+  const canonical = id => `${providerName}/${id}`;
+
+  const provider = await createProvider(page, csrf, providerName);
+  await createClient(page, csrf, clientName);
+
+  // Two AVAILABLE models so a filter can hide a subset: mock-model and reopen-extra.
+  await mockAddModel(page, 'reopen-extra');
+  await refreshProviderApi(page, csrf, provider.id);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(clientRow).toBeVisible();
+
+  const openPermissions = async () => {
+    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await expect(page.locator('#permissions-dialog')).toBeVisible();
+  };
+  const model = id => page.getByLabel(`Enable ${canonical(id)}`);
+  const search = page.locator('#permission-search');
+  const cancel = page.getByRole('button', { name: 'Cancel' });
+  const enableCurrent = page.getByRole('button', { name: 'Enable current' });
+
+  // 1. Open, then filter so only one of the two available models shows.
+  await openPermissions();
+  await expect(model('mock-model')).toBeVisible();
+  await expect(model('reopen-extra')).toBeVisible();
+  await search.fill('reopen-extra');
+  await expect(model('reopen-extra')).toBeVisible();
+  await expect(model('mock-model')).toBeHidden();
+
+  // 2. Close without saving, leaving the stale filter in the input.
+  await cancel.click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+
+  // 3. Reopen: the search field must be cleared and ALL models rendered.
+  await openPermissions();
+  await expect(search).toHaveValue('');
+  await expect(model('mock-model')).toBeVisible();
+  await expect(model('reopen-extra')).toBeVisible();
+
+  // 4. "Enable current" must now scope to the whole available set, including
+  //    the model that the old filter had hidden.
+  await enableCurrent.click();
+  await expect(model('mock-model')).toBeChecked();
+  await expect(model('reopen-extra')).toBeChecked();
+
+  // Cleanup: remove the extra mock model so unrelated later providers stay isolated.
+  await cancel.click();
+  await mockRemoveModel(page, 'reopen-extra');
+});
+
+test('global activity renders across clients, searches, and pages', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'browser-activity';
+  const modelId = `${providerName}/mock-model`;
+  const client1Name = 'activity-client-one';
+  const client2Name = 'activity-client-two';
+
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsRes.ok()).toBeTruthy();
+  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  expect(realModel).toBeTruthy();
+
+  const client1 = await createClient(page, csrf, client1Name);
+  const client2 = await createClient(page, csrf, client2Name);
+
+  const grant = async clientId => {
+    const res = await page.request.put(`/api/admin/client-keys/${clientId}/permissions`, {
+      headers: { 'X-CSRF-Token': csrf },
+      data: { defaults: [], permissions: [{ kind: 'real', model_id: realModel.id, enabled: true }] }
+    });
+    expect(res.status()).toBe(204);
+  };
+  await grant(client1.id);
+  await grant(client2.id);
+
+  const infer = async (secret, content) => {
+    const res = await page.request.post('/v1/chat/completions', {
+      headers: { Authorization: `Bearer ${secret}` },
+      data: { model: modelId, messages: [{ role: 'user', content }] }
+    });
+    expect(res.status()).toBe(200);
+  };
+
+  // Generate enough activity to exceed the 50-row page limit so pagination can
+  // be exercised, alternating between the two clients. Requests are fired
+  // sequentially to keep the test deterministic and avoid load spikes.
+  const total = 55;
+  for (let i = 0; i < total; i++) {
+    const secret = i % 2 === 0 ? client1.secret : client2.secret;
+    await infer(secret, `activity-content-${i}`);
+  }
+
+  // Navigate to Settings and verify the Global activity section renders.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#view-settings')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
+  await expect(page.locator('#global-activity-count')).toHaveText('1–50');
+  await expect(page.locator('#global-activity-prev')).toBeDisabled();
+  await expect(page.locator('#global-activity-next')).toBeEnabled();
+
+  // Search filters to a single client's rows (client2 got the 27 odd-indexed
+  // requests of the 55 total).
+  await page.locator('#global-activity-search').fill(client2Name);
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(27);
+  await expect(page.locator('#global-activity-empty')).toBeHidden();
+  await page.locator('#global-activity-search').fill('zzz-no-match');
+  await expect(page.locator('#global-activity-empty')).toBeVisible();
+  await page.locator('#global-activity-search').fill('');
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
+
+  // Pagination: Older loads the remaining 5 rows; Newer returns to page 1.
+  await page.locator('#global-activity-next').click();
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(5);
+  await expect(page.locator('#global-activity-count')).toHaveText('51–55');
+  await expect(page.locator('#global-activity-prev')).toBeEnabled();
+  await expect(page.locator('#global-activity-next')).toBeDisabled();
+  await page.locator('#global-activity-prev').click();
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
+  await expect(page.locator('#global-activity-count')).toHaveText('1–50');
+});
+
+test('activity pagination handles empty results and the exact-page boundary', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'browser-boundary';
+  const modelId = `${providerName}/mock-model`;
+
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsRes.ok()).toBeTruthy();
+  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  expect(realModel).toBeTruthy();
+
+  // Client A is never used to request, so its activity is empty.
+  const clientA = await createClient(page, csrf, 'boundary-empty-client');
+  // Client B will accumulate EXACTLY `limit` (50) rows of activity.
+  const clientB = await createClient(page, csrf, 'boundary-full-client');
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const clientARow = page.locator('#clients-body tr', { hasText: clientA.name });
+  await expect(clientARow).toBeVisible();
+
+  // 1. Per-client empty results: the count must be neutral (never "1–0") and the
+  //    empty state must be shown; both pager buttons are inert.
+  await clientARow.getByRole('button', { name: 'Activity' }).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await expect(page.locator('#activity-empty')).toBeVisible();
+  await expect(page.locator('#activity-count')).not.toHaveText('1–0');
+  await expect(page.locator('#activity-count')).toHaveText('0 results');
+  await expect(page.locator('#activity-prev')).toBeDisabled();
+  await expect(page.locator('#activity-next')).toBeDisabled();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('#activity-dialog')).toBeHidden();
+
+  // 2. Global activity empty rendering: filter to a term that matches nothing so
+  //    the section renders its empty state (earlier browser tests leave rows behind).
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#view-settings')).toBeVisible();
+  await page.locator('#global-activity-search').fill('zzz-no-match-boundary');
+  await expect(page.locator('#global-activity-empty')).toBeVisible();
+  await expect(page.locator('#global-activity-count')).not.toHaveText('1–0');
+  await expect(page.locator('#global-activity-count')).toHaveText('0 results');
+  await expect(page.locator('#global-activity-next')).toBeDisabled();
+  await page.locator('#global-activity-search').fill('');
+
+  // Grant client B access to the real model, then generate EXACTLY 50 activity
+  // rows sequentially (kept sequential to stay deterministic and avoid load spikes).
+  const grantRes = await page.request.put(`/api/admin/client-keys/${clientB.id}/permissions`, {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { defaults: [], permissions: [{ kind: 'real', model_id: realModel.id, enabled: true }] }
+  });
+  expect(grantRes.status()).toBe(204);
+  for (let i = 0; i < 50; i++) {
+    const res = await page.request.post('/v1/chat/completions', {
+      headers: { Authorization: `Bearer ${clientB.secret}` },
+      data: { model: modelId, messages: [{ role: 'user', content: `boundary-content-${i}` }] }
+    });
+    expect(res.status()).toBe(200);
+  }
+
+  // 3. Exact-page boundary (exactly `limit` rows): the per-client dialog must show
+  //    all 50 rows with "1–50" and the "Older" button DISABLED because there are
+  //    no more pages — clicking it could otherwise fetch an empty "51–50" page.
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const clientBRow = page.locator('#clients-body tr', { hasText: clientB.name });
+  await expect(clientBRow).toBeVisible();
+  await clientBRow.getByRole('button', { name: 'Activity' }).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await expect(page.locator('#activity-empty')).toBeHidden();
+  await expect(page.locator('#activity-body tr')).toHaveCount(50);
+  await expect(page.locator('#activity-count')).toHaveText('1–50');
+  await expect(page.locator('#activity-next')).toBeDisabled();
+  await expect(page.locator('#activity-prev')).toBeDisabled();
+
+  // Cleanup: discard client B's activity so unrelated later tests stay isolated.
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('#activity-dialog')).toBeHidden();
+  const clearRes = await page.request.delete(`/api/admin/client-keys/${clientB.id}/activity`, {
+    headers: { 'X-CSRF-Token': csrf }
+  });
+  expect(clearRes.status()).toBe(204);
+});
+
+test('activity loads clear a previously shown error on success', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'browser-errclear';
+  const clientName = 'browser-errclear-client';
+  await createProvider(page, csrf, providerName);
+  await createClient(page, csrf, clientName);
+
+  // 1. Per-client dialog: plant a sentinel error, then a successful re-load
+  //    (debounced search) must clear it so no stale error lingers.
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(clientRow).toBeVisible();
+  await clientRow.getByRole('button', { name: 'Activity' }).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+
+  await page.evaluate(() => { document.querySelector('#activity-error').textContent = 'sentinel-error'; });
+  await expect(page.locator('#activity-error')).toHaveText('sentinel-error');
+
+  await page.locator('#activity-search').fill(clientName);
+  await expect(page.locator('#activity-error')).toHaveText('');
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('#activity-dialog')).toBeHidden();
+
+  // 2. Global activity section: same sentinel-then-success pattern must clear the error.
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#view-settings')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
+
+  await page.evaluate(() => { document.querySelector('#global-activity-error').textContent = 'sentinel-error'; });
+  await page.locator('#global-activity-search').fill(clientName);
+  await expect(page.locator('#global-activity-error')).toHaveText('');
+  await page.locator('#global-activity-search').fill('');
 });

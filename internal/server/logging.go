@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
@@ -45,7 +44,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		return
 	}
 	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		database.Now(), row.clientKeyID, row.requestedModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.createdAt)
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.createdAt)
 }
 
 // pruneRequestLogs deletes request logs older than each client's retention

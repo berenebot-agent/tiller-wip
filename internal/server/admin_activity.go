@@ -48,6 +48,58 @@ func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
 		v.Streaming = scanBool(streaming)
 		data = append(data, v)
 	}
+	// Guard: rows.Next() can terminate early on a row-iteration error without
+	// surfacing it via Scan. Check rows.Err() so a partial result set is never
+	// returned as a 200 "success". (Not unit-tested: forcing an iteration
+	// failure would require weakening production code.)
+	if err := rows.Err(); err != nil {
+		adminError(w, 500, "database_error", "Could not load activity.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
+}
+
+// globalActivityView extends activityView with the client identity so the
+// workspace-free Global Activity endpoint can report which client key each
+// request belongs to. It reuses the activityView field definitions rather than
+// duplicating incompatible row-scanning logic.
+type globalActivityView struct {
+	activityView
+	ClientKeyID string `json:"client_key_id"`
+	ClientName  string `json:"client_name"`
+}
+
+// listGlobalActivity returns recent request metadata across all client keys,
+// newest first, with a deterministic id secondary sort. It is read-only and
+// returns metadata only (never body-related fields).
+func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
+	limit, offset, search := pagination(r)
+	pattern := "%" + search + "%"
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE (ck.name LIKE ? OR rl.requested_model LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR coalesce(rl.resolved_model,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR rl.client_request_id LIKE ? OR coalesce(rl.provider_request_id,'') LIKE ? OR coalesce(rl.error_text,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load activity.")
+		return
+	}
+	defer rows.Close()
+	data := []globalActivityView{}
+	for rows.Next() {
+		var v globalActivityView
+		var streaming int
+		if err := rows.Scan(&v.ID, &v.RequestedModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.CreatedAt, &v.ClientKeyID, &v.ClientName); err != nil {
+			adminError(w, 500, "database_error", "Could not load activity.")
+			return
+		}
+		v.Streaming = scanBool(streaming)
+		data = append(data, v)
+	}
+	// Guard: rows.Next() can terminate early on a row-iteration error without
+	// surfacing it via Scan. Check rows.Err() so a partial result set is never
+	// returned as a 200 "success". (Not unit-tested: forcing an iteration
+	// failure would require weakening production code.)
+	if err := rows.Err(); err != nil {
+		adminError(w, 500, "database_error", "Could not load activity.")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 

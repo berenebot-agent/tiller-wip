@@ -1,6 +1,11 @@
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Optional extra upstream models that can be added/removed at runtime to
+# simulate catalogue discovery changes. The default catalogue is unaffected
+# until a browser/compatibility test adds a model.
+_extra_models = []
+
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -16,15 +21,25 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def catalogue(self):
+        ids = ["mock-model"]
+        for mid in _extra_models:
+            if mid not in ids:
+                ids.append(mid)
+        return {"object": "list", "data": [{"id": mid} for mid in ids]}
+
     def do_GET(self):
         if self.path == "/v1/models":
-            self.send_json({"object": "list", "data": [{"id": "mock-model"}]})
+            self.send_json(self.catalogue())
             return
         self.send_json({"error": "not found"}, 404)
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length) or b"{}")
+        if self.path.startswith("/__/models/"):
+            self.handle_model_control()
+            return
         if self.path == "/v1/responses":
             self.handle_responses(request)
             return
@@ -58,6 +73,27 @@ class Handler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         })
+
+    def handle_model_control(self):
+        # /__/models/add/{id} and /__/models/remove/{id}
+        parts = self.path.split("/")
+        if len(parts) < 5:
+            self.send_json({"error": "missing model id"}, 400)
+            return
+        action, model_id = parts[3], parts[4]
+        if not model_id:
+            self.send_json({"error": "missing model id"}, 400)
+            return
+        if action == "add":
+            if model_id not in _extra_models:
+                _extra_models.append(model_id)
+            self.send_json({"status": "added", "id": model_id})
+            return
+        if action == "remove":
+            _extra_models[:] = [m for m in _extra_models if m != model_id]
+            self.send_json({"status": "removed", "id": model_id})
+            return
+        self.send_json({"error": "unknown action"}, 400)
 
     def handle_responses(self, request):
         model = request.get("model", "mock-model")
