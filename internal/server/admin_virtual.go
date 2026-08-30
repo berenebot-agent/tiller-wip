@@ -225,6 +225,7 @@ type virtualTargetView struct {
 	ProviderID      string `json:"provider_id"`
 	ProviderName    string `json:"provider_name"`
 	UpstreamModelID string `json:"upstream_model_id"`
+	NativeProtocol  string `json:"native_protocol,omitempty"`
 	Position        int    `json:"position"`
 	Enabled         bool   `json:"enabled"`
 	Available       bool   `json:"available"`
@@ -268,7 +269,7 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) virtualTargets(r *http.Request, virtualID string) ([]virtualTargetView, error) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.id,t.provider_model_id,p.id,p.name,m.upstream_model_id,t.position,t.enabled,(p.enabled=1 AND m.available=1),CASE WHEN t.enabled=0 THEN 'Target is disabled' WHEN p.enabled=0 THEN 'Target provider is disabled' WHEN m.available=0 THEN 'Target model is retired' ELSE '' END,m.context_length,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position`, virtualID)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.id,t.provider_model_id,p.id,p.name,m.upstream_model_id,coalesce(m.native_protocol,''),t.position,t.enabled,(p.enabled=1 AND m.available=1),CASE WHEN t.enabled=0 THEN 'Target is disabled' WHEN p.enabled=0 THEN 'Target provider is disabled' WHEN m.available=0 THEN 'Target model is retired' ELSE '' END,m.context_length,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position`, virtualID)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +278,7 @@ func (s *Server) virtualTargets(r *http.Request, virtualID string) ([]virtualTar
 	for rows.Next() {
 		var v virtualTargetView
 		var enabled, available int
-		if err := rows.Scan(&v.ID, &v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.Position, &enabled, &available, &v.Warning, &v.ContextLength, &v.MaxOutputTokens); err != nil {
+		if err := rows.Scan(&v.ID, &v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.NativeProtocol, &v.Position, &enabled, &available, &v.Warning, &v.ContextLength, &v.MaxOutputTokens); err != nil {
 			return nil, err
 		}
 		v.Enabled, v.Available = scanBool(enabled), scanBool(available)

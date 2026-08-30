@@ -295,6 +295,22 @@ func (r *Registry) ollamaContextLength(ctx context.Context, provider Instance, m
 	if n, ok := coerceInt(payload.ModelInfo["llama.context_length"]); ok {
 		return n
 	}
+	// Ollama prefixes architecture-specific metadata keys. DeepSeek and newer
+	// architectures therefore expose e.g. deepseek.context_length rather than
+	// llama.context_length. Accept any architecture context key after the
+	// canonical llama key has been checked.
+	keys := make([]string, 0, len(payload.ModelInfo))
+	for key := range payload.ModelInfo {
+		if strings.HasSuffix(key, ".context_length") {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if n, ok := coerceInt(payload.ModelInfo[key]); ok {
+			return n
+		}
+	}
 	// Fall back to the runtime num_ctx from the Modelfile.
 	if n, ok := coerceInt(payload.Parameters["num_ctx"]); ok {
 		return n

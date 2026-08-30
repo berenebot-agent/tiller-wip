@@ -177,7 +177,7 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/tags":
-			_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"name": "qwen3.5:397b"}, map[string]any{"name": "llama3:8b"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"name": "qwen3.5:397b"}, map[string]any{"name": "llama3:8b"}, map[string]any{"name": "deepseek-v4-flash:0731"}}})
 		case "/api/show":
 			var input map[string]string
 			_ = json.NewDecoder(r.Body).Decode(&input)
@@ -187,6 +187,8 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 			case "llama3:8b":
 				// No trained context reported; fall back to runtime num_ctx.
 				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{}, "parameters": map[string]any{"num_ctx": 8192}})
+			case "deepseek-v4-flash:0731":
+				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{"deepseek.context_length": 1048576}, "parameters": map[string]any{}})
 			default:
 				http.Error(w, "unknown model", 404)
 			}
@@ -199,7 +201,7 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 2 {
+	if len(models) != 3 {
 		t.Fatalf("unexpected model count: %v", models)
 	}
 	if models[0].ID != "qwen3.5:397b" || models[0].ContextLength != 262144 {
@@ -207,6 +209,9 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 	}
 	if models[1].ID != "llama3:8b" || models[1].ContextLength != 8192 {
 		t.Fatalf("llama3:8b num_ctx fallback not captured: %+v", models[1])
+	}
+	if models[2].ID != "deepseek-v4-flash:0731" || models[2].ContextLength != 1048576 {
+		t.Fatalf("deepseek-v4-flash:0731 architecture context not captured: %+v", models[2])
 	}
 }
 
