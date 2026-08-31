@@ -386,7 +386,7 @@ function renderPermissions(filter = '') {
     const groups = state.permissionData.groups.filter(g => g.kind === kind);
     if (!groups.length) return '';
     const collapsed = collapsedPermissionSections.has(kind);
-    const label = kind === 'real' ? 'Real' : 'Virtual';
+    const label = kind === 'real' ? 'REAL MODELS' : 'VIRTUAL MODELS';
     return `<section class="permission-section"><header class="permission-section-head"><button class="permission-collapse" data-permission-section="${h(kind)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="Collapse ${h(label)}">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</button><h3>${h(label)}</h3></header><div class="permission-section-body${collapsed ? ' permission-section-hidden' : ''}">${groups.map(renderGroup).join('')}</div></section>`;
   };
   $('#permission-groups').innerHTML = ['real', 'virtual'].map(renderSection).join('');
