@@ -222,7 +222,7 @@ function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minW
 function virtualModelFields(model) {
   const groupOptions = state.groups.map(group => `<option value="${h(group.id)}" ${model?.group_id === group.id ? 'selected' : ''}>${h(group.name)}</option>`).join('');
   const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
-  return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><small class="fallback-hint" data-fallback-hint hidden>Models are tried in the order below. If one returns an error or fails to respond, the request is automatically retried with the next model below, seamlessly to the client.</small><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
+  return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Models are tried in the order below. If one returns an error or fails to respond, the request is automatically retried with the next model below, seamlessly to the client.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
 function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
@@ -375,7 +375,8 @@ async function openPermissions(client) {
 function renderPermissions(filter = '') {
   const term = filter.toLowerCase(); $('#permission-groups').innerHTML = state.permissionData.groups.map(group => {
     const models = group.models.map(model => `<label class="permission-row ${model.available ? '' : 'retired'}" ${term && !model.canonical_model_id.toLowerCase().includes(term) ? 'hidden' : ''}><code>${h(model.canonical_model_id)}</code><input class="switch" type="checkbox" data-permission-kind="${h(model.kind)}" data-model-id="${h(model.id)}" ${model.enabled ? 'checked' : ''} aria-label="Enable ${h(model.canonical_model_id)}"></label>`).join('');
-    return `<section class="permission-group"><header class="permission-group-head"><h3>${h(group.name)} <span class="protocol">${h(group.kind)}</span></h3><label class="toggle-label">New models default <input class="switch" type="checkbox" data-default-kind="${h(group.kind)}" data-group-id="${h(group.id)}" ${group.new_models_enabled ? 'checked' : ''}></label></header><div class="permission-list">${models || '<p class="meta-line">No models in this group.</p>'}</div></section>`;
+    const groupActions = group.models.length ? `<div class="permission-group-actions"><label class="toggle-label">New models default <input class="switch" type="checkbox" data-default-kind="${h(group.kind)}" data-group-id="${h(group.id)}" ${group.new_models_enabled ? 'checked' : ''}></label><div class="permission-bulk"><button class="btn btn-small btn-secondary" data-group-enable="${h(group.kind)}:${h(group.id)}" type="button">Enable all</button><button class="btn btn-small btn-secondary" data-group-disable="${h(group.kind)}:${h(group.id)}" type="button">Disable all</button></div></div>` : `<label class="toggle-label">New models default <input class="switch" type="checkbox" data-default-kind="${h(group.kind)}" data-group-id="${h(group.id)}" ${group.new_models_enabled ? 'checked' : ''}></label>`;
+    return `<section class="permission-group"><header class="permission-group-head"><h3>${h(group.name)} <span class="protocol">${h(group.kind)}</span></h3>${groupActions}</header><div class="permission-list">${models || '<p class="meta-line">No models in this group.</p>'}</div></section>`;
   }).join('');
   // The search term controls visibility only; it must never mutate permissions.
   // These handlers update the in-memory state before any re-render so unsaved
@@ -388,22 +389,31 @@ function renderPermissions(filter = '') {
     const group = state.permissionData.groups.find(g => g.kind === input.dataset.defaultKind && g.id === input.dataset.groupId);
     if (group) group.new_models_enabled = input.checked;
   }));
+  $$('[data-group-enable]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => bulkSetGroupPermissions(btn.dataset.groupEnable, true)));
+  $$('[data-group-disable]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => bulkSetGroupPermissions(btn.dataset.groupDisable, false)));
 }
 $('#permission-search').addEventListener('input', event => renderPermissions(event.target.value));
-function bulkSetCurrentPermissions(enabled) {
-  // A bulk action targets only AVAILABLE models (retired/unavailable are
-  // preserved), scoped to the current filter term when one is non-empty. It
+function bulkSetGroupPermissions(groupKey, enabled) {
+  // A per-group bulk action targets only AVAILABLE models in that group
+  // (retired/unavailable are preserved), ignoring the active search filter.
+  // It mutates only the in-memory checkboxes; nothing touches new_models_enabled.
+  const [kind, id] = groupKey.split(':');
+  const group = state.permissionData.groups.find(g => g.kind === kind && g.id === id);
+  if (!group) return;
+  group.models.forEach(model => { if (model.available) model.enabled = enabled; });
+  renderPermissions($('#permission-search').value);
+}
+function bulkSetAllPermissions(enabled) {
+  // A global bulk action targets only AVAILABLE models across every group
+  // (retired/unavailable are preserved), regardless of the search filter. It
   // mutates only the in-memory checkboxes; nothing touches new_models_enabled.
-  const term = ($('#permission-search').value || '').toLowerCase();
   state.permissionData.groups.forEach(group => group.models.forEach(model => {
-    if (!model.available) return;
-    if (term && !model.canonical_model_id.toLowerCase().includes(term)) return;
-    model.enabled = enabled;
+    if (model.available) model.enabled = enabled;
   }));
   renderPermissions($('#permission-search').value);
 }
-$('#enable-current-permissions').onclick = () => bulkSetCurrentPermissions(true);
-$('#disable-current-permissions').onclick = () => bulkSetCurrentPermissions(false);
+$('#enable-all-permissions').onclick = () => bulkSetAllPermissions(true);
+$('#disable-all-permissions').onclick = () => bulkSetAllPermissions(false);
 $('#close-permissions').onclick = $('#cancel-permissions').onclick = () => $('#permissions-dialog').close();
 $('#save-permissions').onclick = async () => {
   const button = $('#save-permissions'), client = state.modelClient;
