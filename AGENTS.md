@@ -4,16 +4,16 @@ Guardrails for any coding agent working in this repository. This file does not r
 
 ## Source of truth
 
-- `tiller-router-v1-specification.md` is the **frozen** V1 spec. Frozen means frozen: do not add, soften, or reinterpret requirements in it. If something seems missing or wrong, stop and flag it — don't silently patch the spec or work around it in code.
-- `tiller-router-roadmap-v2-core.md` describes deferred core work (active phases plus a Deferred Backlog). `tiller-router-roadmap-saas-multiuser.md` describes deferred multi-user/SaaS work. Nothing in either is authorized for implementation unless a human explicitly asks for that specific roadmap item by name.
-- If the two documents conflict, or if a request conflicts with either, stop and ask rather than picking one.
+- `tiller-router-v1-specification.md` is the reference spec. It is **no longer frozen**: in live dev it may be amended with explicit human sign-off, and diverging implementation (a planned change, not an accident) is acceptable when the human is driving it.
+- `tiller-router-roadmap-v2-core.md` describes deferred core work (active phases plus a Deferred Backlog). `tiller-router-roadmap-saas-multiuser.md` describes deferred multi-user/SaaS work. These are a backlog of ideas, not commitments.
+- If the two documents conflict, or a request conflicts with an approved change, ask rather than silently picking one — but do not treat the spec/roadmap as an impassable wall in live dev.
 
 ## Scope discipline
 
-- Before writing code for a new feature, ask: is this in the V1 spec's functional scope (§3), or is it in §27 Non-Goals / roadmap §15 Anti-Roadmap? If it's a non-goal, do not implement it, even as a "small" version, even if it seems like it would obviously help, and even if it's technically easy. Say so and stop.
-- Do not add a dependency, service, or infrastructure component that isn't already implied by the spec (no Redis, Postgres, message queues, vector DBs, Kubernetes, etc.) without explicit sign-off.
+- Before writing code for a new feature, check whether it's in the V1 spec's functional scope (§3), in §27 Non-Goals, or in the roadmaps' anti-roadmap. A non-goal or roadmap item is fine to build in live dev **with explicit human sign-off**, but never silently and never "just to see."
+- Adding a brand-new dependency, service, or infrastructure component (Redis, Postgres, message queues, vector DBs, Kubernetes, etc.) still requires an explicit, named request from a human.
 - Do not "clean up" the roadmap's phase ordering or scope on your own initiative. Roadmap sequencing is a human decision.
-- If a task requires touching something explicitly marked deferred (e.g. credential encryption, fallback routing) to complete the immediate ask, stop and surface that instead of quietly building the deferred piece too.
+- If a task requires touching something explicitly marked deferred (e.g. credential encryption, fallback routing) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
 
 ## Deployment model — non-negotiable
 
@@ -48,11 +48,10 @@ Guardrails for any coding agent working in this repository. This file does not r
 
 ## When to stop and ask instead of proceeding
 
-- The request conflicts with the frozen spec.
-- The request would require an anti-roadmap item (Redis, Postgres, Kubernetes, MCP, vector DB, semantic caching, built-in secret manager, etc.) even indirectly.
+- The request would add a brand-new dependency, service, or infrastructure component that the human has not explicitly named.
 - The request would change client-facing model IDs, provider names, or virtual model names (renames are breaking — confirm intent before touching).
-- The request touches credential handling, auth, or logging in a way not explicitly covered above.
-- You find an actual inconsistency between the spec and the roadmap, or between either document and the current code — report it, don't resolve it unilaterally.
+- The request touches credential handling, auth, or logging in a way not explicitly covered by the security guardrails above.
+- You find an actual inconsistency between the spec and the roadmap, or between either document and the current code — report it, don't resolve it silently.
 
 ## Testing expectations
 
