@@ -201,11 +201,11 @@ function combobox({ input, hidden, options, placeholder, onSelect }) {
   const render = (showAll = false) => {
     const term = showAll ? '' : input.value.trim().toLowerCase();
     items = options.filter(opt => !term || opt.label.toLowerCase().includes(term));
-    list.innerHTML = items.map((opt, i) => `<li role="option" data-i="${i}" ${i === active ? 'aria-selected="true"' : ''}>${h(opt.label)}${opt.muted ? '<small> — retired</small>' : ''}</li>`).join(''); const box=input.getBoundingClientRect(); list.style.left=`${box.left}px`; list.style.top=`${box.bottom+3}px`; list.style.width=`${box.width}px`;
+    list.innerHTML = items.map((opt, i) => `<li role="option" data-i="${i}" ${i === active ? 'aria-selected="true"' : ''} ${opt.disabled ? 'aria-disabled="true"' : ''}>${h(opt.label)}${opt.muted ? '<small> — retired</small>' : ''}${opt.disabled ? '<small> — unavailable</small>' : ''}</li>`).join(''); const box=input.getBoundingClientRect(); list.style.left=`${box.left}px`; list.style.top=`${box.bottom+3}px`; list.style.width=`${box.width}px`;
     list.hidden = !items.length; open = !list.hidden; input.setAttribute('aria-expanded', String(open));
     if (active >= items.length) active = items.length - 1;
   };
-  const select = i => { const opt = items[i]; if (!opt) return; hidden.value = opt.value; input.value = opt.label; onSelect?.(opt); close(); };
+  const select = i => { const opt = items[i]; if (!opt || opt.disabled) return; hidden.value = opt.value; input.value = opt.label; onSelect?.(opt); close(); };
   input.addEventListener('input', () => { if (hidden.value && !options.some(o => o.value === hidden.value && o.label === input.value)) hidden.value = ''; active = -1; render(); });
   input.addEventListener('click', () => { if (open) close(); else render(true); });
   input.addEventListener('keydown', event => {
@@ -236,16 +236,115 @@ function openVirtualModel(model = null) { if (!state.models.length) { flash('Dis
 }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ]; const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; if (model) { payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); flash('Virtual route created.'); } await loadVirtual(); } }); }
 async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
-async function loadClients(search = $('#client-search').value) { const [result, usage] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage')]); state.clients = result.data; state.usage = usage; renderClients(); }
-function renderClients() { $('#clients-empty').hidden = state.clients.length > 0; $('#clients-body').innerHTML = state.clients.map(client => `<tr><td class="primary-cell"><strong>${h(client.name)}</strong><small>${h(client.description || 'No description')}</small></td><td><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span></td><td><span class="meta-line">Created ${date(client.created_at)}${client.rotated_at ? `<br>Rotated ${date(client.rotated_at)}` : ''}</span></td><td>${badge(client.enabled, client.enabled ? 'Enabled' : 'Disabled', client.enabled ? 'good' : 'neutral')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-primary" data-client-permissions="${h(client.id)}">Permissions</button><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Edit</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td></tr>`).join(''); $$('[data-client-permissions]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientPermissions))); $$('[data-client-activity]').forEach(button => button.onclick = () => openActivity(state.clients.find(item => item.id === button.dataset.clientActivity))); $$('[data-client-rotate]').forEach(button => button.onclick = () => rotateClient(button.dataset.clientRotate)); $$('[data-client-edit]').forEach(button => button.onclick = () => openClient(state.clients.find(item => item.id === button.dataset.clientEdit))); $$('[data-client-delete]').forEach(button => button.onclick = () => deleteClient(button.dataset.clientDelete)); }
+async function loadClients(search = $('#client-search').value) { const [result, usage, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage'), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]); state.clients = result.data; state.usage = usage; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data; renderClients(); }
+function singleTargetOptions(client = null) {
+  const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
+  const options = [
+    ...state.virtualModels.map(item => ({ value:`virtual:${item.id}`, kind:'virtual', id:item.id, label:`Virtual · ${item.canonical_model_id}`, canonical:item.canonical_model_id, disabled:!item.available })),
+    ...state.models.map(item => ({ value:`real:${item.id}`, kind:'real', id:item.id, label:`Real · ${item.canonical_model_id}`, canonical:item.canonical_model_id, disabled:!item.available || providerEnabled.get(item.provider_id) === false }))
+  ];
+  if (client?.single_target_id && !options.some(item => item.kind === client.single_target_type && item.id === client.single_target_id)) options.unshift({ value:`${client.single_target_type}:${client.single_target_id}`, kind:client.single_target_type, id:client.single_target_id, label:`${client.single_target_type === 'virtual' ? 'Virtual' : 'Real'} · ${client.single_target_canonical || 'Unavailable target'}`, canonical:client.single_target_canonical || 'Unavailable target', disabled:true });
+  return options.sort((a,b) => a.label.localeCompare(b.label));
+}
+function mountSingleTargetPicker(root, client, onChange = null) {
+  const input = $('input[type="text"]', root), hidden = $('input[type="hidden"]', root), options = singleTargetOptions(client);
+  const currentValue = client?.single_target_id ? `${client.single_target_type}:${client.single_target_id}` : '';
+  const picker = combobox({ input, hidden, options, placeholder:'Search real or virtual models…', onSelect:onChange });
+  const current = options.find(item => item.value === currentValue);
+  if (current) { hidden.value = current.value; input.value = current.label; }
+  return picker;
+}
+function renderClients() {
+  $('#clients-empty').hidden = state.clients.length > 0;
+  $('#clients-body').innerHTML = state.clients.map(client => {
+    const routeLabel = client.type === 'single'
+      ? `${client.single_model_name} → ${client.single_target_canonical || 'Unavailable target'}`
+      : 'Catalogue permissions';
+    return `<tr><td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small></td><td><button class="route-button ${client.type === 'single' && client.single_target_available === false ? 'route-button-error' : ''}" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>${h(client.type === 'single' ? 'Single route' : 'Catalogue')}</span><strong>${h(routeLabel)}</strong><i aria-hidden="true">›</i></button></td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Edit</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td></tr>`;
+  }).join('');
+  $$('[data-client-models]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientModels)));
+  $$('[data-client-activity]').forEach(button => button.onclick = () => openActivity(state.clients.find(item => item.id === button.dataset.clientActivity))); $$('[data-client-rotate]').forEach(button => button.onclick = () => rotateClient(button.dataset.clientRotate)); $$('[data-client-edit]').forEach(button => button.onclick = () => openClient(state.clients.find(item => item.id === button.dataset.clientEdit))); $$('[data-client-delete]').forEach(button => button.onclick = () => deleteClient(button.dataset.clientDelete));
+}
 $('#add-client').onclick = () => openClient();
-function openClient(client = null) { openEntity({ eyebrow: client ? 'EDIT CLIENT' : 'ISSUE CREDENTIAL', title: client ? `Edit ${client.name}` : 'Create client key', fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : ''}`, submit: client ? 'Save client' : 'Create & show key', onSubmit: async form => { const values = new FormData(form); if (client) { await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify({ name: values.get('name'), description: values.get('description'), enabled: values.get('enabled') === 'on', logging_enabled: values.get('logging_enabled') === 'on', retention_days: Number(values.get('retention_days')) }) }); flash('Client key metadata updated.'); } else { const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify({ name: values.get('name'), description: values.get('description') }) }); showSecret(result.secret); } await loadClients(); } }); }
+function openClient(client = null) {
+  const modelFields = client ? '' : `<label>Type <select name="type"><option value="catalogue">Catalogue</option><option value="single">Single</option></select><small>Catalogue exposes permitted models. Single binds this key to exactly one route.</small></label><section data-single-fields><label>Client-facing model name <input name="single_model_name" value="main" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div></label></section>`;
+  const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
+  openEntity({
+    eyebrow: client ? 'EDIT CLIENT' : 'ISSUE CREDENTIAL',
+    title: client ? `Edit ${client.name}` : 'Create client key',
+    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${modelFields}${operationalFields}`,
+    submit: client ? 'Save client' : 'Create & show key',
+    onMount: form => {
+      if (client) return;
+      const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
+      mountSingleTargetPicker($('[data-single-target]', form));
+      const sync = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; };
+      typeSelect.onchange = sync;
+      sync();
+    },
+    onSubmit: async form => {
+      const values = new FormData(form);
+      const payload = { name: values.get('name'), description: values.get('description') };
+      if (client) {
+        payload.enabled = values.get('enabled') === 'on';
+        payload.logging_enabled = values.get('logging_enabled') === 'on';
+        payload.retention_days = Number(values.get('retention_days'));
+        await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+        flash('Client key configuration updated.');
+      } else {
+        const selected = String(values.get('single_target') || ''), split = selected.indexOf(':');
+        payload.type = values.get('type');
+        if (payload.type === 'single') {
+          if (split < 1) throw new Error('Choose an available real or virtual target.');
+          payload.single_model_name = values.get('single_model_name');
+          payload.single_target_type = selected.slice(0, split);
+          payload.single_target_id = selected.slice(split + 1);
+        }
+        const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify(payload) });
+        showSecret(result.secret);
+      }
+      await loadClients();
+    }
+  });
+}
 async function rotateClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Rotate ${client.name}?`, copy: 'The current secret will stop authenticating immediately. Permissions and metadata are preserved.', action: 'Rotate now' })) return; try { const result = await api(`/api/admin/client-keys/${id}/rotate`, { method: 'POST' }); showSecret(result.secret); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function openPermissions(client) {
-  try { state.permissionData = await api(`/api/admin/client-keys/${client.id}/permissions`); $('#permissions-title').textContent = `${client.name} permissions`; $('#permission-search').value = ''; renderPermissions(''); $('#permissions-dialog').showModal(); }
+  try {
+    state.permissionData = await api(`/api/admin/client-keys/${client.id}/permissions`);
+    state.modelClient = client;
+    $('#permissions-title').textContent = `Manage models · ${client.name}`;
+    $('#permission-search').value = '';
+    $('#client-model-mode').value = client.type;
+    $('#managed-single-model-name').value = client.single_model_name || 'main';
+    $('#managed-single-confirm-check').checked = false;
+    const targetRoot = $('[data-managed-single-target]');
+    targetRoot.innerHTML = '<input type="text" aria-label="Single model route"><input type="hidden">';
+    mountSingleTargetPicker(targetRoot, client);
+    renderPermissions('');
+    syncClientModelMode();
+    $('#permissions-dialog').showModal();
+  }
   catch (error) { flash(errorMessage(error), 'error'); }
+}
+function syncClientModelMode() {
+  const mode = $('#client-model-mode').value;
+  const single = mode === 'single';
+  $('#catalogue-config').hidden = single;
+  $('#single-model-config').hidden = !single;
+  $('#permissions-dialog').classList.toggle('single-mode', single);
+  $('#client-model-mode-copy').textContent = single ? 'Expose one stable name routed to one selected model.' : 'Expose only the real and virtual models enabled below.';
+  $('#save-permissions').textContent = single ? 'Save' : 'Save catalogue';
+  const name = $('#managed-single-model-name');
+  name.required = single;
+  syncManagedSingleConfirmation();
+}
+function syncManagedSingleConfirmation() {
+  const client = state.modelClient;
+  const breaking = $('#client-model-mode').value === 'single' && client?.type === 'single' && $('#managed-single-model-name').value !== client.single_model_name;
+  $('#managed-single-confirm').hidden = !breaking;
+  if (!breaking) $('#managed-single-confirm-check').checked = false;
 }
 function renderPermissions(filter = '') {
   const term = filter.toLowerCase(); $('#permission-groups').innerHTML = state.permissionData.groups.map(group => {
@@ -279,8 +378,37 @@ function bulkSetCurrentPermissions(enabled) {
 }
 $('#enable-current-permissions').onclick = () => bulkSetCurrentPermissions(true);
 $('#disable-current-permissions').onclick = () => bulkSetCurrentPermissions(false);
+$('#client-model-mode').onchange = syncClientModelMode;
+$('#managed-single-model-name').oninput = syncManagedSingleConfirmation;
 $('#close-permissions').onclick = $('#cancel-permissions').onclick = () => $('#permissions-dialog').close();
-$('#save-permissions').onclick = async () => { const button = $('#save-permissions'); button.disabled = true; $('#permissions-error').textContent = ''; try { const defaults = state.permissionData.groups.map(group => ({ kind: group.kind, group_id: group.id, enabled: group.new_models_enabled })); const permissions = state.permissionData.groups.flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.enabled }))); await api(`/api/admin/client-keys/${state.permissionData.client_key_id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) }); $('#permissions-dialog').close(); flash('Client catalogue permissions saved.'); } catch (error) { $('#permissions-error').textContent = errorMessage(error); } finally { button.disabled = false; } };
+$('#save-permissions').onclick = async () => {
+  const button = $('#save-permissions'), client = state.modelClient, mode = $('#client-model-mode').value;
+  button.disabled = true;
+  $('#permissions-error').textContent = '';
+  try {
+    if (mode === 'single') {
+      const selected = String($('input[type="hidden"]', $('[data-managed-single-target]')).value || ''), split = selected.indexOf(':');
+      if (split < 1) throw new Error('Choose an available real or virtual route.');
+      await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify({
+        type: 'single',
+        single_model_name: $('#managed-single-model-name').value,
+        single_target_type: selected.slice(0, split),
+        single_target_id: selected.slice(split + 1),
+        confirm_model_name_change: $('#managed-single-confirm-check').checked
+      }) });
+      flash('Single model route saved.');
+    } else {
+      if (client.type !== 'catalogue') await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify({ type: 'catalogue' }) });
+      const defaults = state.permissionData.groups.map(group => ({ kind: group.kind, group_id: group.id, enabled: group.new_models_enabled }));
+      const permissions = state.permissionData.groups.flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.enabled })));
+      await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
+      flash('Client catalogue permissions saved.');
+    }
+    $('#permissions-dialog').close();
+    await loadClients();
+  } catch (error) { $('#permissions-error').textContent = errorMessage(error); }
+  finally { button.disabled = false; }
+};
 
 const activityState = { client: null, model: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
 async function openActivity(client) { activityState.client = client; activityState.model = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; $('#clear-activity').hidden = false; await loadActivity(); $('#activity-dialog').showModal(); }
@@ -289,7 +417,8 @@ async function loadActivity() { if (!activityState.client && !activityState.mode
 function activityAttempt(attempt, index) { return `<div class="activity-attempt ${attempt.result === 'success' ? 'attempt-success' : 'attempt-failed'}"><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code>${h(attempt.provider)}/${h(attempt.model)}</code></span><span class="attempt-latency">${attempt.latency_ms} ms</span><span class="attempt-status">${attempt.http_status || h(attempt.result)}</span></div>`; }
 function attemptSequence(row) { if (!row.fallback_used || !row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map(activityAttempt).join('')}</div>`; }
 function resolvedActivity(row) { const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', latency_ms: row.latency_ms, http_status: row.http_status, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null; const resolved = row.fallback_used ? '' : fixedAttempt ? `<div class="attempt-sequence">${activityAttempt(fixedAttempt, 0)}</div>` : '<span class="meta-line">—</span>'; const sequence = row.fallback_used ? attemptSequence(row) : ''; const error = row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''; return `${resolved}${sequence}${error}`; }
-function renderActivity() { $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><code class="model-id">${h(row.requested_model)}</code></td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td><code class="model-id">${h(row.client_request_id)}</code></td></tr>`).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; }
+function requestIdentity(row) { const exposed=row.exposed_model && row.exposed_model!==row.requested_model ? `<span class="meta-line">Exposed: ${h(row.exposed_model)}</span>` : ''; const bound=row.route_model && row.route_model!==row.requested_model ? `<span class="meta-line">Bound: ${h(row.route_model)}</span>` : ''; return `<code class="model-id">${h(row.requested_model)}</code>${exposed}${bound}`; }
+function renderActivity() { $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td><code class="model-id">${h(row.client_request_id)}</code></td></tr>`).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; }
 filterInput('#activity-search', value => { activityState.search = value; activityState.offset = 0; loadActivity(); });
 $('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activityState.offset - activityState.limit); loadActivity(); };
 $('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
@@ -300,7 +429,7 @@ $('#clear-activity').onclick = async () => { if (!await confirmAction({ title: `
 // the per-client Activity dialog. It shows metadata across all client keys.
 const globalActivityState = { rows: [], offset: 0, limit: 50, search: '', hasMore: true };
 async function loadGlobalActivity() { globalActivityState.controller?.abort(); globalActivityState.controller = new AbortController(); const { signal } = globalActivityState.controller; try { const result = await api(`/api/admin/activity?limit=${globalActivityState.limit + 1}&offset=${globalActivityState.offset}&search=${encodeURIComponent(globalActivityState.search || '')}`, { signal }); const fetched = result.data; globalActivityState.hasMore = fetched.length > globalActivityState.limit; globalActivityState.rows = fetched.slice(0, globalActivityState.limit); $('#global-activity-error').textContent = ''; renderGlobalActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#global-activity-error').textContent = errorMessage(error); } }
-function renderGlobalActivity() { $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong>${h(row.client_name)}</strong></td><td><code class="model-id">${h(row.requested_model)}</code></td><td>${row.resolved_provider ? `<code class="model-id">${h(row.resolved_provider)}/${h(row.resolved_model || '')}</code>` : '<span class="meta-line">—</span>'}${badge(row.http_status >= 200 && row.http_status < 300, row.http_status, row.http_status >= 200 && row.http_status < 300 ? 'good' : 'bad')}${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td><code class="model-id">${h(row.client_request_id)}</code></td></tr>`).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
+function renderGlobalActivity() { $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong>${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${row.resolved_provider ? `<code class="model-id">${h(row.resolved_provider)}/${h(row.resolved_model || '')}</code>` : '<span class="meta-line">—</span>'}${badge(row.http_status >= 200 && row.http_status < 300, row.http_status, row.http_status >= 200 && row.http_status < 300 ? 'good' : 'bad')}${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td><code class="model-id">${h(row.client_request_id)}</code></td></tr>`).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
 filterInput('#global-activity-search', value => { globalActivityState.search = value; globalActivityState.offset = 0; loadGlobalActivity(); });
 $('#global-activity-prev').onclick = () => { globalActivityState.offset = Math.max(0, globalActivityState.offset - globalActivityState.limit); loadGlobalActivity(); };
 $('#global-activity-next').onclick = () => { globalActivityState.offset += globalActivityState.limit; loadGlobalActivity(); };

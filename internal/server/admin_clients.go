@@ -3,6 +3,8 @@ package server
 import (
 	"database/sql"
 	"net/http"
+	"regexp"
+	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
@@ -10,22 +12,71 @@ import (
 )
 
 type clientKeyView struct {
-	ID             string  `json:"id"`
-	Name           string  `json:"name"`
-	Description    string  `json:"description"`
-	Fingerprint    string  `json:"fingerprint"`
-	Enabled        bool    `json:"enabled"`
-	LoggingEnabled bool    `json:"logging_enabled"`
-	RetentionDays  int     `json:"retention_days"`
-	CreatedAt      string  `json:"created_at"`
-	RotatedAt      *string `json:"rotated_at"`
-	UpdatedAt      string  `json:"updated_at"`
+	ID                    string  `json:"id"`
+	Name                  string  `json:"name"`
+	Description           string  `json:"description"`
+	Fingerprint           string  `json:"fingerprint"`
+	Enabled               bool    `json:"enabled"`
+	LoggingEnabled        bool    `json:"logging_enabled"`
+	RetentionDays         int     `json:"retention_days"`
+	CreatedAt             string  `json:"created_at"`
+	RotatedAt             *string `json:"rotated_at"`
+	UpdatedAt             string  `json:"updated_at"`
+	Type                  string  `json:"type"`
+	SingleModelName       string  `json:"single_model_name,omitempty"`
+	SingleTargetType      string  `json:"single_target_type,omitempty"`
+	SingleTargetID        string  `json:"single_target_id,omitempty"`
+	SingleTargetCanonical string  `json:"single_target_canonical,omitempty"`
+	SingleTargetAvailable bool    `json:"single_target_available"`
+}
+
+var clientModelNamePattern = regexp.MustCompile(`^[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?$`)
+
+func validClientModelName(name string) bool {
+	return len(name) >= 1 && len(name) <= 255 && !strings.Contains(name, "//") && clientModelNamePattern.MatchString(name)
+}
+
+func validateSingleTarget(tx *sql.Tx, targetType, targetID string) error {
+	table := "provider_models"
+	if targetType == "virtual" {
+		table = "virtual_models"
+	} else if targetType != "real" {
+		return sql.ErrNoRows
+	}
+	var exists int
+	if err := tx.QueryRow(`SELECT count(*) FROM `+table+` WHERE id=?`, targetID).Scan(&exists); err != nil || exists != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func upsertSingleBinding(tx *sql.Tx, clientID, modelName, targetType, targetID, now string) error {
+	var realID, virtualID any
+	if targetType == "real" {
+		realID = targetID
+	} else {
+		virtualID = targetID
+	}
+	_, err := tx.Exec(`INSERT INTO client_single_bindings(client_key_id,exposed_model_name,real_model_id,virtual_model_id,created_at,updated_at)
+		VALUES(?,?,?,?,?,?) ON CONFLICT(client_key_id) DO UPDATE SET exposed_model_name=excluded.exposed_model_name,real_model_id=excluded.real_model_id,virtual_model_id=excluded.virtual_model_id,updated_at=excluded.updated_at`, clientID, modelName, realID, virtualID, now, now)
+	return err
 }
 
 func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,name,description,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,rotated_at,updated_at FROM client_keys WHERE name LIKE ? OR description LIKE ? ORDER BY name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT c.id,c.name,c.description,c.secret_fingerprint,c.enabled,c.logging_enabled,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
+		coalesce(b.exposed_model_name,''),
+		CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
+		coalesce(b.real_model_id,b.virtual_model_id,''),
+		CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END,
+		CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.enabled=1 AND rm.available=1,0)
+		     WHEN b.virtual_model_id IS NOT NULL THEN EXISTS(SELECT 1 FROM virtual_model_targets vt JOIN provider_models pm ON pm.id=vt.provider_model_id JOIN providers p ON p.id=pm.provider_id WHERE vt.virtual_model_id=b.virtual_model_id AND vt.enabled=1 AND pm.available=1 AND p.enabled=1)
+		     ELSE 0 END
+		FROM client_keys c LEFT JOIN client_single_bindings b ON b.client_key_id=c.id
+		LEFT JOIN provider_models rm ON rm.id=b.real_model_id LEFT JOIN providers rp ON rp.id=rm.provider_id
+		LEFT JOIN virtual_models vm ON vm.id=b.virtual_model_id LEFT JOIN virtual_provider_groups vg ON vg.id=vm.virtual_group_id
+		WHERE c.name LIKE ? OR c.description LIKE ? ORDER BY c.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list client keys.")
 		return
@@ -35,12 +86,14 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var v clientKeyView
 		var enabled, loggingEnabled int
-		if rows.Scan(&v.ID, &v.Name, &v.Description, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt) != nil {
+		var targetAvailable int
+		if rows.Scan(&v.ID, &v.Name, &v.Description, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &targetAvailable) != nil {
 			adminError(w, 500, "database_error", "Could not list client keys.")
 			return
 		}
 		v.Enabled = scanBool(enabled)
 		v.LoggingEnabled = scanBool(loggingEnabled)
+		v.SingleTargetAvailable = scanBool(targetAvailable)
 		data = append(data, v)
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
@@ -48,12 +101,37 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		Name             string `json:"name"`
+		Description      string `json:"description"`
+		Type             string `json:"type"`
+		SingleModelName  string `json:"single_model_name"`
+		SingleTargetType string `json:"single_target_type"`
+		SingleTargetID   string `json:"single_target_id"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
 		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Type == "" {
+		input.Type = "catalogue"
+	}
+	if input.Type != "catalogue" && input.Type != "single" {
+		adminError(w, 400, "invalid_client_type", "Client key type must be catalogue or single.")
+		return
+	}
+	if input.Type == "single" {
+		if input.SingleModelName == "" {
+			input.SingleModelName = "main"
+		}
+		if !validClientModelName(input.SingleModelName) {
+			adminError(w, 400, "invalid_model_name", "Client-facing model names must use 1-255 model-safe characters.")
+			return
+		}
+		if input.SingleTargetID == "" {
+			adminError(w, 400, "target_required", "A Single client key requires a target.")
+			return
+		}
 	}
 	generated, err := auth.GenerateKey()
 	if err != nil {
@@ -77,7 +155,16 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO client_keys(id,name,description,selector,secret_hash,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?,?,?)`, clientID, input.Name, input.Description, generated.Selector, generated.Hash, generated.Fingerprint, boolInt(loggingEnabled), retentionDays, now, now)
+	if input.Type == "single" {
+		if err = validateSingleTarget(tx, input.SingleTargetType, input.SingleTargetID); err != nil {
+			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
+			return
+		}
+	}
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO client_keys(id,name,description,selector,secret_hash,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,updated_at,key_type) VALUES(?,?,?,?,?,?,1,?,?,?,?,?)`, clientID, input.Name, input.Description, generated.Selector, generated.Hash, generated.Fingerprint, boolInt(loggingEnabled), retentionDays, now, now, input.Type)
+	if err == nil && input.Type == "single" {
+		err = upsertSingleBinding(tx, clientID, input.SingleModelName, input.SingleTargetType, input.SingleTargetID, now)
+	}
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT ?,'real',id,0,? FROM providers`, clientID, now)
 	}
@@ -98,16 +185,21 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	writeJSON(w, 201, map[string]any{"id": clientID, "name": input.Name, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. It cannot be displayed again."})
+	writeJSON(w, 201, map[string]any{"id": clientID, "name": input.Name, "type": input.Type, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. It cannot be displayed again."})
 }
 
 func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Name           *string `json:"name"`
-		Description    *string `json:"description"`
-		Enabled        *bool   `json:"enabled"`
-		LoggingEnabled *bool   `json:"logging_enabled"`
-		RetentionDays  *int    `json:"retention_days"`
+		Name                   *string `json:"name"`
+		Description            *string `json:"description"`
+		Enabled                *bool   `json:"enabled"`
+		LoggingEnabled         *bool   `json:"logging_enabled"`
+		RetentionDays          *int    `json:"retention_days"`
+		Type                   *string `json:"type"`
+		SingleModelName        *string `json:"single_model_name"`
+		SingleTargetType       *string `json:"single_target_type"`
+		SingleTargetID         *string `json:"single_target_id"`
+		ConfirmModelNameChange bool    `json:"confirm_model_name_change"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -124,9 +216,9 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	var name, description string
+	var name, description, keyType string
 	var enabled, loggingEnabled, retentionDays int
-	if err = tx.QueryRowContext(r.Context(), `SELECT name,description,enabled,logging_enabled,retention_days FROM client_keys WHERE id=?`, clientID).Scan(&name, &description, &enabled, &loggingEnabled, &retentionDays); err == sql.ErrNoRows {
+	if err = tx.QueryRowContext(r.Context(), `SELECT name,description,enabled,logging_enabled,retention_days,key_type FROM client_keys WHERE id=?`, clientID).Scan(&name, &description, &enabled, &loggingEnabled, &retentionDays, &keyType); err == sql.ErrNoRows {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	} else if err != nil {
@@ -148,7 +240,60 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	if input.RetentionDays != nil {
 		retentionDays = *input.RetentionDays
 	}
-	_, err = tx.ExecContext(r.Context(), `UPDATE client_keys SET name=?,description=?,enabled=?,logging_enabled=?,retention_days=?,updated_at=? WHERE id=?`, name, description, enabled, loggingEnabled, retentionDays, database.Now(), clientID)
+	oldType := keyType
+	if input.Type != nil {
+		keyType = *input.Type
+	}
+	if keyType != "catalogue" && keyType != "single" {
+		adminError(w, 400, "invalid_client_type", "Client key type must be catalogue or single.")
+		return
+	}
+	var oldModelName, targetType, targetID string
+	var realID, virtualID sql.NullString
+	bindErr := tx.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, clientID).Scan(&oldModelName, &realID, &virtualID)
+	if bindErr != nil && bindErr != sql.ErrNoRows {
+		adminError(w, 500, "database_error", "Could not update client key.")
+		return
+	}
+	modelName := oldModelName
+	if bindErr == sql.ErrNoRows {
+		modelName = "main"
+	}
+	if realID.Valid {
+		targetType, targetID = "real", realID.String
+	} else if virtualID.Valid {
+		targetType, targetID = "virtual", virtualID.String
+	}
+	if input.SingleModelName != nil {
+		modelName = *input.SingleModelName
+	}
+	if (input.SingleTargetType == nil) != (input.SingleTargetID == nil) {
+		adminError(w, 400, "invalid_target", "Target type and target ID must be supplied together.")
+		return
+	}
+	if input.SingleTargetType != nil {
+		targetType, targetID = *input.SingleTargetType, *input.SingleTargetID
+	}
+	bindingSupplied := input.SingleModelName != nil || input.SingleTargetID != nil
+	if keyType == "single" || bindingSupplied {
+		if !validClientModelName(modelName) {
+			adminError(w, 400, "invalid_model_name", "Client-facing model names must use 1-255 model-safe characters.")
+			return
+		}
+		if err = validateSingleTarget(tx, targetType, targetID); err != nil {
+			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
+			return
+		}
+		if oldType == "single" && bindErr == nil && modelName != oldModelName && !input.ConfirmModelNameChange {
+			adminError(w, 409, "breaking_change_confirmation_required", "Changing the client-facing model name may require client reconfiguration. Confirm the breaking change.")
+			return
+		}
+	}
+	now := database.Now()
+	_, err = tx.ExecContext(r.Context(), `UPDATE client_keys SET name=?,description=?,enabled=?,logging_enabled=?,retention_days=?,key_type=?,updated_at=? WHERE id=?`, name, description, enabled, loggingEnabled, retentionDays, keyType, now, clientID)
+	if err == nil && (keyType == "single" || bindingSupplied) {
+		err = upsertSingleBinding(tx, clientID, modelName, targetType, targetID, now)
+	}
 	if err != nil || tx.Commit() != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")

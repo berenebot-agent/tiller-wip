@@ -10,8 +10,8 @@ chmod 0777 "$data_dir"
 router_port=${TILLER_COMPAT_ROUTER_PORT:-$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')}
 
 stop_containers() {
-    docker stop "$router_name" >/dev/null 2>&1 || true
-    docker stop "$mock_name" >/dev/null 2>&1 || true
+    docker rm -f "$router_name" >/dev/null 2>&1 || true
+    docker rm -f "$mock_name" >/dev/null 2>&1 || true
 }
 
 cleanup() {

@@ -16,25 +16,29 @@ import (
 // handler returns. Only metadata is ever stored — never prompt/response bodies,
 // tool arguments, reasoning content, or credentials.
 type logRow struct {
-	clientKeyID       string
-	requestedModel    string
-	resolvedProvider  *string
-	resolvedModel     *string
-	protocol          string
-	streaming         bool
-	httpStatus        int
-	latencyMs         int64
-	inputTokens           *int64
-	outputTokens          *int64
-	cacheReadInputTokens  *int64
+	clientKeyID              string
+	requestedModel           string
+	exposedModel             *string
+	routeKind                *string
+	routeModelID             *string
+	routeModel               *string
+	resolvedProvider         *string
+	resolvedModel            *string
+	protocol                 string
+	streaming                bool
+	httpStatus               int
+	latencyMs                int64
+	inputTokens              *int64
+	outputTokens             *int64
+	cacheReadInputTokens     *int64
 	cacheCreationInputTokens *int64
-	providerRequestID     *string
-	clientRequestID   string
-	errorText         *string
-	fallbackUsed      bool
-	fallbackReason    *string
-	attempts          []requestAttempt
-	createdAt         string
+	providerRequestID        *string
+	clientRequestID          string
+	errorText                *string
+	fallbackUsed             bool
+	fallbackReason           *string
+	attempts                 []requestAttempt
+	createdAt                string
 }
 
 type requestAttempt struct {
@@ -54,8 +58,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
 		return
 	}
-	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
+	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
 	for i, attempt := range row.attempts {
 		attemptID, err := id.New()
 		if err != nil {
@@ -102,9 +106,9 @@ func (s *Server) pruneRequestLogs(ctx context.Context) {
 // usageCapture accumulates token counts extracted from a response body in
 // memory. Only the numbers are ever retained; the body is discarded.
 type usageCapture struct {
-	inputTokens             *int64
-	outputTokens            *int64
-	cacheReadInputTokens    *int64 // OpenAI cached_tokens / Anthropic cache_read_input_tokens
+	inputTokens              *int64
+	outputTokens             *int64
+	cacheReadInputTokens     *int64 // OpenAI cached_tokens / Anthropic cache_read_input_tokens
 	cacheCreationInputTokens *int64 // Anthropic cache_creation_input_tokens
 }
 

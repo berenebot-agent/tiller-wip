@@ -236,6 +236,14 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var refs int
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings b JOIN provider_models m ON m.id=b.real_model_id WHERE m.provider_id=?`, providerID).Scan(&refs); err != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
+		return
+	}
+	if refs > 0 {
+		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this provider first.")
+		return
+	}
 	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models WHERE target_provider_id=?`, providerID).Scan(&refs); err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return

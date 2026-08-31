@@ -469,6 +469,15 @@ func (s *Server) deleteVirtualModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
+	var bindings int
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings WHERE virtual_model_id=?`, modelID).Scan(&bindings); err != nil {
+		adminError(w, 500, "database_error", "Could not delete virtual model.")
+		return
+	}
+	if bindings > 0 {
+		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this virtual model first.")
+		return
+	}
 	_, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='virtual' AND model_id=?`, modelID)
 	if err == nil {
 		result, e := tx.ExecContext(r.Context(), `DELETE FROM virtual_models WHERE id=?`, modelID)

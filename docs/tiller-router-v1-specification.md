@@ -135,7 +135,7 @@ V1 consists of six core capabilities:
 
 1. Provider management and model discovery.
 2. Client API key management.
-3. Per-client real-model permissions.
+3. Per-client Catalogue permissions and Single-route bindings.
 4. Virtual provider groups and virtual models.
 5. Transparent request routing and model rewriting.
 6. HTTP administration UI and REST management API.
@@ -363,6 +363,8 @@ Each client key has:
 - Last rotation timestamp.
 - Permission settings for real provider groups/models.
 - Permission settings for virtual provider groups/models.
+- Type: `catalogue` or `single`.
+- For Single keys, one client-facing model name and one real or virtual target binding.
 
 Examples:
 
@@ -451,13 +453,35 @@ Deleting a client key MUST immediately invalidate it.
 
 ---
 
+## 6.5 Client key types
+
+Existing and newly created keys default to `catalogue`. Catalogue keys retain
+the permission and routing behavior in §7 and §10.1-10.2.
+
+A `single` key exposes exactly one administrator-defined client-facing model
+name (default `main`) and binds it to exactly one real or virtual model. The
+binding itself authorizes that route; inactive Catalogue permissions neither
+grant nor restrict a Single key. The client-facing name is local to the key and
+does not create a global model or hidden virtual model.
+
+Switching types MUST preserve the inactive Catalogue permissions and MAY retain
+the inactive Single binding. Rotation MUST preserve both configurations.
+
+Changing an active Single key's client-facing model name is a breaking client
+configuration change and requires an explicit admin warning/confirmation.
+
+---
+
 # 7. Permission Model
 
 ## 7.1 Fundamental rule
 
 The client key is the authority for what the client can directly request and what appears in its model catalogue.
 
-A client MUST NOT be able to use a real or virtual model that is disabled for that key, even if the client knows or guesses the identifier.
+A Catalogue client MUST NOT be able to use a real or virtual model that is
+disabled for that key, even if the client knows or guesses the identifier. A
+Single client is authorized only for its configured binding, regardless of the
+model identifier supplied in the request.
 
 ---
 
@@ -465,7 +489,8 @@ A client MUST NOT be able to use a real or virtual model that is disabled for th
 
 Permissions are stored at model level.
 
-Each client key has an enabled/disabled permission for every relevant model.
+Each client key retains an enabled/disabled permission for every relevant model.
+These permissions are authoritative only while the key is in Catalogue mode.
 
 Provider-group controls do NOT override existing model settings.
 
@@ -723,6 +748,11 @@ Additional endpoint aliases MAY be supported if required by provider/client comp
 - Exclude disabled models.
 - Use canonical client-facing model IDs.
 
+For a Single key, it MUST instead return exactly one entry whose ID is the
+configured client-facing model name. It MUST NOT expose the bound real or
+virtual model. The entry inherits supported capability metadata from the bound
+route. It remains present when that route becomes unavailable.
+
 Examples:
 
 ```text
@@ -795,6 +825,25 @@ Client receives:  main/coding
 ```
 
 The underlying provider/model SHOULD remain transparent to the client for virtual routes.
+
+---
+
+## 10.4 Single-key routing
+
+A Single request MUST still contain a non-empty `model` field, but that value
+MUST NOT influence routing. After authentication, the router resolves only the
+key's configured binding. Supplying or guessing another model identifier cannot
+escape the binding and MUST NOT fall through to Catalogue permissions.
+
+Direct bindings use the normal real-model path. Virtual bindings use the normal
+virtual resolver, including that virtual model's ordered fallback policy. New
+requests observe binding changes immediately; in-flight requests continue with
+the route already resolved. Where protocol-safe, response model identity is
+rewritten to the Single key's configured client-facing name.
+
+An unavailable binding returns `503` without silent reassignment. Its target
+cannot be deleted while referenced; the administrator must repoint the key
+first.
 
 ---
 
@@ -1557,7 +1606,7 @@ V1 is complete only when all critical acceptance tests pass.
 
 ---
 
-## 28.3 Client catalogue isolation
+## 28.3 Catalogue client isolation
 
 Create two client keys with different permissions.
 
@@ -1659,6 +1708,22 @@ Verify:
 - Providers, models, virtual mappings, client metadata and permissions are restored.
 - Existing client keys still authenticate.
 - No plaintext client key can be extracted from backup.
+
+---
+
+## 28.10 Single-model client keys
+
+- Existing keys migrate as Catalogue keys with unchanged behavior.
+- A Single key can bind to a real model without enabling its Catalogue permission.
+- A Single key can bind to a virtual model while keeping its real target hidden.
+- `/v1/models` exposes exactly the configured client-facing identity.
+- Arbitrary non-empty requested model IDs always use the configured binding.
+- Responses preserve the configured client-facing identity where protocol-safe.
+- Inline target changes affect the next request without rotation or restart.
+- Broken bindings remain visible and inference returns `503`.
+- Bound targets cannot be deleted until affected Single keys are repointed.
+- Type switching and key rotation preserve inactive configuration.
+- Activity distinguishes requested, exposed, bound, and final provider/model identities.
 
 ---
 

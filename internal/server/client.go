@@ -21,6 +21,35 @@ import (
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
+	var keyType string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT key_type FROM client_keys WHERE id=?`, identity.ID).Scan(&keyType); err != nil {
+		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+		return
+	}
+	if keyType == "single" {
+		var modelName, realID, virtualID string
+		var real, virtual sql.NullString
+		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
+			inferenceError(w, 500, "server_error", "invalid_single_binding", "The Single client key is not configured correctly.", false)
+			return
+		}
+		realID, virtualID = real.String, virtual.String
+		var contextLength, maxOutputTokens sql.NullInt64
+		if real.Valid {
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens)
+		} else {
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT min(m.context_length),min(m.max_output_tokens) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=? AND t.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens)
+		}
+		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
+		if contextLength.Valid && contextLength.Int64 > 0 {
+			entry["context_length"] = contextLength.Int64
+		}
+		if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
+			entry["max_output_tokens"] = maxOutputTokens.Int64
+		}
+		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
+		return
+	}
 	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens FROM (
 	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
@@ -51,12 +80,13 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 }
 
 type resolvedRoute struct {
-	Provider                        providers.Instance
-	UpstreamModelID, RequestedModel string
-	NativeProtocol                  providers.Protocol
-	Virtual, Available              bool
-	RoutingMode                     string
-	Targets                         []resolvedRoute
+	Provider                            providers.Instance
+	UpstreamModelID, RequestedModel     string
+	NativeProtocol                      providers.Protocol
+	Virtual, Available                  bool
+	RoutingMode                         string
+	Targets                             []resolvedRoute
+	RouteKind, RouteModelID, RouteModel string
 }
 
 func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
@@ -65,20 +95,47 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		return resolvedRoute{}, err
 	}
 	defer tx.Rollback()
-	var route resolvedRoute
-	// Direct real models remain single-target and never participate in fallback.
-	var direct int
-	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&direct)
-	if err != nil {
+	var keyType string
+	if err = tx.QueryRowContext(ctx, `SELECT key_type FROM client_keys WHERE id=?`, clientID).Scan(&keyType); err != nil {
 		return resolvedRoute{}, err
 	}
-	if direct == 0 {
-		var virtualID string
-		err = tx.QueryRowContext(ctx, `SELECT v.id,v.routing_mode FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?`, clientID, requested).Scan(&virtualID, &route.RoutingMode)
-		if err != nil {
+	var route resolvedRoute
+	clientModel := requested
+	if keyType == "single" {
+		var realID, virtualID sql.NullString
+		if err = tx.QueryRowContext(ctx, `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, clientID).Scan(&clientModel, &realID, &virtualID); err != nil {
 			return resolvedRoute{}, err
 		}
-		rows, e := tx.QueryContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, virtualID)
+		if realID.Valid {
+			route.RouteKind, route.RouteModelID = "real", realID.String
+			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel); err != nil {
+				return resolvedRoute{}, err
+			}
+		} else {
+			route.RouteKind, route.RouteModelID = "virtual", virtualID.String
+			if err = tx.QueryRowContext(ctx, `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, virtualID.String).Scan(&route.RouteModel); err != nil {
+				return resolvedRoute{}, err
+			}
+		}
+	} else {
+		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
+		if err == nil {
+			route.RouteKind = "real"
+		} else if err == sql.ErrNoRows {
+			err = tx.QueryRowContext(ctx, `SELECT v.id,g.name||'/'||v.name FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
+			if err != nil {
+				return resolvedRoute{}, err
+			}
+			route.RouteKind = "virtual"
+		} else {
+			return resolvedRoute{}, err
+		}
+	}
+	if route.RouteKind == "virtual" {
+		if err = tx.QueryRowContext(ctx, `SELECT routing_mode FROM virtual_models WHERE id=?`, route.RouteModelID).Scan(&route.RoutingMode); err != nil {
+			return resolvedRoute{}, err
+		}
+		rows, e := tx.QueryContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
 		if e != nil {
 			return resolvedRoute{}, e
 		}
@@ -97,14 +154,14 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
 			}
 			target.Available = target.Provider.Enabled && scanBool(available)
-			target.Virtual = true
-			target.RequestedModel = requested
+			target.Virtual, target.RequestedModel = true, clientModel
+			target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
 			route.Targets = append(route.Targets, target)
 		}
 		if e = rows.Err(); e != nil {
 			return resolvedRoute{}, e
 		}
-		route.Virtual, route.RequestedModel = true, requested
+		route.Virtual, route.RequestedModel = true, clientModel
 		if len(route.Targets) > 0 {
 			route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
 		}
@@ -116,7 +173,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	var protocols string
 	var enabled, modelAvailable int
 	var nativeProtocol sql.NullString
-	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable)
+	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, route.RouteModelID).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable)
 	if err != nil {
 		return resolvedRoute{}, err
 	}
@@ -125,7 +182,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	if nativeProtocol.Valid {
 		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
 	}
-	route.RequestedModel = requested
+	route.RequestedModel = clientModel
 	route.Virtual = false
 	route.Available = route.Provider.Enabled && scanBool(modelAvailable)
 	if err := tx.Commit(); err != nil {
@@ -186,6 +243,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		inferenceError(w, 500, "server_error", "database_error", "Could not resolve the model.", incoming == providers.ProtocolMessages)
 		return
 	}
+	row.exposedModel = &route.RequestedModel
+	row.routeKind = &route.RouteKind
+	row.routeModelID = &route.RouteModelID
+	row.routeModel = &route.RouteModel
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
 		candidates = route.Targets
@@ -313,8 +374,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			return
 		}
 		row.httpStatus = 503
-		row.errorText = strPtr("virtual_model_unavailable")
-		inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
+		if route.Virtual {
+			row.errorText = strPtr("virtual_model_unavailable")
+			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
+		} else {
+			row.errorText = strPtr("model_unavailable")
+			inferenceError(w, 503, "service_unavailable_error", "model_unavailable", "The configured model is unavailable.", incoming == providers.ProtocolMessages)
+		}
 		return
 	}
 	defer cancel()

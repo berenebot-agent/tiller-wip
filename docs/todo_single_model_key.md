@@ -1,7 +1,7 @@
 # TODO — Single-Model Client Keys
 
 **Project:** Tiller Router  
-**Status:** Planned / ready for implementation planning  
+**Status:** Implemented
 **Scope:** Add a second client-key mode that exposes one stable client-facing model and centrally binds that key to one real or virtual model.
 
 ---
@@ -496,11 +496,10 @@ If the bound target is a virtual model, let the virtual model's own routing sema
 
 # 17. Target Deletion
 
-Prefer preventing deletion of a real or virtual model that is actively bound to a Single key.
+Deletion of a real or virtual model that is actively bound to a Single key is blocked.
 
-The admin should repoint the affected key first.
-
-If existing repository conventions instead support broken references safely, the implementation planner should identify that and recommend the cleanest consistent approach before coding.
+The admin must repoint the affected key first. Provider deletion is likewise
+blocked when one of its real models is bound to a Single key.
 
 Do not silently reassign a Single key to another model.
 

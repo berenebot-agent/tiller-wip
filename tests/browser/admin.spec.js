@@ -106,7 +106,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   await expect(clientRow).toBeVisible();
 
   const openPermissions = async () => {
-    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await clientRow.getByRole('button', { name: /Manage models/ }).click();
     await expect(page.locator('#permissions-dialog')).toBeVisible();
   };
   const modelCheckbox = page.getByLabel(`Enable ${modelId}`);
@@ -140,11 +140,86 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   // 5. Repeat, save, reopen, and verify persistence.
   await modelCheckbox.check();
   await feederCheckbox.check();
-  await page.getByRole('button', { name: 'Save permissions' }).click();
+  await page.getByRole('button', { name: 'Save catalogue' }).click();
   await expect(page.locator('#permissions-dialog')).toBeHidden();
   await openPermissions();
   await expect(modelCheckbox).toBeChecked();
   await expect(feederCheckbox).toBeChecked();
+});
+
+test('Single key creation, response identity, rename warning, and dialog route switching', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'single-ui';
+  const clientName = 'single-ui-client';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsResponse.ok()).toBeTruthy();
+  const models = (await modelsResponse.json()).data;
+  const real = models.find(model => model.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  const groupResponse = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'single-ui-vg' } });
+  expect(groupResponse.status()).toBe(201);
+  const group = await groupResponse.json();
+  const virtualResponse = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'coding', target_provider_id: provider.id, target_model_id: real.id } });
+  expect(virtualResponse.status()).toBe(201);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('button', { name: '+ Create client key' }).click();
+  await page.getByLabel('Client name').fill(clientName);
+  await page.locator('#form-dialog select[name="type"]').selectOption('single');
+  await expect(page.locator('#form-dialog').getByLabel('Client-facing model name')).toHaveValue('main');
+  const createTarget = page.locator('[data-single-target] input[type="text"]');
+  await createTarget.click();
+  await page.getByRole('option', { name: `Real · ${providerName}/mock-model` }).click();
+  await expect(page.locator('[name="single_target"]')).toHaveValue(/^real:/);
+  await page.getByRole('button', { name: 'Create & show key' }).click();
+  await page.waitForTimeout(300);
+  expect(await page.locator('#dialog-error').textContent()).toBe('');
+  const secretValue = page.locator('#secret-value');
+  await expect(secretValue).toHaveText(/^sk-tr-/);
+  const secret = await secretValue.textContent();
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
+
+  const row = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(row.locator('.route-button')).toContainText('Single route');
+  await expect(row.locator('.route-button')).toContainText('main');
+  await expect(row.locator('.status-dot')).toHaveAttribute('aria-label', 'Enabled');
+  const response = await page.request.post('/v1/chat/completions', { headers: { Authorization: `Bearer ${secret}` }, data: { model: 'ignored-typo', messages: [] } });
+  expect(response.status()).toBe(200);
+  expect((await response.json()).model).toBe('main');
+
+  await row.getByRole('button', { name: /Manage models/ }).click();
+  await page.locator('#client-model-mode').selectOption('catalogue');
+  await expect(page.locator('#catalogue-config')).toBeVisible();
+  await page.locator('#client-model-mode').selectOption('single');
+  await expect(page.locator('#single-model-config')).toBeVisible();
+  expect((await page.locator('#permissions-dialog').boundingBox()).height).toBeLessThan(600);
+  await page.locator('#managed-single-model-name').fill('coding');
+  await expect(page.locator('#managed-single-confirm')).toBeVisible();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('#permissions-error')).toContainText('Confirm the breaking change');
+  await page.locator('#managed-single-confirm-check').check();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+
+  const refreshedRow = page.locator('#clients-body tr', { hasText: clientName });
+  await refreshedRow.getByRole('button', { name: /Manage models/ }).click();
+  const route = page.getByLabel('Single model route');
+  await route.click();
+  await page.getByRole('option', { name: 'Virtual · single-ui-vg/coding' }).click();
+  await expect(route).toHaveValue('Virtual · single-ui-vg/coding');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  const catalogueResponse = await page.request.get('/v1/models', { headers: { Authorization: `Bearer ${secret}` } });
+  expect(catalogueResponse.status()).toBe(200);
+  expect((await catalogueResponse.json()).data.map(model => model.id)).toEqual(['coding']);
+  const clientsResponse = await page.request.get('/api/admin/client-keys?limit=200');
+  const singleClient = (await clientsResponse.json()).data.find(client => client.name === clientName);
+  const deleteClientResponse = await page.request.delete(`/api/admin/client-keys/${singleClient.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  expect(deleteClientResponse.status()).toBe(204);
 });
 
 test('permission bulk enable/disable applies only to current available models', async ({ page }) => {
@@ -173,7 +248,7 @@ test('permission bulk enable/disable applies only to current available models', 
   await expect(clientRow).toBeVisible();
 
   const openPermissions = async () => {
-    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await clientRow.getByRole('button', { name: /Manage models/ }).click();
     await expect(page.locator('#permissions-dialog')).toBeVisible();
   };
   const model = id => page.getByLabel(`Enable ${canonical(id)}`);
@@ -182,7 +257,7 @@ test('permission bulk enable/disable applies only to current available models', 
   const disableCurrent = page.getByRole('button', { name: 'Disable current' });
   const search = page.locator('#permission-search');
   const cancel = page.getByRole('button', { name: 'Cancel' });
-  const save = page.getByRole('button', { name: 'Save permissions' });
+  const save = page.getByRole('button', { name: 'Save catalogue' });
 
   // 1. Enable all AVAILABLE models with no filter; retired and feeder untouched.
   await openPermissions();
@@ -260,7 +335,7 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   await expect(clientRow).toBeVisible();
 
   const openPermissions = async () => {
-    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await clientRow.getByRole('button', { name: /Manage models/ }).click();
     await expect(page.locator('#permissions-dialog')).toBeVisible();
   };
   const model = id => page.getByLabel(`Enable ${canonical(id)}`);
