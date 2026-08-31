@@ -267,6 +267,12 @@ function mountInlineRoutePicker(root, client) {
   // Focusing a pre-filled route field blanks it so search filters from the
   // first keystroke; the prior target stays recoverable via the cancel button.
   input.addEventListener('focus', () => { if (input.value || hidden.value) { input.value = ''; hidden.value = ''; } });
+  // Clicking out without selecting a model reverts the field to the saved route.
+  input.addEventListener('blur', () => {
+    if (pending) return;
+    if (original) { hidden.value = original.value; input.value = original.label; }
+    else { hidden.value = ''; input.value = ''; }
+  });
   tick.addEventListener('click', async () => {
     if (!pending) return;
     const split = pending.indexOf(':');

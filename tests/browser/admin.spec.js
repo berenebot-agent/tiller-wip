@@ -312,6 +312,39 @@ test('single-route inline picker: red X cancels without saving', async ({ page }
   expect((await modelsRes.json()).data.map(m => m.id)).toEqual(['main']);
 });
 
+test('single-route inline picker: clicking away without selecting reverts to the saved route', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'blur-revert';
+  const clientName = 'blur-revert-client';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsRes.ok()).toBeTruthy();
+  const real = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  const createRes = await page.request.post('/api/admin/client-keys', {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { name: clientName, type: 'single', single_model_name: 'main', single_target_type: 'real', single_target_id: real.id }
+  });
+  expect(createRes.status()).toBe(201);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const row = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(row).toBeVisible();
+  const inlineRoute = row.locator('[data-inline-route] input[type="text"]');
+  await expect(inlineRoute).toHaveValue(`Real · ${providerName}/mock-model`);
+
+  // Clicking focuses and blanks the field.
+  await inlineRoute.click();
+  await expect(inlineRoute).toHaveValue('');
+
+  // Clicking away without selecting a model reverts to the saved route.
+  await page.locator('#client-search').click();
+  await expect(inlineRoute).toHaveValue(`Real · ${providerName}/mock-model`);
+});
+
 test('Settings dialog switches a client between catalogue and single', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
