@@ -367,15 +367,14 @@ async function openPermissions(client) {
     state.modelClient = client;
     $('#permissions-title').textContent = `Manage models · ${client.name}`;
     $('#permission-search').value = '';
-    renderPermissions('');
+    renderPermissions();
     $('#permissions-dialog').showModal();
   }
   catch (error) { flash(errorMessage(error), 'error'); }
 }
-function renderPermissions(filter = '') {
-  const term = filter.toLowerCase();
+function renderPermissions() {
   const renderGroup = group => {
-    const models = group.models.map(model => `<label class="permission-row ${model.available ? '' : 'retired'}" ${term && !model.canonical_model_id.toLowerCase().includes(term) ? 'hidden' : ''}><code>${h(model.canonical_model_id)}</code><input class="switch" type="checkbox" data-permission-kind="${h(model.kind)}" data-model-id="${h(model.id)}" ${model.enabled ? 'checked' : ''} aria-label="Enable ${h(model.canonical_model_id)}"></label>`).join('');
+    const models = group.models.map(model => `<label class="permission-row ${model.available ? '' : 'retired'}" data-canonical="${h(model.canonical_model_id)}"><code>${h(model.canonical_model_id)}</code><input class="switch" type="checkbox" data-permission-kind="${h(model.kind)}" data-model-id="${h(model.id)}" ${model.enabled ? 'checked' : ''} aria-label="Enable ${h(model.canonical_model_id)}"></label>`).join('');
     const groupActions = group.models.length ? `<div class="permission-group-actions"><label class="toggle-label">New models default <input class="switch" type="checkbox" data-default-kind="${h(group.kind)}" data-group-id="${h(group.id)}" ${group.new_models_enabled ? 'checked' : ''}></label><div class="permission-bulk"><button class="btn btn-small btn-secondary" data-group-enable="${h(group.kind)}:${h(group.id)}" type="button">Enable all</button><button class="btn btn-small btn-secondary" data-group-disable="${h(group.kind)}:${h(group.id)}" type="button">Disable all</button></div></div>` : `<label class="toggle-label">New models default <input class="switch" type="checkbox" data-default-kind="${h(group.kind)}" data-group-id="${h(group.id)}" ${group.new_models_enabled ? 'checked' : ''}></label>`;
     const groupKey = `${group.kind}:${group.id}`;
     const collapsed = collapsedPermissionGroups.has(groupKey);
@@ -437,7 +436,13 @@ function togglePermissionGroup(key) {
   arrow.textContent = collapsed ? GROUP_ARROW.down : GROUP_ARROW.up;
   arrow.setAttribute('aria-expanded', String(!collapsed));
 }
-$('#permission-search').addEventListener('input', event => renderPermissions(event.target.value));
+function applyPermissionFilter(term) {
+  const t = term.toLowerCase();
+  $$('.permission-row', $('#permission-groups')).forEach(row => {
+    row.hidden = t && !row.dataset.canonical.toLowerCase().includes(t);
+  });
+}
+$('#permission-search').addEventListener('input', event => applyPermissionFilter(event.target.value));
 function bulkSetGroupPermissions(groupKey, enabled) {
   // A per-group bulk action targets only AVAILABLE models in that group
   // (retired/unavailable are preserved), ignoring the active search filter.
@@ -446,7 +451,10 @@ function bulkSetGroupPermissions(groupKey, enabled) {
   const group = state.permissionData.groups.find(g => g.kind === kind && g.id === id);
   if (!group) return;
   group.models.forEach(model => { if (model.available) model.enabled = enabled; });
-  renderPermissions($('#permission-search').value);
+  group.models.forEach(model => {
+    const cb = document.querySelector(`[data-permission-kind="${model.kind}"][data-model-id="${model.id}"]`);
+    if (cb) cb.checked = model.enabled;
+  });
 }
 function bulkSetAllPermissions(enabled) {
   // A global bulk action targets only AVAILABLE models across every group
@@ -455,7 +463,10 @@ function bulkSetAllPermissions(enabled) {
   state.permissionData.groups.forEach(group => group.models.forEach(model => {
     if (model.available) model.enabled = enabled;
   }));
-  renderPermissions($('#permission-search').value);
+  state.permissionData.groups.forEach(group => group.models.forEach(model => {
+    const cb = document.querySelector(`[data-permission-kind="${model.kind}"][data-model-id="${model.id}"]`);
+    if (cb) cb.checked = model.enabled;
+  }));
 }
 $('#enable-all-permissions').onclick = () => bulkSetAllPermissions(true);
 $('#disable-all-permissions').onclick = () => bulkSetAllPermissions(false);
