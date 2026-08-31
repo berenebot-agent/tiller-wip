@@ -134,7 +134,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   await expect(feederCheckbox).toBeChecked();
 
   // 4. Cancel discards; reopening reloads from the API (both back to OFF).
-  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(page.locator('#permissions-dialog')).toBeHidden();
   await openPermissions();
   await expect(modelCheckbox).not.toBeChecked();
@@ -430,7 +430,7 @@ test('permission bulk enable/disable applies only to current available models', 
   const enableAll = page.locator('#enable-all-permissions');
   const disableAll = page.locator('#disable-all-permissions');
   const search = page.locator('#permission-search');
-  const cancel = page.getByRole('button', { name: 'Cancel' });
+  const cancel = page.getByRole('button', { name: 'Cancel', exact: true });
   const save = page.getByRole('button', { name: 'Save catalogue' });
 
   // 1. Enable all AVAILABLE models with no filter; retired and feeder untouched.
@@ -521,7 +521,7 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   };
   const model = id => page.getByLabel(`Enable ${canonical(id)}`);
   const search = page.locator('#permission-search');
-  const cancel = page.getByRole('button', { name: 'Cancel' });
+  const cancel = page.getByRole('button', { name: 'Cancel', exact: true });
   const enableAll = page.locator('#enable-all-permissions');
 
   // 1. Open, then filter so only one of the two available models shows.

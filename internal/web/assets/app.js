@@ -1,7 +1,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'providers', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null };
-const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedPermissionGroups = new Set();
+const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const capabilities = model => `<span class="meta-line">Context: ${model.context_length ? h(model.context_length) : '—'}</span><span class="meta-line">Output: ${model.max_output_tokens ? h(model.max_output_tokens) : '—'}</span>`;
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
@@ -373,14 +373,23 @@ async function openPermissions(client) {
   catch (error) { flash(errorMessage(error), 'error'); }
 }
 function renderPermissions(filter = '') {
-  const term = filter.toLowerCase(); $('#permission-groups').innerHTML = state.permissionData.groups.map(group => {
+  const term = filter.toLowerCase();
+  const renderGroup = group => {
     const models = group.models.map(model => `<label class="permission-row ${model.available ? '' : 'retired'}" ${term && !model.canonical_model_id.toLowerCase().includes(term) ? 'hidden' : ''}><code>${h(model.canonical_model_id)}</code><input class="switch" type="checkbox" data-permission-kind="${h(model.kind)}" data-model-id="${h(model.id)}" ${model.enabled ? 'checked' : ''} aria-label="Enable ${h(model.canonical_model_id)}"></label>`).join('');
     const groupActions = group.models.length ? `<div class="permission-group-actions"><label class="toggle-label">New models default <input class="switch" type="checkbox" data-default-kind="${h(group.kind)}" data-group-id="${h(group.id)}" ${group.new_models_enabled ? 'checked' : ''}></label><div class="permission-bulk"><button class="btn btn-small btn-secondary" data-group-enable="${h(group.kind)}:${h(group.id)}" type="button">Enable all</button><button class="btn btn-small btn-secondary" data-group-disable="${h(group.kind)}:${h(group.id)}" type="button">Disable all</button></div></div>` : `<label class="toggle-label">New models default <input class="switch" type="checkbox" data-default-kind="${h(group.kind)}" data-group-id="${h(group.id)}" ${group.new_models_enabled ? 'checked' : ''}></label>`;
     const groupKey = `${group.kind}:${group.id}`;
     const collapsed = collapsedPermissionGroups.has(groupKey);
     const title = group.models.length ? `<div class="permission-group-title"><button class="permission-collapse" data-permission-collapse="${h(groupKey)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="Collapse ${h(group.name)}">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</button><h3>${h(group.name)} <span class="protocol">${h(group.kind)}</span></h3></div>` : `<h3>${h(group.name)} <span class="protocol">${h(group.kind)}</span></h3>`;
     return `<section class="permission-group"><header class="permission-group-head">${title}${groupActions}</header><div class="permission-list${collapsed ? ' permission-list-hidden' : ''}">${models || '<p class="meta-line">No models in this group.</p>'}</div></section>`;
-  }).join('');
+  };
+  const renderSection = kind => {
+    const groups = state.permissionData.groups.filter(g => g.kind === kind);
+    if (!groups.length) return '';
+    const collapsed = collapsedPermissionSections.has(kind);
+    const label = kind === 'real' ? 'Real' : 'Virtual';
+    return `<section class="permission-section"><header class="permission-section-head"><button class="permission-collapse" data-permission-section="${h(kind)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="Collapse ${h(label)}">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</button><h3>${h(label)}</h3></header><div class="permission-section-body${collapsed ? ' permission-section-hidden' : ''}">${groups.map(renderGroup).join('')}</div></section>`;
+  };
+  $('#permission-groups').innerHTML = ['real', 'virtual'].map(renderSection).join('');
   // The search term controls visibility only; it must never mutate permissions.
   // These handlers update the in-memory state before any re-render so unsaved
   // toggles survive filtering. state.permissionData is the single source of truth.
@@ -398,6 +407,12 @@ function renderPermissions(filter = '') {
     const key = btn.dataset.permissionCollapse;
     if (collapsedPermissionGroups.has(key)) collapsedPermissionGroups.delete(key);
     else collapsedPermissionGroups.add(key);
+    renderPermissions($('#permission-search').value);
+  }));
+  $$('[data-permission-section]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => {
+    const key = btn.dataset.permissionSection;
+    if (collapsedPermissionSections.has(key)) collapsedPermissionSections.delete(key);
+    else collapsedPermissionSections.add(key);
     renderPermissions($('#permission-search').value);
   }));
 }
