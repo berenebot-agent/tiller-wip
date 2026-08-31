@@ -84,7 +84,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.locator('#clients-body tr')).toHaveCount(1);
 
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#health-state')).toHaveText('READY');
   await expect(page.locator('.danger-note')).toContainText('recoverable provider API credentials');
 
@@ -192,7 +192,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   expect(response.status()).toBe(200);
   expect((await response.json()).model).toBe('main');
 
-  await row.getByRole('button', { name: 'Edit' }).click();
+  await row.getByRole('button', { name: 'Settings' }).click();
   await page.locator('#form-dialog').getByLabel('Client-facing model name').fill('coding');
   await expect(page.locator('[data-single-confirm]')).toBeVisible();
   await page.getByRole('button', { name: 'Save client' }).click();
@@ -306,6 +306,57 @@ test('single-route inline picker: red X cancels without saving', async ({ page }
   const modelsRes = await page.request.get('/v1/models', { headers: { Authorization: `Bearer ${secret}` } });
   expect(modelsRes.status()).toBe(200);
   expect((await modelsRes.json()).data.map(m => m.id)).toEqual(['main']);
+});
+
+test('Settings dialog switches a client between catalogue and single', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'settings-switch';
+  const clientName = 'settings-switch-client';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsResponse.ok()).toBeTruthy();
+  const models = (await modelsResponse.json()).data;
+  const real = models.find(model => model.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  // Start with a catalogue client.
+  const catRes = await page.request.post('/api/admin/client-keys', {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { name: clientName, type: 'catalogue' }
+  });
+  expect(catRes.status()).toBe(201);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  let row = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(row).toBeVisible();
+  await expect(row.getByRole('button', { name: `Manage models for ${clientName}` })).toBeVisible();
+
+  // Switch catalogue -> single via Settings and pick a target.
+  await row.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
+  await page.locator('#form-dialog select[name="type"]').selectOption('single');
+  await page.locator('[data-single-target] input[type="text"]').click();
+  await page.getByRole('option', { name: `Real · ${providerName}/mock-model` }).click();
+  await page.getByRole('button', { name: 'Save client' }).click();
+  await expect(page.locator('#form-dialog')).toBeHidden();
+
+  // The row now shows the inline Single route picker.
+  row = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(row.locator('[data-inline-route] input[type="text"]')).toHaveValue(`Real · ${providerName}/mock-model`);
+
+  // Switch single -> catalogue via Settings.
+  await row.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
+  await page.locator('#form-dialog select[name="type"]').selectOption('catalogue');
+  await page.getByRole('button', { name: 'Save client' }).click();
+  await expect(page.locator('#form-dialog')).toBeHidden();
+
+  // The row returns to the Manage models (catalogue) button.
+  row = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(row.getByRole('button', { name: `Manage models for ${clientName}` })).toBeVisible();
+  await expect(row.locator('[data-inline-route]')).toHaveCount(0);
 });
 
 test('permission bulk enable/disable applies only to current available models', async ({ page }) => {
@@ -505,7 +556,7 @@ test('global activity renders across clients, searches, and pages', async ({ pag
   }
 
   // Navigate to Settings and verify the Global activity section renders.
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
@@ -571,7 +622,7 @@ test('activity pagination handles empty results and the exact-page boundary', as
 
   // 2. Global activity empty rendering: filter to a term that matches nothing so
   //    the section renders its empty state (earlier browser tests leave rows behind).
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await page.locator('#global-activity-search').fill('zzz-no-match-boundary');
   await expect(page.locator('#global-activity-empty')).toBeVisible();
@@ -646,7 +697,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
   await expect(page.locator('#activity-dialog')).toBeHidden();
 
   // 2. Global activity section: same sentinel-then-success pattern must clear the error.
-  await page.getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
 

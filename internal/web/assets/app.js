@@ -287,7 +287,7 @@ function renderClients() {
     const routeCell = client.type === 'single'
       ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
       : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-    return `<tr><td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Edit</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td></tr>`;
+    return `<tr><td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td></tr>`;
   }).join('');
   $$('[data-inline-route]').forEach(box => mountInlineRoutePicker(box.closest('.client-route-picker'), state.clients.find(item => item.id === box.closest('.client-route-picker').dataset.clientId)));
   $$('[data-client-models]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientModels)));
@@ -295,28 +295,25 @@ function renderClients() {
 }
 $('#add-client').onclick = () => openClient();
 function openClient(client = null) {
-  const modelFields = client ? '' : `<label>Type <select name="type"><option value="catalogue">Catalogue</option><option value="single">Single</option></select><small>Catalogue exposes permitted models. Single binds this key to exactly one route.</small></label><section data-single-fields><label>Client-facing model name <input name="single_model_name" value="main" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div></label></section>`;
-  const singleNameField = client?.type === 'single' ? `<label>Client-facing model name <input name="single_model_name" value="${h(client.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>` : '';
+  const singleFields = `<section data-single-fields ${client?.type !== 'single' ? 'hidden' : ''}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
+  const typeField = `<label>Type <select name="type"><option value="catalogue" ${client?.type !== 'single' ? 'selected' : ''}>Catalogue</option><option value="single" ${client?.type === 'single' ? 'selected' : ''}>Single</option></select><small>Catalogue exposes permitted models. Single binds this key to exactly one route.</small></label>`;
   const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
-    eyebrow: client ? 'EDIT CLIENT' : 'ISSUE CREDENTIAL',
-    title: client ? `Edit ${client.name}` : 'Create client key',
-    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${modelFields}${singleNameField}${operationalFields}`,
+    eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
+    title: client ? `Settings · ${client.name}` : 'Create client key',
+    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${singleFields}${operationalFields}`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
-      if (client) {
-        if (client.type === 'single') {
-          const nameInput = $('[name="single_model_name"]', form), wrap = $('[data-single-confirm]', form);
-          const sync = () => { wrap.hidden = nameInput.value === client.single_model_name; if (wrap.hidden) { const cb = $('[name="confirm_model_name_change"]', form); if (cb) cb.checked = false; } };
-          nameInput.addEventListener('input', sync); sync();
-        }
-        return;
-      }
       const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
-      mountSingleTargetPicker($('[data-single-target]', form));
-      const sync = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; };
-      typeSelect.onchange = sync;
-      sync();
+      mountSingleTargetPicker($('[data-single-target]', form), client);
+      const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; };
+      typeSelect.onchange = syncType;
+      syncType();
+      if (client?.type === 'single') {
+        const wrap = $('[data-single-confirm]', form);
+        const syncName = () => { wrap.hidden = name.value === client.single_model_name; if (wrap.hidden) { const cb = $('[name="confirm_model_name_change"]', form); if (cb) cb.checked = false; } };
+        name.addEventListener('input', syncName); syncName();
+      }
     },
     onSubmit: async form => {
       const values = new FormData(form);
@@ -325,12 +322,17 @@ function openClient(client = null) {
         payload.enabled = values.get('enabled') === 'on';
         payload.logging_enabled = values.get('logging_enabled') === 'on';
         payload.retention_days = Number(values.get('retention_days'));
-        if (client.type === 'single') {
+        payload.type = values.get('type');
+        if (payload.type === 'single') {
+          const selected = String(values.get('single_target') || ''), split = selected.indexOf(':');
+          if (split < 1) throw new Error('Choose an available real or virtual target.');
           payload.single_model_name = values.get('single_model_name');
+          payload.single_target_type = selected.slice(0, split);
+          payload.single_target_id = selected.slice(split + 1);
           payload.confirm_model_name_change = values.get('confirm_model_name_change') === 'on';
         }
         await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
-        flash('Client key configuration updated.');
+        flash('Client settings updated.');
       } else {
         const selected = String(values.get('single_target') || ''), split = selected.indexOf(':');
         payload.type = values.get('type');
@@ -356,40 +358,10 @@ async function openPermissions(client) {
     state.modelClient = client;
     $('#permissions-title').textContent = `Manage models · ${client.name}`;
     $('#permission-search').value = '';
-    $('#client-model-mode').value = client.type;
-    $('#managed-single-model-name').value = client.single_model_name || 'main';
-    $('#managed-single-confirm-check').checked = false;
-    const targetRoot = $('[data-managed-single-target]');
-    targetRoot.innerHTML = '<input type="text" aria-label="Single model route"><input type="hidden">';
-    mountSingleTargetPicker(targetRoot, client, null, () => $('#save-permissions').click());
     renderPermissions('');
-    syncClientModelMode();
     $('#permissions-dialog').showModal();
-    if (client.type === 'single') {
-      const targetInput = $('input[type="text"]', targetRoot);
-      targetInput.focus();
-      targetInput.select();
-    }
   }
   catch (error) { flash(errorMessage(error), 'error'); }
-}
-function syncClientModelMode() {
-  const mode = $('#client-model-mode').value;
-  const single = mode === 'single';
-  $('#catalogue-config').hidden = single;
-  $('#single-model-config').hidden = !single;
-  $('#permissions-dialog').classList.toggle('single-mode', single);
-  $('#client-model-mode-copy').textContent = single ? 'Expose one stable name routed to one selected model.' : 'Expose only the real and virtual models enabled below.';
-  $('#save-permissions').textContent = single ? 'Save' : 'Save catalogue';
-  const name = $('#managed-single-model-name');
-  name.required = single;
-  syncManagedSingleConfirmation();
-}
-function syncManagedSingleConfirmation() {
-  const client = state.modelClient;
-  const breaking = $('#client-model-mode').value === 'single' && client?.type === 'single' && $('#managed-single-model-name').value !== client.single_model_name;
-  $('#managed-single-confirm').hidden = !breaking;
-  if (!breaking) $('#managed-single-confirm-check').checked = false;
 }
 function renderPermissions(filter = '') {
   const term = filter.toLowerCase(); $('#permission-groups').innerHTML = state.permissionData.groups.map(group => {
@@ -423,32 +395,16 @@ function bulkSetCurrentPermissions(enabled) {
 }
 $('#enable-current-permissions').onclick = () => bulkSetCurrentPermissions(true);
 $('#disable-current-permissions').onclick = () => bulkSetCurrentPermissions(false);
-$('#client-model-mode').onchange = syncClientModelMode;
-$('#managed-single-model-name').oninput = syncManagedSingleConfirmation;
 $('#close-permissions').onclick = $('#cancel-permissions').onclick = () => $('#permissions-dialog').close();
 $('#save-permissions').onclick = async () => {
-  const button = $('#save-permissions'), client = state.modelClient, mode = $('#client-model-mode').value;
+  const button = $('#save-permissions'), client = state.modelClient;
   button.disabled = true;
   $('#permissions-error').textContent = '';
   try {
-    if (mode === 'single') {
-      const selected = String($('input[type="hidden"]', $('[data-managed-single-target]')).value || ''), split = selected.indexOf(':');
-      if (split < 1) throw new Error('Choose an available real or virtual route.');
-      await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify({
-        type: 'single',
-        single_model_name: $('#managed-single-model-name').value,
-        single_target_type: selected.slice(0, split),
-        single_target_id: selected.slice(split + 1),
-        confirm_model_name_change: $('#managed-single-confirm-check').checked
-      }) });
-      flash('Single model route saved.');
-    } else {
-      if (client.type !== 'catalogue') await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify({ type: 'catalogue' }) });
-      const defaults = state.permissionData.groups.map(group => ({ kind: group.kind, group_id: group.id, enabled: group.new_models_enabled }));
-      const permissions = state.permissionData.groups.flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.enabled })));
-      await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
-      flash('Client catalogue permissions saved.');
-    }
+    const defaults = state.permissionData.groups.map(group => ({ kind: group.kind, group_id: group.id, enabled: group.new_models_enabled }));
+    const permissions = state.permissionData.groups.flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.enabled })));
+    await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
+    flash('Client catalogue permissions saved.');
     $('#permissions-dialog').close();
     await loadClients();
   } catch (error) { $('#permissions-error').textContent = errorMessage(error); }
