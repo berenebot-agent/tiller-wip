@@ -441,6 +441,17 @@ function applyPermissionFilter(term) {
   $$('.permission-row', $('#permission-groups')).forEach(row => {
     row.hidden = t && !row.dataset.canonical.toLowerCase().includes(t);
   });
+  // Hide a provider (group) row when the search matches none of its models,
+  // mirroring the Models tab. Search only affects visibility, never permissions.
+  $$('.permission-group', $('#permission-groups')).forEach(group => {
+    const rows = $$('.permission-row', group);
+    group.hidden = t && rows.every(row => row.hidden);
+  });
+  // Hide a section when the search matches none of its groups.
+  $$('.permission-section', $('#permission-groups')).forEach(section => {
+    const groups = $$('.permission-group', section);
+    section.hidden = t && groups.every(group => group.hidden);
+  });
 }
 $('#permission-search').addEventListener('input', event => applyPermissionFilter(event.target.value));
 function bulkSetGroupPermissions(groupKey, enabled) {
