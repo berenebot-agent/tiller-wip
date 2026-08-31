@@ -67,3 +67,4 @@
 .attempt-failed .attempt-status { color: var(--red); }
 .attempt-success .attempt-status { color: var(--green); }
 .fallback-label { display: block; margin-top: 4px; color: var(--red); font: 700 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+.fallback-hint { display: block; margin: 8px 0 2px; color: var(--muted); font-size: 11px; line-height: 1.5; }
