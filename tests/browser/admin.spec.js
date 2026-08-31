@@ -85,7 +85,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
 
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
   await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
-  await expect(page.locator('#health-state')).toHaveText('READY');
+  await expect(page.locator('#top-status')).toHaveText('READY');
   await expect(page.locator('.danger-note')).toContainText('recoverable provider API credentials');
 
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -370,10 +370,8 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   await expect(row).toBeVisible();
   await expect(row.getByRole('button', { name: `Manage models for ${clientName}` })).toBeVisible();
 
-  // Switch catalogue -> single via Settings and pick a target. exact:true so
-  // the "Manage models for settings-switch-client" button (whose name contains
-  // "settings") is not matched.
-  await row.getByRole('button', { name: 'Settings', exact: true }).click();
+  // Switch catalogue -> single via Settings and pick a target.
+  await row.getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#form-dialog')).toBeVisible();
   await page.locator('#form-dialog select[name="type"]').selectOption('single');
   await page.locator('[data-single-target] input[type="text"]').click();
@@ -386,7 +384,7 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   await expect(row.locator('[data-inline-route] input[type="text"]')).toHaveValue(`Real · ${providerName}/mock-model`);
 
   // Switch single -> catalogue via Settings.
-  await row.getByRole('button', { name: 'Settings', exact: true }).click();
+  await row.getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#form-dialog')).toBeVisible();
   await page.locator('#form-dialog select[name="type"]').selectOption('catalogue');
   await page.getByRole('button', { name: 'Save client' }).click();
