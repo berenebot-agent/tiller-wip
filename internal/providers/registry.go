@@ -13,6 +13,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -127,7 +128,10 @@ func nativeProtocol(providerType, modelID string) Protocol {
 	return ""
 }
 
-type Registry struct{ client *http.Client }
+type Registry struct {
+	client *http.Client
+	mu     sync.Mutex
+}
 
 func NewRegistry() *Registry {
 	transport := &http.Transport{
@@ -144,6 +148,18 @@ func NewRegistry() *Registry {
 		ExpectContinueTimeout: time.Second, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second,
 	}
 	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+}
+
+// SetResponseHeaderTimeout updates the per-attempt time-to-first-header bound on
+// the shared HTTP transport. It is what keeps a stalled ordered-fallback target
+// from consuming the client's request deadline; once headers arrive, streaming
+// continues unbounded. Guarded by a mutex because the transport is shared.
+func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.client.Transport.(*http.Transport); ok {
+		t.ResponseHeaderTimeout = d
+	}
 }
 
 func (r *Registry) HTTPClient() *http.Client { return r.client }

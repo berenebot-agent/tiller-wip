@@ -87,6 +87,8 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
   await expect(page.locator('#top-status')).toHaveText('READY');
   await expect(page.locator('.danger-note')).toContainText('recoverable provider API credentials');
+  await expect(page.locator('#fallback-form input[name="fallback_timeout_seconds"]')).toHaveValue('60');
+  await expect(page.locator('#fallback-form')).toContainText('at least 60 seconds');
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();

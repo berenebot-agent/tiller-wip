@@ -50,3 +50,24 @@ func TestSettingsAccessors(t *testing.T) {
 		t.Fatalf("GetInt: %v %v", v, err)
 	}
 }
+
+func TestFallbackTimeout(t *testing.T) {
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	// Seeded default from migration 012.
+	if v, err := db.GetFallbackTimeout(ctx); err != nil || v != 60 {
+		t.Fatalf("default fallback timeout = %d, %v; want 60, nil", v, err)
+	}
+
+	if err := db.SetSetting(ctx, SettingFallbackTimeoutSeconds, "120"); err != nil {
+		t.Fatal(err)
+	}
+	if v, err := db.GetFallbackTimeout(ctx); err != nil || v != 120 {
+		t.Fatalf("fallback timeout after set = %d, %v; want 120, nil", v, err)
+	}
+}

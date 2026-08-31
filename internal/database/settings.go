@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	SettingDefaultLoggingEnabled = "default_logging_enabled"
-	SettingDefaultRetentionDays  = "default_retention_days"
+	SettingDefaultLoggingEnabled  = "default_logging_enabled"
+	SettingDefaultRetentionDays   = "default_retention_days"
+	SettingFallbackTimeoutSeconds = "fallback_timeout_seconds"
 )
 
 // GetSetting returns the raw string value for a settings key.
@@ -59,4 +60,16 @@ func (d *DB) GetLoggingDefaults(ctx context.Context) (enabled bool, retentionDay
 		return false, 0, e
 	}
 	return enabled, retentionDays, nil
+}
+
+// GetFallbackTimeout returns the configured fallback timeout in seconds, with a
+// sane default of 60 if the key is missing or malformed.
+func (d *DB) GetFallbackTimeout(ctx context.Context) (int, error) {
+	const fallback = 60
+	if v, e := d.GetInt(ctx, SettingFallbackTimeoutSeconds); e == nil {
+		return v, nil
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return 0, e
+	}
+	return fallback, nil
 }

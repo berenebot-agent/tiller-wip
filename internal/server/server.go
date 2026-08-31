@@ -50,6 +50,9 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 		return nil, err
 	}
 	registry := providers.NewRegistry()
+	if t, err := db.GetFallbackTimeout(context.Background()); err == nil {
+		registry.SetResponseHeaderTimeout(time.Duration(t) * time.Second)
+	}
 	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler()}, nil
 }
 

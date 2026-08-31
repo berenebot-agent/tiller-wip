@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
@@ -14,6 +15,21 @@ func TestRegistryIncludesApprovedProviders(t *testing.T) {
 		if _, ok := Lookup(providerType); !ok {
 			t.Errorf("missing provider type %s", providerType)
 		}
+	}
+}
+
+func TestSetResponseHeaderTimeout(t *testing.T) {
+	r := NewRegistry()
+	transport, ok := r.HTTPClient().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("registry transport is not *http.Transport")
+	}
+	if transport.ResponseHeaderTimeout != 60*time.Second {
+		t.Fatalf("default ResponseHeaderTimeout = %v, want 60s", transport.ResponseHeaderTimeout)
+	}
+	r.SetResponseHeaderTimeout(120 * time.Second)
+	if transport.ResponseHeaderTimeout != 120*time.Second {
+		t.Fatalf("ResponseHeaderTimeout after set = %v, want 120s", transport.ResponseHeaderTimeout)
 	}
 }
 
