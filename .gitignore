@@ -5,3 +5,4 @@ tests/browser/test-results/
 tests/browser/playwright-report/
 *.log
 .env
+docs/
