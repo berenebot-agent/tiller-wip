@@ -167,8 +167,9 @@ func setUsage(usage *usageCapture, input, output any) {
 
 // setCacheFromUsage records provider-reported prompt-cache token fields:
 // OpenAI-style cached_tokens (chat prompt_tokens_details / Responses
-// input_tokens_details) and Anthropic cache_read/cache_creation input tokens.
-// Only numbers are retained; first non-nil wins.
+// input_tokens_details), DeepSeek's native prompt_cache_hit_tokens, and
+// Anthropic cache_read/cache_creation input tokens. Only numbers are
+// retained; first non-nil wins.
 func setCacheFromUsage(u map[string]any, usage *usageCapture) {
 	if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
 		if v, ok := intVal(d["cached_tokens"]); ok && usage.cacheReadInputTokens == nil {
@@ -179,6 +180,9 @@ func setCacheFromUsage(u map[string]any, usage *usageCapture) {
 		if v, ok := intVal(d["cached_tokens"]); ok && usage.cacheReadInputTokens == nil {
 			usage.cacheReadInputTokens = v
 		}
+	}
+	if v, ok := intVal(u["prompt_cache_hit_tokens"]); ok && usage.cacheReadInputTokens == nil {
+		usage.cacheReadInputTokens = v
 	}
 	if v, ok := intVal(u["cache_read_input_tokens"]); ok && usage.cacheReadInputTokens == nil {
 		usage.cacheReadInputTokens = v

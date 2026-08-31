@@ -89,7 +89,7 @@ func mockUpstream(t *testing.T) http.HandlerFunc {
 			flusher := w.(http.Flusher)
 			_, _ = io.WriteString(w, `data: {"id":"one","object":"chat.completion.chunk","model":"model-a","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`+"\n\n")
 			flusher.Flush()
-			_, _ = io.WriteString(w, `data: {"id":"one","object":"chat.completion.chunk","model":"model-a","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`+"\n\n")
+			_, _ = io.WriteString(w, `data: {"id":"one","object":"chat.completion.chunk","model":"model-a","choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7,"prompt_tokens_details":{"cached_tokens":3}}}`+"\n\n")
 			flusher.Flush()
 			_, _ = io.WriteString(w, "data: [DONE]\n\n")
 			return
@@ -222,6 +222,9 @@ func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
 	}
 	if stream["input_tokens"] == nil || stream["output_tokens"] == nil {
 		t.Fatalf("streaming usage not captured: %v", stream)
+	}
+	if stream["cache_read_input_tokens"] == nil || stream["cache_read_input_tokens"] != float64(3) {
+		t.Fatalf("streaming prompt-cache tokens not captured (expected cache_read=3): %v", stream)
 	}
 }
 
@@ -363,6 +366,32 @@ func TestClientKeyCreationCopiesLoggingDefaults(t *testing.T) {
 		}
 	}
 	t.Fatal("created client not found in list")
+}
+
+func TestSetCacheFromUsageDeepSeekNativeField(t *testing.T) {
+	// DeepSeek reports its prompt cache breakdown as prompt_cache_hit_tokens;
+	// ensure it maps to the router's cacheReadInputTokens (hit) field.
+	u := map[string]any{
+		"prompt_tokens":            float64(1000),
+		"prompt_cache_hit_tokens":  float64(800),
+		"prompt_cache_miss_tokens": float64(200),
+	}
+	var usage usageCapture
+	setCacheFromUsage(u, &usage)
+	if usage.cacheReadInputTokens == nil || *usage.cacheReadInputTokens != 800 {
+		t.Fatalf("expected cacheReadInputTokens=800, got %v", usage.cacheReadInputTokens)
+	}
+	// OpenAI-style prompt_tokens_details.cached_tokens is read before DeepSeek's
+	// native field, so it wins when both are present (first non-nil wins).
+	u2 := map[string]any{
+		"prompt_tokens_details":   map[string]any{"cached_tokens": float64(700)},
+		"prompt_cache_hit_tokens": float64(600),
+	}
+	var usage2 usageCapture
+	setCacheFromUsage(u2, &usage2)
+	if usage2.cacheReadInputTokens == nil || *usage2.cacheReadInputTokens != 700 {
+		t.Fatalf("expected OpenAI-style cached_tokens to win, got %v", usage2.cacheReadInputTokens)
+	}
 }
 
 func TestPrunerDeletesByRetention(t *testing.T) {

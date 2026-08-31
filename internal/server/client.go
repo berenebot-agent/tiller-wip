@@ -464,6 +464,7 @@ func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, 
 						if m, ok := value.(map[string]any); ok {
 							if u, ok := m["usage"].(map[string]any); ok {
 								setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
+								setCacheFromUsage(u, usage)
 							}
 						}
 						rewriteModel(value, upstream, requested)
