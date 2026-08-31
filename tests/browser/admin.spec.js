@@ -109,7 +109,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   await expect(clientRow).toBeVisible();
 
   const openPermissions = async () => {
-    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await clientRow.getByRole('button', { name: `Manage models for ${clientName}` }).click();
     await expect(page.locator('#permissions-dialog')).toBeVisible();
   };
   const modelCheckbox = page.getByLabel(`Enable ${modelId}`);
@@ -143,7 +143,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   // 5. Repeat, save, reopen, and verify persistence.
   await modelCheckbox.check();
   await feederCheckbox.check();
-  await page.getByRole('button', { name: 'Save permissions' }).click();
+  await page.getByRole('button', { name: 'Save catalogue' }).click();
   await expect(page.locator('#permissions-dialog')).toBeHidden();
   await openPermissions();
   await expect(modelCheckbox).toBeChecked();
@@ -173,7 +173,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   await page.getByRole('button', { name: '+ Create client key' }).click();
   await page.getByLabel('Client name').fill(clientName);
   await page.locator('#form-dialog select[name="type"]').selectOption('single');
-  await expect(page.getByLabel('Client-facing model name')).toHaveValue('main');
+  await expect(page.locator('#form-dialog').getByLabel('Client-facing model name')).toHaveValue('main');
   const createTarget = page.locator('[data-single-target] input[type="text"]');
   await createTarget.click();
   await page.getByRole('option', { name: `Real · ${providerName}/mock-model` }).click();
@@ -187,14 +187,13 @@ test('Single key creation, response identity, rename warning, and inline route s
   await page.getByRole('button', { name: 'I have stored the key' }).click();
 
   const row = page.locator('#clients-body tr', { hasText: clientName });
-  await expect(row).toContainText('Single');
-  await expect(row.locator('.model-id')).toHaveText('main');
+  await expect(row.locator('[data-inline-route] input[type="text"]')).toHaveValue(`Real · ${providerName}/mock-model`);
   const response = await page.request.post('/v1/chat/completions', { headers: { Authorization: `Bearer ${secret}` }, data: { model: 'ignored-typo', messages: [] } });
   expect(response.status()).toBe(200);
   expect((await response.json()).model).toBe('main');
 
   await row.getByRole('button', { name: 'Edit' }).click();
-  await page.getByLabel('Client-facing model name').fill('coding');
+  await page.locator('#form-dialog').getByLabel('Client-facing model name').fill('coding');
   await expect(page.locator('[data-single-confirm]')).toBeVisible();
   await page.getByRole('button', { name: 'Save client' }).click();
   await expect(page.locator('#dialog-error')).toContainText('Confirm the breaking change');
@@ -203,20 +202,24 @@ test('Single key creation, response identity, rename warning, and inline route s
   await expect(page.locator('#form-dialog')).toBeHidden();
 
   const refreshedRow = page.locator('#clients-body tr', { hasText: clientName });
-  await refreshedRow.getByRole('button', { name: `Manage models for ${clientName}` }).click();
-  await expect(page.locator('#permissions-dialog')).toBeVisible();
-  const route = page.locator('[data-managed-single-target] input[type="text"]');
-  await route.click();
+  const inlineRoute = refreshedRow.locator('[data-inline-route] input[type="text"]');
+  await inlineRoute.click();
   await page.getByRole('option', { name: 'Virtual · single-ui-vg/coding' }).click();
-  await expect(route).toHaveValue('Virtual · single-ui-vg/coding');
-  await page.getByRole('button', { name: 'Save' }).click();
-  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  await expect(inlineRoute).toHaveValue('Virtual · single-ui-vg/coding');
+  await refreshedRow.getByRole('button', { name: 'Apply new route' }).click();
+  await expect(refreshedRow.locator('[data-inline-route] input[type="text"]')).toHaveValue('Virtual · single-ui-vg/coding');
   const catalogueResponse = await page.request.get('/v1/models', { headers: { Authorization: `Bearer ${secret}` } });
   expect(catalogueResponse.status()).toBe(200);
   expect((await catalogueResponse.json()).data.map(model => model.id)).toEqual(['coding']);
+
+  // Cleanup: remove this client's logged request so later global-activity
+  // pagination tests see a clean baseline.
+  const listRes = await page.request.get(`/api/admin/client-keys?search=${clientName}`);
+  const found = (await listRes.json()).data.find(c => c.name === clientName);
+  if (found) await page.request.delete(`/api/admin/client-keys/${found.id}/activity`, { headers: { 'X-CSRF-Token': csrf } });
 });
 
-test('single-route edit: model picker is focused and Enter selects and saves', async ({ page }) => {
+test('single-route inline picker: typeahead selects and tick applies', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
   const csrf = await adminCsrf(page);
@@ -246,23 +249,63 @@ test('single-route edit: model picker is focused and Enter selects and saves', a
   const row = page.locator('#clients-body tr', { hasText: clientName });
   await expect(row).toBeVisible();
 
-  // Open the single-route permissions dialog.
-  await row.getByRole('button', { name: `Manage models for ${clientName}` }).click();
-  await expect(page.locator('#permissions-dialog')).toBeVisible();
+  // The inline route field shows the current real target.
+  const inlineRoute = row.locator('[data-inline-route] input[type="text"]');
+  await expect(inlineRoute).toHaveValue(`Real · ${providerName}/mock-model`);
 
-  // The target model input is focused and its current value selected.
-  const targetInput = page.locator('[data-managed-single-target] input[type="text"]');
-  await expect(targetInput).toBeFocused();
-  await expect(targetInput).toHaveValue(`Real · ${providerName}/mock-model`);
+  // Type to filter, press Enter to select the virtual model.
+  await inlineRoute.fill('coding');
+  await inlineRoute.press('Enter');
+  await expect(inlineRoute).toHaveValue('Virtual · enter-save-vg/coding');
 
-  // Type the next model and press Enter: selects the top match and saves.
-  await targetInput.fill('coding');
-  await targetInput.press('Enter');
-  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  // Apply via the green tick; the row re-renders to the new target.
+  await row.getByRole('button', { name: 'Apply new route' }).click();
+  await expect(row.locator('[data-inline-route] input[type="text"]')).toHaveValue('Virtual · enter-save-vg/coding');
+});
 
-  // The route now points at the virtual model.
-  await expect(row.locator('.model-id')).toHaveText('main');
-  await expect(row).toContainText('enter-save-vg/coding');
+test('single-route inline picker: red X cancels without saving', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'cancel-route';
+  const clientName = 'cancel-route-client';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsResponse.ok()).toBeTruthy();
+  const models = (await modelsResponse.json()).data;
+  const real = models.find(model => model.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  const groupResponse = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'cancel-route-vg' } });
+  expect(groupResponse.status()).toBe(201);
+  const group = await groupResponse.json();
+  const virtualResponse = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'coding', target_provider_id: provider.id, target_model_id: real.id } });
+  expect(virtualResponse.status()).toBe(201);
+
+  const createRes = await page.request.post('/api/admin/client-keys', {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { name: clientName, type: 'single', single_model_name: 'main', single_target_type: 'real', single_target_id: real.id }
+  });
+  expect(createRes.status()).toBe(201);
+  const secret = (await createRes.json()).secret;
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const row = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(row).toBeVisible();
+  const inlineRoute = row.locator('[data-inline-route] input[type="text"]');
+  await expect(inlineRoute).toHaveValue(`Real · ${providerName}/mock-model`);
+
+  // Select a new target, then cancel.
+  await inlineRoute.click();
+  await page.getByRole('option', { name: 'Virtual · cancel-route-vg/coding' }).click();
+  await expect(inlineRoute).toHaveValue('Virtual · cancel-route-vg/coding');
+  await row.getByRole('button', { name: 'Cancel route change' }).click();
+  await expect(inlineRoute).toHaveValue(`Real · ${providerName}/mock-model`);
+
+  // Verify the route was NOT changed via the API.
+  const modelsRes = await page.request.get('/v1/models', { headers: { Authorization: `Bearer ${secret}` } });
+  expect(modelsRes.status()).toBe(200);
+  expect((await modelsRes.json()).data.map(m => m.id)).toEqual(['main']);
 });
 
 test('permission bulk enable/disable applies only to current available models', async ({ page }) => {
@@ -291,7 +334,7 @@ test('permission bulk enable/disable applies only to current available models', 
   await expect(clientRow).toBeVisible();
 
   const openPermissions = async () => {
-    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await clientRow.getByRole('button', { name: `Manage models for ${clientName}` }).click();
     await expect(page.locator('#permissions-dialog')).toBeVisible();
   };
   const model = id => page.getByLabel(`Enable ${canonical(id)}`);
@@ -300,7 +343,7 @@ test('permission bulk enable/disable applies only to current available models', 
   const disableCurrent = page.getByRole('button', { name: 'Disable current' });
   const search = page.locator('#permission-search');
   const cancel = page.getByRole('button', { name: 'Cancel' });
-  const save = page.getByRole('button', { name: 'Save permissions' });
+  const save = page.getByRole('button', { name: 'Save catalogue' });
 
   // 1. Enable all AVAILABLE models with no filter; retired and feeder untouched.
   await openPermissions();
@@ -378,7 +421,7 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   await expect(clientRow).toBeVisible();
 
   const openPermissions = async () => {
-    await clientRow.getByRole('button', { name: 'Permissions' }).click();
+    await clientRow.getByRole('button', { name: `Manage models for ${clientName}` }).click();
     await expect(page.locator('#permissions-dialog')).toBeVisible();
   };
   const model = id => page.getByLabel(`Enable ${canonical(id)}`);

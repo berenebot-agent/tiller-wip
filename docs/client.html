@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tiller Router — Client Keys (inline route UX mockup)</title>
+<style>
+  :root{--navy:#173454;--navy-2:#102a46;--blue:#2778b8;--blue-dark:#1e6198;--blue-pale:#e7f2fa;--ink:#283747;--muted:#66788b;--line:#d5dee7;--line-dark:#bdc9d4;--paper:#fff;--canvas:#f2f5f7;--panel:#f8fafb;--green:#25845b;--green-bg:#ddf2e7;--amber:#a66312;--amber-bg:#fff1d5;--red:#b5403c;--red-bg:#fbe4e2;--mono:"SFMono-Regular",Consolas,"Liberation Mono",monospace;--body:"Aptos","Segoe UI",Tahoma,sans-serif}
+  *{box-sizing:border-box}
+  body{margin:0;color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.5;background:linear-gradient(90deg,rgba(23,52,84,.025) 1px,transparent 1px),linear-gradient(rgba(23,52,84,.025) 1px,transparent 1px),var(--canvas);background-size:24px 24px}
+  button,input{font:inherit}button{cursor:pointer}
+  .topbar{position:sticky;top:0;z-index:50;background:var(--navy);color:white;border-bottom:3px solid #2b79b3;box-shadow:0 2px 9px rgba(10,31,50,.25)}
+  .nav-inner{max-width:1500px;height:62px;margin:auto;padding:0 24px;display:flex;align-items:stretch}
+  .brand{display:flex;align-items:center;gap:10px;padding:0 24px 0 0;margin-right:18px;color:white;border:0;background:transparent;font-size:16px;letter-spacing:.08em}
+  .brand b{color:#9ed2f3}
+  .nav-links{display:flex;align-items:stretch}
+  .nav-links button{position:relative;border:0;background:transparent;color:#c8dcec;padding:0 14px;font-size:13px}
+  .nav-links button.active{color:white}
+  .nav-links button.active:after{content:"";position:absolute;left:14px;right:14px;bottom:-3px;height:3px;background:#8ed0f5}
+  .nav-meta{margin-left:auto;display:flex;align-items:center;gap:13px;color:#b9d3e6;font-size:12px}
+  main{max-width:1500px;margin:0 auto;padding:34px 28px 60px}
+  .dashboard-header{display:flex;align-items:flex-end;justify-content:space-between;gap:30px;margin-bottom:25px;padding-bottom:21px;border-bottom:1px solid var(--line-dark)}
+  .dashboard-header h1{margin:2px 0 4px;font-family:Georgia,"Times New Roman",serif;font-weight:600;font-size:31px;line-height:1.15;color:var(--navy)}
+  .dashboard-header p:not(.eyebrow){margin:0;color:var(--muted);max-width:760px}
+  .eyebrow{margin:0;color:var(--blue);font:700 10px/1.4 var(--mono);letter-spacing:.16em}
+  .btn{display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:8px 15px;border:1px solid transparent;border-radius:4px;font-weight:650;font-size:13px;text-decoration:none}
+  .btn-primary{background:var(--blue);border-color:var(--blue);color:white}
+  .btn-secondary{background:#e8edf1;border-color:#cbd5de;color:#30465a}
+  .btn-small{min-height:30px;padding:4px 9px;font-size:11px}
+  .notice{display:flex;align-items:flex-start;gap:13px;padding:12px 14px;border-left:4px solid var(--blue);background:var(--blue-pale);margin-bottom:16px}
+  .notice>span{flex:none;color:var(--blue-dark);font:700 9px var(--mono);letter-spacing:.08em;border:1px solid #a9cde4;padding:3px 5px;margin-top:1px}
+  .notice p{margin:0;color:#3e5b72;font-size:12px}
+  .filter-bar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:11px 14px;background:#e7edf2;border:1px solid var(--line);border-bottom:0}
+  .search-field{display:flex;align-items:center;gap:10px;color:#536779;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+  .search-field input{width:min(360px,55vw);height:34px;background:white;border:1px solid #bcc9d3;border-radius:3px;padding:6px 10px;color:var(--ink);font-size:13px;text-transform:none;letter-spacing:0}
+  .table-shell{position:relative;background:var(--paper);border:1px solid var(--line);box-shadow:0 2px 10px rgba(25,52,78,.09);overflow:auto}
+  .form-table{border-collapse:collapse;width:100%;min-width:900px}
+  .form-table th{height:42px;padding:9px 14px;text-align:left;background:#f2f5f7;border-bottom:2px solid #c8d3dc;color:#566a7d;font:700 10px var(--mono);letter-spacing:.07em;text-transform:uppercase}
+  .form-table td{padding:13px 14px;border-top:1px solid #e2e8ed;vertical-align:middle}
+  .form-table tbody tr:hover td{background:#f8fbfd}
+  .form-table .actions-head{text-align:right}
+  .actions{display:flex;justify-content:flex-end;gap:5px;white-space:nowrap}
+  .primary-cell strong{display:block;color:var(--navy);font-weight:700}
+  .primary-cell small{display:block;color:var(--muted);margin-top:2px}
+  .clients-table{min-width:900px}
+  .clients-table th:nth-child(3){min-width:300px}
+  .key-info-cell .secret-fingerprint{display:block}
+  .key-info-cell small{display:block;color:var(--muted);margin-top:2px;font-size:11px}
+  .client-name-line{display:flex;align-items:center;gap:8px}
+  .client-name-line strong{display:inline}
+  .status-dot{display:inline-block;flex:none;width:10px;height:10px;border-radius:50%}
+  .status-dot-enabled{background:var(--green);box-shadow:0 0 0 3px var(--green-bg)}
+  .status-dot-disabled{background:var(--red);box-shadow:0 0 0 3px var(--red-bg)}
+  .secret-fingerprint{font:700 12px var(--mono);color:#385b75}
+  .meta-line{font-size:12px;color:var(--muted)}
+  .tok{display:inline-block;white-space:nowrap}
+  .tok b{font:700 12px var(--mono);color:var(--navy);display:inline-block;min-width:6ch;text-align:right}
+  .tok small{display:inline;margin-left:2px;color:var(--muted);font:700 10px var(--mono);letter-spacing:.02em}
+  .cache-hit{display:block;margin-top:1px}
+  .cache-hit b{font:700 12px var(--mono);color:var(--navy);display:inline-block;min-width:6ch;text-align:right}
+  .cache-hit small{font:700 10px var(--mono);color:var(--muted);margin-left:2px;letter-spacing:.02em}
+  .cache-hit.na small{font-style:italic;opacity:.75}
+
+  /* ---- Inline route picker (the new UX) ---- */
+  .client-route-picker{display:flex;align-items:center;gap:8px;min-width:250px}
+  .combobox{position:relative;flex:1;min-width:0}
+  .combobox input[type="text"]{width:100%;border:1px solid #b9c7d2;background:white;border-radius:3px;padding:9px 10px;color:var(--ink);font:600 11px var(--mono)}
+  .combobox input[type="text"]:focus-visible{outline:3px solid #77bce8;outline-offset:2px}
+  .combobox-list{position:absolute;left:0;top:100%;z-index:30;margin:2px 0 0;padding:4px;list-style:none;background:white;border:1px solid #b9c7d2;border-radius:3px;box-shadow:0 12px 28px rgba(12,34,53,.18);max-height:220px;overflow:auto;min-width:420px}
+  .combobox-list li{padding:7px 9px;border-radius:2px;color:var(--ink);font-size:13px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .combobox-list li small{color:var(--muted);font-weight:400}
+  .combobox-list li:hover,.combobox-list li[aria-selected="true"]{background:#eef3f6;color:var(--navy)}
+  .combobox-list li[aria-disabled="true"]{color:#9aa9b5;cursor:not-allowed;background:#f5f7f8}
+  .route-confirm{flex:none;display:flex;gap:4px}
+  .route-confirm[hidden]{display:none}
+  .route-confirm button{width:30px;height:30px;border-radius:3px;border:1px solid transparent;font-size:15px;line-height:1;display:inline-flex;align-items:center;justify-content:center}
+  .route-confirm-tick{background:var(--green-bg);border-color:#a9d9c2;color:var(--green)}
+  .route-confirm-tick:hover{background:#cdeeda;color:#1d6b49}
+  .route-confirm-cancel{background:var(--red-bg);border-color:#e1aaa7;color:var(--red)}
+  .route-confirm-cancel:hover{background:#f6d3d0;color:#96332f}
+  .route-picker-error .combobox input[type="text"]{border-color:#d9a19e;background:var(--red-bg)}
+  .route-button{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:2px 14px;align-items:center;width:100%;min-width:270px;padding:9px 11px;border:1px solid #b7c8d4;border-radius:3px;background:#f8fbfd;color:var(--navy);text-align:left;cursor:pointer}
+  .route-button span{font:700 9px var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+  .route-button strong{grid-column:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:650 11px var(--mono)}
+  .route-button i{grid-column:2;grid-row:1/3;color:var(--blue);font:400 22px Georgia,serif}
+  .flash{position:sticky;top:76px;z-index:40;padding:11px 14px;margin-bottom:16px;border-radius:3px;box-shadow:0 2px 10px rgba(25,52,78,.09);font-size:13px}
+  .flash-success{background:#dff4e9;border:1px solid #a9d9c2;color:#245f47}
+  .flash-error{background:#fbe4e2;border:1px solid #e1aaa7;color:#7f302d}
+  .mock-note{position:fixed;right:14px;bottom:14px;z-index:60;max-width:300px;padding:10px 12px;background:var(--navy);color:#d4e4ef;font-size:11px;border-radius:4px;box-shadow:0 8px 20px rgba(0,0,0,.25)}
+  .mock-note b{color:#9ed2f3}
+</style>
+</head>
+<body>
+  <nav class="topbar" aria-label="Primary">
+    <div class="nav-inner">
+      <button class="brand"><span>TILLER <b>ROUTER</b></span></button>
+      <div class="nav-links">
+        <button>Providers</button>
+        <button>Real Models</button>
+        <button>Virtual Models</button>
+        <button class="active">Client Keys</button>
+        <button>Settings</button>
+      </div>
+      <div class="nav-meta"><span>admin</span></div>
+    </div>
+  </nav>
+
+  <main>
+    <div id="flash" class="flash flash-success" hidden></div>
+
+    <section>
+      <header class="dashboard-header">
+        <div>
+          <p class="eyebrow">CLIENT ROUTING CONTROL</p>
+          <h1>Client Keys</h1>
+          <p>Catalogue keys expose permitted models. Single keys expose one stable identity with an inline route.</p>
+        </div>
+        <button class="btn btn-primary">+ Create client key</button>
+      </header>
+
+      <div class="notice"><span>FEEDER RULE</span><p><b>New models default</b> affects only models added in future. It never changes an existing model permission.</p></div>
+
+      <div class="filter-bar">
+        <label class="search-field"><span>Search</span><input type="search" placeholder="Client name or description"></label>
+      </div>
+
+      <div class="table-shell">
+        <table class="form-table clients-table">
+          <thead>
+            <tr><th>Client</th><th>Key info</th><th>Route</th><th>1h</th><th>24h</th><th>7d</th><th class="actions-head">Actions</th></tr>
+          </thead>
+          <tbody id="clients-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <div class="mock-note"><b>MOCKUP</b> — static demo of the inline Single-key route picker. Click a Single key's route field, pick a model, then use the green ✓ to apply or the red ✕ to cancel. Catalogue keys keep the "Manage models" button.</div>
+
+<script>
+  // ---- Static mock data ----
+  const clients = [
+    { name:'OpenCode', desc:'Primary coding agent', type:'single', model:'main', target:'Real · deepseek/deepseek-v4-pro', broken:false },
+    { name:'Hermes', desc:'Assistant gateway', type:'single', model:'main', target:'Virtual · main/coding', broken:false },
+    { name:'Treasurer', desc:'Accounting agent', type:'single', model:'default', target:'Virtual · main/accounting', broken:false },
+    { name:'API Test', desc:'Disposable integration key', type:'catalogue', target:'Catalogue permissions', broken:false },
+    { name:'Legacy Bot', desc:'Retired workload', type:'single', model:'main', target:'Unavailable target', broken:true },
+  ];
+
+  // All selectable targets (real + virtual) for the mock dropdown.
+  const targets = [
+    { label:'Real · deepseek/deepseek-v4-pro' },
+    { label:'Real · openai/gpt-4o' },
+    { label:'Real · anthropic/claude-sonnet-4' },
+    { label:'Real · google/gemini-2.5-pro' },
+    { label:'Virtual · main/coding' },
+    { label:'Virtual · main/accounting' },
+    { label:'Virtual · main/creative' },
+    { label:'Virtual · main/glm-flash' },
+  ];
+
+  const $ = (s, r=document) => r.querySelector(s);
+  const $$ = (s, r=document) => [...r.querySelectorAll(s)];
+  const h = v => String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const tok = (m, c) => `<span class="tok"><b>${m}</b><small>Mtok</small><span class="cache-hit ${c==null?'na':''}"><b>${c==null?'':c+'%'}</b><small>Cache</small></span></span>`;
+
+  function flash(msg, kind='success'){ const f=$('#flash'); f.textContent=msg; f.className=`flash flash-${kind}`; f.hidden=false; clearTimeout(flash.t); flash.t=setTimeout(()=>f.hidden=true, 4000); }
+
+  function render(){
+    $('#clients-body').innerHTML = clients.map(c => {
+      const routeCell = c.type === 'single'
+        ? `<div class="client-route-picker ${c.broken?'route-picker-error':''}">
+             <div class="combobox" data-inline-route>
+               <input type="text" aria-label="Route for ${h(c.name)}" value="${h(c.target)}">
+               <input type="hidden">
+             </div>
+             <div class="route-confirm" data-route-confirm hidden>
+               <button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button>
+               <button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button>
+             </div>
+           </div>`
+        : `<button class="route-button" aria-label="Manage models for ${h(c.name)}"><span>Catalogue</span><strong>${h(c.target)}</strong><i aria-hidden="true">›</i></button>`;
+      return `<tr>
+        <td class="primary-cell"><div class="client-name-line"><span class="status-dot status-dot-enabled"></span><strong>${h(c.name)}</strong></div><small>${h(c.desc)}</small></td>
+        <td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(c.name.slice(0,4).toLowerCase())}</span><small>Created Aug 31, 2026</small></td>
+        <td>${routeCell}</td>
+        <td>${tok('1.2','38')}</td><td>${tok('8.4','41')}</td><td>${tok('52.0','40')}</td>
+        <td><div class="actions"><button class="btn btn-small btn-secondary">Activity</button><button class="btn btn-small btn-secondary">Rotate</button><button class="btn btn-small btn-secondary">Edit</button><button class="btn btn-small btn-danger">Delete</button></div></td>
+      </tr>`;
+    }).join('');
+
+    // Mount inline pickers for Single keys.
+    $$('[data-inline-route]').forEach(box => {
+      const input = $('input[type="text"]', box);
+      const hidden = $('input[type="hidden"]', box);
+      const wrap = box.closest('.client-route-picker');
+      const confirm = $('[data-route-confirm]', wrap);
+      const tick = $('[data-route-tick]', wrap);
+      const cancel = $('[data-route-cancel]', wrap);
+      const original = input.value;
+      let pending = null;
+
+      const list = document.createElement('ul');
+      list.className = 'combobox-list'; list.hidden = true;
+      box.appendChild(list);
+      let open = false, active = -1;
+
+      const renderList = (showAll=false) => {
+        const term = showAll ? '' : input.value.trim().toLowerCase();
+        const items = targets.filter(t => !term || t.label.toLowerCase().includes(term));
+        list.innerHTML = items.map((t,i) => `<li data-i="${i}" ${i===active?'aria-selected="true"':''}>${h(t.label)}</li>`).join('');
+        list.hidden = !items.length; open = !list.hidden;
+      };
+      const select = i => {
+        const li = list.querySelectorAll('li')[i]; if(!li) return;
+        input.value = li.textContent; hidden.value = li.textContent;
+        pending = li.textContent; confirm.hidden = false;
+        list.hidden = true; open = false;
+      };
+      input.addEventListener('input', () => { active=-1; renderList(); });
+      input.addEventListener('click', () => { if(open) { list.hidden=true; open=false; } else renderList(true); });
+      input.addEventListener('keydown', e => {
+        if(e.key==='ArrowDown'){ e.preventDefault(); active=Math.min(active+1, list.querySelectorAll('li').length-1); renderList(); }
+        else if(e.key==='ArrowUp'){ e.preventDefault(); active=Math.max(active-1,0); renderList(); }
+        else if(e.key==='Enter'){ e.preventDefault(); select(active>=0?active:0); }
+        else if(e.key==='Escape'){ list.hidden=true; open=false; }
+      });
+      list.addEventListener('mousedown', e => { e.preventDefault(); const li=e.target.closest('li[data-i]'); if(li) select(Number(li.dataset.i)); });
+      input.addEventListener('blur', () => setTimeout(()=>{ list.hidden=true; open=false; }, 120));
+
+      tick.addEventListener('click', () => {
+        if(!pending) return;
+        flash(`Route updated → ${pending}. New requests use the new target immediately.`);
+        // In the real app this PATCHes and reloads; here we just persist the label.
+        const row = wrap.closest('tr');
+        const name = $('.client-name-line strong', row).textContent;
+        const c = clients.find(x => x.name === name);
+        if(c){ c.target = pending; c.broken = false; }
+        confirm.hidden = true; pending = null;
+        render();
+      });
+      cancel.addEventListener('click', () => {
+        input.value = original; hidden.value = original;
+        confirm.hidden = true; pending = null;
+      });
+    });
+  }
+  render();
+</script>
+</body>
+</html>
