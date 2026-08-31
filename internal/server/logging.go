@@ -24,9 +24,11 @@ type logRow struct {
 	streaming         bool
 	httpStatus        int
 	latencyMs         int64
-	inputTokens       *int64
-	outputTokens      *int64
-	providerRequestID *string
+	inputTokens           *int64
+	outputTokens          *int64
+	cacheReadInputTokens  *int64
+	cacheCreationInputTokens *int64
+	providerRequestID     *string
 	clientRequestID   string
 	errorText         *string
 	fallbackUsed      bool
@@ -52,8 +54,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
 		return
 	}
-	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
+	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
 	for i, attempt := range row.attempts {
 		attemptID, err := id.New()
 		if err != nil {
@@ -100,8 +102,10 @@ func (s *Server) pruneRequestLogs(ctx context.Context) {
 // usageCapture accumulates token counts extracted from a response body in
 // memory. Only the numbers are ever retained; the body is discarded.
 type usageCapture struct {
-	inputTokens  *int64
-	outputTokens *int64
+	inputTokens             *int64
+	outputTokens            *int64
+	cacheReadInputTokens    *int64 // OpenAI cached_tokens / Anthropic cache_read_input_tokens
+	cacheCreationInputTokens *int64 // Anthropic cache_creation_input_tokens
 }
 
 // extractUsage parses a non-streaming JSON response body for usage numbers.
@@ -116,6 +120,7 @@ func extractUsage(body []byte, usage *usageCapture) {
 	}
 	setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
 	setUsage(usage, u["input_tokens"], u["output_tokens"])
+	setCacheFromUsage(u, usage)
 }
 
 // captureStreamUsage extracts usage from a single SSE event payload, handling
@@ -125,20 +130,24 @@ func captureStreamUsage(payload map[string]any, target providers.Protocol, usage
 	case providers.ProtocolChat:
 		if u, ok := payload["usage"].(map[string]any); ok {
 			setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
+			setCacheFromUsage(u, usage)
 		}
 	case providers.ProtocolMessages:
 		if u, ok := payload["usage"].(map[string]any); ok {
 			setUsage(usage, nil, u["output_tokens"])
+			setCacheFromUsage(u, usage)
 		}
 		if msg, ok := payload["message"].(map[string]any); ok {
 			if u, ok := msg["usage"].(map[string]any); ok {
 				setUsage(usage, u["input_tokens"], nil)
+				setCacheFromUsage(u, usage)
 			}
 		}
 	case providers.ProtocolResponses:
 		if resp, ok := payload["response"].(map[string]any); ok {
 			if u, ok := resp["usage"].(map[string]any); ok {
 				setUsage(usage, u["input_tokens"], u["output_tokens"])
+				setCacheFromUsage(u, usage)
 			}
 		}
 	}
@@ -154,6 +163,40 @@ func setUsage(usage *usageCapture, input, output any) {
 		v := int64(out)
 		usage.outputTokens = &v
 	}
+}
+
+// setCacheFromUsage records provider-reported prompt-cache token fields:
+// OpenAI-style cached_tokens (chat prompt_tokens_details / Responses
+// input_tokens_details) and Anthropic cache_read/cache_creation input tokens.
+// Only numbers are retained; first non-nil wins.
+func setCacheFromUsage(u map[string]any, usage *usageCapture) {
+	if d, ok := u["prompt_tokens_details"].(map[string]any); ok {
+		if v, ok := intVal(d["cached_tokens"]); ok && usage.cacheReadInputTokens == nil {
+			usage.cacheReadInputTokens = v
+		}
+	}
+	if d, ok := u["input_tokens_details"].(map[string]any); ok {
+		if v, ok := intVal(d["cached_tokens"]); ok && usage.cacheReadInputTokens == nil {
+			usage.cacheReadInputTokens = v
+		}
+	}
+	if v, ok := intVal(u["cache_read_input_tokens"]); ok && usage.cacheReadInputTokens == nil {
+		usage.cacheReadInputTokens = v
+	}
+	if v, ok := intVal(u["cache_creation_input_tokens"]); ok && usage.cacheCreationInputTokens == nil {
+		usage.cacheCreationInputTokens = v
+	}
+}
+
+// intVal converts a JSON number to an int64 pointer. Only float64 (how
+// encoding/json decodes numbers) is accepted.
+func intVal(v any) (*int64, bool) {
+	f, ok := v.(float64)
+	if !ok {
+		return nil, false
+	}
+	x := int64(f)
+	return &x, true
 }
 
 // rewriteModelBytes replaces the upstream model identifier in a non-streaming

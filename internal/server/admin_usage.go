@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"net/http"
 	"time"
 )
@@ -48,11 +49,29 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load usage.")
 		return
 	}
+	clientCache, err := s.cacheByClient(r, cut1h, cut24h, cut7d)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load usage.")
+		return
+	}
+	virtualCache, err := s.cacheByVirtual(r, cut1h, cut24h, cut7d)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load usage.")
+		return
+	}
+	realCache, err := s.cacheByReal(r, cut1h, cut24h, cut7d)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load usage.")
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"client_keys":    clientKeys,
 		"virtual_models": virtualModels,
 		"target_health":  targetHealth,
 		"real_models":    realModels,
+		"client_cache":   clientCache,
+		"virtual_cache":  virtualCache,
+		"real_cache":     realCache,
 	})
 }
 
@@ -139,6 +158,102 @@ func (s *Server) usageByReal(r *http.Request, c1, c24, c7 string) (map[string]us
 			return nil, err
 		}
 		out[provider+"/"+model] = w
+	}
+	return out, rows.Err()
+}
+
+// cacheWindows holds prompt-cache hit percentages (0-100) for the three
+// lookback windows. Values are nil when no cache data was recorded, so callers
+// can render "—" rather than a fabricated 0%.
+type cacheWindows struct {
+	H1  *float64 `json:"1h"`
+	H24 *float64 `json:"24h"`
+	D7  *float64 `json:"7d"`
+}
+
+// cachePct computes cache_read / total_input as a percentage. Both read and
+// input must be present and input non-zero; otherwise nil signals "no cache
+// data", never a misleading 0.
+func cachePct(read, input sql.NullFloat64) *float64 {
+	if !read.Valid || !input.Valid || input.Float64 <= 0 {
+		return nil
+	}
+	p := read.Float64 / input.Float64 * 100
+	return &p
+}
+
+// cacheSelect returns, per window, the summed cache_read_input_tokens and
+// input_tokens. Sums ignore NULL rows; a window with no cache data yields NULL.
+const cacheSelect = `sum(CASE WHEN created_at >= ? THEN cache_read_input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? THEN input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? THEN cache_read_input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? THEN input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? THEN cache_read_input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? THEN input_tokens ELSE 0 END)`
+
+func (s *Server) cacheByClient(r *http.Request, c1, c24, c7 string) (map[string]cacheWindows, error) {
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT client_key_id, `+cacheSelect+` FROM request_logs WHERE created_at >= ? GROUP BY client_key_id`, c1, c1, c24, c24, c7, c7, c7)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCache(rows, 0)
+}
+
+func (s *Server) cacheByVirtual(r *http.Request, c1, c24, c7 string) (map[string]cacheWindows, error) {
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT vm.canonical, `+cacheSelect+` FROM request_logs l JOIN (SELECT g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON vm.canonical = l.requested_model WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c1, c24, c24, c7, c7, c7)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCache(rows, 0)
+}
+
+func (s *Server) cacheByReal(r *http.Request, c1, c24, c7 string) (map[string]cacheWindows, error) {
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT resolved_provider, resolved_model, `+cacheSelect+` FROM request_logs WHERE created_at >= ? AND resolved_provider IS NOT NULL GROUP BY resolved_provider, resolved_model`, c1, c1, c24, c24, c7, c7, c7)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCache(rows, 1)
+}
+
+// scanCache scans the windowed cache read/input sums into each row's keyed
+// cacheWindows. keyCols is the number of leading group-by columns preceding the
+// cache sums (0 for client/virtual, 1 for the composite provider/model key).
+func scanCache(rows *sql.Rows, keyCols int) (map[string]cacheWindows, error) {
+	out := map[string]cacheWindows{}
+	var cols []any
+	if keyCols == 1 {
+		cols = []any{new(string), new(string)}
+	} else {
+		cols = []any{new(string)}
+	}
+	var sums [6]sql.NullFloat64
+	for i := range sums {
+		cols = append(cols, &sums[i])
+	}
+	for rows.Next() {
+		var key string
+		if keyCols == 1 {
+			var provider, model string
+			cols[0] = &provider
+			cols[1] = &model
+			if err := rows.Scan(cols...); err != nil {
+				return nil, err
+			}
+			key = provider + "/" + model
+		} else {
+			if err := rows.Scan(cols...); err != nil {
+				return nil, err
+			}
+			key = *cols[0].(*string)
+		}
+		out[key] = cacheWindows{
+			H1:  cachePct(sums[0], sums[1]),
+			H24: cachePct(sums[2], sums[3]),
+			D7:  cachePct(sums[4], sums[5]),
+		}
 	}
 	return out, rows.Err()
 }

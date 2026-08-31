@@ -345,6 +345,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
 		}
 		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
+		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 		return
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
@@ -352,6 +353,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		row.httpStatus = resp.StatusCode
 		rewriteSSE(w, reader, route.UpstreamModelID, route.RequestedModel, usage)
 		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
+		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 		return
 	}
 	// Non-streaming JSON body: read fully to extract usage, then rewrite.
@@ -363,6 +365,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	}
 	extractUsage(body, usage)
 	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
+	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 	w.WriteHeader(resp.StatusCode)
 	row.httpStatus = resp.StatusCode
 	_, _ = w.Write(rewriteModelBytes(body, route.UpstreamModelID, route.RequestedModel))
