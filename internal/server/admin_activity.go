@@ -246,6 +246,31 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
+// exportRealModelActivityCSV streams a metadata-only CSV of activity attributable
+// to a real model (route_kind='real' AND route_model_id=?), honouring the active
+// search filter. One inference request = one row.
+func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	var canonical string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT p.name||'/'||m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, modelID).Scan(&canonical); err != nil {
+		adminError(w, 404, "not_found", "Model not found.")
+		return
+	}
+	where := `rl.route_kind='real' AND rl.route_model_id=?`
+	args := []any{modelID}
+	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+		pattern := "%" + search + "%"
+		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+	rows, err := s.queryActivityExport(r.Context(), where, args)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not export activity.")
+		return
+	}
+	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
+}
+
 // writeActivityCSV streams the export rows as a UTF-8 CSV attachment. Only
 // metadata is written; unknown values stay blank. A BOM is prepended so Excel
 // detects UTF-8 correctly.
@@ -298,19 +323,21 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 	cw.Flush()
 }
 
-// listVirtualActivity returns metadata for requests attributable to a virtual
-// model (route_kind='virtual' AND route_model_id=?), newest first, with the same
-// search and pagination as the client-key activity endpoint.
-func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
-	modelID := r.PathValue("id")
+// listScopedActivity returns metadata for requests matching the given WHERE
+// clause (e.g. a specific real or virtual model), newest first, with the same
+// search and pagination as the client-key activity endpoint. It verifies the
+// scoping entity exists first.
+func (s *Server) listScopedActivity(w http.ResponseWriter, r *http.Request, where string, args []any, existsQuery string, existsArgs []any, notFoundMsg string) {
 	var exists int
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models WHERE id=?`, modelID).Scan(&exists); err != nil || exists == 0 {
-		adminError(w, 404, "not_found", "Virtual model not found.")
+	if err := s.db.SQL.QueryRowContext(r.Context(), existsQuery, existsArgs...).Scan(&exists); err != nil || exists == 0 {
+		adminError(w, 404, "not_found", notFoundMsg)
 		return
 	}
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at FROM request_logs WHERE route_kind='virtual' AND route_model_id=? AND (requested_model LIKE ? OR coalesce(exposed_model,'') LIKE ? OR coalesce(route_model,'') LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, modelID, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	queryArgs := append([]any{}, args...)
+	queryArgs = append(queryArgs, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at FROM request_logs WHERE `+where+` AND (requested_model LIKE ? OR coalesce(exposed_model,'') LIKE ? OR coalesce(route_model,'') LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
@@ -332,6 +359,20 @@ func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
+}
+
+// listVirtualActivity returns metadata for requests attributable to a virtual
+// model (route_kind='virtual' AND route_model_id=?), newest first, with the same
+// search and pagination as the client-key activity endpoint.
+func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
+	s.listScopedActivity(w, r, `route_kind='virtual' AND route_model_id=?`, []any{r.PathValue("id")}, `SELECT count(*) FROM virtual_models WHERE id=?`, []any{r.PathValue("id")}, "Virtual model not found.")
+}
+
+// listRealModelActivity returns metadata for requests attributable to a real
+// model (route_kind='real' AND route_model_id=?), newest first, with the same
+// search and pagination as the client-key activity endpoint.
+func (s *Server) listRealModelActivity(w http.ResponseWriter, r *http.Request) {
+	s.listScopedActivity(w, r, `route_kind='real' AND route_model_id=?`, []any{r.PathValue("id")}, `SELECT count(*) FROM provider_models WHERE id=?`, []any{r.PathValue("id")}, "Model not found.")
 }
 
 func strPtrOrEmpty(v *string) string {

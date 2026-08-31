@@ -206,6 +206,94 @@ func TestVirtualActivityListScopedToModel(t *testing.T) {
 	}
 }
 
+// realModelID returns the provider_models row id for the harness's model-a.
+func realModelID(t *testing.T, api *testAPI) string {
+	t.Helper()
+	status, payload, _ := api.request("GET", "/api/admin/providers", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	var providerID string
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["name"] == "provider-a" {
+			providerID = m["id"].(string)
+		}
+	}
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["upstream_model_id"] == "model-a" {
+			return m["id"].(string)
+		}
+	}
+	t.Fatal("mock upstream did not expose model-a")
+	return ""
+}
+
+// insertRealLogRow inserts a request_logs row attributable to a real model
+// (route_kind='real', route_model_id set) so tests can control values
+// deterministically.
+func insertRealLogRow(t *testing.T, db *database.DB, id, clientKeyID, realModelID, routeModel, resolvedProvider, resolvedModel, createdAt string) {
+	t.Helper()
+	_, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,provider_request_id,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, clientKeyID, routeModel, routeModel, "real", realModelID, routeModel, resolvedProvider, resolvedModel, "chat", 0, 200, 10, "upstream-"+id, "req-"+id, createdAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRealModelActivityCSVExportScopedToModel(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	modelID := realModelID(t, api)
+	insertRealLogRow(t, db, "row-a", clientID, modelID, "provider-a/model-a", "provider-a", "model-a", "2026-01-01T00:00:01Z")
+	insertRealLogRow(t, db, "row-b", clientID, modelID, "provider-a/model-a", "provider-a", "model-a", "2026-01-01T00:00:02Z")
+	// A row attributable to a different real model must be excluded.
+	insertRealLogRow(t, db, "row-other", clientID, "some-other-id", "provider-a/other", "provider-a", "other", "2026-01-01T00:00:03Z")
+
+	status, body := getCSV(t, api, "/api/admin/models/"+modelID+"/activity/export")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("expected header + 2 rows, got %d", len(records))
+	}
+	if records[1][5] != "provider-a/model-a" {
+		t.Fatalf("bound_target column wrong: %v", records[1])
+	}
+	for _, rec := range records {
+		if rec[0] == "2026-01-01T00:00:03Z" {
+			t.Fatalf("other model's row leaked into export: %v", records)
+		}
+	}
+}
+
+func TestRealModelActivityListScopedToModel(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	modelID := realModelID(t, api)
+	insertRealLogRow(t, db, "row-a", clientID, modelID, "provider-a/model-a", "provider-a", "model-a", "2026-01-01T00:00:01Z")
+	insertRealLogRow(t, db, "row-other", clientID, "some-other-id", "provider-a/other", "provider-a", "other", "2026-01-01T00:00:02Z")
+
+	status, payload, _ := api.request("GET", "/api/admin/models/"+modelID+"/activity", nil)
+	if status != 200 {
+		t.Fatalf("list: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-a" {
+		t.Fatalf("real model activity not scoped: %v", data)
+	}
+	status, _, _ = api.request("GET", "/api/admin/models/does-not-exist/activity", nil)
+	if status != 404 {
+		t.Fatalf("expected 404 for unknown model, got %d", status)
+	}
+}
+
 func TestActivityCSVExportNoSensitiveMaterial(t *testing.T) {
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "PROMPT-SECRET-MARKER"}}})
