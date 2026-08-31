@@ -222,8 +222,9 @@ func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request)
 }
 
 // exportVirtualActivityCSV streams a metadata-only CSV of activity attributable
-// to a virtual model (route_kind='virtual' AND route_model_id=?), honouring the
-// active search filter. One inference request = one row.
+// to a virtual model, honouring the active search filter. It matches new rows by
+// route_model_id and legacy rows (route_kind NULL) by canonical name. One
+// inference request = one row.
 func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
 	var canonical string
@@ -231,8 +232,8 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	}
-	where := `rl.route_kind='virtual' AND rl.route_model_id=?`
-	args := []any{modelID}
+	where := `((rl.route_kind='virtual' AND rl.route_model_id=?) OR rl.requested_model=? OR rl.route_model=?)`
+	args := []any{modelID, canonical, canonical}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		pattern := "%" + search + "%"
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
@@ -246,18 +247,19 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
-// exportRealModelActivityCSV streams a metadata-only CSV of activity attributable
-// to a real model (route_kind='real' AND route_model_id=?), honouring the active
-// search filter. One inference request = one row.
+// exportRealModelActivityCSV streams a metadata-only CSV of activity that
+// resolved to a real model (resolved_provider + resolved_model), honouring the
+// active search filter. Scoping by resolved names keeps legacy rows and
+// virtual-routed requests visible. One inference request = one row.
 func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
-	var canonical string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT p.name||'/'||m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, modelID).Scan(&canonical); err != nil {
+	var provider, upstream string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT p.name,m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, modelID).Scan(&provider, &upstream); err != nil {
 		adminError(w, 404, "not_found", "Model not found.")
 		return
 	}
-	where := `rl.route_kind='real' AND rl.route_model_id=?`
-	args := []any{modelID}
+	where := `(rl.resolved_provider=? AND rl.resolved_model=?)`
+	args := []any{provider, upstream}
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		pattern := "%" + search + "%"
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
@@ -268,7 +270,7 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 		adminError(w, 500, "database_error", "Could not export activity.")
 		return
 	}
-	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
+	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(provider+"/"+upstream)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
 // writeActivityCSV streams the export rows as a UTF-8 CSV attachment. Only
@@ -362,17 +364,31 @@ func (s *Server) listScopedActivity(w http.ResponseWriter, r *http.Request, wher
 }
 
 // listVirtualActivity returns metadata for requests attributable to a virtual
-// model (route_kind='virtual' AND route_model_id=?), newest first, with the same
-// search and pagination as the client-key activity endpoint.
+// model, newest first, with the same search and pagination as the client-key
+// activity endpoint. It matches new rows by route_model_id and legacy rows
+// (route_kind NULL) by the virtual model's canonical name.
 func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
-	s.listScopedActivity(w, r, `route_kind='virtual' AND route_model_id=?`, []any{r.PathValue("id")}, `SELECT count(*) FROM virtual_models WHERE id=?`, []any{r.PathValue("id")}, "Virtual model not found.")
+	modelID := r.PathValue("id")
+	var canonical string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, modelID).Scan(&canonical); err != nil {
+		adminError(w, 404, "not_found", "Virtual model not found.")
+		return
+	}
+	s.listScopedActivity(w, r, `((route_kind='virtual' AND route_model_id=?) OR requested_model=? OR route_model=?)`, []any{modelID, canonical, canonical}, `SELECT count(*) FROM virtual_models WHERE id=?`, []any{modelID}, "Virtual model not found.")
 }
 
-// listRealModelActivity returns metadata for requests attributable to a real
-// model (route_kind='real' AND route_model_id=?), newest first, with the same
-// search and pagination as the client-key activity endpoint.
+// listRealModelActivity returns metadata for requests that resolved to a real
+// model (resolved_provider + resolved_model), newest first, with the same search
+// and pagination as the client-key activity endpoint. Scoping by resolved names
+// (not route_model_id) keeps legacy rows and virtual-routed requests visible.
 func (s *Server) listRealModelActivity(w http.ResponseWriter, r *http.Request) {
-	s.listScopedActivity(w, r, `route_kind='real' AND route_model_id=?`, []any{r.PathValue("id")}, `SELECT count(*) FROM provider_models WHERE id=?`, []any{r.PathValue("id")}, "Model not found.")
+	modelID := r.PathValue("id")
+	var provider, upstream string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT p.name,m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, modelID).Scan(&provider, &upstream); err != nil {
+		adminError(w, 404, "not_found", "Model not found.")
+		return
+	}
+	s.listScopedActivity(w, r, `(resolved_provider=? AND resolved_model=?)`, []any{provider, upstream}, `SELECT count(*) FROM provider_models WHERE id=?`, []any{modelID}, "Model not found.")
 }
 
 func strPtrOrEmpty(v *string) string {

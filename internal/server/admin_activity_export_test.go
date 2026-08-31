@@ -294,6 +294,77 @@ func TestRealModelActivityListScopedToModel(t *testing.T) {
 	}
 }
 
+// TestRealModelActivityIncludesLegacyAndVirtualRoutedRows verifies that a row
+// with NULL route_kind (legacy) or a virtual route that resolved to a real model
+// still appears in that real model's activity.
+func TestRealModelActivityIncludesLegacyAndVirtualRoutedRows(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	modelID := realModelID(t, api)
+	// Legacy row: route_kind NULL, resolved to model-a.
+	insertLogRow(t, db, "row-legacy", clientID, "main/hermes-daily", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-legacy", nil, "2026-01-01T00:00:01Z")
+	// Virtual-routed row: route_kind='virtual', resolved to model-a.
+	insertVirtualLogRow(t, db, "row-virtual", clientID, "some-virtual-id", "main/hermes-daily", "provider-a", "model-a", "2026-01-01T00:00:02Z")
+
+	status, payload, _ := api.request("GET", "/api/admin/models/"+modelID+"/activity", nil)
+	if status != 200 {
+		t.Fatalf("list: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 2 {
+		t.Fatalf("expected 2 rows (legacy + virtual-routed), got %d: %v", len(data), data)
+	}
+}
+
+// TestVirtualModelActivityIncludesLegacyRows verifies a legacy row (route_kind
+// NULL) that requested the virtual model by canonical name still appears.
+func TestVirtualModelActivityIncludesLegacyRows(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	status, payload, _ := api.request("GET", "/api/admin/providers", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	var providerID string
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["name"] == "provider-a" {
+			providerID = m["id"].(string)
+		}
+	}
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	var modelID string
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["upstream_model_id"] == "model-a" {
+			modelID = m["id"].(string)
+		}
+	}
+	status, payload, _ = api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != 201 {
+		t.Fatalf("create virtual group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupID, "name": "coding", "target_provider_id": providerID, "target_model_id": modelID})
+	if status != 201 {
+		t.Fatalf("create virtual model: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	// Legacy row: route_kind NULL, requested the virtual model by canonical name.
+	insertLogRow(t, db, "row-legacy", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-legacy", nil, "2026-01-01T00:00:01Z")
+
+	status, payload, _ = api.request("GET", "/api/admin/virtual-models/"+virtualID+"/activity", nil)
+	if status != 200 {
+		t.Fatalf("list: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-legacy" {
+		t.Fatalf("legacy virtual row not found: %v", data)
+	}
+}
+
 func TestActivityCSVExportNoSensitiveMaterial(t *testing.T) {
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "PROMPT-SECRET-MARKER"}}})
