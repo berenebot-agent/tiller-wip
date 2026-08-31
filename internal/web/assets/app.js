@@ -415,6 +415,25 @@ function renderPermissions(filter = '') {
     else collapsedPermissionSections.add(key);
     renderPermissions($('#permission-search').value);
   }));
+  // Clicking anywhere on a section or group header toggles collapse, except
+  // on the interactive controls inside (arrow, switch, Enable/Disable buttons).
+  $$('.permission-section-head', $('#permission-groups')).forEach(head => head.addEventListener('click', (event) => {
+    if (event.target.closest('button, input, label.toggle-label')) return;
+    const btn = head.querySelector('[data-permission-section]');
+    const key = btn.dataset.permissionSection;
+    if (collapsedPermissionSections.has(key)) collapsedPermissionSections.delete(key);
+    else collapsedPermissionSections.add(key);
+    renderPermissions($('#permission-search').value);
+  }));
+  $$('.permission-group-head', $('#permission-groups')).forEach(head => head.addEventListener('click', (event) => {
+    if (event.target.closest('button, input, label.toggle-label')) return;
+    const btn = head.querySelector('[data-permission-collapse]');
+    if (!btn) return;
+    const key = btn.dataset.permissionCollapse;
+    if (collapsedPermissionGroups.has(key)) collapsedPermissionGroups.delete(key);
+    else collapsedPermissionGroups.add(key);
+    renderPermissions($('#permission-search').value);
+  }));
 }
 $('#permission-search').addEventListener('input', event => renderPermissions(event.target.value));
 function bulkSetGroupPermissions(groupKey, enabled) {
