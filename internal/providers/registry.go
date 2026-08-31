@@ -132,8 +132,10 @@ func nativeProtocol(providerType, modelID string) Protocol {
 }
 
 type Registry struct {
-	client *http.Client
-	mu     sync.Mutex
+	client           *http.Client
+	mu               sync.Mutex
+	modelsDev        modelsDevDataset
+	modelsDevEnabled bool
 }
 
 func NewRegistry() *Registry {
@@ -150,7 +152,7 @@ func NewRegistry() *Registry {
 		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: time.Second, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second,
 	}
-	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, modelsDevEnabled: true}
 }
 
 // SetResponseHeaderTimeout updates the per-attempt time-to-first-header bound on
@@ -172,16 +174,25 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	if !ok {
 		return nil, fmt.Errorf("unsupported provider type %q", provider.Type)
 	}
+	var models []Model
+	var err error
 	switch d.Discovery {
 	case "ollama":
-		return r.discoverOllama(ctx, provider)
+		models, err = r.discoverOllama(ctx, provider)
 	case "huggingface":
-		return r.discoverHuggingFace(ctx, provider)
+		models, err = r.discoverHuggingFace(ctx, provider)
 	case "cloudflare":
-		return r.discoverCloudflare(ctx, provider)
+		models, err = r.discoverCloudflare(ctx, provider)
 	default:
-		return r.discoverPaged(ctx, provider, d.Discovery == "anthropic")
+		models, err = r.discoverPaged(ctx, provider, d.Discovery == "anthropic")
 	}
+	if err != nil {
+		return nil, err
+	}
+	// Merge models.dev capability metadata as a fallback so real models whose
+	// provider does not report capabilities still surface useful metadata. The
+	// merged slice flows into Manager.applyCatalogue and is stored in the DB.
+	return r.enrich(models, provider.Type), nil
 }
 
 func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthropic bool) ([]Model, error) {

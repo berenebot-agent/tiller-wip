@@ -53,11 +53,17 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if t, err := db.GetFallbackTimeout(context.Background()); err == nil {
 		registry.SetResponseHeaderTimeout(time.Duration(t) * time.Second)
 	}
+	if cfg.ModelsDevEnabled {
+		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
+	}
 	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler()}, nil
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
 	s.providers.StartScheduler(ctx)
+	if s.config.ModelsDevEnabled {
+		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
+	}
 	go s.startLogPruner(ctx)
 }
 

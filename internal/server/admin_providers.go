@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -223,6 +224,11 @@ func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
 	if err := s.providers.Refresh(ctx, r.PathValue("id")); err != nil {
 		adminError(w, 502, "refresh_failed", "Refresh failed; the previous catalogue and permissions were preserved.")
 		return
+	}
+	// A manual catalogue refresh also picks up fresh models.dev metadata in the
+	// background (best-effort; never blocks or fails the refresh response).
+	if s.config.ModelsDevEnabled {
+		s.providers.Registry().RefreshModelsDevIfStale(context.Background(), filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
 	writeJSON(w, 200, map[string]any{"status": "refreshed"})
 }
