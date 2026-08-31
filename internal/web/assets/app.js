@@ -5,7 +5,6 @@ const collapsedModels = new Set(); const collapsedVirtual = new Set(); const col
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
-const capabilities = model => `<span class="meta-line">Context: ${model.context_length ? h(model.context_length) : '—'}</span><span class="meta-line">Output: ${model.max_output_tokens ? h(model.max_output_tokens) : '—'}</span>`;
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
 const tok = (tokens, pct) => {
@@ -164,7 +163,7 @@ function toggleGroup(event) {
   revealBatch();
 }
 const groupRows = (rows, key, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}">${row}</tr>`).join('')}`;
-function renderModels() { const shown = state.models.filter(item => $('#show-retired').checked || item.available); $('#models-empty').hidden = shown.length > 0; const byProvider = new Map(); shown.forEach(model => { if (!byProvider.has(model.provider_name)) byProvider.set(model.provider_name, []); byProvider.get(model.provider_name).push(model); }); const html = [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([provider, models]) => { const available = models.filter(m => m.available).length; const retired = models.length - available; const collapsed = collapsedModels.has(provider); const note = retired ? `${retired} retired` : 'provider'; const actions = `<button class="btn btn-small btn-secondary" data-refresh-models="${h(models[0].provider_id)}">Refresh models</button>`; return groupBanner('models', provider, provider, note, `${available} available`, actions) + groupRows(models.map(model => `<td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${h(model.provider_name)}</td><td>${badge(model.available, model.available ? 'Available' : 'Retired', model.available ? 'good' : 'warn')}</td><td>${model.native_protocol ? `<span class="protocol">${h(model.native_protocol)}</span>` : '<span class="meta-line">provider default</span>'}</td><td>${capabilities(model)}</td><td><span class="meta-line">${date(model.first_seen_at)}</span></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button></div></td>`), provider, collapsed); }).join(''); $('#models-body').innerHTML = html; $$('.group-toggle', $('#models-body')).forEach(header => header.onclick = toggleGroup); $$('[data-refresh-models]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); refreshModels(button.dataset.refreshModels); }); $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'); }); }
+function renderModels() { const shown = state.models.filter(item => $('#show-retired').checked || item.available); $('#models-empty').hidden = shown.length > 0; const byProvider = new Map(); shown.forEach(model => { if (!byProvider.has(model.provider_name)) byProvider.set(model.provider_name, []); byProvider.get(model.provider_name).push(model); }); const html = [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([provider, models]) => { const available = models.filter(m => m.available).length; const retired = models.length - available; const collapsed = collapsedModels.has(provider); const note = retired ? `${retired} retired` : 'provider'; const actions = `<button class="btn btn-small btn-secondary" data-refresh-models="${h(models[0].provider_id)}">Refresh models</button>`; return groupBanner('models', provider, provider, note, `${available} available`, actions) + groupRows(models.map(model => `<td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td>`), provider, collapsed); }).join(''); $('#models-body').innerHTML = html; $$('.group-toggle', $('#models-body')).forEach(header => header.onclick = toggleGroup); $$('[data-refresh-models]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); refreshModels(button.dataset.refreshModels); }); $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'); }); $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); }); }
 
 async function loadVirtual(search = $('#virtual-search').value) {
   const [groups, virtualModels, providersResult, modelsResult, usage] = await Promise.all([
@@ -214,20 +213,40 @@ function openCapabilities(model) {
   const effectiveContext = contexts.length ? Math.min(...contexts) : null;
   const effectiveOutput = outputs.length ? Math.min(...outputs) : null;
   $('#capabilities-title').textContent = `${model.canonical_model_id} capabilities`;
+  $('#refresh-capabilities').dataset.kind = 'virtual';
   $('#refresh-capabilities').dataset.modelId = model.id;
   $('#capabilities-content').innerHTML = `<div class="capability-effective"><p class="eyebrow">ADVERTISED TO HERMES / V1 MODELS</p><div class="capability-grid"><div><small>Context window</small><strong>${capabilityNumber(effectiveContext)}</strong></div><div><small>Max output</small><strong>${capabilityNumber(effectiveOutput)}</strong></div></div><div class="capability-flags">${capFlags(model)}</div></div><div class="capability-targets"><p class="eyebrow">CONFIGURED TARGETS</p>${targets.length ? targets.map((target, index) => `<div class="capability-target"><div><strong>${String(index + 1).padStart(2, '0')} · ${h(target.provider_name)}/${h(target.upstream_model_id)}</strong><span class="meta-line">${target.native_protocol ? h(target.native_protocol) : 'Provider default'} · ${target.enabled && target.available ? 'eligible' : h(target.warning || 'not eligible')}</span></div><div class="capability-values"><span><small>Context</small><b>${capabilityNumber(target.context_length)}</b></span><span><small>Output</small><b>${capabilityNumber(target.max_output_tokens)}</b></span></div><div class="capability-flags">${capFlags(target)}</div></div>`).join('') : '<p class="meta-line">No targets configured.</p>'}</div><p class="form-error" id="capabilities-refresh-error" role="alert"></p>`;
   $('#capabilities-dialog').showModal();
 }
+function openRealModelCapabilities(model) {
+  if (!model) return;
+  $('#capabilities-title').textContent = `${model.canonical_model_id} capabilities`;
+  $('#refresh-capabilities').dataset.kind = 'real';
+  $('#refresh-capabilities').dataset.modelId = model.id;
+  const modalities = (list) => list && list.length ? h(list.join(', ')) : '—';
+  $('#capabilities-content').innerHTML = `<div class="capability-effective"><p class="eyebrow">ADVERTISED TO HERMES / V1 MODELS</p><div class="capability-grid"><div><small>Context window</small><strong>${capabilityNumber(model.context_length)}</strong></div><div><small>Max output</small><strong>${capabilityNumber(model.max_output_tokens)}</strong></div></div><div class="capability-flags">${capFlags(model)}</div></div><div class="capability-targets"><p class="eyebrow">UPSTREAM</p><div class="capability-target"><div><strong>${h(model.provider_name)}/${h(model.upstream_model_id)}</strong><span class="meta-line">${model.native_protocol ? h(model.native_protocol) : 'Provider default'} · ${model.available ? 'available' : 'retired'} · first seen ${date(model.first_seen_at)}</span></div><div class="capability-values"><span><small>Input</small><b>${modalities(model.input_modalities)}</b></span><span><small>Output</small><b>${modalities(model.output_modalities)}</b></span></div></div></div><p class="form-error" id="capabilities-refresh-error" role="alert"></p>`;
+  $('#capabilities-dialog').showModal();
+}
 $('#refresh-capabilities').onclick = async () => {
   const button = $('#refresh-capabilities');
-  const model = state.virtualModels.find(item => item.id === button.dataset.modelId);
-  if (!model) return;
+  const modelId = button.dataset.modelId;
   button.disabled = true; $('#capabilities-refresh-error').textContent = '';
   try {
-    await refreshProviderCatalogues((model.targets || []).map(target => target.provider_id));
-    await loadVirtual();
-    $('#capabilities-dialog').close();
-    openCapabilities(state.virtualModels.find(item => item.id === model.id) || model);
+    if (button.dataset.kind === 'real') {
+      const model = state.models.find(item => item.id === modelId);
+      if (!model) return;
+      await refreshProviderCatalogues([model.provider_id]);
+      await loadModels();
+      $('#capabilities-dialog').close();
+      openRealModelCapabilities(state.models.find(item => item.id === modelId) || model);
+    } else {
+      const model = state.virtualModels.find(item => item.id === modelId);
+      if (!model) return;
+      await refreshProviderCatalogues((model.targets || []).map(target => target.provider_id));
+      await loadVirtual();
+      $('#capabilities-dialog').close();
+      openCapabilities(state.virtualModels.find(item => item.id === model.id) || model);
+    }
   } catch (error) { $('#capabilities-refresh-error').textContent = errorMessage(error, 'Could not refresh target capabilities.'); }
   finally { button.disabled = false; }
 };
