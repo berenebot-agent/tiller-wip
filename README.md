@@ -5,8 +5,9 @@ keeps one endpoint and one key while an administrator controls its visible
 catalogue and maps stable virtual model names to real upstream targets.
 
 V1 is one statically compiled Go service with embedded SQLite and an embedded
-admin UI. It has no external database, no named volumes, no fallback routing,
-and no prompt or response logging.
+admin UI. It has no external database, no named volumes, and no prompt or
+response logging. It supports ordered, pre-stream fallback for virtual models
+only; direct real-model requests never fall back.
 
 ## Install under `/opt/tiller-router`
 
@@ -108,8 +109,11 @@ authenticated export.
 - Upstream redirects are disabled, client authorization/cookie/organization/
   project headers are not forwarded, and only stored provider credentials are
   applied.
-- Routing is deterministic. There is no retry, fallback, health-based reroute,
-  or alternate-model selection.
+- Routing is deterministic. There is no retry, no health-based reroute, and no
+  alternate-model selection. The only fallback is ordered and pre-stream, and
+  applies to virtual models configured for ordered fallback only; it is
+  non-silent (recorded and visible in Activity) and direct real-model requests
+  never fall back.
 - The container root filesystem is read-only with all Linux capabilities
   dropped and `no-new-privileges` enforced; `/tmp` is an ephemeral tmpfs, so
   nothing written there survives a restart.
@@ -122,11 +126,14 @@ examples.
 
 ## Development and verification
 
-All dependency resolution, building, and tests run inside Docker:
+All dependency resolution, building, and Go tests run inside Docker via the
+`./tiller-go.sh` wrapper, which uses persistent bind-mounted caches and a RAM
+cap (no Go needs to be installed on the host). The browser and compatibility
+tests are fully containerized and need no host Go either:
 
 ```sh
-docker run --rm -v "$PWD:/src" -w /src golang:1.26.7-alpine go mod tidy
-docker run --rm -v "$PWD:/src" -w /src golang:1.26.7-alpine go test ./...
+./tiller-go.sh mod tidy
+./tiller-go.sh test ./...
 docker build -t tiller-router:dev .
 docker build -t tiller-router-browser-tests:dev tests/browser
 docker build -t tiller-router-sdk-probes:dev tests/compatibility
@@ -140,7 +147,8 @@ two-client catalogue isolation, non-retroactive permission feeders,
 guessed-model rejection, hidden-target virtual routing, immediate remapping,
 all three streaming protocols, tool-call chunks, disconnect cancellation,
 rotation and disable invalidation, failed-refresh preservation, retired
-targets, provider outages, and backup restoration with existing client keys.
+targets, provider outages, ordered fallback and fallback exhaustion for virtual
+models, and backup restoration with existing client keys.
 The disposable compatibility probes use pinned official OpenAI and Anthropic
 Python SDKs plus real Codex CLI, OpenCode, Claude Code, and Hermes Agent
 executables against a controllable mock upstream. Hermes is exercised in Chat
