@@ -60,10 +60,13 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.setViewportSize({ width: 780, height: 700 });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/media/tiller-favicon.svg');
+  await expect(page.locator('.login-mark')).toBeVisible();
   await page.getByLabel('Administrator').fill(process.env.TILLER_BROWSER_ADMIN_USERNAME || 'admin');
   await page.getByLabel('Password').fill(process.env.TILLER_BROWSER_ADMIN_PASSWORD || 'browser-test-password');
   await page.getByRole('button', { name: 'Enter control panel' }).click();
   await expect(page.getByRole('heading', { name: 'Providers', exact: true })).toBeVisible();
+  await expect(page.locator('.brand-mark')).toBeVisible();
 
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
   await page.getByRole('button', { name: 'Client Keys' }).click();
