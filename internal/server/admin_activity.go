@@ -298,13 +298,13 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 		}
 		_ = cw.Write([]string{
 			row.CreatedAt,
-			row.ClientName,
-			row.RequestedModel,
-			strPtrOrEmpty(row.ExposedModel),
-			virtualModel,
-			boundTarget,
-			strPtrOrEmpty(row.ResolvedProvider),
-			strPtrOrEmpty(row.ResolvedModel),
+			neutralizeCSVField(row.ClientName),
+			neutralizeCSVField(row.RequestedModel),
+			neutralizeCSVField(strPtrOrEmpty(row.ExposedModel)),
+			neutralizeCSVField(virtualModel),
+			neutralizeCSVField(boundTarget),
+			neutralizeCSVField(strPtrOrEmpty(row.ResolvedProvider)),
+			neutralizeCSVField(strPtrOrEmpty(row.ResolvedModel)),
 			row.Protocol,
 			strconv.FormatBool(row.Streaming),
 			strconv.Itoa(row.HTTPStatus),
@@ -315,7 +315,7 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 			strconv.Itoa(row.AttemptCount),
 			strconv.FormatBool(row.FallbackUsed),
 			strPtrOrEmpty(row.FallbackReason),
-			strPtrOrEmpty(row.ProviderRequestID),
+			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)),
 			row.ClientRequestID,
 			strPtrOrEmpty(row.RouteKind),
 		})
@@ -417,6 +417,19 @@ func sanitizeFilename(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// neutralizeCSVField prevents spreadsheet formula injection by escaping a
+// leading formula prefix (= + - @ tab or carriage return) with a single quote.
+func neutralizeCSVField(s string) string {
+	if s == "" {
+		return s
+	}
+	switch s[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + s
+	}
+	return s
 }
 
 var _ = sql.ErrNoRows

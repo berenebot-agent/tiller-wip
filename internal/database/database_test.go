@@ -3,9 +3,41 @@ package database
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestOpenRestrictsFileAndDirPermissions(t *testing.T) {
+	dir := t.TempDir()
+	// Simulate a host bind-mount that pre-exists with loose perms.
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "router.db")
+	db, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	// The data dir is tightened to 0700.
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("data dir mode = %o, want 700", perm)
+	}
+	// The DB file is tightened to 0600.
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("db file mode = %o, want 600", perm)
+	}
+}
 
 func TestMigrationsAndSharedNamespace(t *testing.T) {
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))

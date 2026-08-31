@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -16,6 +17,7 @@ type Config struct {
 	DataDir          string
 	ListenAddr       string
 	TrustProxy       bool
+	TrustedProxy     netip.Prefix
 	ModelsDevEnabled bool
 }
 
@@ -41,6 +43,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_TRUST_PROXY_HEADERS: %w", err)
 		}
 		c.TrustProxy = v
+	}
+	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
+		v, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+		}
+		c.TrustedProxy = v
 	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
 		v, err := strconv.ParseBool(raw)

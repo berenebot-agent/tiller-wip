@@ -29,6 +29,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
+	// The data dir may pre-exist (e.g. a host bind-mount) with looser perms;
+	// MkdirAll won't tighten an existing dir, so chmod it explicitly.
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
 	dsnURL := url.URL{Scheme: "file", Path: path}
 	query := dsnURL.Query()
 	query.Add("_pragma", "foreign_keys(1)")
@@ -46,12 +51,33 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
+	// Restrict the on-disk DB and any existing WAL/SHM sidecars to the owning
+	// user. SQLite creates -wal/-shm with the same mode as the main DB file, so
+	// tightening the DB file also governs future sidecar files.
+	if err := restrictFileMode(path); err != nil {
+		db.Close()
+		return nil, err
+	}
 	d := &DB{SQL: db, Path: path}
 	if err := d.Migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return d, nil
+}
+
+// restrictFileMode chmods the given SQLite file and any existing -wal/-shm
+// sidecars to 0600 so provider credentials and other sensitive state are not
+// world-readable on the host bind-mount.
+func restrictFileMode(path string) error {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			if err := os.Chmod(p, 0o600); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (d *DB) Close() error { return d.SQL.Close() }

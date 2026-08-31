@@ -500,3 +500,44 @@ func TestAttributionHelperConsistency(t *testing.T) {
 		t.Fatalf("usage 1h: expected 300, got %v", vm["1h"])
 	}
 }
+
+// TestNeutralizeCSVField guards against spreadsheet formula injection: a leading
+// formula prefix must be escaped with a single quote so the cell is not treated
+// as a formula when opened in a spreadsheet.
+func TestNeutralizeCSVField(t *testing.T) {
+	for _, prefix := range []string{"=", "+", "-", "@", "\t", "\r"} {
+		got := neutralizeCSVField(prefix + "cmd|' /C calc'!A0")
+		if !strings.HasPrefix(got, "'") {
+			t.Fatalf("prefix %q not neutralized: %q", prefix, got)
+		}
+	}
+	// Non-formula values and empty strings are untouched.
+	if got := neutralizeCSVField("provider-a/model-a"); got != "provider-a/model-a" {
+		t.Fatalf("plain value altered: %q", got)
+	}
+	if got := neutralizeCSVField(""); got != "" {
+		t.Fatalf("empty value altered: %q", got)
+	}
+}
+
+// TestActivityCSVExportNeutralizesFormulaModel verifies end-to-end that a
+// client-chosen model beginning with a formula prefix is neutralized in the
+// admin CSV export.
+func TestActivityCSVExportNeutralizesFormulaModel(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	// A client-chosen model string that would otherwise execute as a formula.
+	insertLogRow(t, db, "row-formula", clientID, "=1+1", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
+
+	status, body := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// client_requested_model is column index 2.
+	if got := records[1][2]; !strings.HasPrefix(got, "'") {
+		t.Fatalf("formula-prefixed model not neutralized in export: %q", got)
+	}
+}

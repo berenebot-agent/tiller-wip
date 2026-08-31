@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +37,8 @@ type Server struct {
 	// notifications. It has a short timeout so a slow webhook can never
 	// materially delay an inference request.
 	notifyClient *http.Client
+	// loginLimiter throttles failed admin login attempts to blunt brute force.
+	loginLimiter *loginLimiter
 }
 
 type contextKey string
@@ -60,7 +64,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}}, nil
+	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -151,15 +155,25 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	key := peerIP(r)
+	if s.loginLimiter.locked(key) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
+		return
+	}
 	var input struct{ Username, Password string }
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
 	if !auth.EqualCredential(input.Username, s.config.AdminUsername) || !auth.EqualCredential(input.Password, s.config.AdminPassword) {
+		if s.loginLimiter.recordFailure(key) {
+			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
+			return
+		}
 		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid administrator credentials.")
 		return
 	}
+	s.loginLimiter.success(key)
 	session, err := s.sessions.Create()
 	if err != nil {
 		adminError(w, 500, "internal_error", "Could not create session.")
@@ -226,11 +240,28 @@ func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
 	})
 }
 
+// secureRequest reports whether the request arrived over a secure channel so
+// the admin session cookie can be marked Secure. A direct TLS connection is
+// always secure. When behind a reverse proxy, X-Forwarded-Proto is only trusted
+// if the direct peer is within the configured trusted-proxy CIDR, so a client
+// cannot force Secure-cookie semantics on a plaintext connection by spoofing the
+// header.
 func (s *Server) secureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	return s.config.TrustProxy && strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
+	if !s.config.TrustProxy || !s.config.TrustedProxy.IsValid() {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil || !s.config.TrustedProxy.Contains(addr) {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
