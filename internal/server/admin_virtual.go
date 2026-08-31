@@ -213,6 +213,10 @@ type virtualModelView struct {
 	Targets               []virtualTargetView `json:"targets"`
 	ContextLength         *int64              `json:"context_length"`
 	MaxOutputTokens       *int64              `json:"max_output_tokens"`
+	SupportsTools         *bool               `json:"supports_tools"`
+	SupportsVision        *bool               `json:"supports_vision"`
+	SupportsReasoning     *bool               `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool            `json:"supports_structured_output"`
 	Available             bool                `json:"available"`
 	Warning               string              `json:"warning,omitempty"`
 	CreatedAt             string              `json:"created_at"`
@@ -232,6 +236,12 @@ type virtualTargetView struct {
 	Warning         string `json:"warning,omitempty"`
 	ContextLength   *int64 `json:"context_length"`
 	MaxOutputTokens *int64 `json:"max_output_tokens"`
+	SupportsTools   *bool  `json:"supports_tools"`
+	SupportsVision  *bool  `json:"supports_vision"`
+	SupportsReasoning *bool `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool `json:"supports_structured_output"`
+	InputModalities  []string `json:"input_modalities,omitempty"`
+	OutputModalities []string `json:"output_modalities,omitempty"`
 }
 
 func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
@@ -251,9 +261,14 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		v.Targets, _ = s.virtualTargets(r, v.ID)
+		var tools, vision, reasoning, structured []*bool
 		for _, target := range v.Targets {
 			if target.Enabled && target.Available {
 				v.Available = true
+				tools = append(tools, target.SupportsTools)
+				vision = append(vision, target.SupportsVision)
+				reasoning = append(reasoning, target.SupportsReasoning)
+				structured = append(structured, target.SupportsStructuredOutput)
 			}
 			if v.TargetProviderID == "" {
 				v.TargetProviderID, v.TargetProviderName, v.TargetModelID, v.TargetUpstreamModelID = target.ProviderID, target.ProviderName, target.ProviderModelID, target.UpstreamModelID
@@ -263,13 +278,17 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 				v.Warning = target.Warning
 			}
 		}
+		v.SupportsTools = triStateANDBool(tools)
+		v.SupportsVision = triStateANDBool(vision)
+		v.SupportsReasoning = triStateANDBool(reasoning)
+		v.SupportsStructuredOutput = triStateANDBool(structured)
 		data = append(data, v)
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
 func (s *Server) virtualTargets(r *http.Request, virtualID string) ([]virtualTargetView, error) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.id,t.provider_model_id,p.id,p.name,m.upstream_model_id,coalesce(m.native_protocol,''),t.position,t.enabled,(p.enabled=1 AND m.available=1),CASE WHEN t.enabled=0 THEN 'Target is disabled' WHEN p.enabled=0 THEN 'Target provider is disabled' WHEN m.available=0 THEN 'Target model is retired' ELSE '' END,m.context_length,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position`, virtualID)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.id,t.provider_model_id,p.id,p.name,m.upstream_model_id,coalesce(m.native_protocol,''),t.position,t.enabled,(p.enabled=1 AND m.available=1),CASE WHEN t.enabled=0 THEN 'Target is disabled' WHEN p.enabled=0 THEN 'Target provider is disabled' WHEN m.available=0 THEN 'Target model is retired' ELSE '' END,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.input_modalities,m.output_modalities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position`, virtualID)
 	if err != nil {
 		return nil, err
 	}
@@ -278,10 +297,18 @@ func (s *Server) virtualTargets(r *http.Request, virtualID string) ([]virtualTar
 	for rows.Next() {
 		var v virtualTargetView
 		var enabled, available int
-		if err := rows.Scan(&v.ID, &v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.NativeProtocol, &v.Position, &enabled, &available, &v.Warning, &v.ContextLength, &v.MaxOutputTokens); err != nil {
+		var tools, vision, reasoning, structured sql.NullInt64
+		var inputMod, outputMod sql.NullString
+		if err := rows.Scan(&v.ID, &v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.NativeProtocol, &v.Position, &enabled, &available, &v.Warning, &v.ContextLength, &v.MaxOutputTokens, &tools, &vision, &reasoning, &structured, &inputMod, &outputMod); err != nil {
 			return nil, err
 		}
 		v.Enabled, v.Available = scanBool(enabled), scanBool(available)
+		v.SupportsTools = triBoolFromInt(tools)
+		v.SupportsVision = triBoolFromInt(vision)
+		v.SupportsReasoning = triBoolFromInt(reasoning)
+		v.SupportsStructuredOutput = triBoolFromInt(structured)
+		v.InputModalities = decodeModalities(inputMod)
+		v.OutputModalities = decodeModalities(outputMod)
 		data = append(data, v)
 	}
 	return data, rows.Err()

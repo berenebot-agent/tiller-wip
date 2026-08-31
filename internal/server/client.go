@@ -35,10 +35,11 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		}
 		realID, virtualID = real.String, virtual.String
 		var contextLength, maxOutputTokens sql.NullInt64
+		var caps modelCapabilities
 		if real.Valid {
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens)
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
 		} else {
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT min(m.context_length),min(m.max_output_tokens) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=? AND t.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens)
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT min(m.context_length),min(m.max_output_tokens),`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=? AND t.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
 		}
 		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
@@ -47,13 +48,14 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
 			entry["max_output_tokens"] = maxOutputTokens.Int64
 		}
+		caps.addTo(entry)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
 		return
 	}
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens FROM (
-	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output FROM (
+	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical, min(t.context_length), min(t.max_output_tokens) FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
+	SELECT g.name||'/'||v.name canonical, min(t.context_length), min(t.max_output_tokens), `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+` FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
 ) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
@@ -65,7 +67,8 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		var modelID string
 		var contextLength sql.NullInt64
 		var maxOutputTokens sql.NullInt64
-		if rows.Scan(&modelID, &contextLength, &maxOutputTokens) == nil {
+		var caps modelCapabilities
+		if rows.Scan(&modelID, &contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput) == nil {
 			entry := map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"}
 			if contextLength.Valid && contextLength.Int64 > 0 {
 				entry["context_length"] = contextLength.Int64
@@ -73,10 +76,40 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 			if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
 				entry["max_output_tokens"] = maxOutputTokens.Int64
 			}
+			caps.addTo(entry)
 			data = append(data, entry)
 		}
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
+}
+
+// modelCapabilities holds the tri-state capability flags for a model. A flag is
+// Valid only when the provider reported it; unknown flags are omitted from the
+// client-facing catalogue rather than being reported as unsupported.
+type modelCapabilities struct {
+	Tools, Vision, Reasoning, StructuredOutput sql.NullInt64
+}
+
+func (c modelCapabilities) addTo(entry map[string]any) {
+	if c.Tools.Valid {
+		entry["supports_tools"] = c.Tools.Int64
+	}
+	if c.Vision.Valid {
+		entry["supports_vision"] = c.Vision.Int64
+	}
+	if c.Reasoning.Valid {
+		entry["supports_reasoning"] = c.Reasoning.Int64
+	}
+	if c.StructuredOutput.Valid {
+		entry["supports_structured_output"] = c.StructuredOutput.Int64
+	}
+}
+
+// triStateAND builds a SQLite expression computing the conservative AND of a
+// tri-state capability column across a group: any 0 -> 0; else any NULL ->
+// NULL; else 1. An empty group yields NULL (unknown).
+func triStateAND(col string) string {
+	return `CASE WHEN COUNT(*)=0 THEN NULL WHEN COUNT(CASE WHEN ` + col + `=0 THEN 1 END)>0 THEN 0 WHEN COUNT(CASE WHEN ` + col + ` IS NULL THEN 1 END)>0 THEN NULL ELSE 1 END`
 }
 
 type resolvedRoute struct {

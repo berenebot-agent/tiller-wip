@@ -30,7 +30,7 @@ func TestSingleModelKeyEndToEnd(t *testing.T) {
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{
-				map[string]any{"id": "model-a", "context_length": 128000, "max_output_tokens": 8192},
+				map[string]any{"id": "model-a", "context_length": 128000, "max_output_tokens": 8192, "supported_parameters": []string{"tools", "reasoning"}, "architecture": map[string]any{"input_modalities": []string{"text", "image"}}},
 				map[string]any{"id": "model-b", "context_length": 64000, "max_output_tokens": 4096},
 			}})
 			return
@@ -99,6 +99,9 @@ func TestSingleModelKeyEndToEnd(t *testing.T) {
 	models := catalogue["data"].([]any)
 	if len(models) != 1 || models[0].(map[string]any)["id"] != "main" || models[0].(map[string]any)["context_length"] != float64(128000) {
 		t.Fatalf("Single catalogue leaked or lost metadata: %v", catalogue)
+	}
+	if models[0].(map[string]any)["supports_tools"] != float64(1) || models[0].(map[string]any)["supports_vision"] != float64(1) {
+		t.Fatalf("Single catalogue did not inherit bound-model capabilities: %v", catalogue)
 	}
 
 	resp, body := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "hidden/typo", "messages": []any{}})

@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"sync"
@@ -76,7 +77,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 			if err != nil {
 				return err
 			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,?,?,?,?)`, modelID, providerID, model.ID, model.DisplayName, nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens), nullableProtocol(model.NativeProtocol), now, now, now, now); err != nil {
+			if _, err = tx.ExecContext(ctx, `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)`, modelID, providerID, model.ID, model.DisplayName, nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens), nullableProtocol(model.NativeProtocol), nullableBool(model.SupportsTools), nullableBool(model.SupportsVision), nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput), nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities), now, now, now, now); err != nil {
 				return err
 			}
 			if _, err = tx.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at)
@@ -85,7 +86,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 			}
 		} else if err != nil {
 			return err
-		} else if _, err = tx.ExecContext(ctx, `UPDATE provider_models SET display_name=?,context_length=?,max_output_tokens=?,native_protocol=?,available=1,last_seen_at=?,updated_at=? WHERE id=?`, model.DisplayName, nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens), nullableProtocol(model.NativeProtocol), now, now, modelID); err != nil {
+		} else if _, err = tx.ExecContext(ctx, `UPDATE provider_models SET display_name=?,context_length=?,max_output_tokens=?,native_protocol=?,supports_tools=?,supports_vision=?,supports_reasoning=?,supports_structured_output=?,input_modalities=?,output_modalities=?,available=1,last_seen_at=?,updated_at=? WHERE id=?`, model.DisplayName, nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens), nullableProtocol(model.NativeProtocol), nullableBool(model.SupportsTools), nullableBool(model.SupportsVision), nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput), nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities), now, now, modelID); err != nil {
 			return err
 		}
 	}
@@ -196,4 +197,25 @@ func nullableProtocol(v Protocol) any {
 		return nil
 	}
 	return string(v)
+}
+
+func nullableBool(v *bool) any {
+	if v == nil {
+		return nil
+	}
+	if *v {
+		return 1
+	}
+	return 0
+}
+
+func nullableJSON(list []string) any {
+	if len(list) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(list)
+	if err != nil {
+		return nil
+	}
+	return string(b)
 }

@@ -486,3 +486,129 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 		t.Fatalf("provider outage corrupted catalogue: %d %v", resp.StatusCode, catalogue)
 	}
 }
+
+func TestCatalogueSurfacesCapabilities(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{
+			map[string]any{"id": "model-a", "context_length": 128000, "max_output_tokens": 16384, "supported_parameters": []string{"tools", "reasoning", "structured_outputs"}, "architecture": map[string]any{"input_modalities": []string{"text", "image"}, "output_modalities": []string{"text"}}},
+			map[string]any{"id": "model-b", "context_length": 262144, "max_output_tokens": 32768},
+		}})
+	}))
+	defer upstream.Close()
+
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := httptest.NewServer(app.Handler())
+	defer router.Close()
+	jar, _ := cookiejar.New(nil)
+	api := &testAPI{t: t, base: router.URL, client: &http.Client{Jar: jar}}
+	status, payload, _ := api.request("POST", "/api/admin/session", map[string]any{"username": "admin", "password": "correct horse"})
+	if status != 200 {
+		t.Fatalf("login: %d %v", status, payload)
+	}
+	api.csrf = payload["csrf_token"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/providers", map[string]any{"name": "provider-a", "type": "generic-openai", "base_url": upstream.URL + "/v1", "credential": "provider-secret"})
+	if status != 201 {
+		t.Fatalf("create provider: %d %v", status, payload)
+	}
+	providerID := payload["id"].(string)
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	modelIDs := map[string]string{}
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
+	}
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "cap client"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+	clientSecret := payload["secret"].(string)
+	status, payload, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{"defaults": []any{}, "permissions": []any{
+		map[string]any{"kind": "real", "model_id": modelIDs["model-a"], "enabled": true},
+		map[string]any{"kind": "real", "model_id": modelIDs["model-b"], "enabled": true},
+	}})
+	if status != 204 {
+		t.Fatalf("permissions: %d %v", status, payload)
+	}
+	clientCatalogue := func() map[string]map[string]any {
+		t.Helper()
+		req, _ := http.NewRequest("GET", router.URL+"/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+clientSecret)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var catalogue map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&catalogue)
+		resp.Body.Close()
+		byID := map[string]map[string]any{}
+		for _, raw := range catalogue["data"].([]any) {
+			m := raw.(map[string]any)
+			byID[m["id"].(string)] = m
+		}
+		return byID
+	}
+	byID := clientCatalogue()
+	a := byID["provider-a/model-a"]
+	if a["supports_tools"] != float64(1) || a["supports_vision"] != float64(1) || a["supports_reasoning"] != float64(1) || a["supports_structured_output"] != float64(1) {
+		t.Fatalf("model-a capabilities not surfaced: %v", a)
+	}
+	b := byID["provider-a/model-b"]
+	for _, key := range []string{"supports_tools", "supports_vision", "supports_reasoning", "supports_structured_output"} {
+		if _, ok := b[key]; ok {
+			t.Fatalf("model-b unknown capability %s should be omitted: %v", key, b)
+		}
+	}
+	// Virtual effective flags: model-a (tools=1) + model-b (tools=unknown) -> unknown.
+	status, payload, _ = api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != 201 {
+		t.Fatalf("group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupID, "name": "mixed", "routing_mode": "ordered_fallback", "targets": []any{
+		map[string]any{"provider_model_id": modelIDs["model-a"], "enabled": true},
+		map[string]any{"provider_model_id": modelIDs["model-b"], "enabled": true},
+	}})
+	if status != 201 {
+		t.Fatalf("virtual mixed: %d %v", status, payload)
+	}
+	mixedID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupID, "name": "single", "target_provider_id": providerID, "target_model_id": modelIDs["model-a"]})
+	if status != 201 {
+		t.Fatalf("virtual single: %d %v", status, payload)
+	}
+	singleID := payload["id"].(string)
+	status, payload, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{"defaults": []any{}, "permissions": []any{
+		map[string]any{"kind": "real", "model_id": modelIDs["model-a"], "enabled": true},
+		map[string]any{"kind": "real", "model_id": modelIDs["model-b"], "enabled": true},
+		map[string]any{"kind": "virtual", "model_id": mixedID, "enabled": true},
+		map[string]any{"kind": "virtual", "model_id": singleID, "enabled": true},
+	}})
+	if status != 204 {
+		t.Fatalf("permissions2: %d %v", status, payload)
+	}
+	byID = clientCatalogue()
+	mixed := byID["virtual/mixed"]
+	if _, ok := mixed["supports_tools"]; ok {
+		t.Fatalf("mixed virtual tools should be unknown (model-b unknown), got %v", mixed["supports_tools"])
+	}
+	single := byID["virtual/single"]
+	if single["supports_tools"] != float64(1) || single["supports_vision"] != float64(1) {
+		t.Fatalf("single-target virtual should inherit model-a capabilities: %v", single)
+	}
+}

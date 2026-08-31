@@ -172,6 +172,48 @@ func TestPagedDiscovery(t *testing.T) {
 	}
 }
 
+func TestPagedDiscoveryCapturesCapabilities(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{
+				"id":                   "model-a",
+				"supported_parameters": []string{"tools", "reasoning", "structured_outputs"},
+				"architecture":         map[string]any{"input_modalities": []string{"text", "image"}, "output_modalities": []string{"text"}},
+			},
+			map[string]any{"id": "model-b"},
+		}})
+	}))
+	defer upstream.Close()
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "openrouter", BaseURL: upstream.URL + "/v1", Credential: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	a := models[0]
+	if a.SupportsTools == nil || !*a.SupportsTools {
+		t.Errorf("model-a supports_tools: %v", a.SupportsTools)
+	}
+	if a.SupportsVision == nil || !*a.SupportsVision {
+		t.Errorf("model-a supports_vision: %v", a.SupportsVision)
+	}
+	if a.SupportsReasoning == nil || !*a.SupportsReasoning {
+		t.Errorf("model-a supports_reasoning: %v", a.SupportsReasoning)
+	}
+	if a.SupportsStructuredOutput == nil || !*a.SupportsStructuredOutput {
+		t.Errorf("model-a supports_structured_output: %v", a.SupportsStructuredOutput)
+	}
+	if len(a.InputModalities) != 2 || a.InputModalities[0] != "text" || a.InputModalities[1] != "image" {
+		t.Errorf("model-a input_modalities: %v", a.InputModalities)
+	}
+	// model-b reports nothing -> all flags stay unknown (nil).
+	b := models[1]
+	if b.SupportsTools != nil || b.SupportsVision != nil || b.SupportsReasoning != nil || b.SupportsStructuredOutput != nil {
+		t.Errorf("model-b flags should be unknown, got tools=%v vision=%v reasoning=%v structured=%v", b.SupportsTools, b.SupportsVision, b.SupportsReasoning, b.SupportsStructuredOutput)
+	}
+}
+
 func TestOpenRouterDiscoveryCapturesTopProviderOutputLimit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{

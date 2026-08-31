@@ -96,6 +96,9 @@ type Model struct {
 	ContextLength   int
 	MaxOutputTokens int
 	NativeProtocol  Protocol
+	// Tri-state capability flags: nil = unknown, non-nil = supported/unsupported.
+	SupportsTools, SupportsVision, SupportsReasoning, SupportsStructuredOutput *bool
+	InputModalities, OutputModalities                                          []string
 }
 
 var openCodeZenProtocolByModel = map[string]Protocol{
@@ -218,6 +221,11 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 				TopProvider     struct {
 					MaxCompletionTokens int `json:"max_completion_tokens"`
 				} `json:"top_provider"`
+				SupportedParameters []string `json:"supported_parameters"`
+				Architecture        struct {
+					InputModalities  []string `json:"input_modalities"`
+					OutputModalities []string `json:"output_modalities"`
+				} `json:"architecture"`
 			} `json:"data"`
 			HasMore bool   `json:"has_more"`
 			LastID  string `json:"last_id"`
@@ -243,7 +251,9 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			if provider.Type == "openrouter" {
 				maxOutputTokens = firstPositive(maxOutputTokens, item.TopProvider.MaxCompletionTokens)
 			}
-			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID)})
+			sp := item.SupportedParameters
+			arch := item.Architecture
+			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID), SupportsTools: triBool(len(sp) > 0, contains(sp, "tools")), SupportsVision: triBool(len(arch.InputModalities) > 0, contains(arch.InputModalities, "image")), SupportsReasoning: triBool(len(sp) > 0, contains(sp, "reasoning")), SupportsStructuredOutput: triBool(len(sp) > 0, contains(sp, "structured_outputs")), InputModalities: arch.InputModalities, OutputModalities: arch.OutputModalities})
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break
@@ -509,6 +519,25 @@ func firstPositive(values ...int) int {
 		}
 	}
 	return 0
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// triBool returns a tri-state capability value: nil when the provider did not
+// report the field (unknown), otherwise a pointer to the reported boolean.
+func triBool(present, val bool) *bool {
+	if !present {
+		return nil
+	}
+	b := val
+	return &b
 }
 
 func coerceInt(v any) (int, bool) {
