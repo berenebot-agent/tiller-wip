@@ -427,8 +427,8 @@ test('permission bulk enable/disable applies only to current available models', 
   };
   const model = id => page.getByLabel(`Enable ${canonical(id)}`);
   const feederCheckbox = page.locator('.permission-group', { hasText: providerName }).locator('input[data-group-id]');
-  const enableCurrent = page.getByRole('button', { name: 'Enable current' });
-  const disableCurrent = page.getByRole('button', { name: 'Disable current' });
+  const enableAll = page.locator('#enable-all-permissions');
+  const disableAll = page.locator('#disable-all-permissions');
   const search = page.locator('#permission-search');
   const cancel = page.getByRole('button', { name: 'Cancel' });
   const save = page.getByRole('button', { name: 'Save catalogue' });
@@ -439,21 +439,28 @@ test('permission bulk enable/disable applies only to current available models', 
   await expect(model('bulk-extra')).toBeVisible();
   await expect(model('bulk-retired')).toBeVisible();
   await expect(feederCheckbox).not.toBeChecked();
-  await enableCurrent.click();
+  await enableAll.click();
   await expect(model('mock-model')).toBeChecked();
   await expect(model('bulk-extra')).toBeChecked();
   await expect(model('bulk-retired')).not.toBeChecked();
   await expect(feederCheckbox).not.toBeChecked();
 
-  // 2. With a filter, disable only the matching AVAILABLE model.
+  // 2. Per-group "Disable all" acts on the whole group regardless of the filter,
+  //    disabling every AVAILABLE model while retired stays untouched.
   await search.fill('bulk-extra');
-  await disableCurrent.click();
+  await page.locator('.permission-group', { hasText: providerName }).getByRole('button', { name: 'Disable all' }).click();
   await expect(model('bulk-extra')).not.toBeChecked();
-  await expect(model('mock-model')).toBeChecked();    // available but not matching filter
+  await expect(model('mock-model')).not.toBeChecked();   // available but not matching filter
   await expect(model('bulk-retired')).not.toBeChecked(); // retired and not matching
   await search.fill('');
   await expect(model('bulk-extra')).not.toBeChecked();
+  await expect(model('mock-model')).not.toBeChecked();
+
+  // 2b. Per-group "Enable all" re-enables every AVAILABLE model in the group.
+  await page.locator('.permission-group', { hasText: providerName }).getByRole('button', { name: 'Enable all' }).click();
   await expect(model('mock-model')).toBeChecked();
+  await expect(model('bulk-extra')).toBeChecked();
+  await expect(model('bulk-retired')).not.toBeChecked();
 
   // 3+5. Cancel discards bulk changes; reopening refetches (all back OFF).
   await cancel.click();
@@ -464,7 +471,7 @@ test('permission bulk enable/disable applies only to current available models', 
   await expect(model('bulk-retired')).not.toBeChecked();
 
   // 6. Save persists bulk changes; retired models still untouched.
-  await enableCurrent.click();
+  await enableAll.click();
   await save.click();
   await expect(page.locator('#permissions-dialog')).toBeHidden();
   await openPermissions();
@@ -515,7 +522,7 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   const model = id => page.getByLabel(`Enable ${canonical(id)}`);
   const search = page.locator('#permission-search');
   const cancel = page.getByRole('button', { name: 'Cancel' });
-  const enableCurrent = page.getByRole('button', { name: 'Enable current' });
+  const enableAll = page.locator('#enable-all-permissions');
 
   // 1. Open, then filter so only one of the two available models shows.
   await openPermissions();
@@ -535,9 +542,9 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   await expect(model('mock-model')).toBeVisible();
   await expect(model('reopen-extra')).toBeVisible();
 
-  // 4. "Enable current" must now scope to the whole available set, including
+  // 4. "Enable all" must now scope to the whole available set, including
   //    the model that the old filter had hidden.
-  await enableCurrent.click();
+  await enableAll.click();
   await expect(model('mock-model')).toBeChecked();
   await expect(model('reopen-extra')).toBeChecked();
 
