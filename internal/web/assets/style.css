@@ -23,7 +23,9 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 
 /* Client model access: compact status-first table and one routing dialog. */
 .clients-table{min-width:900px}
-.clients-table th:nth-child(2){min-width:300px}
+.clients-table th:nth-child(3){min-width:300px}
+.key-info-cell .secret-fingerprint{display:block}
+.key-info-cell small{display:block;color:var(--muted);margin-top:2px;font-size:11px}
 .client-name-line{display:flex;align-items:center;gap:8px}
 .client-name-line strong{display:inline}
 .status-dot{display:inline-block;flex:none;width:10px;height:10px;border-radius:50%}
