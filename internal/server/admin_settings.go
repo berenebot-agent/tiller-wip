@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -19,14 +20,33 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"default_logging_enabled": enabled, "default_retention_days": retention, "fallback_timeout_seconds": fallbackTimeout})
+	notifications, err := s.db.GetNotificationSettings(r.Context())
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load settings.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"default_logging_enabled":        enabled,
+		"default_retention_days":         retention,
+		"fallback_timeout_seconds":       fallbackTimeout,
+		"notifications_enabled":          notifications.Enabled,
+		"notifications_webhook_url":      notifications.WebhookURL,
+		"notifications_event_fallback":   notifications.EventFallback,
+		"notifications_event_all_failed": notifications.EventAllFailed,
+		"notifications_auth_header_set":  notifications.AuthHeader != "",
+	})
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		DefaultLoggingEnabled  *bool `json:"default_logging_enabled"`
-		DefaultRetentionDays   *int  `json:"default_retention_days"`
-		FallbackTimeoutSeconds *int  `json:"fallback_timeout_seconds"`
+		DefaultLoggingEnabled       *bool   `json:"default_logging_enabled"`
+		DefaultRetentionDays        *int    `json:"default_retention_days"`
+		FallbackTimeoutSeconds      *int    `json:"fallback_timeout_seconds"`
+		NotificationsEnabled        *bool   `json:"notifications_enabled"`
+		NotificationsWebhookURL     *string `json:"notifications_webhook_url"`
+		NotificationsEventFallback  *bool   `json:"notifications_event_fallback"`
+		NotificationsEventAllFailed *bool   `json:"notifications_event_all_failed"`
+		NotificationsAuthHeader     *string `json:"notifications_auth_header"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -39,6 +59,12 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if input.FallbackTimeoutSeconds != nil && (*input.FallbackTimeoutSeconds < 1 || *input.FallbackTimeoutSeconds > 3600) {
 		adminError(w, 400, "invalid_fallback_timeout", "Fallback timeout must be between 1 and 3600 seconds.")
 		return
+	}
+	if input.NotificationsWebhookURL != nil && *input.NotificationsWebhookURL != "" {
+		if !validWebhookURL(*input.NotificationsWebhookURL) {
+			adminError(w, 400, "invalid_webhook_url", "The webhook URL must be a valid http(s) URL.")
+			return
+		}
 	}
 	if input.DefaultLoggingEnabled != nil {
 		if err := s.db.SetSetting(r.Context(), database.SettingDefaultLoggingEnabled, strconv.FormatBool(*input.DefaultLoggingEnabled)); err != nil {
@@ -59,5 +85,43 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		s.providers.Registry().SetResponseHeaderTimeout(time.Duration(*input.FallbackTimeoutSeconds) * time.Second)
 	}
+	if input.NotificationsEnabled != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEnabled, strconv.FormatBool(*input.NotificationsEnabled)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsWebhookURL != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsWebhookURL, *input.NotificationsWebhookURL); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventFallback != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventFallback, strconv.FormatBool(*input.NotificationsEventFallback)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventAllFailed != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventAllFailed, strconv.FormatBool(*input.NotificationsEventAllFailed)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	// The auth header is a secret: it is never returned by GET. A non-nil value
+	// here replaces it (empty string clears it); a nil value leaves it unchanged.
+	if input.NotificationsAuthHeader != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsAuthHeader, *input.NotificationsAuthHeader); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
 	w.WriteHeader(204)
+}
+
+// validWebhookURL reports whether a webhook URL is an absolute http(s) URL.
+func validWebhookURL(raw string) bool {
+	u, err := url.Parse(raw)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }

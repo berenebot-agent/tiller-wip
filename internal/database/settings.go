@@ -8,9 +8,14 @@ import (
 )
 
 const (
-	SettingDefaultLoggingEnabled  = "default_logging_enabled"
-	SettingDefaultRetentionDays   = "default_retention_days"
-	SettingFallbackTimeoutSeconds = "fallback_timeout_seconds"
+	SettingDefaultLoggingEnabled       = "default_logging_enabled"
+	SettingDefaultRetentionDays        = "default_retention_days"
+	SettingFallbackTimeoutSeconds      = "fallback_timeout_seconds"
+	SettingNotificationsEnabled        = "notifications_enabled"
+	SettingNotificationsWebhookURL     = "notifications_webhook_url"
+	SettingNotificationsEventFallback  = "notifications_event_fallback"
+	SettingNotificationsEventAllFailed = "notifications_event_all_failed"
+	SettingNotificationsAuthHeader     = "notifications_auth_header"
 )
 
 // GetSetting returns the raw string value for a settings key.
@@ -72,4 +77,47 @@ func (d *DB) GetFallbackTimeout(ctx context.Context) (int, error) {
 		return 0, e
 	}
 	return fallback, nil
+}
+
+// NotificationSettings holds the installation-global outbound webhook
+// notification configuration. Event toggles default to enabled so a configured
+// webhook starts notifying immediately.
+type NotificationSettings struct {
+	Enabled        bool
+	WebhookURL     string
+	EventFallback  bool
+	EventAllFailed bool
+	AuthHeader     string
+}
+
+// GetNotificationSettings reads the notification configuration, with sane
+// defaults if a key is missing or malformed.
+func (d *DB) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
+	ns := NotificationSettings{EventFallback: true, EventAllFailed: true}
+	if v, e := d.GetBool(ctx, SettingNotificationsEnabled); e == nil {
+		ns.Enabled = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetSetting(ctx, SettingNotificationsWebhookURL); e == nil {
+		ns.WebhookURL = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetBool(ctx, SettingNotificationsEventFallback); e == nil {
+		ns.EventFallback = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetBool(ctx, SettingNotificationsEventAllFailed); e == nil {
+		ns.EventAllFailed = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetSetting(ctx, SettingNotificationsAuthHeader); e == nil {
+		ns.AuthHeader = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	return ns, nil
 }

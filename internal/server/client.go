@@ -399,6 +399,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		row.attempts = append(row.attempts, requestAttempt{provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 		break
 	}
+	// Emit a single logical notification for the routing outcome (fallback or
+	// all-targets-failed). This is best-effort and never blocks or alters the
+	// client response.
+	s.maybeNotify(row, route, resp)
 	if resp == nil {
 		if protocolUnavailable {
 			row.httpStatus = 400

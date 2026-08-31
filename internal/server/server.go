@@ -31,6 +31,10 @@ type Server struct {
 	providers *providers.Manager
 	logger    *slog.Logger
 	assets    http.Handler
+	// notifyClient is a dedicated HTTP client for best-effort outbound webhook
+	// notifications. It has a short timeout so a slow webhook can never
+	// materially delay an inference request.
+	notifyClient *http.Client
 }
 
 type contextKey string
@@ -56,7 +60,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler()}, nil
+	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}}, nil
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -121,6 +125,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/models/{id}/activity/export", s.requireAdmin(http.HandlerFunc(s.exportRealModelActivityCSV)))
 	mux.Handle("GET /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.getSettings)))
 	mux.Handle("PUT /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.updateSettings)))
+	mux.Handle("POST /api/admin/notifications/test", s.requireAdmin(http.HandlerFunc(s.sendTestNotification)))
 	mux.Handle("GET /api/admin/usage", s.requireAdmin(http.HandlerFunc(s.usage)))
 	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))
