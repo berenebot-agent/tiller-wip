@@ -264,6 +264,9 @@ function mountInlineRoutePicker(root, client) {
   let pending = null;
   combobox({ input, hidden, options, placeholder:'Search real or virtual models…', minWidth:420, onSelect: opt => { pending = opt.value; confirm.hidden = false; } });
   if (original) { hidden.value = original.value; input.value = original.label; }
+  // Focusing a pre-filled route field blanks it so search filters from the
+  // first keystroke; the prior target stays recoverable via the cancel button.
+  input.addEventListener('focus', () => { if (input.value || hidden.value) { input.value = ''; hidden.value = ''; } });
   tick.addEventListener('click', async () => {
     if (!pending) return;
     const split = pending.indexOf(':');

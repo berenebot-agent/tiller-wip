@@ -253,8 +253,12 @@ test('single-route inline picker: typeahead selects and tick applies', async ({ 
   const inlineRoute = row.locator('[data-inline-route] input[type="text"]');
   await expect(inlineRoute).toHaveValue(`Real · ${providerName}/mock-model`);
 
-  // Type to filter, press Enter to select the virtual model.
-  await inlineRoute.fill('coding');
+  // Clicking focuses and blanks the pre-filled label so the first keystroke filters.
+  await inlineRoute.click();
+  await expect(inlineRoute).toHaveValue('');
+
+  // Type to filter from the first character, press Enter to select the virtual model.
+  await inlineRoute.pressSequentially('coding');
   await inlineRoute.press('Enter');
   await expect(inlineRoute).toHaveValue('Virtual · enter-save-vg/coding');
 
