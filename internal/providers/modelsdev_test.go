@@ -161,7 +161,7 @@ func TestEnrichUnknownProviderOrModel(t *testing.T) {
 		}},
 	}
 	// Unknown provider type -> unchanged.
-	if got := r.enrich([]Model{{ID: "deepseek-v4-flash"}}, "ollama-local"); got[0].ContextLength != 0 {
+	if got := r.enrich([]Model{{ID: "deepseek-v4-flash"}}, "unknown-type"); got[0].ContextLength != 0 {
 		t.Errorf("unknown provider should not enrich, got context %d", got[0].ContextLength)
 	}
 	// Known provider but unknown model -> unchanged.
@@ -263,5 +263,136 @@ func TestLoadModelsDevCacheMissingIsNotError(t *testing.T) {
 	defer r.mu.Unlock()
 	if r.modelsDev != nil {
 		t.Fatal("missing cache should leave in-memory data nil")
+	}
+}
+
+// glmDataset is a minimal models.dev dataset mirroring the canonical zai entry
+// for glm-5.3-flash so Ollama tests assert meaningful values.
+func glmDataset() modelsDevDataset {
+	return modelsDevDataset{
+		"zai": {Models: map[string]modelsDevModel{
+			"glm-5.3-flash": {
+				Reasoning:        boolPtr(true),
+				ToolCall:         boolPtr(true),
+				StructuredOutput: boolPtr(true),
+				Modalities:       modelsDevModalities{Input: []string{"text", "image", "video", "pdf"}, Output: []string{"text"}},
+				Limit:            modelsDevLimit{Context: 1000000, Output: 131072},
+			},
+		}},
+	}
+}
+
+func TestOllamaPlainName(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"glm-5.3-flash", "glm-5.3-flash"},
+		{"glm-5.3-flash:latest", "glm-5.3-flash"},
+		{"zai/glm-5.3-flash", "glm-5.3-flash"},
+		{"zai/glm-5.3-flash:latest", "glm-5.3-flash"},
+		{"deepseek-v4-flash:8b-q4_0", "deepseek-v4-flash"},
+	}
+	for _, c := range cases {
+		if got := ollamaPlainName(c.in); got != c.want {
+			t.Errorf("ollamaPlainName(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestOllamaLookupCanonicalLab(t *testing.T) {
+	data := glmDataset()
+	// Exact plain-name hit under the inferred canonical lab (zai for GLM).
+	got := ollamaLookup(data, "glm-5.3-flash:latest")
+	if got.Limit.Context != 1000000 || got.Limit.Output != 131072 {
+		t.Errorf("ollama glm hit = ctx %d out %d, want 1000000/131072", got.Limit.Context, got.Limit.Output)
+	}
+	if got.ToolCall == nil || !*got.ToolCall || got.Reasoning == nil || !*got.Reasoning {
+		t.Errorf("ollama glm should report tools+reasoning, got %+v", got)
+	}
+}
+
+func TestOllamaEnrichFillsUnknownFields(t *testing.T) {
+	r := NewRegistry()
+	r.modelsDev = glmDataset()
+	// Plain name, with a tag: enrichment must land on the canonical zai entry.
+	got := r.enrich([]Model{{ID: "glm-5.3-flash:latest"}}, "ollama-local")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 model, got %d", len(got))
+	}
+	m := got[0]
+	if m.ContextLength != 1000000 {
+		t.Errorf("context = %d, want 1000000", m.ContextLength)
+	}
+	if m.MaxOutputTokens != 131072 {
+		t.Errorf("max output = %d, want 131072", m.MaxOutputTokens)
+	}
+	if m.SupportsTools == nil || !*m.SupportsTools {
+		t.Errorf("tools = %v, want true", m.SupportsTools)
+	}
+	if m.SupportsReasoning == nil || !*m.SupportsReasoning {
+		t.Errorf("reasoning = %v, want true", m.SupportsReasoning)
+	}
+	if m.SupportsVision == nil || !*m.SupportsVision {
+		t.Errorf("vision = %v, want true", m.SupportsVision)
+	}
+}
+
+func TestOllamaEnrichUnknownFamilyOrModel(t *testing.T) {
+	r := NewRegistry()
+	r.modelsDev = glmDataset()
+	// Unknown family must not enrich.
+	if got := r.enrich([]Model{{ID: "some-rando-model:latest"}}, "ollama-local"); got[0].ContextLength != 0 {
+		t.Errorf("unknown family should not enrich, got context %d", got[0].ContextLength)
+	}
+	// Known family but unknown model name must not enrich.
+	if got := r.enrich([]Model{{ID: "glm-not-a-real-model:latest"}}, "ollama-local"); got[0].ContextLength != 0 {
+		t.Errorf("unknown model should not enrich, got context %d", got[0].ContextLength)
+	}
+}
+
+func TestOllamaEnrichDoesNotOverrideProviderReported(t *testing.T) {
+	r := NewRegistry()
+	r.modelsDev = glmDataset()
+	got := r.enrich([]Model{{ID: "glm-5.3-flash", ContextLength: 1000000, MaxOutputTokens: 99999}}, "ollama-local")[0]
+	// Provider-reported max output (99999) must be kept, not replaced by the
+	// models.dev 131072.
+	if got.MaxOutputTokens != 99999 {
+		t.Errorf("provider-reported max output overridden: got %d, want 99999", got.MaxOutputTokens)
+	}
+	if got.ContextLength != 1000000 {
+		t.Errorf("context = %d, want 1000000", got.ContextLength)
+	}
+}
+
+func TestOllamaEnrichLeavesOtherProvidersUntouched(t *testing.T) {
+	r := NewRegistry()
+	r.modelsDev = glmDataset()
+	// A non-Ollama provider whose type is not in the provider map stays
+	// unenriched (the prefix check must not leak into other types).
+	got := r.enrich([]Model{{ID: "glm-5.3-flash"}}, "generic-openai")
+	if len(got) != 1 || got[0].ContextLength != 0 {
+		t.Fatalf("unmapped non-ollama provider should not enrich, got %+v", got[0])
+	}
+	// A type that merely *contains* "ollama" elsewhere must not trigger the
+	// plain-name path.
+	if got := r.enrich([]Model{{ID: "glm-5.3-flash"}}, "not-ollama-local"); got[0].ContextLength != 0 {
+		t.Fatalf("non-ollama-prefixed type should not enrich, got %+v", got[0])
+	}
+	// The exact deepseek path still behaves via the provider map.
+	r.modelsDev["deepseek"] = modelsDevProvider{Models: map[string]modelsDevModel{
+		"deepseek-v4-flash": {Limit: modelsDevLimit{Context: 1000000, Output: 384000}, ToolCall: boolPtr(true)},
+	}}
+	got = r.enrich([]Model{{ID: "deepseek-v4-flash"}}, "deepseek")
+	if got[0].ContextLength != 1000000 || got[0].MaxOutputTokens != 384000 {
+		t.Errorf("exact deepseek path should still enrich, got %+v", got[0])
+	}
+}
+
+func TestOllamaEnrichBothProviderTypes(t *testing.T) {
+	r := NewRegistry()
+	r.modelsDev = glmDataset()
+	for _, typ := range []string{"ollama-local", "ollama-cloud"} {
+		got := r.enrich([]Model{{ID: "glm-5.3-flash:latest"}}, typ)
+		if got[0].ContextLength != 1000000 {
+			t.Errorf("type %q: context = %d, want 1000000", typ, got[0].ContextLength)
+		}
 	}
 }

@@ -1,5 +1,7 @@
+# Runtime state is bind-mounted, never part of the image. Excluding the whole
+# data/ dir keeps the build from trying to read the (container-owned, mode-0700)
+# runtime directory in the source tree.
 .git
-data/*
-!data/.gitkeep
+data/
 docs/example_files
 tests/browser/node_modules

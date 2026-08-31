@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -85,10 +86,66 @@ var modelsDevProviderKey = map[string]string{
 	"huggingface":  "huggingface",
 }
 
+// ollamaLabInference maps a recognizable model-family root (the lowercased,
+// tag/namespace-stripped model name) to the canonical models.dev lab that holds
+// exact, plain-key entries for that family. It is deliberately small: only
+// families with a verified canonical lab that stores the model under its plain
+// name are listed, so the lookup is deterministic and never relies on fuzzy
+// basename matching across labs (which diverges for many models). Families
+// without such a canonical lab (e.g. qwen/llama/gemma/phi) are intentionally
+// omitted rather than guessed.
+var ollamaLabInference = []struct{ root, lab string }{
+	{"glm", "zai"},
+	{"deepseek", "deepseek"},
+	{"mistral", "mistral"},
+}
+
+// ollamaLookup resolves a models.dev entry for an Ollama model. Ollama model
+// IDs carry an optional `:tag` suffix and an optional `namespace/` prefix, and
+// models.dev has no `ollama` lab — open-weights models live under their origin
+// lab's plain name. The plain name is matched against the inferred canonical
+// lab only.
+func ollamaLookup(data modelsDevDataset, id string) modelsDevModel {
+	plain := ollamaPlainName(id)
+	var lab string
+	ok := false
+	l := strings.ToLower(plain)
+	for _, e := range ollamaLabInference {
+		if strings.HasPrefix(l, e.root) {
+			lab, ok = e.lab, true
+			break
+		}
+	}
+	if !ok {
+		return modelsDevModel{}
+	}
+	provider, ok := data[lab]
+	if !ok {
+		return modelsDevModel{}
+	}
+	return provider.Models[plain]
+}
+
+// ollamaPlainName strips the trailing `:tag` (e.g. `glm-5.3-flash:latest`) and
+// any leading `namespace/` prefix (e.g. `zai/glm-5.3-flash`) to recover the
+// plain model name models.dev keys models by.
+func ollamaPlainName(id string) string {
+	if i := strings.LastIndex(id, ":"); i >= 0 {
+		id = id[:i]
+	}
+	if i := strings.LastIndex(id, "/"); i >= 0 {
+		id = id[i+1:]
+	}
+	return id
+}
+
 // enrich merges models.dev capability metadata into the discovered models for a
 // provider. It fills in only the fields the provider left unknown and never
 // overrides a provider-reported value. It is a no-op when models.dev is disabled
-// or the dataset is unavailable.
+// or the dataset is unavailable. Non-Ollama providers are looked up by their
+// exact provider key + model ID; Ollama has no lab of its own, so its models are
+// resolved by plain (tag/namespace-stripped) name under an inferred canonical
+// lab.
 func (r *Registry) enrich(models []Model, providerType string) []Model {
 	r.mu.Lock()
 	enabled := r.modelsDevEnabled
@@ -96,6 +153,13 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 	r.mu.Unlock()
 	if !enabled || data == nil {
 		return models
+	}
+	out := make([]Model, len(models))
+	if strings.HasPrefix(providerType, "ollama-") {
+		for i, model := range models {
+			out[i] = enrichModel(model, ollamaLookup(data, model.ID))
+		}
+		return out
 	}
 	key, ok := modelsDevProviderKey[providerType]
 	if !ok {
@@ -105,7 +169,6 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 	if !ok {
 		return models
 	}
-	out := make([]Model, len(models))
 	for i, model := range models {
 		out[i] = enrichModel(model, provider.Models[model.ID])
 	}
