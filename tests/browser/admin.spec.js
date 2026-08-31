@@ -553,6 +553,77 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   await mockRemoveModel(page, 'reopen-extra');
 });
 
+test('Manage models collapse: Real/Virtual sections and provider groups', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'collapse-perm';
+  const clientName = 'collapse-perm-client';
+  const canonical = id => `${providerName}/${id}`;
+
+  const provider = await createProvider(page, csrf, providerName);
+  await createClient(page, csrf, clientName);
+
+  // Create a virtual group + model so both the Real and Virtual sections render.
+  const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  const models = (await modelsResponse.json()).data;
+  const real = models.find(model => model.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+  const groupResponse = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'collapse-vg' } });
+  expect(groupResponse.status()).toBe(201);
+  const group = await groupResponse.json();
+  const virtualResponse = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'coding', target_provider_id: provider.id, target_model_id: real.id } });
+  expect(virtualResponse.status()).toBe(201);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(clientRow).toBeVisible();
+
+  const openPermissions = async () => {
+    await clientRow.getByRole('button', { name: `Manage models for ${clientName}` }).click();
+    await expect(page.locator('#permissions-dialog')).toBeVisible();
+  };
+  const realArrow = page.locator('[data-permission-section="real"]');
+  const virtualArrow = page.locator('[data-permission-section="virtual"]');
+  const realModel = page.getByLabel(`Enable ${canonical('mock-model')}`);
+  const virtualModel = page.getByLabel('Enable collapse-vg/coding');
+  const realGroupArrow = page.locator('.permission-group', { hasText: providerName }).locator('.permission-collapse');
+
+  // 1. Both sections render and start expanded.
+  await openPermissions();
+  await expect(realArrow).toBeVisible();
+  await expect(virtualArrow).toBeVisible();
+  await expect(realArrow).toHaveAttribute('aria-expanded', 'true');
+  await expect(virtualArrow).toHaveAttribute('aria-expanded', 'true');
+  await expect(realModel).toBeVisible();
+  await expect(virtualModel).toBeVisible();
+
+  // 2. Collapse the Real section: the real model hides, virtual stays.
+  await realArrow.click();
+  await expect(realArrow).toHaveAttribute('aria-expanded', 'false');
+  await expect(realModel).toBeHidden();
+  await expect(page.locator('.permission-section-body.permission-section-hidden')).toHaveCount(1);
+  await expect(virtualModel).toBeVisible();
+
+  // 3. Expand Real again.
+  await realArrow.click();
+  await expect(realArrow).toHaveAttribute('aria-expanded', 'true');
+  await expect(realModel).toBeVisible();
+
+  // 4. Group collapse arrow hides the group's model list (CSS fix).
+  await realGroupArrow.click();
+  await expect(realModel).toBeHidden();
+  await expect(page.locator('.permission-list.permission-list-hidden')).toHaveCount(1);
+  await realGroupArrow.click();
+  await expect(realModel).toBeVisible();
+
+  // 5. Collapse the Virtual section.
+  await virtualArrow.click();
+  await expect(virtualArrow).toHaveAttribute('aria-expanded', 'false');
+  await expect(virtualModel).toBeHidden();
+});
+
 test('global activity renders across clients, searches, and pages', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
