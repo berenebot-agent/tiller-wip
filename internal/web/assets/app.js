@@ -192,7 +192,7 @@ $('#close-capabilities').onclick = $('#done-capabilities').onclick = () => $('#c
 $('#add-virtual-group').onclick = () => openVirtualGroup(); $('#add-virtual-model').onclick = () => openVirtualModel();
 function openVirtualGroup(group = null) { openEntity({ eyebrow: 'VIRTUAL NAMESPACE', title: group ? `Rename ${group.name}` : 'Create virtual group', fields: `<label>Group name <input name="name" value="${h(group?.name || '')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>Lowercase slug. Shares the provider namespace.</small></label>${group ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>I understand that every model ID in this group will change.</span></label>' : ''}`, submit: group ? 'Rename group' : 'Create group', onMount: group ? form => { const nameInput = $('[name="name"]', form), wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === group.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); } : null, onSubmit: async form => { const values = new FormData(form); if (group) await api(`/api/admin/virtual-groups/${group.id}`, { method: 'PATCH', body: JSON.stringify({ name: values.get('name'), confirm_breaking_change: values.get('confirm') === 'on' }) }); else await api('/api/admin/virtual-groups', { method: 'POST', body: JSON.stringify({ name: values.get('name') }) }); flash(group ? 'Virtual group renamed.' : 'Virtual group created.'); await loadVirtual(); } }); }
 async function deleteVirtualGroup(id) { const group = state.groups.find(item => item.id === id); if (!await confirmAction({ title: `Delete group ${group.name}?`, copy: 'Only empty virtual groups can be deleted.', action: 'Delete group', typeMatch: group.name, typeLabel: 'group name' })) return; try { await api(`/api/admin/virtual-groups/${id}`, { method: 'DELETE' }); flash('Virtual group deleted.'); await loadVirtual(); } catch (error) { flash(errorMessage(error), 'error'); } }
-function combobox({ input, hidden, options, placeholder, onSelect }) {
+function combobox({ input, hidden, options, placeholder, onSelect, onEnter }) {
   const list = document.createElement('ul'); list.className = 'combobox-list'; list.setAttribute('role', 'listbox'); list.hidden = true;
   input.setAttribute('role', 'combobox'); input.setAttribute('aria-autocomplete', 'list'); input.setAttribute('aria-expanded', 'false'); input.setAttribute('autocomplete', 'off'); input.setAttribute('spellcheck', 'false'); input.placeholder = placeholder || 'Type to filter…';
   input.parentNode.appendChild(list);
@@ -205,14 +205,14 @@ function combobox({ input, hidden, options, placeholder, onSelect }) {
     list.hidden = !items.length; open = !list.hidden; input.setAttribute('aria-expanded', String(open));
     if (active >= items.length) active = items.length - 1;
   };
-  const select = i => { const opt = items[i]; if (!opt || opt.disabled) return; hidden.value = opt.value; input.value = opt.label; onSelect?.(opt); close(); };
+  const select = i => { const opt = items[i]; if (!opt || opt.disabled) return false; hidden.value = opt.value; input.value = opt.label; onSelect?.(opt); close(); return true; };
   input.addEventListener('input', () => { if (hidden.value && !options.some(o => o.value === hidden.value && o.label === input.value)) hidden.value = ''; active = -1; render(); });
   input.addEventListener('click', () => { if (open) close(); else render(true); });
   input.addEventListener('keydown', event => {
     if (!open && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); render(true); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); active = Math.min(active + 1, items.length - 1); render(); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); active = Math.max(active - 1, 0); render(); }
-    else if (event.key === 'Enter') { event.preventDefault(); if (active >= 0) select(active); }
+    else if (event.key === 'Enter') { event.preventDefault(); const target = active >= 0 ? active : (items.length ? 0 : -1); if (target >= 0 && select(target)) onEnter?.(); }
     else if (event.key === 'Escape') { close(); }
   });
   list.addEventListener('mousedown', event => { event.preventDefault(); const li = event.target.closest('li[data-i]'); if (li) select(Number(li.dataset.i)); });
@@ -246,10 +246,10 @@ function singleTargetOptions(client = null) {
   if (client?.single_target_id && !options.some(item => item.kind === client.single_target_type && item.id === client.single_target_id)) options.unshift({ value:`${client.single_target_type}:${client.single_target_id}`, kind:client.single_target_type, id:client.single_target_id, label:`${client.single_target_type === 'virtual' ? 'Virtual' : 'Real'} · ${client.single_target_canonical || 'Unavailable target'}`, canonical:client.single_target_canonical || 'Unavailable target', disabled:true });
   return options.sort((a,b) => a.label.localeCompare(b.label));
 }
-function mountSingleTargetPicker(root, client, onChange = null) {
+function mountSingleTargetPicker(root, client, onChange = null, onEnter = null) {
   const input = $('input[type="text"]', root), hidden = $('input[type="hidden"]', root), options = singleTargetOptions(client);
   const currentValue = client?.single_target_id ? `${client.single_target_type}:${client.single_target_id}` : '';
-  const picker = combobox({ input, hidden, options, placeholder:'Search real or virtual models…', onSelect:onChange });
+  const picker = combobox({ input, hidden, options, placeholder:'Search real or virtual models…', onSelect:onChange, onEnter });
   const current = options.find(item => item.value === currentValue);
   if (current) { hidden.value = current.value; input.value = current.label; }
   return picker;
@@ -321,10 +321,15 @@ async function openPermissions(client) {
     $('#managed-single-confirm-check').checked = false;
     const targetRoot = $('[data-managed-single-target]');
     targetRoot.innerHTML = '<input type="text" aria-label="Single model route"><input type="hidden">';
-    mountSingleTargetPicker(targetRoot, client);
+    mountSingleTargetPicker(targetRoot, client, null, () => $('#save-permissions').click());
     renderPermissions('');
     syncClientModelMode();
     $('#permissions-dialog').showModal();
+    if (client.type === 'single') {
+      const targetInput = $('input[type="text"]', targetRoot);
+      targetInput.focus();
+      targetInput.select();
+    }
   }
   catch (error) { flash(errorMessage(error), 'error'); }
 }

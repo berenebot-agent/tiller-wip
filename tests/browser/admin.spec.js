@@ -203,13 +203,66 @@ test('Single key creation, response identity, rename warning, and inline route s
   await expect(page.locator('#form-dialog')).toBeHidden();
 
   const refreshedRow = page.locator('#clients-body tr', { hasText: clientName });
-  const route = refreshedRow.locator('[data-client-route] input[type="text"]');
+  await refreshedRow.getByRole('button', { name: `Manage models for ${clientName}` }).click();
+  await expect(page.locator('#permissions-dialog')).toBeVisible();
+  const route = page.locator('[data-managed-single-target] input[type="text"]');
   await route.click();
   await page.getByRole('option', { name: 'Virtual · single-ui-vg/coding' }).click();
   await expect(route).toHaveValue('Virtual · single-ui-vg/coding');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
   const catalogueResponse = await page.request.get('/v1/models', { headers: { Authorization: `Bearer ${secret}` } });
   expect(catalogueResponse.status()).toBe(200);
   expect((await catalogueResponse.json()).data.map(model => model.id)).toEqual(['coding']);
+});
+
+test('single-route edit: model picker is focused and Enter selects and saves', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'enter-save';
+  const clientName = 'enter-save-client';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsResponse.ok()).toBeTruthy();
+  const models = (await modelsResponse.json()).data;
+  const real = models.find(model => model.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  const groupResponse = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'enter-save-vg' } });
+  expect(groupResponse.status()).toBe(201);
+  const group = await groupResponse.json();
+  const virtualResponse = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'coding', target_provider_id: provider.id, target_model_id: real.id } });
+  expect(virtualResponse.status()).toBe(201);
+
+  // Create a single client bound to the real model.
+  const createRes = await page.request.post('/api/admin/client-keys', {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { name: clientName, type: 'single', single_model_name: 'main', single_target_type: 'real', single_target_id: real.id }
+  });
+  expect(createRes.status()).toBe(201);
+
+  await page.getByRole('button', { name: 'Client Keys' }).click();
+  const row = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(row).toBeVisible();
+
+  // Open the single-route permissions dialog.
+  await row.getByRole('button', { name: `Manage models for ${clientName}` }).click();
+  await expect(page.locator('#permissions-dialog')).toBeVisible();
+
+  // The target model input is focused and its current value selected.
+  const targetInput = page.locator('[data-managed-single-target] input[type="text"]');
+  await expect(targetInput).toBeFocused();
+  await expect(targetInput).toHaveValue(`Real · ${providerName}/mock-model`);
+
+  // Type the next model and press Enter: selects the top match and saves.
+  await targetInput.fill('coding');
+  await targetInput.press('Enter');
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+
+  // The route now points at the virtual model.
+  await expect(row.locator('.model-id')).toHaveText('main');
+  await expect(row).toContainText('enter-save-vg/coding');
 });
 
 test('permission bulk enable/disable applies only to current available models', async ({ page }) => {
