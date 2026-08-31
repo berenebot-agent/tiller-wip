@@ -196,58 +196,148 @@ type Session struct {
 	ExpiresAt time.Time
 }
 
-type SessionStore struct {
-	mu       sync.Mutex
-	sessions map[[32]byte]Session
-	key      []byte
-	ttl      time.Duration
+const (
+	sessionSelectorBytes = 16
+	sessionSecretBytes   = 32
+	sessionCacheTTL      = 5 * time.Minute
+	credentialHashKey    = "admin_credential_hash"
+)
+
+type sessionCacheEntry struct {
+	session Session
+	expires time.Time
 }
 
-func NewSessionStore() (*SessionStore, error) {
-	key, err := randomBytes(32)
-	if err != nil {
+// SessionStore persists admin sessions in the database so they survive process
+// and container restarts. The raw session secret is never stored; only an
+// argon2id hash of it is persisted. A short-lived in-memory cache avoids
+// recomputing the argon2id hash on every request.
+type SessionStore struct {
+	db    *sql.DB
+	ttl   time.Duration
+	mu    sync.Mutex
+	cache map[string]sessionCacheEntry
+}
+
+func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (*SessionStore, error) {
+	if ttl <= 0 {
+		ttl = 30 * 24 * time.Hour
+	}
+	s := &SessionStore{db: db, ttl: ttl, cache: make(map[string]sessionCacheEntry)}
+	if err := s.syncCredential(username, password); err != nil {
 		return nil, err
 	}
-	return &SessionStore{sessions: make(map[[32]byte]Session), key: key, ttl: 12 * time.Hour}, nil
+	return s, nil
+}
+
+// syncCredential stores an argon2id fingerprint of the admin credentials and
+// invalidates all existing sessions if the credentials changed since the last
+// start, so a material username/password change forces a fresh login.
+func (s *SessionStore) syncCredential(username, password string) error {
+	material := username + "\x00" + password
+	var stored string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, credentialHashKey).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		hash, err := HashSecret(material)
+		if err != nil {
+			return err
+		}
+		_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)`, credentialHashKey, hash, formatUTC(time.Now()))
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if VerifySecret(material, stored) {
+		return nil
+	}
+	if err := s.InvalidateAll(); err != nil {
+		return err
+	}
+	hash, err := HashSecret(material)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE settings SET value=?, updated_at=? WHERE key=?`, hash, formatUTC(time.Now()), credentialHashKey)
+	return err
 }
 
 func (s *SessionStore) Create() (Session, error) {
-	token, err := randomToken(32)
+	selector, err := randomBytes(sessionSelectorBytes)
 	if err != nil {
 		return Session{}, err
 	}
-	csrf, err := randomToken(32)
+	secret, err := randomBytes(sessionSecretBytes)
 	if err != nil {
 		return Session{}, err
 	}
-	session := Session{Token: token, CSRFToken: csrf, ExpiresAt: time.Now().Add(s.ttl)}
-	s.mu.Lock()
-	s.pruneLocked()
-	s.sessions[s.digest(token)] = session
-	s.mu.Unlock()
+	csrf, err := randomBytes(32)
+	if err != nil {
+		return Session{}, err
+	}
+	sel := base64.RawURLEncoding.EncodeToString(selector)
+	sec := base64.RawURLEncoding.EncodeToString(secret)
+	hash, err := HashSecret(sec)
+	if err != nil {
+		return Session{}, err
+	}
+	now := time.Now()
+	expires := now.Add(s.ttl)
+	session := Session{Token: sel + "." + sec, CSRFToken: base64.RawURLEncoding.EncodeToString(csrf), ExpiresAt: expires}
+	_, err = s.db.Exec(`INSERT INTO admin_sessions(id,token_hash,csrf_token,created_at,expires_at,last_used_at) VALUES(?,?,?,?,?,?)`,
+		sel, hash, session.CSRFToken, formatUTC(now), formatUTC(expires), formatUTC(now))
+	if err != nil {
+		return Session{}, err
+	}
 	return session, nil
 }
 
 func (s *SessionStore) Get(token string) (Session, bool) {
-	if token == "" {
+	selector, secret, ok := parseSessionToken(token)
+	if !ok {
 		return Session{}, false
 	}
+	now := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := s.digest(token)
-	session, ok := s.sessions[key]
-	if !ok || time.Now().After(session.ExpiresAt) {
-		if ok {
-			delete(s.sessions, key)
+	if entry, found := s.cache[selector]; found {
+		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) {
+			s.mu.Unlock()
+			return entry.session, true
 		}
+		delete(s.cache, selector)
+	}
+	s.mu.Unlock()
+
+	var csrfToken, tokenHash, expiresAt string
+	err := s.db.QueryRow(`SELECT csrf_token, token_hash, expires_at FROM admin_sessions WHERE id=?`, selector).Scan(&csrfToken, &tokenHash, &expiresAt)
+	if err != nil {
 		return Session{}, false
 	}
+	exp, perr := time.Parse(time.RFC3339Nano, expiresAt)
+	if perr != nil || now.After(exp) || !VerifySecret(secret, tokenHash) {
+		_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
+		return Session{}, false
+	}
+	// Sliding expiry: extend when more than half the lifetime has elapsed.
+	if now.Add(s.ttl / 2).After(exp) {
+		exp = now.Add(s.ttl)
+		_, _ = s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=?`, formatUTC(exp), formatUTC(now), selector)
+	}
+	session := Session{CSRFToken: csrfToken, ExpiresAt: exp}
+	s.mu.Lock()
+	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(sessionCacheTTL)}
+	s.mu.Unlock()
 	return session, true
 }
 
 func (s *SessionStore) Delete(token string) {
+	selector, _, ok := parseSessionToken(token)
+	if !ok {
+		return
+	}
+	_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
 	s.mu.Lock()
-	delete(s.sessions, s.digest(token))
+	delete(s.cache, selector)
 	s.mu.Unlock()
 }
 
@@ -255,30 +345,30 @@ func (s *SessionStore) CheckCSRF(session Session, token string) bool {
 	return token != "" && subtle.ConstantTimeCompare([]byte(session.CSRFToken), []byte(token)) == 1
 }
 
-func (s *SessionStore) digest(token string) [32]byte {
-	h := hmac.New(sha256.New, s.key)
-	_, _ = h.Write([]byte(token))
-	var out [32]byte
-	copy(out[:], h.Sum(nil))
-	return out
+// InvalidateAll revokes every admin session, e.g. after a credential change.
+func (s *SessionStore) InvalidateAll() error {
+	_, err := s.db.Exec(`DELETE FROM admin_sessions`)
+	s.mu.Lock()
+	s.cache = make(map[string]sessionCacheEntry)
+	s.mu.Unlock()
+	return err
 }
 
-func (s *SessionStore) pruneLocked() {
-	now := time.Now()
-	for key, session := range s.sessions {
-		if now.After(session.ExpiresAt) {
-			delete(s.sessions, key)
-		}
+func parseSessionToken(token string) (selector, secret string, ok bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
 	}
+	if _, err := base64.RawURLEncoding.DecodeString(parts[0]); err != nil {
+		return "", "", false
+	}
+	if decoded, err := base64.RawURLEncoding.DecodeString(parts[1]); err != nil || len(decoded) != sessionSecretBytes {
+		return "", "", false
+	}
+	return parts[0], parts[1], true
 }
 
-func randomToken(n int) (string, error) {
-	b, err := randomBytes(n)
-	if err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
+func formatUTC(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 func EqualCredential(got, want string) bool {
 	gotHash := sha256.Sum256([]byte(got))

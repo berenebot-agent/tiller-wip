@@ -99,8 +99,10 @@ authenticated export.
   PHC hash of the secret is stored (64 MiB, 3 iterations, 4 lanes).
 - Provider credentials are write-only through the UI/API but remain recoverable
   in SQLite until post-V1 encryption-at-rest work ships.
-- Admin sessions last 12 hours, are process-local, use HTTP-only SameSite
-  cookies, and require CSRF tokens for mutations.
+- Admin sessions are persistent (survive container restarts), default to a 30-day
+  sliding-expiry lifetime, use HTTP-only SameSite cookies, and require CSRF tokens
+  for mutations. The raw session secret is never stored; only an Argon2id hash is
+  persisted. A material admin credential change invalidates all existing sessions.
 - Prompt bodies, response bodies, tool arguments, credentials, and
   authorization headers are never logged.
 - Upstream redirects are disabled, client authorization/cookie/organization/

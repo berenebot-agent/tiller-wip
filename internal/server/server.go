@@ -45,7 +45,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := auth.NewSessionStore()
+	sessions, err := auth.NewSessionStore(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL)
 	if err != nil {
 		return nil, err
 	}
@@ -146,8 +146,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "internal_error", "Could not create session.")
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: session.Token, Path: "/", HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
+	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+}
+
+// setSessionCookie writes the admin session cookie. Refreshing it on every
+// authenticated request keeps the browser cookie's MaxAge in sync with the
+// server-side sliding expiry, so active use extends the session across browser
+// reopen rather than the cookie expiring 30 days after login.
+func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
 }
 
 func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
@@ -174,6 +182,8 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			adminError(w, 401, "unauthorized", "Administrator authentication required.")
 			return
 		}
+		// Refresh the cookie so the browser tracks the sliding session expiry.
+		s.setSessionCookie(w, r, cookie.Value, session.ExpiresAt)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.sessions.CheckCSRF(session, r.Header.Get("X-CSRF-Token")) {
 			adminError(w, 403, "csrf_failed", "A valid CSRF token is required.")
 			return
