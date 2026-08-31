@@ -95,6 +95,85 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
 });
 
+test('Real Models expands large provider groups in cancellable batches', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'progressive-models';
+  const totalRows = 95;
+  await createProvider(page, csrf, providerName);
+
+  await page.getByRole('button', { name: 'Real Models' }).click();
+  const header = page.locator(`[data-group-toggle="models"][data-group-key="${providerName}"]`);
+  await expect(header).toBeVisible();
+
+  // Build a large group in the rendered catalogue without adding dozens of
+  // upstream fixtures. The cloned rows exercise the real collapse handler.
+  await page.evaluate(({ providerName, totalRows }) => {
+    const groupHeader = document.querySelector(`[data-group-toggle="models"][data-group-key="${CSS.escape(providerName)}"]`);
+    const source = groupHeader.nextElementSibling;
+    let insertionPoint = source.nextElementSibling;
+    while (insertionPoint && !insertionPoint.classList.contains('group-toggle')) insertionPoint = insertionPoint.nextElementSibling;
+    for (let index = 1; index < totalRows; index += 1) {
+      const clone = source.cloneNode(true);
+      clone.querySelector('.model-id').textContent = `${providerName}/synthetic-${index}`;
+      groupHeader.parentElement.insertBefore(clone, insertionPoint);
+    }
+  }, { providerName, totalRows });
+
+  const groupState = () => page.evaluate(providerName => {
+    const groupHeader = document.querySelector(`[data-group-toggle="models"][data-group-key="${CSS.escape(providerName)}"]`);
+    const rows = [];
+    let row = groupHeader.nextElementSibling;
+    while (row && !row.classList.contains('group-toggle')) { rows.push(row); row = row.nextElementSibling; }
+    return {
+      expanded: groupHeader.getAttribute('aria-expanded'),
+      visible: rows.filter(item => !item.classList.contains('group-row-hidden')).length,
+      hidden: rows.filter(item => item.classList.contains('group-row-hidden')).length
+    };
+  }, providerName);
+
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.model-table')).tableLayout)).toBe('fixed');
+
+  // Collapse is immediate, and expanding reveals only the first 20 rows in
+  // the click turn before scheduling the remaining frames.
+  expect(await page.evaluate(providerName => {
+    document.querySelector(`[data-group-toggle="models"][data-group-key="${CSS.escape(providerName)}"]`).click();
+    return true;
+  }, providerName)).toBe(true);
+  await expect.poll(groupState).toEqual({ expanded: 'false', visible: 0, hidden: totalRows });
+
+  const immediateExpansion = await page.evaluate(providerName => {
+    const groupHeader = document.querySelector(`[data-group-toggle="models"][data-group-key="${CSS.escape(providerName)}"]`);
+    groupHeader.click();
+    const rows = [];
+    let row = groupHeader.nextElementSibling;
+    while (row && !row.classList.contains('group-toggle')) { rows.push(row); row = row.nextElementSibling; }
+    return {
+      expanded: groupHeader.getAttribute('aria-expanded'),
+      visible: rows.filter(item => !item.classList.contains('group-row-hidden')).length
+    };
+  }, providerName);
+  expect(immediateExpansion).toEqual({ expanded: 'true', visible: 20 });
+  await expect.poll(groupState).toEqual({ expanded: 'true', visible: totalRows, hidden: 0 });
+
+  // A second click during expansion must cancel the queued frames rather than
+  // allowing a stale callback to reopen part of the group.
+  await page.evaluate(providerName => {
+    const groupHeader = document.querySelector(`[data-group-toggle="models"][data-group-key="${CSS.escape(providerName)}"]`);
+    groupHeader.click(); // collapse the fully expanded group
+    groupHeader.click(); // start progressive expansion
+    groupHeader.click(); // immediately collapse and cancel it
+  }, providerName);
+  await page.waitForTimeout(100);
+  await expect.poll(groupState).toEqual({ expanded: 'false', visible: 0, hidden: totalRows });
+
+  // A catalogue rerender keeps the provider collapsed and discards old work.
+  await page.locator('#show-retired').uncheck();
+  await expect(header).toHaveAttribute('aria-expanded', 'false');
+  await expect(header.locator('xpath=following-sibling::tr[1]')).toHaveClass(/group-row-hidden/);
+});
+
 test('permission edits survive filtering, and cancel/save semantics hold', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);

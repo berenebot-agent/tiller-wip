@@ -3,6 +3,8 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'providers', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
+const MODEL_EXPAND_BATCH_SIZE = 20;
+const groupRevealFrames = new WeakMap();
 const capabilities = model => `<span class="meta-line">Context: ${model.context_length ? h(model.context_length) : '—'}</span><span class="meta-line">Output: ${model.max_output_tokens ? h(model.max_output_tokens) : '—'}</span>`;
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
@@ -121,7 +123,46 @@ async function deleteProvider(id) { const provider = state.providers.find(item =
 
 async function loadModels(search = $('#model-search').value) { const [result, usage] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage')]); state.models = result.data; state.usage = usage; renderModels(); }
 function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 8 : 11; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
-function toggleGroup(event) { const header = event.currentTarget; const expanded = header.dataset.expanded === 'true'; let next = header.nextElementSibling; const rows = []; while (next && !next.classList.contains('group-toggle')) { rows.push(next); next = next.nextElementSibling; } const nowExpanded = !expanded; rows.forEach(row => row.classList.toggle('group-row-hidden', !nowExpanded)); header.dataset.expanded = String(nowExpanded); header.setAttribute('aria-expanded', String(nowExpanded)); $('.group-arrow', header).textContent = nowExpanded ? GROUP_ARROW.up : GROUP_ARROW.down; const store = header.dataset.groupToggle === 'models' ? collapsedModels : collapsedVirtual; const key = header.dataset.groupKey; if (nowExpanded) store.delete(key); else store.add(key); }
+function toggleGroup(event) {
+  const header = event.currentTarget;
+  const pendingFrame = groupRevealFrames.get(header);
+  if (pendingFrame !== undefined) cancelAnimationFrame(pendingFrame);
+  groupRevealFrames.delete(header);
+
+  const rows = [];
+  let next = header.nextElementSibling;
+  while (next && !next.classList.contains('group-toggle')) { rows.push(next); next = next.nextElementSibling; }
+
+  const nowExpanded = header.dataset.expanded !== 'true';
+  header.dataset.expanded = String(nowExpanded);
+  header.setAttribute('aria-expanded', String(nowExpanded));
+  $('.group-arrow', header).textContent = nowExpanded ? GROUP_ARROW.up : GROUP_ARROW.down;
+  const store = header.dataset.groupToggle === 'models' ? collapsedModels : collapsedVirtual;
+  const key = header.dataset.groupKey;
+  if (nowExpanded) store.delete(key); else store.add(key);
+
+  if (!nowExpanded) {
+    rows.forEach(row => row.classList.add('group-row-hidden'));
+    return;
+  }
+  if (header.dataset.groupToggle !== 'models' || rows.length <= MODEL_EXPAND_BATCH_SIZE) {
+    rows.forEach(row => row.classList.remove('group-row-hidden'));
+    return;
+  }
+
+  let index = 0;
+  const revealBatch = () => {
+    if (!header.isConnected || header.dataset.expanded !== 'true') {
+      groupRevealFrames.delete(header);
+      return;
+    }
+    const end = Math.min(index + MODEL_EXPAND_BATCH_SIZE, rows.length);
+    for (; index < end; index += 1) rows[index].classList.remove('group-row-hidden');
+    if (index < rows.length) groupRevealFrames.set(header, requestAnimationFrame(revealBatch));
+    else groupRevealFrames.delete(header);
+  };
+  revealBatch();
+}
 const groupRows = (rows, key, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}">${row}</tr>`).join('')}`;
 function renderModels() { const shown = state.models.filter(item => $('#show-retired').checked || item.available); $('#models-empty').hidden = shown.length > 0; const byProvider = new Map(); shown.forEach(model => { if (!byProvider.has(model.provider_name)) byProvider.set(model.provider_name, []); byProvider.get(model.provider_name).push(model); }); const html = [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([provider, models]) => { const available = models.filter(m => m.available).length; const retired = models.length - available; const collapsed = collapsedModels.has(provider); const note = retired ? `${retired} retired` : 'provider'; const actions = `<button class="btn btn-small btn-secondary" data-refresh-models="${h(models[0].provider_id)}">Refresh models</button>`; return groupBanner('models', provider, provider, note, `${available} available`, actions) + groupRows(models.map(model => `<td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${h(model.provider_name)}</td><td>${badge(model.available, model.available ? 'Available' : 'Retired', model.available ? 'good' : 'warn')}</td><td>${model.native_protocol ? `<span class="protocol">${h(model.native_protocol)}</span>` : '<span class="meta-line">provider default</span>'}</td><td>${capabilities(model)}</td><td><span class="meta-line">${date(model.first_seen_at)}</span></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button></div></td>`), provider, collapsed); }).join(''); $('#models-body').innerHTML = html; $$('.group-toggle', $('#models-body')).forEach(header => header.onclick = toggleGroup); $$('[data-refresh-models]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); refreshModels(button.dataset.refreshModels); }); $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'); }); }
 
