@@ -1,11 +1,15 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/csv"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
 )
@@ -381,5 +385,118 @@ func TestActivityCSVExportNoSensitiveMaterial(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("sensitive material leaked into CSV: %q", forbidden)
 		}
+	}
+}
+
+// providerAndModelIDs returns the harness provider id and its model-a id.
+func providerAndModelIDs(t *testing.T, api *testAPI) (string, string) {
+	t.Helper()
+	status, payload, _ := api.request("GET", "/api/admin/providers", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	var providerID string
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["name"] == "provider-a" {
+			providerID = m["id"].(string)
+		}
+	}
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["upstream_model_id"] == "model-a" {
+			return providerID, m["id"].(string)
+		}
+	}
+	t.Fatal("mock upstream did not expose model-a")
+	return "", ""
+}
+
+// TestWriteLogInvariant verifies the write-time invariant guard: a 2xx row
+// written with NULL resolved_provider/resolved_model is still persisted
+// (best-effort, never fails the request) but triggers a warning so a future
+// code path that forgets to set the resolved target surfaces early.
+func TestWriteLogInvariant(t *testing.T) {
+	_, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	s := &Server{db: db, logger: logger}
+	// A 2xx row with NULL resolved target must still be written but must warn.
+	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "req-invariant", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: database.Now()})
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='req-invariant'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("2xx row with NULL resolved was not written: count=%d err=%v", count, err)
+	}
+	if !strings.Contains(buf.String(), "resolved") {
+		t.Fatalf("expected invariant warning, got log: %q", buf.String())
+	}
+	// A 2xx row WITH a resolved target must not warn.
+	buf.Reset()
+	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "req-ok", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, resolvedProvider: strPtr("provider-a"), resolvedModel: strPtr("model-a"), createdAt: database.Now()})
+	if strings.Contains(buf.String(), "resolved") {
+		t.Fatalf("unexpected warning for resolved 2xx row: %q", buf.String())
+	}
+}
+
+// TestAttributionHelperConsistency guards against drift between list, CSV
+// export, and usage: for a given virtual model they must all attribute the same
+// set of rows (new route_kind='virtual' rows plus legacy NULL-route rows).
+func TestAttributionHelperConsistency(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	providerID, modelID := providerAndModelIDs(t, api)
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != 201 {
+		t.Fatal(payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupID, "name": "coding", "target_provider_id": providerID, "target_model_id": modelID})
+	if status != 201 {
+		t.Fatalf("create virtual model: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	now := time.Now().UTC()
+	// One new row (route_kind='virtual') and two legacy rows (route_kind NULL,
+	// requested by canonical) attributable to virtual/coding; one row for a
+	// different virtual model that must be excluded everywhere.
+	insertVirtualLogRow(t, db, "row-new", clientID, virtualID, "virtual/coding", "provider-a", "model-a", now.Add(-time.Minute).Format(time.RFC3339Nano))
+	insertLogRow(t, db, "row-legacy-1", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(100), int64Ptr(0), "up-a", "req-l1", nil, now.Add(-2*time.Minute).Format(time.RFC3339Nano))
+	insertLogRow(t, db, "row-legacy-2", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(200), int64Ptr(0), "up-b", "req-l2", nil, now.Add(-3*time.Minute).Format(time.RFC3339Nano))
+	insertVirtualLogRow(t, db, "row-other", clientID, "some-other-id", "virtual/other", "provider-a", "model-a", now.Add(-4*time.Minute).Format(time.RFC3339Nano))
+
+	// List.
+	status, payload, _ = api.request("GET", "/api/admin/virtual-models/"+virtualID+"/activity?limit=50", nil)
+	if status != 200 {
+		t.Fatalf("list: %d %v", status, payload)
+	}
+	if rows := payload["data"].([]any); len(rows) != 3 {
+		t.Fatalf("list: expected 3 rows, got %d: %v", len(rows), rows)
+	}
+
+	// CSV export.
+	status, body := getCSV(t, api, "/api/admin/virtual-models/"+virtualID+"/activity/export")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 4 { // header + 3 rows
+		t.Fatalf("export: expected header + 3 rows, got %d", len(records))
+	}
+
+	// Usage: virtual/coding totals 300 tokens (100+200) in the 1h window.
+	status, payload, _ = api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	vm := payload["virtual_models"].(map[string]any)["virtual/coding"].(map[string]any)
+	if vm["1h"] != float64(300) {
+		t.Fatalf("usage 1h: expected 300, got %v", vm["1h"])
 	}
 }

@@ -232,8 +232,7 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	}
-	where := `((rl.route_kind='virtual' AND rl.route_model_id=?) OR rl.requested_model=? OR rl.route_model=?)`
-	args := []any{modelID, canonical, canonical}
+	where, args := virtualAttribution(modelID, canonical)
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		pattern := "%" + search + "%"
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
@@ -258,8 +257,7 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 		adminError(w, 404, "not_found", "Model not found.")
 		return
 	}
-	where := `(rl.resolved_provider=? AND rl.resolved_model=?)`
-	args := []any{provider, upstream}
+	where, args := realAttribution(provider, upstream)
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		pattern := "%" + search + "%"
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
@@ -374,7 +372,8 @@ func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	}
-	s.listScopedActivity(w, r, `((route_kind='virtual' AND route_model_id=?) OR requested_model=? OR route_model=?)`, []any{modelID, canonical, canonical}, `SELECT count(*) FROM virtual_models WHERE id=?`, []any{modelID}, "Virtual model not found.")
+	where, args := virtualAttribution(modelID, canonical)
+	s.listScopedActivity(w, r, where, args, `SELECT count(*) FROM virtual_models WHERE id=?`, []any{modelID}, "Virtual model not found.")
 }
 
 // listRealModelActivity returns metadata for requests that resolved to a real
@@ -388,7 +387,8 @@ func (s *Server) listRealModelActivity(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Model not found.")
 		return
 	}
-	s.listScopedActivity(w, r, `(resolved_provider=? AND resolved_model=?)`, []any{provider, upstream}, `SELECT count(*) FROM provider_models WHERE id=?`, []any{modelID}, "Model not found.")
+	where, args := realAttribution(provider, upstream)
+	s.listScopedActivity(w, r, where, args, `SELECT count(*) FROM provider_models WHERE id=?`, []any{modelID}, "Model not found.")
 }
 
 func strPtrOrEmpty(v *string) string {

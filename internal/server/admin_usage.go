@@ -86,7 +86,7 @@ func (s *Server) targetResolutionHealth(r *http.Request, c1, c24 string) (map[st
 		max(CASE WHEN l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END)
 		FROM request_logs l
 		JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id) vm
-		  ON (l.route_kind='virtual' AND l.route_model_id=vm.id) OR (l.route_model_id IS NULL AND vm.canonical=l.requested_model)
+		  ON `+virtualAttributionJoin()+`
 		WHERE l.created_at >= ? AND l.resolved_provider IS NOT NULL AND l.resolved_model IS NOT NULL
 		GROUP BY l.resolved_provider, l.resolved_model`, c1, c1, c24)
 	if err != nil {
@@ -128,7 +128,7 @@ func (s *Server) usageByClient(r *http.Request, c1, c24, c7 string) (map[string]
 }
 
 func (s *Server) usageByVirtual(r *http.Request, c1, c24, c7 string) (map[string]usageWindows, error) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT vm.canonical, `+usageSelect+` FROM request_logs l JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON (l.route_kind='virtual' AND l.route_model_id=vm.id) OR (l.route_model_id IS NULL AND vm.canonical=l.requested_model) WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c24, c7, c7)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT vm.canonical, `+usageSelect+` FROM request_logs l JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON `+virtualAttributionJoin()+` WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c24, c7, c7)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +204,7 @@ func (s *Server) cacheByClient(r *http.Request, c1, c24, c7 string) (map[string]
 }
 
 func (s *Server) cacheByVirtual(r *http.Request, c1, c24, c7 string) (map[string]cacheWindows, error) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT vm.canonical, `+cacheSelect+` FROM request_logs l JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON (l.route_kind='virtual' AND l.route_model_id=vm.id) OR (l.route_model_id IS NULL AND vm.canonical=l.requested_model) WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c1, c24, c24, c7, c7, c7)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT vm.canonical, `+cacheSelect+` FROM request_logs l JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON `+virtualAttributionJoin()+` WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c1, c24, c24, c7, c7, c7)
 	if err != nil {
 		return nil, err
 	}
