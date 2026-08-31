@@ -137,7 +137,10 @@ func NewRegistry() *Registry {
 		// Keep a stalled ordered-fallback target from consuming the client's
 		// entire request deadline. Once headers arrive, streaming may continue
 		// without this header timeout interrupting the response body.
-		ResponseHeaderTimeout: 15 * time.Second,
+		// 60s: large-prompt requests to cloud LLMs (e.g. ollama) can legitimately
+		// take longer than 15s to return response headers; 15s caused spurious
+		// upstream_timeout -> virtual_model_unavailable on big cron prompts.
+		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: time.Second, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second,
 	}
 	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
