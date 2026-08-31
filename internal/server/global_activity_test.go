@@ -182,6 +182,37 @@ func TestGlobalActivitySearchFields(t *testing.T) {
 	}
 }
 
+// TestGlobalActivitySearchResolvedPair covers the Real Models "Activity" button:
+// a real-model request is logged with the client's requested_model as an alias
+// (e.g. "main/hermes-daily") while the provider and model are stored in separate
+// resolved_provider/resolved_model columns. Searching by the canonical
+// "provider/model" id must still find the row via the concatenated resolved pair.
+func TestGlobalActivitySearchResolvedPair(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	// Row A: real-model request addressed by an alias, resolved to provider-a/model-a.
+	insertLogRow(t, db, "row-a", clientID, "main/hermes-daily", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
+	// Row B: direct request whose requested_model already equals the canonical id.
+	insertLogRow(t, db, "row-b", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 20, int64Ptr(2), int64Ptr(2), "upstream-b", "req-b", nil, "2026-01-01T00:00:02Z")
+
+	search := func(term string) []any {
+		status, payload, _ := api.request("GET", "/api/admin/activity?search="+term, nil)
+		if status != 200 {
+			t.Fatalf("search %q: %d %v", term, status, payload)
+		}
+		return payload["data"].([]any)
+	}
+
+	// Searching by the canonical id must surface both the alias-addressed row and
+	// the direct row (the alias row only matches via the resolved provider/model pair).
+	if rows := search("provider-a%2Fmodel-a"); len(rows) != 2 {
+		t.Fatalf("search by canonical resolved pair failed, want 2 rows, got %d: %v", len(rows), rows)
+	}
+	// The alias row must not be found by its requested_model alone.
+	if rows := search("hermes-daily"); len(rows) != 1 || rows[0].(map[string]any)["id"] != "row-a" {
+		t.Fatalf("search by alias requested_model failed: %v", rows)
+	}
+}
+
 func TestGlobalActivityPagination(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Insert 5 rows with increasing created_at.
