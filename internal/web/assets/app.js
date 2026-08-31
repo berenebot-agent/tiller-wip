@@ -403,37 +403,39 @@ function renderPermissions(filter = '') {
   }));
   $$('[data-group-enable]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => bulkSetGroupPermissions(btn.dataset.groupEnable, true)));
   $$('[data-group-disable]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => bulkSetGroupPermissions(btn.dataset.groupDisable, false)));
-  $$('[data-permission-collapse]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => {
-    const key = btn.dataset.permissionCollapse;
-    if (collapsedPermissionGroups.has(key)) collapsedPermissionGroups.delete(key);
-    else collapsedPermissionGroups.add(key);
-    renderPermissions($('#permission-search').value);
-  }));
-  $$('[data-permission-section]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => {
-    const key = btn.dataset.permissionSection;
-    if (collapsedPermissionSections.has(key)) collapsedPermissionSections.delete(key);
-    else collapsedPermissionSections.add(key);
-    renderPermissions($('#permission-search').value);
-  }));
+  $$('[data-permission-collapse]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => togglePermissionGroup(btn.dataset.permissionCollapse)));
+  $$('[data-permission-section]', $('#permission-groups')).forEach(btn => btn.addEventListener('click', () => togglePermissionSection(btn.dataset.permissionSection)));
   // Clicking anywhere on a section or group header toggles collapse, except
   // on the interactive controls inside (arrow, switch, Enable/Disable buttons).
   $$('.permission-section-head', $('#permission-groups')).forEach(head => head.addEventListener('click', (event) => {
     if (event.target.closest('button, input, label.toggle-label')) return;
-    const btn = head.querySelector('[data-permission-section]');
-    const key = btn.dataset.permissionSection;
-    if (collapsedPermissionSections.has(key)) collapsedPermissionSections.delete(key);
-    else collapsedPermissionSections.add(key);
-    renderPermissions($('#permission-search').value);
+    togglePermissionSection(head.querySelector('[data-permission-section]').dataset.permissionSection);
   }));
   $$('.permission-group-head', $('#permission-groups')).forEach(head => head.addEventListener('click', (event) => {
     if (event.target.closest('button, input, label.toggle-label')) return;
     const btn = head.querySelector('[data-permission-collapse]');
-    if (!btn) return;
-    const key = btn.dataset.permissionCollapse;
-    if (collapsedPermissionGroups.has(key)) collapsedPermissionGroups.delete(key);
-    else collapsedPermissionGroups.add(key);
-    renderPermissions($('#permission-search').value);
+    if (btn) togglePermissionGroup(btn.dataset.permissionCollapse);
   }));
+}
+function togglePermissionSection(key) {
+  if (collapsedPermissionSections.has(key)) collapsedPermissionSections.delete(key);
+  else collapsedPermissionSections.add(key);
+  const arrow = document.querySelector(`[data-permission-section="${key}"]`);
+  const body = arrow.closest('.permission-section').querySelector('.permission-section-body');
+  const collapsed = collapsedPermissionSections.has(key);
+  body.classList.toggle('permission-section-hidden', collapsed);
+  arrow.textContent = collapsed ? GROUP_ARROW.down : GROUP_ARROW.up;
+  arrow.setAttribute('aria-expanded', String(!collapsed));
+}
+function togglePermissionGroup(key) {
+  if (collapsedPermissionGroups.has(key)) collapsedPermissionGroups.delete(key);
+  else collapsedPermissionGroups.add(key);
+  const arrow = document.querySelector(`[data-permission-collapse="${key}"]`);
+  const list = arrow.closest('.permission-group').querySelector('.permission-list');
+  const collapsed = collapsedPermissionGroups.has(key);
+  list.classList.toggle('permission-list-hidden', collapsed);
+  arrow.textContent = collapsed ? GROUP_ARROW.down : GROUP_ARROW.up;
+  arrow.setAttribute('aria-expanded', String(!collapsed));
 }
 $('#permission-search').addEventListener('input', event => renderPermissions(event.target.value));
 function bulkSetGroupPermissions(groupKey, enabled) {
