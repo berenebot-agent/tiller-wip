@@ -30,8 +30,10 @@ MEM_LIMIT="${TILLER_GO_MEM:-1g}"        # hard RAM cap for the container (overri
 # Create cache dirs if absent
 mkdir -p "$MOD_CACHE" "$BUILD_CACHE"
 
-# Locate repo root (dir containing go.mod) so bind mounts always target the repo
-REPO_ROOT=$(dirname "$(CDPATH= cd -- "$(dirname "$0")" && pwd)")
+# Repo root = this script's own directory (tiller-go.sh lives in the repo root,
+# the dir that contains go.mod). Resolve symlinks + get absolute path.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+REPO_ROOT="$SCRIPT_DIR"
 
 # A container without a TTY/terminal shouldn't try to allocate one
 TTY_FLAG=""
@@ -46,4 +48,4 @@ exec docker run $TTY_FLAG --rm \
     -v "$REPO_ROOT:/src" \
     -w /src \
     "$GO_IMAGE" \
-    "$@"
+    go "$@"
