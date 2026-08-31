@@ -183,13 +183,15 @@ func cachePct(read, input sql.NullFloat64) *float64 {
 }
 
 // cacheSelect returns, per window, the summed cache_read_input_tokens and
-// input_tokens. Sums ignore NULL rows; a window with no cache data yields NULL.
-const cacheSelect = `sum(CASE WHEN created_at >= ? THEN cache_read_input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? THEN input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? THEN cache_read_input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? THEN input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? THEN cache_read_input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? THEN input_tokens ELSE 0 END)`
+// input_tokens restricted to cache-valid rows (those that actually reported
+// prompt-cache data). Both sums are NULL when a window has no cache-valid row,
+// so callers can render "n.a." rather than a misleading 0%.
+const cacheSelect = `sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
+	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN input_tokens ELSE 0 END)`
 
 func (s *Server) cacheByClient(r *http.Request, c1, c24, c7 string) (map[string]cacheWindows, error) {
 	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT client_key_id, `+cacheSelect+` FROM request_logs WHERE created_at >= ? GROUP BY client_key_id`, c1, c1, c24, c24, c7, c7, c7)

@@ -7,17 +7,21 @@ const capabilities = model => `<span class="meta-line">Context: ${model.context_
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
 const tok = (tokens, pct) => {
-  const hasCache = pct != null && !isNaN(pct);
-  if (!tokens && !hasCache) return '—';
+  if (!tokens && pct == null) return '—';
   const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
-  const cache = hasCache ? `<span class="cache-hit"><b>${Math.round(pct)}%</b><small>Cache</small></span>` : '';
+  const cache = (pct != null && !isNaN(pct))
+    ? `<span class="cache-hit"><b>${Math.round(pct)}%</b><small>Cache</small></span>`
+    : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   return `<span class="tok">${num}${cache}</span>`;
 };
 const rowCache = (row) => {
   const inp = row.input_tokens;
+  const output = row.output_tokens;
   const cache = row.cache_read_input_tokens;
-  const pct = (cache != null && inp > 0) ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>Cache</small></span>` : '';
-  return `<span class="activity-tokens"><b>${inp ?? '—'} / ${row.output_tokens ?? '—'}</b>${pct}</span>`;
+  const line = (cache != null && inp > 0)
+    ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>Cache</small></span>`
+    : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
+  return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
 };
 const VIEWS = ['providers', 'models', 'virtual', 'clients', 'settings'];
 const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'providers'); return VIEWS.includes(v) ? v : 'providers'; };

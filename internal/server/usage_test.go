@@ -103,3 +103,57 @@ func TestUsageEndpointEmpty(t *testing.T) {
 		t.Fatalf("expected empty usage, got %v", payload)
 	}
 }
+
+func TestUsageCacheHitWindows(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	now := time.Now().UTC()
+	type row struct {
+		in, out, cacheRead int64
+		hasCache           bool
+	}
+	// Three real-model groups resolved to the same target:
+	//  - cache-valid: cache_read present (e.g. Anthropic reporting cache).
+	//  - zero-cache:  cache_read present but 0 (reported cache, no hits).
+	//  - no-cache:    cache_read absent (e.g. Ollama — not reported).
+	rows := []row{
+		{in: 1000, out: 100, cacheRead: 900, hasCache: true},  // 90% hit
+		{in: 1000, out: 100, cacheRead: 500, hasCache: true},  // 50% hit
+		{in: 1000, out: 100, cacheRead: 0, hasCache: true},    // 0% hit (real)
+		{in: 1000, out: 100, cacheRead: 0, hasCache: false},   // missing -> n.a.
+	}
+	for i, r := range rows {
+		created := now.Add(-10 * time.Minute).Format(time.RFC3339Nano)
+		resolvedModel := "model-a"
+		req := "provider-a/model-a"
+		var cacheRead any
+		if !r.hasCache {
+			req = "provider-a/model-b"
+			resolvedModel = "model-b"
+		} else {
+			cacheRead = r.cacheRead
+		}
+		if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			fmt.Sprintf("cache%d", i), clientID, req, "provider-a", resolvedModel, "chat", 0, 200, 1, r.in, r.out, cacheRead, "req-c", created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	// Mixed window: cache-valid rows (90%, 50%, 0%) blend to
+	// (900+500+0)/(1000+1000+1000) = 1400/3000 ≈ 46.67%. n.a. rows are dropped.
+	if v, ok := payload["real_cache"].(map[string]any)["provider-a/model-a"].(map[string]any); !ok {
+		t.Fatalf("expected real_cache for provider-a/model-a, got %v", payload["real_cache"])
+	} else if v["1h"] == nil {
+		t.Fatalf("expected non-nil cache %% for blended window, got %v", v)
+	} else if p := v["1h"].(float64); p < 46.4 || p > 47.0 {
+		t.Fatalf("blended cache %% wrong: %.3f (want ~46.67)", p)
+	}
+	// n.a. window: only non-reporting rows -> null.
+	if v, ok := payload["real_cache"].(map[string]any)["provider-a/model-b"].(map[string]any); !ok {
+		t.Fatalf("expected real_cache for provider-a/model-b, got %v", payload["real_cache"])
+	} else if v["1h"] != nil {
+		t.Fatalf("expected null (n.a.) cache %% for non-reporting window, got %v", v)
+	}
+}
