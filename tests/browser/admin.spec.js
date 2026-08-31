@@ -12,7 +12,7 @@ async function login(page) {
   await page.getByLabel('Administrator').fill(ADMIN_USER);
   await page.getByLabel('Password').fill(ADMIN_PASS);
   await page.getByRole('button', { name: 'Enter control panel' }).click();
-  await expect(page.getByRole('heading', { name: 'Providers', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Client Keys', exact: true })).toBeVisible();
 }
 
 async function adminCsrf(page) {
@@ -65,11 +65,9 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.getByLabel('Administrator').fill(process.env.TILLER_BROWSER_ADMIN_USERNAME || 'admin');
   await page.getByLabel('Password').fill(process.env.TILLER_BROWSER_ADMIN_PASSWORD || 'browser-test-password');
   await page.getByRole('button', { name: 'Enter control panel' }).click();
-  await expect(page.getByRole('heading', { name: 'Providers', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Client Keys', exact: true })).toBeVisible();
   await expect(page.locator('.brand-mark')).toBeVisible();
 
-  await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.getByRole('button', { name: 'Client Keys' }).click();
   await page.getByRole('button', { name: '+ Create client key' }).click();
   await page.getByLabel('Client name').fill('Container browser client');
   await page.getByLabel('Description').fill('Disposable Playwright workflow');
@@ -93,6 +91,48 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+});
+
+test('mobile: Client Keys renders as cards with expandable detail and working actions', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'mobile-cards';
+  const clientName = 'mobile-cards-client';
+  await createProvider(page, csrf, providerName);
+  await createClient(page, csrf, clientName);
+  // Reload so the freshly created client appears in the (default) Client Keys view.
+  await page.reload();
+
+  // Lands on Client Keys by default.
+  await expect(page.getByRole('heading', { name: 'Client Keys', exact: true })).toBeVisible();
+  // Card list is shown; the wide table is hidden on mobile.
+  await expect(page.locator('#clients-cards')).toBeVisible();
+  await expect(page.locator('.clients-table-shell')).toBeHidden();
+
+  const card = page.locator('.client-card', { hasText: clientName });
+  await expect(card).toBeVisible();
+  await expect(card.locator('.client-card-name')).toHaveText(clientName);
+  await expect(card.locator('.client-card-detail')).toBeHidden();
+
+  // Tap the card to expand the in-place detail.
+  await card.locator('.client-card-head').click();
+  const detail = card.locator('.client-card-detail');
+  await expect(detail).toBeVisible();
+  // Vertical fields are present.
+  for (const label of ['Description', 'Fingerprint', 'Created', 'Type', 'Route', 'Usage']) {
+    await expect(detail.getByText(label)).toBeVisible();
+  }
+  // Actions are present.
+  for (const action of ['Activity', 'Rotate', 'Settings', 'Delete']) {
+    await expect(detail.getByRole('button', { name: action })).toBeVisible();
+  }
+
+  // Tapping an action opens the dialog.
+  await detail.getByRole('button', { name: 'Activity' }).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('#activity-dialog')).toBeHidden();
 });
 
 test('Real Models expands large provider groups in cancellable batches', async ({ page }) => {
@@ -133,7 +173,7 @@ test('Real Models expands large provider groups in cancellable batches', async (
     };
   }, providerName);
 
-  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.model-table')).tableLayout)).toBe('fixed');
+  expect(await page.evaluate(() => getComputedStyle(document.querySelector('.model-table')).tableLayout)).toBe('auto');
 
   // Collapse is immediate, and expanding reveals only the first 20 rows in
   // the click turn before scheduling the remaining frames.
@@ -273,7 +313,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   expect(response.status()).toBe(200);
   expect((await response.json()).model).toBe('main');
 
-  await row.getByRole('button', { name: 'Settings' }).click();
+  await row.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.locator('#form-dialog').getByLabel('Client-facing model name').fill('coding');
   await expect(page.locator('[data-single-confirm]')).toBeVisible();
   await page.getByRole('button', { name: 'Save client' }).click();
@@ -452,7 +492,7 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   await expect(row.getByRole('button', { name: `Manage models for ${clientName}` })).toBeVisible();
 
   // Switch catalogue -> single via Settings and pick a target.
-  await row.getByRole('button', { name: 'Settings' }).click();
+  await row.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.locator('#form-dialog')).toBeVisible();
   await page.locator('#form-dialog select[name="type"]').selectOption('single');
   await page.locator('[data-single-target] input[type="text"]').click();
@@ -465,7 +505,7 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   await expect(row.locator('[data-inline-route] input[type="text"]')).toHaveValue(`Real · ${providerName}/mock-model`);
 
   // Switch single -> catalogue via Settings.
-  await row.getByRole('button', { name: 'Settings' }).click();
+  await row.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.locator('#form-dialog')).toBeVisible();
   await page.locator('#form-dialog select[name="type"]').selectOption('catalogue');
   await page.getByRole('button', { name: 'Save client' }).click();

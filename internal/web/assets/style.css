@@ -53,3 +53,27 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 #catalogue-config[hidden]{display:none}
 .permissions-dialog #permissions-error{padding:0 22px}
 @media(max-width:720px){.route-button{min-width:230px}}
+
+/* Mobile client-key cards: hidden on desktop, shown below the mobile breakpoint. */
+.client-cards{display:none}
+.client-card{border:1px solid var(--line);background:var(--paper);box-shadow:var(--shadow);border-radius:4px;margin-bottom:12px;overflow:hidden}
+.client-card-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"dot name chevron" "dot desc chevron" "dot fp chevron";gap:2px 10px;align-items:center;width:100%;padding:14px;border:0;background:transparent;text-align:left;cursor:pointer}
+.client-card-head:hover{background:#f8fbfd}
+.client-card-head .status-dot{grid-area:dot}
+.client-card-name{grid-area:name;color:var(--navy);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.client-card-desc{grid-area:desc;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.client-card-head .secret-fingerprint{grid-area:fp;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.client-card-chevron{grid-area:chevron;color:var(--blue);font-size:14px;transition:transform .15s}
+.client-card-head[aria-expanded="true"] .client-card-chevron{transform:rotate(180deg)}
+.client-card-detail{padding:0 14px 14px;border-top:1px solid var(--line)}
+.client-card-field{display:flex;flex-direction:column;gap:3px;padding:10px 0;border-bottom:1px solid #eef2f5}
+.client-card-field:last-of-type{border-bottom:0}
+.client-card-label{color:var(--muted);font:700 10px var(--mono);letter-spacing:.07em;text-transform:uppercase}
+.client-card-route{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.client-card-usage{display:flex;gap:16px;flex-wrap:wrap}
+.client-card-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:12px}
+.client-card-actions .btn{min-height:44px}
+@media(max-width:720px){
+  .clients-table-shell{display:none}
+  .client-cards{display:block}
+}

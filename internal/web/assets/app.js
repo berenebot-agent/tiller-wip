@@ -1,6 +1,6 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'providers', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
@@ -25,7 +25,7 @@ const rowCache = (row) => {
   return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
 };
 const VIEWS = ['providers', 'models', 'virtual', 'clients', 'settings'];
-const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'providers'); return VIEWS.includes(v) ? v : 'providers'; };
+const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'clients'); return VIEWS.includes(v) ? v : 'clients'; };
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -44,7 +44,7 @@ async function api(path, options = {}) {
   return payload;
 }
 
-function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/providers'); }
+function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/clients'); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; navigate(state.view); }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
@@ -352,8 +352,42 @@ function mountInlineRoutePicker(root, client) {
     else { hidden.value = ''; input.value = ''; }
   });
 }
+function clientCard(client) {
+  const statusDot = `<span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span>`;
+  const routeAction = client.type === 'single'
+    ? `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Change route</button>`
+    : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Catalogue permissions</button>`;
+  const routeSummary = client.type === 'single'
+    ? `<code class="model-id">${h(client.single_target_canonical || 'Unavailable target')}</code>`
+    : `<span class="meta-line">Catalogue — model permissions</span>`;
+  return `<article class="client-card" data-client-id="${h(client.id)}">
+    <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
+      ${statusDot}
+      <span class="client-card-name">${h(client.name)}</span>
+      <span class="client-card-desc">${h(client.description || 'No description')}</span>
+      <span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span>
+      <span class="client-card-chevron" aria-hidden="true">▾</span>
+    </button>
+    <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
+      <div class="client-card-field"><span class="client-card-label">Description</span><span>${h(client.description || 'No description')}</span></div>
+      <div class="client-card-field"><span class="client-card-label">Fingerprint</span><code class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</code></div>
+      <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
+      ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
+      <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
+      <div class="client-card-field"><span class="client-card-label">Route</span><div class="client-card-route">${routeSummary}${routeAction}</div></div>
+      <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</div></div>
+      <div class="client-card-actions">
+        <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
+        <button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button>
+        <button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button>
+        <button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button>
+      </div>
+    </div>
+  </article>`;
+}
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
+  $('#clients-cards').innerHTML = state.clients.map(clientCard).join('');
   $('#clients-body').innerHTML = state.clients.map(client => {
     const routeCell = client.type === 'single'
       ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
@@ -364,6 +398,19 @@ function renderClients() {
   $$('[data-client-models]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientModels)));
   $$('[data-client-activity]').forEach(button => button.onclick = () => openActivity(state.clients.find(item => item.id === button.dataset.clientActivity))); $$('[data-client-rotate]').forEach(button => button.onclick = () => rotateClient(button.dataset.clientRotate)); $$('[data-client-edit]').forEach(button => button.onclick = () => openClient(state.clients.find(item => item.id === button.dataset.clientEdit))); $$('[data-client-delete]').forEach(button => button.onclick = () => deleteClient(button.dataset.clientDelete));
 }
+// Mobile card accordion: tapping a card head expands its detail in place,
+// closing any other open card (one open at a time). Action buttons inside the
+// detail are not inside the head, so their clicks bubble past this handler.
+$('#clients-cards').addEventListener('click', event => {
+  const head = event.target.closest('[data-card-toggle]');
+  if (!head) return;
+  const card = head.closest('.client-card');
+  const detail = card.querySelector('.client-card-detail');
+  const wasOpen = !detail.hidden;
+  $$('.client-card-detail', $('#clients-cards')).forEach(d => { d.hidden = true; });
+  $$('[data-card-toggle]', $('#clients-cards')).forEach(b => b.setAttribute('aria-expanded', 'false'));
+  if (!wasOpen) { detail.hidden = false; head.setAttribute('aria-expanded', 'true'); }
+});
 $('#add-client').onclick = () => openClient();
 function openClient(client = null) {
   const singleFields = `<section data-single-fields ${client?.type !== 'single' ? 'hidden' : ''}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
