@@ -152,7 +152,7 @@ function renderVirtual() {
   }).join('');
   $('#virtual-body').innerHTML = html;
   $$('.group-toggle', $('#virtual-body')).forEach(header => header.onclick = toggleGroup);
-  $$('[data-model-activity]', $('#virtual-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(button.dataset.modelActivity); });
+  $$('[data-model-activity]', $('#virtual-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.virtualModels.find(item => item.canonical_model_id === button.dataset.modelActivity)); });
   $$('[data-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.virtualEdit)));
   $$('[data-virtual-capabilities]').forEach(button => button.onclick = event => { event.stopPropagation(); openCapabilities(state.virtualModels.find(item => item.id === button.dataset.virtualCapabilities)); });
   $$('[data-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.virtualDelete));
@@ -441,17 +441,6 @@ function applyPermissionFilter(term) {
   $$('.permission-row', $('#permission-groups')).forEach(row => {
     row.hidden = t && !row.dataset.canonical.toLowerCase().includes(t);
   });
-  // Hide a provider (group) row when the search matches none of its models,
-  // mirroring the Models tab. Search only affects visibility, never permissions.
-  $$('.permission-group', $('#permission-groups')).forEach(group => {
-    const rows = $$('.permission-row', group);
-    group.hidden = t && rows.every(row => row.hidden);
-  });
-  // Hide a section when the search matches none of its groups.
-  $$('.permission-section', $('#permission-groups')).forEach(section => {
-    const groups = $$('.permission-group', section);
-    section.hidden = t && groups.every(group => group.hidden);
-  });
 }
 $('#permission-search').addEventListener('input', event => applyPermissionFilter(event.target.value));
 function bulkSetGroupPermissions(groupKey, enabled) {
@@ -497,10 +486,10 @@ $('#save-permissions').onclick = async () => {
   finally { button.disabled = false; }
 };
 
-const activityState = { client: null, model: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
-async function openActivity(client) { activityState.client = client; activityState.model = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; $('#clear-activity').hidden = false; await loadActivity(); $('#activity-dialog').showModal(); }
-async function openModelActivity(model) { activityState.client = null; activityState.model = model; activityState.offset = 0; activityState.search = model; $('#activity-search').value = model; $('#activity-title').textContent = `${model} activity`; $('#clear-activity').hidden = true; await loadActivity(); $('#activity-dialog').showModal(); }
-async function loadActivity() { if (!activityState.client && !activityState.model) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.client ? `/api/admin/client-keys/${activityState.client.id}/activity` : '/api/admin/activity'; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
+const activityState = { client: null, model: '', virtualID: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
+async function openActivity(client) { activityState.client = client; activityState.model = ''; activityState.virtualID = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; $('#clear-activity').hidden = false; await loadActivity(); $('#activity-dialog').showModal(); }
+async function openModelActivity(model) { activityState.client = null; activityState.model = model.canonical_model_id; activityState.virtualID = model.id; activityState.offset = 0; activityState.search = model.canonical_model_id; $('#activity-search').value = model.canonical_model_id; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; await loadActivity(); $('#activity-dialog').showModal(); }
+async function loadActivity() { if (!activityState.client && !activityState.model) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.client ? `/api/admin/client-keys/${activityState.client.id}/activity` : `/api/admin/virtual-models/${activityState.virtualID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
 function activityAttempt(attempt, index) { return `<div class="activity-attempt ${attempt.result === 'success' ? 'attempt-success' : 'attempt-failed'}"><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code>${h(attempt.provider)}/${h(attempt.model)}</code></span><span class="attempt-latency">${attempt.latency_ms} ms</span><span class="attempt-status">${attempt.http_status || h(attempt.result)}</span></div>`; }
 function attemptSequence(row) { if (!row.fallback_used || !row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map(activityAttempt).join('')}</div>`; }
 function resolvedActivity(row) { const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', latency_ms: row.latency_ms, http_status: row.http_status, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null; const resolved = row.fallback_used ? '' : fixedAttempt ? `<div class="attempt-sequence">${activityAttempt(fixedAttempt, 0)}</div>` : '<span class="meta-line">—</span>'; const sequence = row.fallback_used ? attemptSequence(row) : ''; const error = row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''; return `${resolved}${sequence}${error}`; }
@@ -511,6 +500,7 @@ $('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activit
 $('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
 $('#clear-activity').onclick = async () => { if (!await confirmAction({ title: `Clear ${activityState.client.name} activity?`, copy: 'All logged requests for this client will be permanently deleted.', action: 'Clear logs' })) return; try { await api(`/api/admin/client-keys/${activityState.client.id}/activity`, { method: 'DELETE' }); activityState.offset = 0; await loadActivity(); flash('Client activity cleared.'); } catch (error) { $('#activity-error').textContent = errorMessage(error); } };
+$('#export-activity').onclick = () => { const base = activityState.client ? `/api/admin/client-keys/${activityState.client.id}/activity/export` : `/api/admin/virtual-models/${activityState.virtualID}/activity/export`; const url = `${base}?search=${encodeURIComponent(activityState.search || '')}`; const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); };
 
 // Global activity is a read-only section in the Settings view, distinct from
 // the per-client Activity dialog. It shows metadata across all client keys and

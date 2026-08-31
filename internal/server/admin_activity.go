@@ -1,8 +1,14 @@
 package server
 
 import (
+	"context"
 	"database/sql"
+	"encoding/csv"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 )
 
 type requestAttemptView struct {
@@ -157,6 +163,203 @@ func (s *Server) clearActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(204)
+}
+
+// activityExportRow is the metadata captured for one CSV row. It mirrors the
+// request_logs columns plus the owning client's name (via JOIN) so both the
+// client-scoped and virtual-model-scoped exports can include it.
+type activityExportRow struct {
+	activityView
+	ClientName string
+}
+
+// queryActivityExport runs a metadata-only SELECT over request_logs joined to
+// client_keys, applying the given WHERE clause and optional search pattern, and
+// returns one row per inference request ordered newest-first. It is shared by
+// the client-key and virtual-model CSV export handlers so the column set cannot
+// drift between them.
+func (s *Server) queryActivityExport(ctx context.Context, where string, args []any) ([]activityExportRow, error) {
+	rows, err := s.db.SQL.QueryContext(ctx, `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` ORDER BY rl.created_at DESC, rl.id DESC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	data := []activityExportRow{}
+	for rows.Next() {
+		var v activityExportRow
+		var streaming, fallback int
+		if err := rows.Scan(&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.AttemptCount, &fallback, &v.FallbackReason, &v.CreatedAt, &v.ClientName); err != nil {
+			return nil, err
+		}
+		v.Streaming, v.FallbackUsed = scanBool(streaming), scanBool(fallback)
+		data = append(data, v)
+	}
+	return data, rows.Err()
+}
+
+// exportClientActivityCSV streams a metadata-only CSV of the client key's
+// activity, honouring the active search filter. One inference request = one row.
+func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request) {
+	clientID := r.PathValue("id")
+	var name string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT name FROM client_keys WHERE id=?`, clientID).Scan(&name); err != nil {
+		adminError(w, 404, "not_found", "Client key not found.")
+		return
+	}
+	where := `rl.client_key_id=?`
+	args := []any{clientID}
+	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+		pattern := "%" + search + "%"
+		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+	rows, err := s.queryActivityExport(r.Context(), where, args)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not export activity.")
+		return
+	}
+	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(name)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
+}
+
+// exportVirtualActivityCSV streams a metadata-only CSV of activity attributable
+// to a virtual model (route_kind='virtual' AND route_model_id=?), honouring the
+// active search filter. One inference request = one row.
+func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	var canonical string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, modelID).Scan(&canonical); err != nil {
+		adminError(w, 404, "not_found", "Virtual model not found.")
+		return
+	}
+	where := `rl.route_kind='virtual' AND rl.route_model_id=?`
+	args := []any{modelID}
+	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
+		pattern := "%" + search + "%"
+		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
+	}
+	rows, err := s.queryActivityExport(r.Context(), where, args)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not export activity.")
+		return
+	}
+	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
+}
+
+// writeActivityCSV streams the export rows as a UTF-8 CSV attachment. Only
+// metadata is written; unknown values stay blank. A BOM is prepended so Excel
+// detects UTF-8 correctly.
+func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, rows []activityExportRow) {
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Write([]byte("\xEF\xBB\xBF")) // UTF-8 BOM for Excel
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{
+		"timestamp", "client_key", "client_requested_model", "client_exposed_model",
+		"virtual_model", "bound_target", "final_provider", "final_model", "protocol",
+		"streaming", "http_status", "latency_ms", "input_tokens", "output_tokens",
+		"cached_input_tokens", "attempt_count", "fallback_used", "fallback_reason",
+		"provider_request_id", "client_request_id", "route_kind",
+	})
+	for _, row := range rows {
+		virtualModel := ""
+		if row.RouteKind != nil && *row.RouteKind == "virtual" && row.RouteModel != nil {
+			virtualModel = *row.RouteModel
+		}
+		boundTarget := ""
+		if row.RouteModel != nil {
+			boundTarget = *row.RouteModel
+		}
+		_ = cw.Write([]string{
+			row.CreatedAt,
+			row.ClientName,
+			row.RequestedModel,
+			strPtrOrEmpty(row.ExposedModel),
+			virtualModel,
+			boundTarget,
+			strPtrOrEmpty(row.ResolvedProvider),
+			strPtrOrEmpty(row.ResolvedModel),
+			row.Protocol,
+			strconv.FormatBool(row.Streaming),
+			strconv.Itoa(row.HTTPStatus),
+			strconv.FormatInt(row.LatencyMs, 10),
+			int64PtrOrEmpty(row.InputTokens),
+			int64PtrOrEmpty(row.OutputTokens),
+			int64PtrOrEmpty(row.CacheReadInputTokens),
+			strconv.Itoa(row.AttemptCount),
+			strconv.FormatBool(row.FallbackUsed),
+			strPtrOrEmpty(row.FallbackReason),
+			strPtrOrEmpty(row.ProviderRequestID),
+			row.ClientRequestID,
+			strPtrOrEmpty(row.RouteKind),
+		})
+	}
+	cw.Flush()
+}
+
+// listVirtualActivity returns metadata for requests attributable to a virtual
+// model (route_kind='virtual' AND route_model_id=?), newest first, with the same
+// search and pagination as the client-key activity endpoint.
+func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	var exists int
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models WHERE id=?`, modelID).Scan(&exists); err != nil || exists == 0 {
+		adminError(w, 404, "not_found", "Virtual model not found.")
+		return
+	}
+	limit, offset, search := pagination(r)
+	pattern := "%" + search + "%"
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at FROM request_logs WHERE route_kind='virtual' AND route_model_id=? AND (requested_model LIKE ? OR coalesce(exposed_model,'') LIKE ? OR coalesce(route_model,'') LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, modelID, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load activity.")
+		return
+	}
+	defer rows.Close()
+	data := []activityView{}
+	for rows.Next() {
+		var v activityView
+		var streaming, fallback int
+		if err := rows.Scan(&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.AttemptCount, &fallback, &v.FallbackReason, &v.CreatedAt); err != nil {
+			adminError(w, 500, "database_error", "Could not load activity.")
+			return
+		}
+		v.Streaming, v.FallbackUsed = scanBool(streaming), scanBool(fallback)
+		data = append(data, v)
+	}
+	if err := rows.Err(); err != nil {
+		adminError(w, 500, "database_error", "Could not load activity.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
+}
+
+func strPtrOrEmpty(v *string) string {
+	if v == nil {
+		return ""
+	}
+	return *v
+}
+
+func int64PtrOrEmpty(v *int64) string {
+	if v == nil {
+		return ""
+	}
+	return strconv.FormatInt(*v, 10)
+}
+
+// sanitizeFilename strips characters that are unsafe in a Content-Disposition
+// filename, replacing slashes (as in virtual canonical ids like "main/coding")
+// with dashes.
+func sanitizeFilename(s string) string {
+	s = strings.ReplaceAll(s, "/", "-")
+	s = strings.ReplaceAll(s, "\\", "-")
+	return strings.Map(func(r rune) rune {
+		if r < 32 || r == '"' || r == ':' || r == '*' || r == '?' || r == '<' || r == '>' || r == '|' {
+			return '-'
+		}
+		return r
+	}, s)
 }
 
 var _ = sql.ErrNoRows
