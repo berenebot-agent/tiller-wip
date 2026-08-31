@@ -28,9 +28,19 @@ Guardrails for any coding agent working in this repository. This file does not r
 ## Toolchain — Go runs in Docker, never on the host
 
 - Go is intentionally **not** installed on the host. `go` is not on PATH and `go: command not found` is expected, not an error. Do not install Go on the host and do not treat the missing host Go as a problem to fix.
-- Every Go command (build, test, vet, mod tidy, etc.) must run inside the `golang:1.26.7-alpine` image, e.g. `docker run --rm -v "$PWD:/src" -w /src golang:1.26.7-alpine go test ./...`
+- **Use the wrapper `./tiller-go.sh` for ALL Go commands** (build, test, vet, mod tidy, etc.). It runs the pinned `golang:1.26.7-alpine` image with persistent bind-mounted caches and a RAM cap, so repeated runs are fast and cannot OOM the host:
+  ```bash
+  ./tiller-go.sh test ./...     # run tests (cached, fast)
+  ./tiller-go.sh vet ./...
+  ./tiller-go.sh mod tidy
+  ./tiller-go.sh build ./...
+  ```
+- **Why the wrapper exists:** the raw `docker run --rm golang:1.26.7-alpine go test ./...` one-liner is stateless — every run re-downloads all modules and cold-recompiles, spiking RAM and getting OOM-killed on this 4GiB box. `tiller-go.sh` fixes both:
+  - **Bind-mounted caches** (NOT named volumes — matches the deployment rule): `~/.cache/tiller-go/mod` → `/go/pkg/mod`, `~/.cache/tiller-go/build` → `/root/.cache/go-build`. First run is slow (cold), every later run reuses the cache.
+  - **RAM cap:** `--memory=1g` (override: `TILLER_GO_MEM=2g`) + `GOFLAGS=-p=2` (parallelism cap). The cap bounds the container; `-p=2` cuts peak compiler RAM.
+  - Image pinned to `golang:1.26.7-alpine` — the same image the Dockerfile build stage uses.
+- Do NOT hand-write `docker run --rm -v "$PWD:/src" ... golang:1.26.7-alpine go ...` — use the wrapper so caches and the RAM cap are always applied. If a script or tool invokes bare `go` on the host, that is the bug — point it at `./tiller-go.sh` instead.
 - The integration/browser/compatibility tests are fully containerized and need no host Go at all — see `tests/compatibility/run.sh` and `tests/browser`.
-- If a script or tool invokes bare `go` on the host, that is the bug — point it at the Docker wrapper instead of installing Go.
 
 ## Security guardrails
 
