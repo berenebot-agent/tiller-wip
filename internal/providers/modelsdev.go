@@ -154,14 +154,6 @@ func visionFromModalities(input []string) (bool, bool) {
 	return contains(input, "image"), true
 }
 
-// SetModelsDevEnabled toggles enrichment. It is safe to call before any
-// concurrent Discover/enrich calls.
-func (r *Registry) SetModelsDevEnabled(enabled bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.modelsDevEnabled = enabled
-}
-
 // LoadModelsDevCache synchronously loads the cached models.dev dataset from
 // path. A missing or unreadable cache is not an error: the registry simply
 // proceeds without enrichment until a background refresh succeeds.

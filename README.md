@@ -72,6 +72,33 @@ keys, WAL mode, and a busy timeout. Provider catalogue refresh runs
 approximately every 24 hours with deterministic jitter; manual refresh is
 available in the UI.
 
+When a provider's `/models` endpoint does not report capability metadata
+(context length, max output, tool/vision/reasoning/structured-output flags,
+modalities), the router fills the gaps from the community-maintained
+[models.dev](https://models.dev) registry. Provider-reported values are always
+authoritative; models.dev only supplies what the provider left unknown, and a
+field stays unknown if neither source reports it. The dataset is cached at
+`./data/models-dev.json` (refreshed daily and on manual catalogue refresh) so
+discovery never depends on models.dev being reachable. Set
+`TILLER_MODELS_DEV_ENABLED=false` to disable the lookup entirely for offline or
+privacy-sensitive deployments.
+
+### Notifications
+
+Settings includes an installation-global outbound webhook for routing events.
+Enable it, set any HTTP(S) endpoint (an
+[ntfy](https://ntfy.sh) topic is the simplest self-hosted example), and pick the
+events: *Fallback occurred* (an ordered-fallback virtual model advanced to a
+later target) and *All targets failed* (every eligible target was attempted and
+none succeeded). Payloads are metadata-only JSON with the same privacy boundary
+as Activity — no prompts, responses, or credentials — plus a short human-readable
+summary. Delivery is best-effort with a short timeout: a failed notification is
+recorded in diagnostics and never fails, delays, or alters an inference request,
+and there is no queue or retry engine. An optional `Authorization` header is
+stored for endpoints that need one; it is write-only (never displayed again) and
+can be cleared from the settings card. A **Send test notification** button
+verifies delivery before enabling events.
+
 ### Backup and restoration
 
 The Backup/System screen downloads a consistent SQLite snapshot. The response

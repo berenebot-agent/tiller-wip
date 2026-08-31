@@ -401,8 +401,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	}
 	// Emit a single logical notification for the routing outcome (fallback or
 	// all-targets-failed). This is best-effort and never blocks or alters the
-	// client response.
-	s.maybeNotify(row, route, resp)
+	// client response. The final client-facing status is passed in explicitly:
+	// for a successful fallback it is the upstream 2xx; when no target
+	// succeeded the client receives 503 (set below), which is not yet on the
+	// row at this point.
+	finalStatus := 503
+	if resp != nil {
+		finalStatus = resp.StatusCode
+	}
+	s.maybeNotify(row, route, resp, finalStatus)
 	if resp == nil {
 		if protocolUnavailable {
 			row.httpStatus = 400

@@ -133,6 +133,52 @@ test('mobile: Client Keys renders as cards with expandable detail and working ac
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
+
+  // A Catalogue key's card opens catalogue permissions; the permissions dialog
+  // renders with its filter cleared.
+  await detail.getByRole('button', { name: 'Catalogue permissions' }).click();
+  await expect(page.locator('#permissions-dialog')).toBeVisible();
+  await expect(page.locator('#permission-search')).toHaveValue('');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+});
+
+test('mobile: Single-key card route summary and Settings entry point', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'mobile-single';
+  const clientName = 'mobile-single-client';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  const real = (await modelsResponse.json()).data.find(model => model.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  const createRes = await page.request.post('/api/admin/client-keys', {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { name: clientName, type: 'single', single_model_name: 'main', single_target_type: 'real', single_target_id: real.id }
+  });
+  expect(createRes.status()).toBe(201);
+
+  await page.reload();
+  const card = page.locator('.client-card', { hasText: clientName });
+  await expect(card).toBeVisible();
+
+  // The collapsed card and expanded detail show the current route target.
+  await card.locator('.client-card-head').click();
+  const detail = card.locator('.client-card-detail');
+  await expect(detail).toBeVisible();
+  await expect(detail.locator('.client-card-route')).toContainText(`${providerName}/mock-model`);
+  // The route is available, so no broken-target badge.
+  await expect(detail.locator('.client-route-broken')).toHaveCount(0);
+
+  // "Change route" opens the client Settings dialog, which contains the actual
+  // target picker (the permissions dialog cannot repoint a Single key).
+  await detail.getByRole('button', { name: 'Change route' }).click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
+  await expect(page.locator('#form-dialog').getByLabel('Client-facing model name')).toHaveValue('main');
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('#form-dialog')).toBeHidden();
 });
 
 test('Real Models expands large provider groups in cancellable batches', async ({ page }) => {

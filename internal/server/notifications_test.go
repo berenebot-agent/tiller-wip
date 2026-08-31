@@ -190,6 +190,27 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	if status != 400 {
 		t.Fatalf("invalid webhook url should be rejected, got %d", status)
 	}
+
+	// Clearing the auth header: an empty (non-nil) value clears it.
+	status, _, _ = api.request("PUT", "/api/admin/settings", map[string]any{"notifications_auth_header": ""})
+	if status != 204 {
+		t.Fatalf("clear auth header: %d", status)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/settings", nil)
+	if v, ok := payload["notifications_auth_header_set"].(bool); !ok || v {
+		t.Fatalf("auth header should be cleared, got %v", payload["notifications_auth_header_set"])
+	}
+
+	// Omitting the auth-header field entirely leaves the (still-cleared) value
+	// unchanged — nil means "not present", never "clear".
+	status, _, _ = api.request("PUT", "/api/admin/settings", map[string]any{"notifications_webhook_url": "https://ntfy.example.com/tiller"})
+	if status != 204 {
+		t.Fatalf("settings update without auth field: %d", status)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/settings", nil)
+	if v, ok := payload["notifications_auth_header_set"].(bool); !ok || v {
+		t.Fatalf("omitted auth field must not clear the header, got %v", payload["notifications_auth_header_set"])
+	}
 }
 
 func TestNotificationTestEndpoint(t *testing.T) {
@@ -272,6 +293,9 @@ func TestNotificationFallbackEvent(t *testing.T) {
 	if p.ClientKey != "notify client" {
 		t.Fatalf("client key = %q, want notify client", p.ClientKey)
 	}
+	if p.FinalStatus != 200 {
+		t.Fatalf("final status = %d, want 200 (the upstream 2xx must be captured, not the pre-response 0)", p.FinalStatus)
+	}
 	if p.Summary == "" {
 		t.Fatal("summary should not be empty")
 	}
@@ -345,6 +369,28 @@ func TestNotificationEventToggleRespected(t *testing.T) {
 	case p := <-received:
 		t.Fatalf("notification should not fire when fallback event disabled, got %+v", p)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestAttemptCountExcludesSkippedTargets guards the payload's attempt_count
+// semantics: targets skipped without an upstream attempt (unavailable or
+// protocol-mismatched) are not "attempted" and must not inflate the count.
+func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
+	attempts := []requestAttempt{
+		{provider: "a", model: "m", result: "skipped", failureClass: "unavailable"},
+		{provider: "b", model: "m", result: "failed", failureClass: "http_500"},
+		{provider: "c", model: "m", result: "skipped", failureClass: "protocol_unavailable"},
+		{provider: "d", model: "m", result: "success"},
+	}
+	if got := attemptCount(attempts); got != 2 {
+		t.Fatalf("attemptCount = %d, want 2 (only real upstream attempts)", got)
+	}
+	if hasFailedAttempt(attempts) != true {
+		t.Fatal("hasFailedAttempt should be true with one failed attempt")
+	}
+	allSkipped := []requestAttempt{{provider: "a", model: "m", result: "skipped", failureClass: "unavailable"}}
+	if hasFailedAttempt(allSkipped) {
+		t.Fatal("hasFailedAttempt must be false when targets were only skipped")
 	}
 }
 

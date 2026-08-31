@@ -21,12 +21,12 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		AdminUsername:    os.Getenv("TILLER_ADMIN_USERNAME"),
-		AdminPassword:    os.Getenv("TILLER_ADMIN_PASSWORD"),
-		AdminSessionTTL:  30 * 24 * time.Hour,
-		DataDir:          envDefault("TILLER_DATA_DIR", "/data"),
-		ListenAddr:       envDefault("TILLER_LISTEN_ADDR", ":8080"),
-		ModelsDevEnabled: envBoolDefault("TILLER_MODELS_DEV_ENABLED", true),
+		AdminUsername:   os.Getenv("TILLER_ADMIN_USERNAME"),
+		AdminPassword:   os.Getenv("TILLER_ADMIN_PASSWORD"),
+		AdminSessionTTL: 30 * 24 * time.Hour,
+		DataDir:         envDefault("TILLER_DATA_DIR", "/data"),
+		ListenAddr:      envDefault("TILLER_LISTEN_ADDR", ":8080"),
+		ModelsDevEnabled: true,
 	}
 	if raw := os.Getenv("TILLER_ADMIN_SESSION_TTL"); raw != "" {
 		v, err := time.ParseDuration(raw)
@@ -41,6 +41,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_TRUST_PROXY_HEADERS: %w", err)
 		}
 		c.TrustProxy = v
+	}
+	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_MODELS_DEV_ENABLED: %w", err)
+		}
+		c.ModelsDevEnabled = v
 	}
 	if c.AdminUsername == "" || c.AdminPassword == "" {
 		return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD are required")
@@ -59,15 +66,6 @@ func Load() (Config, error) {
 func envDefault(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
-	}
-	return fallback
-}
-
-func envBoolDefault(key string, fallback bool) bool {
-	if v := os.Getenv(key); v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
 	}
 	return fallback
 }

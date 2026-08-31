@@ -39,4 +39,10 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 	if !c.ModelsDevEnabled {
 		t.Error("ModelsDevEnabled should be true when TILLER_MODELS_DEV_ENABLED=true")
 	}
+
+	// An invalid value is a hard configuration error, not a silent default.
+	t.Setenv("TILLER_MODELS_DEV_ENABLED", "banana")
+	if _, err := Load(); err == nil {
+		t.Error("TILLER_MODELS_DEV_ENABLED=banana should fail to load")
+	}
 }

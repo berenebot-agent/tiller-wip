@@ -56,6 +56,7 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 
 /* Mobile client-key cards: hidden on desktop, shown below the mobile breakpoint. */
 .client-cards{display:none}
+#clients-empty{border:1px solid var(--line);background:var(--paper);box-shadow:var(--shadow)}
 .client-card{border:1px solid var(--line);background:var(--paper);box-shadow:var(--shadow);border-radius:4px;margin-bottom:12px;overflow:hidden}
 .client-card-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"dot name chevron" "dot desc chevron" "dot fp chevron";gap:2px 10px;align-items:center;width:100%;padding:14px;border:0;background:transparent;text-align:left;cursor:pointer}
 .client-card-head:hover{background:#f8fbfd}
@@ -70,6 +71,8 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .client-card-field:last-of-type{border-bottom:0}
 .client-card-label{color:var(--muted);font:700 10px var(--mono);letter-spacing:.07em;text-transform:uppercase}
 .client-card-route{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.client-route-broken{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;background:var(--red-bg);color:var(--red);font:700 10px var(--mono);letter-spacing:.04em;text-transform:uppercase}
+.client-route-unavailable{color:var(--red)}
 .client-card-usage{display:flex;gap:16px;flex-wrap:wrap}
 .client-card-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding-top:12px}
 .client-card-actions .btn{min-height:44px}

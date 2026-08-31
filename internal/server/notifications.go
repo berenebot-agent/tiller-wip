@@ -47,10 +47,12 @@ type notificationPayload struct {
 }
 
 // maybeNotify emits a single logical notification for a routed request based on
-// its final outcome. It is called after the routing loop has settled and never
-// blocks or alters the client response: delivery runs in a detached goroutine
-// with its own short timeout.
-func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Response) {
+// its final outcome. The payload is built synchronously here (before the
+// goroutine) because the caller's logRow continues to be mutated after this
+// call; finalStatus is the client-facing status the request will return, which
+// is not yet recorded on the row. Only the delivery runs detached, so it never
+// blocks or alters the client response.
+func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Response, finalStatus int) {
 	var event string
 	switch {
 	case resp != nil && row.fallbackUsed:
@@ -60,7 +62,8 @@ func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Respon
 	default:
 		return
 	}
-	go s.deliverNotification(event, row, route)
+	payload := s.buildNotificationPayload(event, row, route, finalStatus)
+	go s.deliverNotification(event, payload)
 }
 
 // hasFailedAttempt reports whether any target was actually attempted upstream
@@ -76,10 +79,24 @@ func hasFailedAttempt(attempts []requestAttempt) bool {
 	return false
 }
 
+// attemptCount counts actual upstream attempts, excluding targets that were
+// skipped without an upstream attempt (unavailable or protocol-mismatch). This
+// is what "N targets attempted" in the payload summary means.
+func attemptCount(attempts []requestAttempt) int {
+	n := 0
+	for _, a := range attempts {
+		if a.result != "skipped" {
+			n++
+		}
+	}
+	return n
+}
+
 // deliverNotification loads the current notification config and, if the event
 // is enabled, sends one best-effort webhook POST. Any failure is logged in
-// normal admin diagnostics and never affects the inference request.
-func (s *Server) deliverNotification(event string, row *logRow, route resolvedRoute) {
+// normal admin diagnostics and never affects the inference request. The payload
+// must already be built (it is a value, so it is immune to further row mutation).
+func (s *Server) deliverNotification(event string, payload notificationPayload) {
 	ctx := context.Background()
 	cfg, err := s.db.GetNotificationSettings(ctx)
 	if err != nil || !cfg.Enabled || cfg.WebhookURL == "" {
@@ -91,7 +108,6 @@ func (s *Server) deliverNotification(event string, row *logRow, route resolvedRo
 	if event == eventAllFailed && !cfg.EventAllFailed {
 		return
 	}
-	payload := s.buildNotificationPayload(ctx, event, row, route)
 	body, err := json.Marshal(payload)
 	if err != nil {
 		s.logger.Warn("notification payload marshal failed", "event", event, "error", err.Error())
@@ -119,17 +135,19 @@ func (s *Server) deliverNotification(event string, row *logRow, route resolvedRo
 
 // buildNotificationPayload assembles the metadata-only payload for an event
 // from the request's routing outcome. Only metadata already recorded for
-// Activity is used; no request or response content is ever included.
-func (s *Server) buildNotificationPayload(ctx context.Context, event string, row *logRow, route resolvedRoute) notificationPayload {
-	clientName := s.clientKeyName(ctx, row.clientKeyID)
+// Activity is used; no request or response content is ever included. It runs
+// synchronously in the request goroutine (before delivery is spawned).
+// finalStatus is the client-facing status the request will return (the row's
+// own httpStatus is not always set yet at the call site).
+func (s *Server) buildNotificationPayload(event string, row *logRow, route resolvedRoute, finalStatus int) notificationPayload {
 	p := notificationPayload{
 		Event:          event,
 		Timestamp:      row.createdAt,
-		ClientKey:      clientName,
+		ClientKey:      s.clientKeyName(context.Background(), row.clientKeyID),
 		RequestedModel: row.requestedModel,
 		VirtualModel:   route.RouteModel,
-		AttemptCount:   len(row.attempts),
-		FinalStatus:    row.httpStatus,
+		AttemptCount:   attemptCount(row.attempts),
+		FinalStatus:    finalStatus,
 	}
 	switch event {
 	case eventFallback:
