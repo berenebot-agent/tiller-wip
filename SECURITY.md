@@ -31,10 +31,9 @@ the direct proxy peer is restricted with `TILLER_TRUSTED_PROXY`.
 **Provider credentials are not encrypted at rest.** They are stored in
 recoverable form in the SQLite database (`./data`) so Tiller can authenticate
 upstream requests, and credential encryption at rest is a future-roadmap
-consideration (see [docs/roadmap_credential_encryption.md](docs/roadmap_credential_encryption.md)).
-Take care with where you store the persistent database and any backups of it —
-treat `./data` and its backups as secrets, since anyone who can read the
-database file can recover your provider keys.
+consideration. Take care with where you store the persistent database and any
+backups of it — treat `./data` and its backups as secrets, since anyone who can
+read the database file can recover your provider keys.
 
 For questions that are not security reports, please use the project's normal
 public issue and discussion channels.

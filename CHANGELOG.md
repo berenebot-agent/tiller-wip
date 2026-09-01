@@ -48,7 +48,7 @@ Initial public FOSS alpha release.
   defaults may change between releases.
 - Provider integrations are contract-tested with local mocks; external provider
   accounts and every provider/model combination are not continuously live
-  tested. See [provider support](docs/provider-support.md).
+  tested. See the provider matrix in the README.
 - Provider credential encryption at rest, multi-user/SaaS operation, and
   Kubernetes deployment are outside this release's scope.
 - Model capabilities and streaming/tool behavior depend on the selected
