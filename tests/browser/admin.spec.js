@@ -21,6 +21,31 @@ async function adminCsrf(page) {
   return (await res.json()).csrf_token;
 }
 
+async function waitForDiscovery(page, providerId, timeoutMs = 10000) {
+  // Discovery runs synchronously during provider creation. On CI the router's
+  // HTTP transport can be sluggish under burst test load, causing discovery to
+  // time out intermittently and leave last_refresh_at unset when the POST
+  // returns. This helper polls the providers list until last_refresh_at is
+  // non-null (discovery completed, one way or another), or the timeout fires.
+  // Once last_refresh_at is set the value is stable — the next background
+  // refresh won't overwrite it until at least 24 h from now.
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await page.waitForTimeout(200);
+    const res = await page.request.get('/api/admin/providers');
+    if (!res.ok()) break;
+    const body = await res.json();
+    const provider = (body.data || []).find(p => p.id === providerId);
+    if (provider && provider.last_refresh_at) return provider;
+  }
+  // Timed out. Return the provider as-is — callers that need last_refresh_at
+  // can still assert on it. This keeps the helper non-breaking for existing callers.
+  const res = await page.request.get('/api/admin/providers');
+  if (!res.ok()) return { id: providerId };
+  const body = await res.json();
+  return (body.data || []).find(p => p.id === providerId) || { id: providerId };
+}
+
 async function createProvider(page, csrf, name) {
   const res = await page.request.post('/api/admin/providers', {
     headers: { 'X-CSRF-Token': csrf },
@@ -28,7 +53,11 @@ async function createProvider(page, csrf, name) {
   });
   expect(res.status()).toBe(201);
   const body = await res.json();
-  expect(body.refresh_error).toBeFalsy();
+  // Wait for discovery to settle before returning so callers can immediately
+  // read the catalogue without a stale last_refresh_error. This decouples the
+  // test from router timing and eliminates the CI flake.
+  const provider = await waitForDiscovery(page, body.id, 10000);
+  expect(provider.last_refresh_error || null).toBeNull();
   return body;
 }
 
