@@ -18,174 +18,37 @@
 
 ## Why Tiller exists
 
-I had a growing collection of LLM agents, coding tools and automations, and the same three annoyances kept coming up.
+Three annoyances kept coming up with a growing collection of LLM agents, coding tools and automations:
 
-### 1. Every tool had its own bad model selector
-
-Some clients have decent model management. Some have a dropdown buried in settings. Some want model IDs in config files. Some barely support changing models at all.
-
-I wanted to be able to say:
-
-```text
-OpenCode → use Claude today
-Hermes   → use GLM
-Agent X  → use DeepSeek
-```
-
-and change it again five minutes later **without touching the clients**.
-
-Tiller moves model selection out of the agent/tool and into one fast control panel.
-
-### 2. Cheap and free API access is useful — until it rate-limits
-
-Free tiers, promotional credits and limited API keys are great upstreams, but they are not always reliable enough to make the client depend on them directly.
-
-I wanted:
-
-```text
-try this model first
-        ↓
-if it fails, try this one
-        ↓
-then this one
-```
-
-with the client still asking for the same model name.
-
-Tiller gives virtual models an **ordered fallback chain**, so a limited provider can be useful without becoming a single point of failure.
-
-### 3. I was tired of putting provider API keys into everything
-
-If ten tools all talk directly to five providers, credentials end up scattered through config files, containers and machines.
-
-With Tiller:
-
-```text
-Provider credentials → Tiller
-Client credentials   → each tool
-```
-
-Provider keys are entered once. Clients only receive a Tiller key.
+1. **Every tool had its own bad model selector.** Some bury it in settings, some want model IDs in config files, some barely support changing models at all. Tiller moves model selection out of the tool and into one control panel — change it without touching the clients.
+2. **Cheap and free API access is useful — until it rate-limits.** Tiller gives virtual models an **ordered fallback chain**, so a limited provider is useful without becoming a single point of failure.
+3. **Provider API keys were scattered everywhere.** Enter provider credentials once in Tiller; clients only ever receive a Tiller key.
 
 ---
 
 ## What Tiller does
 
-Tiller sits between your LLM clients and your upstream providers.
+Tiller sits between your LLM clients and your upstream providers. Clients keep a stable **endpoint, API key and model name**. You change what sits behind it — a route change applies to new requests immediately, with no client restart, config edit or credential swap. Steer a client key from the control panel by picking any real or virtual model:
 
-```text
-                         ┌──────────────────────┐
- OpenCode ──────────────▶│                      │────▶ OpenAI
- Hermes ────────────────▶│                      │────▶ Anthropic
- Coding agent ──────────▶│    Tiller Router     │────▶ OpenRouter
- Automation ────────────▶│                      │────▶ DeepSeek
- Random AI thing ───────▶│                      │────▶ GLM / Z.ai
-                         │                      │────▶ Ollama
-                         └──────────────────────┘────▶ ...
-                                  ▲
-                                  │
-                           steer from the UI
-```
-
-The client keeps a stable:
-
-```text
-endpoint
-API key
-model name
-```
-
-You change what sits behind it.
-
-A route change applies to new requests immediately. No client restart, config edit or credential swap required.
+<p align="center">
+  <img src="docs/media/ss/instant-switch-models.png" width="840" alt="Instant model switch from the Tiller control panel">
+</p>
 
 > **Tiller does not try to choose the model for you. It gives you the tiller.**
 
 ---
 
-## The main idea: Single client keys
+## Client keys
 
-A **Single** client key exposes one stable model identity — usually something simple like:
+**Single keys** expose one stable model identity — usually something simple like `main` — bound to any real or virtual model. The key itself defines the route; the model string the client sends cannot escape that binding. Change the route from the control panel and the next request follows it.
 
-```text
-main
-```
-
-You bind that key to any real or virtual model in Tiller:
-
-```text
-OpenCode
-model: main
-    ↓
-Tiller
-    ↓
-main/coding
-    ↓
-Anthropic / Claude
-```
-
-Then change it from the control panel:
-
-```text
-OpenCode
-model: main
-    ↓
-Tiller
-    ↓
-main/coding
-    ↓
-DeepSeek
-```
-
-OpenCode still thinks it is using `main`.
-
-For Single keys, the key itself defines the route. The model string supplied by the client does not let it escape that binding. This is useful for tools with awkward model selectors, hard-coded model names, or configs you simply do not want to keep editing.
-
-The Client Keys screen is designed to be the steering surface:
-
-```text
-Client        Type       Client model     Route
-OpenCode      Single     main             main/coding
-Hermes        Single     main             glm/glm-...
-Treasurer     Single     default          main/accounting
-```
-
-Change the route, and the next request follows it.
-
----
-
-## Catalogue client keys
-
-Not every client needs to be forced onto one route.
-
-A **Catalogue** key exposes a controlled subset of Tiller's catalogue through:
-
-```text
-GET /v1/models
-```
-
-You decide which real and virtual models that client is allowed to see and use.
-
-This is useful when the client has a good model picker but you still want:
-
-- centralised provider credentials;
-- per-client model permissions;
-- stable virtual model names;
-- one place to manage the catalogue.
+**Catalogue keys** expose a controlled subset of Tiller's catalogue through `GET /v1/models`, with per-client model permissions. Useful when the client has a good model picker but you still want centralised credentials, permissions and stable virtual model names.
 
 ---
 
 ## Virtual models
 
-Virtual models give a stable client-facing identity to one or more upstream targets.
-
-For example:
-
-```text
-main/coding
-```
-
-can resolve to:
+A virtual model gives a stable client-facing identity to one or more upstream targets. For example, `main/coding` might resolve to:
 
 ```text
 1. Z.ai / GLM
@@ -193,130 +56,33 @@ can resolve to:
 3. OpenRouter / Claude
 ```
 
-The client only knows:
+The client only knows `main/coding`. You can reorder or replace the targets without changing the client.
 
-```text
-main/coding
-```
+Configure the ordered target list in the control panel:
 
-You can reorder or replace the targets without changing the client.
+<p align="center">
+  <img src="docs/media/ss/auto_fallback.png" width="420" alt="Editing a virtual model's ordered fallback list">
+</p>
 
-### Ordered fallback
+**Ordered fallback:** if an upstream attempt fails before client-visible output begins, Tiller may try the next configured target. Once output has started, it never splices another model into the response. There is no hidden health-based or random routing — the order you configure is the order Tiller uses.
 
-A virtual model can try targets in order.
+Each attempt is visible in Activity, including the fallback — the client gets a valid response and never knows there was a failure:
 
-```text
-request
-  │
-  ▼
-GLM
-  │ upstream failure before output?
-  ▼
-DeepSeek
-  │ upstream failure before output?
-  ▼
-OpenRouter
-```
-
-Tiller's rule is intentionally simple:
-
-> **If an upstream attempt fails before client-visible output begins, Tiller may try the next configured target. Once output has started, Tiller will not splice another model into the response.**
-
-That means provider errors, rate limits, unavailable models and other upstream failures can fall through to the next target while preserving a coherent response for the client.
-
-There is no hidden health-based or random routing. The order you configure is the order Tiller uses.
+<p align="center">
+  <img src="docs/media/ss/fallback.png" width="640" alt="Activity view showing a failed attempt followed by a successful fallback">
+</p>
 
 ---
 
 ## Features
 
-### Steering
-
-- Fast web control panel
-- Single client keys with a centrally controlled route
-- Catalogue client keys with per-model permissions
-- Real and virtual models in the same route selector
-- Route changes apply immediately to new requests
-- Stable client-facing model identities
-
-### Providers and models
-
-- Multiple named provider instances
-- Provider credentials entered once in Tiller
-- Automatic model catalogue discovery
-- Manual and periodic catalogue refresh
-- Retired/unavailable model state is preserved rather than silently remapped
-- Context length, output limits and capability metadata where available
-
-### Routing
-
-- Fixed virtual routes
-- Ordered fallback across multiple targets
-- Configurable fallback timeout
-- No silent fallback on direct real-model calls
-- No response-stream splicing after output has begun
-- Client cancellation propagates upstream
-
-### Client API surfaces
-
-Tiller exposes:
-
-```text
-GET  /v1/models
-POST /v1/chat/completions
-POST /v1/responses
-POST /v1/messages
-```
-
-These cover the common OpenAI and Anthropic client surfaces.
-
-Tiller translates between supported protocol shapes where it can do so safely. Provider-specific stateful features are not always portable between backends, and Tiller prefers rejecting an unsupported translation over pretending it is equivalent.
-
-### Activity
-
-Tiller can keep request **metadata** so you can see what actually happened:
-
-```text
-client
-requested model
-resolved route
-provider
-upstream model
-status
-latency
-token usage
-fallback attempts
-request ID
-```
-
-Activity can be searched, filtered and exported to CSV.
-
-Tiller does **not** persist prompt or response content in Activity.
-
-Logging and retention can be controlled per client key.
-
-### Notifications
-
-Optional best-effort webhook notifications can report events such as:
-
-- fallback occurred;
-- all targets failed;
-- client key created/deleted;
-- admin login.
-
-Notification delivery is metadata-only and never blocks inference.
-
-### Operations
-
-- Persistent admin sessions
-- Client key rotation
-- Consistent SQLite backup export
-- Health endpoints
-- Single Docker container
-- Embedded web UI
-- SQLite persistence
-- Read-only container root filesystem
-- Non-root runtime user
+- **Steering** — fast web control panel; single and catalogue client keys; real and virtual models in one route selector; immediate route changes; stable client-facing identities.
+- **Providers & models** — multiple named instances; credentials entered once; automatic catalogue discovery; manual/periodic refresh; retired models preserved rather than silently remapped; context/capability metadata.
+- **Routing** — fixed virtual routes; ordered fallback; configurable fallback timeout; no silent fallback on direct real-model calls; no response-stream splicing after output begins; client cancellation propagates upstream.
+- **Client API** — `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, covering the common OpenAI and Anthropic surfaces with safe protocol translation.
+- **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks). Never persists prompt or response content. Retention controlled per client key.
+- **Notifications** — optional best-effort webhooks for fallback, all-targets-failed, key created/deleted, admin login. Metadata-only, never blocks inference.
+- **Operations** — persistent admin sessions; key rotation; SQLite backup export; health endpoints; single Docker container; embedded UI; read-only rootfs; non-root runtime user.
 
 ---
 
@@ -358,78 +124,90 @@ Tiller includes adapters for a broad set of native and OpenAI-compatible provide
 
 </details>
 
-Provider support varies because upstream APIs vary. The first alpha should be treated as **verified for the providers explicitly tested and compatibility/best-effort for the wider OpenAI-compatible surface**.
+Provider support varies because upstream APIs vary. The first alpha should be treated as **verified for the providers explicitly tested** and compatibility/best-effort for the wider OpenAI-compatible surface.
 
 ---
 
-## Quick start
+## Install
 
-### 1. Create your environment file
+Requires Docker and Docker Compose.
 
-Create `.env`:
+### Option 1 — Prebuilt image (recommended)
 
-```env
-TILLER_ADMIN_USERNAME=admin
-TILLER_ADMIN_PASSWORD=replace-this-with-a-long-random-password
-```
+1. **Create a project directory** with a `docker-compose.yml`:
 
-### 2. Start Tiller
+   ```yaml
+   services:
+     tiller-router:
+       container_name: tiller-router
+       image: ghcr.io/dellarb/tiller-router:alpha
+       restart: unless-stopped
+       read_only: true
+       tmpfs:
+         - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+       cap_drop:
+         - ALL
+       environment:
+         TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
+         TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
+         TILLER_DATA_DIR: /data
+         TILLER_LISTEN_ADDR: :8080
+         TILLER_TRUST_PROXY_HEADERS: ${TILLER_TRUST_PROXY_HEADERS:-false}
+         TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
+         TILLER_MODELS_DEV_ENABLED: ${TILLER_MODELS_DEV_ENABLED:-true}
+       volumes:
+         - ./data:/data
+       healthcheck:
+         test: ["CMD", "/tiller-router", "healthcheck"]
+         interval: 30s
+         timeout: 5s
+         retries: 3
+         start_period: 10s
+       ports:
+         - 0.0.0.0:${TILLER_PORT:-8080}:8080
+       security_opt:
+         - no-new-privileges:true
+   ```
+
+2. **Create your environment file** — create `.env` next to `docker-compose.yml`:
+
+   ```env
+   TILLER_ADMIN_USERNAME=admin
+   TILLER_ADMIN_PASSWORD=replace-this-with-a-long-random-password
+   ```
+
+3. **Start Tiller:**
+
+   ```bash
+   docker compose up -d
+   ```
+
+   Then open `http://localhost:8080` and log in with the admin credentials from `.env`. For remote access, put Tiller behind an HTTPS reverse proxy.
+
+Images are published to GHCR for `linux/amd64` and `linux/arm64` on every release: `ghcr.io/dellarb/tiller-router:alpha` tracks the current alpha, or pin a specific version such as `ghcr.io/dellarb/tiller-router:v0.1.0-alpha.1`.
+
+### Option 2 — Build from source
 
 ```bash
+git clone https://github.com/dellarb/tiller-router.git
+cd tiller-router
+cp .env.example .env   # set TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
-Then open:
+The repository's `docker-compose.yml` builds locally instead of pulling an image; everything else (hardening, volumes, healthcheck) is identical to the prebuilt option above.
 
-```text
-http://localhost:8080
-```
+The service runs read-only with all capabilities dropped, as a non-root user, persisting state in `./data`.
 
-For remote access, put Tiller behind an HTTPS reverse proxy and configure trusted proxy handling appropriately.
+### First steps
 
-### 3. Add a provider
+1. **Add a provider** — in **Providers**, `+ Add provider`. Choose the type, name the instance, add its API credential. Tiller discovers the model catalogue where supported.
 
-In **Providers**:
+2. **Create a route** — use a real model directly, or create a virtual model such as `main/coding` with one or more ordered targets.
 
-```text
-+ Add provider
-```
+3. **Create a client key** — for the simplest setup: `Type: Single`, `Client model: main`, `Route: main/coding`. Tiller shows the client secret once.
 
-Choose the provider type, give the instance a useful name, and add its API credential.
-
-Tiller will discover the provider's model catalogue where supported.
-
-### 4. Create a route
-
-You can either use a real model directly or create a virtual model such as:
-
-```text
-main/coding
-```
-
-with one or more ordered targets.
-
-### 5. Create a client key
-
-For the simplest setup, create:
-
-```text
-Type: Single
-Client model: main
-Route: main/coding
-```
-
-Tiller shows the client secret once. Save it in your client.
-
-### 6. Point your tool at Tiller
-
-For an OpenAI-compatible client:
-
-```text
-Base URL: http://localhost:8080/v1
-API key:  <your Tiller client key>
-Model:    main
-```
+4. **Point your tool at Tiller** — for an OpenAI-compatible client: `Base URL: http://localhost:8080/v1`, `API key: <your Tiller client key>`, `Model: main`.
 
 Now steer the real route from Tiller instead of changing the client.
 
@@ -437,16 +215,12 @@ Now steer the real route from Tiller instead of changing the client.
 
 ## API example
 
-List the models visible to a client key:
-
 ```bash
+# List the models visible to a client key
 curl http://localhost:8080/v1/models \
   -H "Authorization: Bearer $TILLER_API_KEY"
-```
 
-Send a Chat Completions request:
-
-```bash
+# Send a Chat Completions request
 curl http://localhost:8080/v1/chat/completions \
   -H "Authorization: Bearer $TILLER_API_KEY" \
   -H "Content-Type: application/json" \
@@ -465,151 +239,27 @@ With a Single key, `main` can be redirected from the control panel without chang
 
 ---
 
-## A practical example
-
-Suppose you have a limited API key that is excellent while quota is available.
-
-Instead of configuring your coding tool directly:
-
-```text
-OpenCode
-    ↓
-Free provider
-```
-
-configure:
-
-```text
-OpenCode
-    ↓
-Tiller: main
-    ↓
-main/coding
-    ├─ 1. Free / limited provider
-    ├─ 2. Low-cost paid provider
-    └─ 3. Reliable fallback provider
-```
-
-When the first provider hits a rate limit before it starts responding, Tiller tries the next target.
-
-Tomorrow, if you want a completely different model to be first:
-
-```text
-drag / change route
-```
-
-The client configuration stays exactly the same.
-
----
-
 ## Architecture
 
-Tiller is intentionally small.
+Tiller is intentionally small: a Go HTTP server (client API, provider adapters, protocol translation, route/fallback resolver, admin API, embedded control-panel assets) over SQLite (providers, model catalogue, virtual routes, client keys, sessions, settings, metadata-only Activity).
 
-```text
-┌─────────────────────────────────────┐
-│            Tiller Router            │
-│                                     │
-│  Go HTTP server                     │
-│  ├─ client API                      │
-│  ├─ provider adapters               │
-│  ├─ protocol translation            │
-│  ├─ route/fallback resolver         │
-│  ├─ admin API                       │
-│  └─ embedded control-panel assets   │
-│                                     │
-│  SQLite                             │
-│  ├─ providers / model catalogue     │
-│  ├─ virtual routes                  │
-│  ├─ client keys / permissions       │
-│  ├─ sessions                        │
-│  ├─ settings                        │
-│  └─ metadata-only Activity          │
-└─────────────────────────────────────┘
-```
-
-No Redis.
-
-No Postgres.
-
-No separate frontend service.
-
-No message broker.
-
-No vector database.
-
-The normal deployment is one container with one bind-mounted data directory.
+No Redis. No Postgres. No separate frontend service. No message broker. No vector database. The normal deployment is one container with one bind-mounted data directory.
 
 ---
 
 ## Design principles
 
-### Steerable over clever
-
-Tiller is designed around explicit operator control.
-
-If you configure:
-
-```text
-A → B → C
-```
-
-Tiller should not decide that today it prefers:
-
-```text
-C → A → B
-```
-
-because of an opaque score.
-
-More sophisticated routing may come later, but the configured route should always be understandable.
-
-### Stable clients, movable backends
-
-The client should know as little as possible about the real provider arrangement.
-
-That is the point.
-
-### Failure should be boring
-
-A rate-limited upstream should be able to fall through to the next target without turning into an emergency reconfiguration exercise.
-
-### Keep infrastructure small
-
-Tiller is a router and control panel, not an infrastructure platform.
-
-The bias is toward:
-
-```text
-Go
-SQLite
-one container
-few dependencies
-```
-
-### Don't collect content you don't need
-
-Activity is for answering:
-
-> What route did this request take, and what happened?
-
-It is not intended to become a prompt surveillance database.
+- **Steerable over clever** — if you configure `A → B → C`, Tiller won't decide it prefers `C → A → B` based on an opaque score.
+- **Stable clients, movable backends** — the client should know as little as possible about the real provider arrangement.
+- **Failure should be boring** — a rate-limited upstream falls through to the next target without turning into an emergency reconfiguration.
+- **Keep infrastructure small** — Go, SQLite, one container, few dependencies.
+- **Don't collect content you don't need** — Activity answers "what route did this request take?", not "what did it say?".
 
 ---
 
 ## What Tiller is not
 
-Tiller is deliberately **not**:
-
-- an agent framework;
-- an LLM marketplace;
-- a billing platform;
-- a prompt-management suite;
-- a vector database;
-- a model benchmarking service;
-- an automatic "AI chooses the best AI" engine;
-- a multi-tenant SaaS control plane;
-- an attempt to reproduce every feature of a general-purpose LLM gateway.
+Tiller is deliberately **not** an agent framework, LLM marketplace, billing platform, prompt-management suite, vector database, model benchmarking service, automatic "AI chooses the best AI" engine, multi-tenant SaaS control plane, or an attempt to reproduce every feature of a general-purpose LLM gateway.
 
 It is a focused router for people who want to **control their own clients, providers and routes from one place**.
 
@@ -617,40 +267,11 @@ It is a focused router for people who want to **control their own clients, provi
 
 ## Data and security
 
-Tiller stores its state under the configured data directory, normally:
+Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material — treat the data directory and its backups as secrets.
 
-```text
-./data
-```
+Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records are metadata-only and should not contain prompt or response bodies.
 
-This includes sensitive provider credential material.
-
-Treat the data directory and its backups as secrets.
-
-Client API-key secrets are intended to be shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests.
-
-Activity and notification records are metadata-only and should not contain prompt or response bodies.
-
-For anything other than local-only use:
-
-- use HTTPS;
-- put Tiller behind a trusted reverse proxy;
-- use a strong admin password;
-- protect the data directory;
-- protect exported backups;
-- do not expose the control panel casually to the public internet.
-
-See [SECURITY.md](SECURITY.md) for the project's security policy and reporting process.
-
----
-
-## Backups
-
-The control panel can export a consistent SQLite backup.
-
-Backups contain provider credentials and must be protected accordingly.
-
-The normal persistent data directory should also be included in your own host backup strategy.
+For anything other than local-only use: use HTTPS, put Tiller behind a trusted reverse proxy, use a strong admin password, protect the data directory and exported backups, and do not expose the control panel casually to the public internet. See [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -658,27 +279,10 @@ The normal persistent data directory should also be included in your own host ba
 
 Tiller is written in Go with an embedded browser UI and SQLite.
 
-Run the test suite:
-
 ```bash
 go test ./...
-```
-
-Static checks:
-
-```bash
 go vet ./...
-```
-
-Build:
-
-```bash
 go build ./cmd/tiller-router
-```
-
-Or build the container:
-
-```bash
 docker compose build
 ```
 
@@ -688,28 +292,15 @@ The project currently targets the Go version declared in `go.mod`.
 
 ## Project status
 
-Tiller Router is in **alpha**.
+Tiller Router is in **alpha**. The routing model is intentionally narrow and already useful, but the public API, migrations and provider compatibility surface may still evolve before a stable `1.0`. The near-term priority is reliability and hardening.
 
-The routing model is intentionally narrow and already useful, but the public API, migrations and provider compatibility surface may still evolve before a stable `1.0`.
-
-The near-term priority is reliability and hardening rather than adding every possible routing feature.
-
-Likely post-alpha areas include:
-
-- additional provider validation;
-- richer provider health;
-- cost-aware routing;
-- additional capability metadata;
-- experimental subscription-backed providers such as Codex;
-- further hardening and operational polish.
+Likely post-alpha areas include: additional provider validation, richer provider health, cost-aware routing, additional capability metadata, experimental subscription-backed providers such as Codex, and further hardening and operational polish.
 
 ---
 
 ## Contributing
 
-Issues and pull requests are welcome.
-
-The project intentionally favours a small, understandable core. New features are most useful when they strengthen Tiller's central job:
+Issues and pull requests are welcome. The project intentionally favours a small, understandable core — new features are most useful when they strengthen Tiller's central job:
 
 > **Make LLM clients easy to steer without making the router itself complicated.**
 
