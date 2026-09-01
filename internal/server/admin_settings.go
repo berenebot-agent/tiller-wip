@@ -34,6 +34,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"notifications_event_fallback":   notifications.EventFallback,
 		"notifications_event_all_failed": notifications.EventAllFailed,
 		"notifications_cooldown_seconds": notifications.CooldownSeconds,
+		"notifications_event_client_key_created": notifications.EventClientKeyCreated,
+		"notifications_event_client_key_deleted": notifications.EventClientKeyDeleted,
+		"notifications_event_admin_login":       notifications.EventAdminLogin,
 		"notifications_auth_header_set":  notifications.AuthHeader != "",
 	})
 }
@@ -48,6 +51,9 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		NotificationsEventFallback  *bool   `json:"notifications_event_fallback"`
 		NotificationsEventAllFailed *bool   `json:"notifications_event_all_failed"`
 		NotificationsCooldownSeconds *int   `json:"notifications_cooldown_seconds"`
+		NotificationsEventClientKeyCreated *bool `json:"notifications_event_client_key_created"`
+		NotificationsEventClientKeyDeleted *bool `json:"notifications_event_client_key_deleted"`
+		NotificationsEventAdminLogin       *bool `json:"notifications_event_admin_login"`
 		NotificationsAuthHeader     *string `json:"notifications_auth_header"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
@@ -117,6 +123,24 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.NotificationsCooldownSeconds != nil {
 		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsCooldownSeconds, strconv.Itoa(*input.NotificationsCooldownSeconds)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventClientKeyCreated != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventClientKeyCreated, strconv.FormatBool(*input.NotificationsEventClientKeyCreated)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventClientKeyDeleted != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventClientKeyDeleted, strconv.FormatBool(*input.NotificationsEventClientKeyDeleted)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventAdminLogin != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventAdminLogin, strconv.FormatBool(*input.NotificationsEventAdminLogin)); err != nil {
 			adminError(w, 500, "database_error", "Could not update settings.")
 			return
 		}

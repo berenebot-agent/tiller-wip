@@ -17,8 +17,12 @@ const (
 	eventFallback   = "virtual_model_fallback"
 	eventAllFailed  = "virtual_model_failed"
 	eventTest       = "test"
+	eventClientKeyCreated = "client_key_created"
+	eventClientKeyDeleted = "client_key_deleted"
+	eventAdminLogin       = "admin_login"
 	severityWarning = "warning"
 	severityError   = "error"
+	severityInfo    = "info"
 )
 
 // notificationTimeout bounds a single best-effort webhook delivery. Delivery
@@ -39,6 +43,9 @@ type notificationPayload struct {
 	VirtualModel   string `json:"virtual_model,omitempty"`
 	AttemptCount   int    `json:"attempt_count"`
 	Attempts       []notificationAttempt `json:"attempts,omitempty"`
+	// Message, when set, is the full human-readable body for non-routing
+	// (admin) events. It is rendered verbatim instead of the routing format.
+	Message string `json:"message,omitempty"`
 }
 
 // notificationAttempt is the per-target outcome of a routed request.
@@ -67,6 +74,26 @@ func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Respon
 		return
 	}
 	payload := s.buildNotificationPayload(event, row, route)
+	go s.deliverNotification(event, payload)
+}
+
+// subjectToCooldown reports whether an event is throttled by the notification
+// cooldown. Only routing events (fallback, all-failed) are throttled; the manual
+// test and discrete admin events are not.
+func subjectToCooldown(event string) bool {
+	return event == eventFallback || event == eventAllFailed
+}
+
+// notifyAdminEvent emits a best-effort notification for a discrete admin action
+// (e.g. client key created/deleted, admin login). It is fire-and-forget and never
+// blocks the admin request. The message is the full human-readable body.
+func (s *Server) notifyAdminEvent(event, message string) {
+	payload := notificationPayload{
+		Event:     event,
+		Severity:  severityInfo,
+		Timestamp: database.Now(),
+		Message:   message,
+	}
 	go s.deliverNotification(event, payload)
 }
 
@@ -112,9 +139,19 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 	if event == eventAllFailed && !cfg.EventAllFailed {
 		return
 	}
+	if event == eventClientKeyCreated && !cfg.EventClientKeyCreated {
+		return
+	}
+	if event == eventClientKeyDeleted && !cfg.EventClientKeyDeleted {
+		return
+	}
+	if event == eventAdminLogin && !cfg.EventAdminLogin {
+		return
+	}
 	// Throttle repeat notifications for the same event + model within the
-	// cooldown window. The manual test notification is never throttled.
-	if cfg.CooldownSeconds > 0 && event != eventTest {
+	// cooldown window. Only routing events are throttled; the manual test and
+	// discrete admin events are not.
+	if cfg.CooldownSeconds > 0 && subjectToCooldown(event) {
 		key := event + "|" + payload.VirtualModel
 		s.notifyCooldownMu.Lock()
 		now := time.Now()
@@ -197,6 +234,12 @@ func (p notificationPayload) heading() string {
 		return "Tiller Routing Failed - " + model
 	case eventTest:
 		return "Tiller Test Notification"
+	case eventClientKeyCreated:
+		return "New client key created"
+	case eventClientKeyDeleted:
+		return "Client key deleted"
+	case eventAdminLogin:
+		return "Admin login"
 	default:
 		return "Tiller Notification"
 	}
@@ -210,6 +253,10 @@ func (p notificationPayload) humanMessage() string {
 	if p.Timestamp != "" {
 		b.WriteString(formatTimestamp(p.Timestamp))
 		b.WriteString("\n\n")
+	}
+	if p.Message != "" {
+		b.WriteString(p.Message)
+		return strings.TrimRight(b.String(), "\n")
 	}
 	if p.ClientKey != "" {
 		fmt.Fprintf(&b, "Client: %s\n", p.ClientKey)

@@ -17,6 +17,9 @@ const (
 	SettingNotificationsEventAllFailed = "notifications_event_all_failed"
 	SettingNotificationsAuthHeader     = "notifications_auth_header"
 	SettingNotificationsCooldownSeconds = "notifications_cooldown_seconds"
+	SettingNotificationsEventClientKeyCreated = "notifications_event_client_key_created"
+	SettingNotificationsEventClientKeyDeleted = "notifications_event_client_key_deleted"
+	SettingNotificationsEventAdminLogin       = "notifications_event_admin_login"
 )
 
 // GetSetting returns the raw string value for a settings key.
@@ -91,12 +94,15 @@ type NotificationSettings struct {
 	EventAllFailed   bool
 	AuthHeader       string
 	CooldownSeconds  int
+	EventClientKeyCreated bool
+	EventClientKeyDeleted bool
+	EventAdminLogin       bool
 }
 
 // GetNotificationSettings reads the notification configuration, with sane
 // defaults if a key is missing or malformed.
 func (d *DB) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
-	ns := NotificationSettings{EventFallback: true, EventAllFailed: true, CooldownSeconds: 60}
+	ns := NotificationSettings{EventFallback: true, EventAllFailed: true, CooldownSeconds: 60, EventAdminLogin: true}
 	if v, e := d.GetBool(ctx, SettingNotificationsEnabled); e == nil {
 		ns.Enabled = v
 	} else if !errors.Is(e, sql.ErrNoRows) {
@@ -124,6 +130,21 @@ func (d *DB) GetNotificationSettings(ctx context.Context) (NotificationSettings,
 	}
 	if v, e := d.GetInt(ctx, SettingNotificationsCooldownSeconds); e == nil {
 		ns.CooldownSeconds = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetBool(ctx, SettingNotificationsEventClientKeyCreated); e == nil {
+		ns.EventClientKeyCreated = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetBool(ctx, SettingNotificationsEventClientKeyDeleted); e == nil {
+		ns.EventClientKeyDeleted = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetBool(ctx, SettingNotificationsEventAdminLogin); e == nil {
+		ns.EventAdminLogin = v
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return ns, e
 	}

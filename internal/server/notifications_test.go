@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -164,6 +166,15 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	if v, ok := payload["notifications_cooldown_seconds"].(float64); !ok || v != 60 {
 		t.Fatalf("cooldown should default to 60, got %v", payload["notifications_cooldown_seconds"])
 	}
+	if v, ok := payload["notifications_event_client_key_created"].(bool); !ok || v {
+		t.Fatalf("client-key-created should default to disabled, got %v", payload["notifications_event_client_key_created"])
+	}
+	if v, ok := payload["notifications_event_client_key_deleted"].(bool); !ok || v {
+		t.Fatalf("client-key-deleted should default to disabled, got %v", payload["notifications_event_client_key_deleted"])
+	}
+	if v, ok := payload["notifications_event_admin_login"].(bool); !ok || !v {
+		t.Fatalf("admin-login should default to enabled, got %v", payload["notifications_event_admin_login"])
+	}
 
 	status, _, _ = api.request("PUT", "/api/admin/settings", map[string]any{
 		"notifications_enabled":          true,
@@ -171,6 +182,9 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 		"notifications_event_fallback":   false,
 		"notifications_event_all_failed": true,
 		"notifications_cooldown_seconds": 120,
+		"notifications_event_client_key_created": true,
+		"notifications_event_client_key_deleted": true,
+		"notifications_event_admin_login":       false,
 		"notifications_auth_header":      "Bearer secret-token",
 	})
 	if status != 204 {
@@ -194,6 +208,15 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	}
 	if v, ok := payload["notifications_cooldown_seconds"].(float64); !ok || v != 120 {
 		t.Fatalf("cooldown not persisted: %v", payload["notifications_cooldown_seconds"])
+	}
+	if v, ok := payload["notifications_event_client_key_created"].(bool); !ok || !v {
+		t.Fatalf("client-key-created not persisted: %v", payload["notifications_event_client_key_created"])
+	}
+	if v, ok := payload["notifications_event_client_key_deleted"].(bool); !ok || !v {
+		t.Fatalf("client-key-deleted not persisted: %v", payload["notifications_event_client_key_deleted"])
+	}
+	if v, ok := payload["notifications_event_admin_login"].(bool); !ok || v {
+		t.Fatalf("admin-login not persisted: %v", payload["notifications_event_admin_login"])
 	}
 	// The secret value itself must never be returned.
 	if _, ok := payload["notifications_auth_header"].(string); ok {
@@ -411,6 +434,138 @@ func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
 	case p := <-received:
 		t.Fatalf("duplicate notification should be suppressed by cooldown, got %+v", p)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestAdminEventNotifications(t *testing.T) {
+	received := make(chan receivedNotification, 4)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
+		w.WriteHeader(200)
+	}))
+	defer webhook.Close()
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{
+		"notifications_enabled":                    true,
+		"notifications_webhook_url":                webhook.URL,
+		"notifications_event_client_key_created":   true,
+		"notifications_event_client_key_deleted":  true,
+		"notifications_event_admin_login":          true,
+	})
+	if status != 204 {
+		t.Fatalf("update settings: %d", status)
+	}
+
+	// Create a client key -> notification.
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	keyID := payload["id"].(string)
+	n := waitForNotification(t, received)
+	if n.title != "New client key created" {
+		t.Fatalf("unexpected title: %q", n.title)
+	}
+	if !strings.Contains(n.body, "Client: alert-key") {
+		t.Fatalf("message missing client name: %q", n.body)
+	}
+
+	// Delete the client key -> notification.
+	status, _, _ = api.request("DELETE", "/api/admin/client-keys/"+keyID, nil)
+	if status != 204 {
+		t.Fatalf("delete key: %d", status)
+	}
+	n = waitForNotification(t, received)
+	if n.title != "Client key deleted" {
+		t.Fatalf("unexpected title: %q", n.title)
+	}
+	if !strings.Contains(n.body, "Client: alert-key") {
+		t.Fatalf("message missing client name: %q", n.body)
+	}
+
+	// Admin login -> notification.
+	status, _, _ = api.request("POST", "/api/admin/session", map[string]any{"username": "admin", "password": "correct horse"})
+	if status != 200 {
+		t.Fatalf("login: %d", status)
+	}
+	n = waitForNotification(t, received)
+	if n.title != "Admin login" {
+		t.Fatalf("unexpected title: %q", n.title)
+	}
+	if !strings.Contains(n.body, "User: admin") {
+		t.Fatalf("message missing user: %q", n.body)
+	}
+}
+
+func TestAdminEventToggleRespected(t *testing.T) {
+	received := make(chan receivedNotification, 1)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
+		w.WriteHeader(200)
+	}))
+	defer webhook.Close()
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	// Notifications enabled, but the client-key-created toggle is off.
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{
+		"notifications_enabled":     true,
+		"notifications_webhook_url": webhook.URL,
+	})
+	if status != 204 {
+		t.Fatalf("update settings: %d", status)
+	}
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	select {
+	case p := <-received:
+		t.Fatalf("notification should not fire when toggle disabled, got %+v", p)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestSendExampleNotificationsToNtfy sends one example of every notification
+// type to the real ntfy topic. It is opt-in (TILLER_NOTIFY_EXAMPLES=1) because
+// it hits the real network.
+func TestSendExampleNotificationsToNtfy(t *testing.T) {
+	if os.Getenv("TILLER_NOTIFY_EXAMPLES") == "" {
+		t.Skip("set TILLER_NOTIFY_EXAMPLES=1 to send example notifications to the real ntfy topic")
+	}
+	topic := "https://ntfy.sh/tiller_test_8913ubc081"
+	examples := []notificationPayload{
+		{Event: eventFallback, Severity: severityWarning, Timestamp: database.Now(), ClientKey: "Agentbox Hermes Argus", RequestedModel: "main/argus", VirtualModel: "main/argus", Attempts: []notificationAttempt{
+			{Provider: "nvidia", Model: "moonshotai/kimi-k3", Result: "failed", FailureClass: "http_500", HTTPStatus: 500, LatencyMs: 1234},
+			{Provider: "ollama", Model: "deepseek-v4-flash:0731", Result: "success", LatencyMs: 890},
+		}},
+		{Event: eventAllFailed, Severity: severityError, Timestamp: database.Now(), ClientKey: "Agentbox Hermes Argus", RequestedModel: "main/argus", VirtualModel: "main/argus", Attempts: []notificationAttempt{
+			{Provider: "nvidia", Model: "moonshotai/kimi-k3", Result: "failed", FailureClass: "http_500", HTTPStatus: 500, LatencyMs: 1234},
+			{Provider: "ollama", Model: "deepseek-v4-flash:0731", Result: "failed", FailureClass: "upstream_timeout", LatencyMs: 5000},
+		}},
+		{Event: eventTest, Severity: severityWarning, Timestamp: database.Now()},
+		{Event: eventClientKeyCreated, Severity: severityInfo, Timestamp: database.Now(), Message: "Client: demo-key\nType: catalogue"},
+		{Event: eventClientKeyDeleted, Severity: severityInfo, Timestamp: database.Now(), Message: "Client: demo-key"},
+		{Event: eventAdminLogin, Severity: severityInfo, Timestamp: database.Now(), Message: "User: admin\nIP: 192.0.2.1"},
+	}
+	for _, p := range examples {
+		body := []byte(p.humanMessage())
+		req, err := http.NewRequest(http.MethodPost, topic, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+		req.Header.Set("X-Title", p.heading())
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("delivery failed for %s: %v", p.Event, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			t.Fatalf("delivery failed for %s: HTTP %d", p.Event, resp.StatusCode)
+		}
 	}
 }
 

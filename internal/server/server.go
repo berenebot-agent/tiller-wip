@@ -185,6 +185,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
+	s.notifyAdminEvent(eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, peerIP(r)))
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 
