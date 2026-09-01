@@ -25,10 +25,11 @@ const (
 // is fire-and-forget and never blocks or delays the inference request.
 const notificationTimeout = 5 * time.Second
 
-// notificationPayload is the stable, metadata-only JSON body sent to the
-// webhook. It shares the Activity privacy boundary: it never contains prompts,
-// responses, tool arguments/results, reasoning, provider keys, client key
-// plaintext, auth headers, cookies, or credentials.
+// notificationPayload is the metadata captured for a single routing event. It
+// is rendered as a human-readable plain-text message for the webhook. It shares
+// the Activity privacy boundary: it never contains prompts, responses, tool
+// arguments/results, reasoning, provider keys, client key plaintext, auth
+// headers, cookies, or credentials.
 type notificationPayload struct {
 	Event          string `json:"event"`
 	Severity       string `json:"severity"`
@@ -36,23 +37,26 @@ type notificationPayload struct {
 	ClientKey      string `json:"client_key"`
 	RequestedModel string `json:"requested_model"`
 	VirtualModel   string `json:"virtual_model,omitempty"`
-	FromProvider   string `json:"from_provider,omitempty"`
-	FromModel      string `json:"from_model,omitempty"`
-	ToProvider     string `json:"to_provider,omitempty"`
-	ToModel        string `json:"to_model,omitempty"`
-	Reason         string `json:"reason,omitempty"`
 	AttemptCount   int    `json:"attempt_count"`
-	FinalStatus    int    `json:"final_status"`
-	Summary        string `json:"summary"`
+	Attempts       []notificationAttempt `json:"attempts,omitempty"`
+}
+
+// notificationAttempt is the per-target outcome of a routed request.
+type notificationAttempt struct {
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	Result       string `json:"result"`
+	FailureClass string `json:"failure_class,omitempty"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	LatencyMs    int64  `json:"latency_ms"`
 }
 
 // maybeNotify emits a single logical notification for a routed request based on
 // its final outcome. The payload is built synchronously here (before the
 // goroutine) because the caller's logRow continues to be mutated after this
-// call; finalStatus is the client-facing status the request will return, which
-// is not yet recorded on the row. Only the delivery runs detached, so it never
-// blocks or alters the client response.
-func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Response, finalStatus int) {
+// call. Only the delivery runs detached, so it never blocks or alters the
+// client response.
+func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Response) {
 	var event string
 	switch {
 	case resp != nil && row.fallbackUsed:
@@ -62,7 +66,7 @@ func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Respon
 	default:
 		return
 	}
-	payload := s.buildNotificationPayload(event, row, route, finalStatus)
+	payload := s.buildNotificationPayload(event, row, route)
 	go s.deliverNotification(event, payload)
 }
 
@@ -134,9 +138,7 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 // from the request's routing outcome. Only metadata already recorded for
 // Activity is used; no request or response content is ever included. It runs
 // synchronously in the request goroutine (before delivery is spawned).
-// finalStatus is the client-facing status the request will return (the row's
-// own httpStatus is not always set yet at the call site).
-func (s *Server) buildNotificationPayload(event string, row *logRow, route resolvedRoute, finalStatus int) notificationPayload {
+func (s *Server) buildNotificationPayload(event string, row *logRow, route resolvedRoute) notificationPayload {
 	p := notificationPayload{
 		Event:          event,
 		Timestamp:      row.createdAt,
@@ -144,30 +146,24 @@ func (s *Server) buildNotificationPayload(event string, row *logRow, route resol
 		RequestedModel: row.requestedModel,
 		VirtualModel:   route.RouteModel,
 		AttemptCount:   attemptCount(row.attempts),
-		FinalStatus:    finalStatus,
+	}
+	for _, a := range row.attempts {
+		p.Attempts = append(p.Attempts, notificationAttempt{
+			Provider:     a.provider,
+			Model:        a.model,
+			Result:       a.result,
+			FailureClass: a.failureClass,
+			HTTPStatus:   a.httpStatus,
+			LatencyMs:    a.latencyMs,
+		})
 	}
 	switch event {
 	case eventFallback:
 		p.Severity = severityWarning
-		if from, ok := lastFailedAttempt(row.attempts); ok {
-			p.FromProvider, p.FromModel = from.provider, from.model
-		}
-		if to, ok := successAttempt(row.attempts); ok {
-			p.ToProvider, p.ToModel = to.provider, to.model
-		}
-		if row.fallbackReason != nil {
-			p.Reason = *row.fallbackReason
-		}
-		p.Summary = fmt.Sprintf("Tiller fallback: %s — %s/%s → %s/%s", route.RouteModel, p.FromProvider, p.FromModel, p.ToProvider, p.ToModel)
 	case eventAllFailed:
 		p.Severity = severityError
-		if row.fallbackReason != nil {
-			p.Reason = *row.fallbackReason
-		}
-		p.Summary = fmt.Sprintf("Tiller routing failed: %s — %d targets attempted, no target succeeded", route.RouteModel, p.AttemptCount)
 	case eventTest:
 		p.Severity = severityWarning
-		p.Summary = "Tiller test notification"
 	}
 	return p
 }
@@ -192,33 +188,70 @@ func (p notificationPayload) heading() string {
 // responses, tool arguments, reasoning, or credentials.
 func (p notificationPayload) humanMessage() string {
 	var b strings.Builder
+	if p.Timestamp != "" {
+		b.WriteString(formatTimestamp(p.Timestamp))
+		b.WriteString("\n\n")
+	}
 	b.WriteString(p.heading())
 	b.WriteString("\n")
 	if p.ClientKey != "" {
-		fmt.Fprintf(&b, "Client key: %s\n", p.ClientKey)
+		fmt.Fprintf(&b, "Client: %s\n", p.ClientKey)
 	}
 	if p.RequestedModel != "" {
-		fmt.Fprintf(&b, "Requested model: %s\n", p.RequestedModel)
+		fmt.Fprintf(&b, "Requested model: %s", p.RequestedModel)
+		if p.VirtualModel != "" && p.VirtualModel != p.RequestedModel {
+			fmt.Fprintf(&b, " Served model: %s", p.VirtualModel)
+		}
+		b.WriteString("\n")
 	}
-	if p.VirtualModel != "" {
-		fmt.Fprintf(&b, "Virtual model: %s\n", p.VirtualModel)
-	}
-	if p.FromProvider != "" || p.FromModel != "" {
-		fmt.Fprintf(&b, "From: %s/%s\n", p.FromProvider, p.FromModel)
-	}
-	if p.ToProvider != "" || p.ToModel != "" {
-		fmt.Fprintf(&b, "To: %s/%s\n", p.ToProvider, p.ToModel)
-	}
-	if p.Reason != "" {
-		fmt.Fprintf(&b, "Reason: %s\n", p.Reason)
-	}
-	if p.AttemptCount > 0 {
-		fmt.Fprintf(&b, "Attempts: %d\n", p.AttemptCount)
-	}
-	if p.FinalStatus > 0 {
-		fmt.Fprintf(&b, "Status: %d\n", p.FinalStatus)
+	failed := 0
+	for _, a := range p.Attempts {
+		switch a.Result {
+		case "failed":
+			failed++
+			fmt.Fprintf(&b, "Failed #%d: %s/%s [%s, %dms]\n", failed, a.Provider, a.Model, failureMessage(a.FailureClass, a.HTTPStatus), a.LatencyMs)
+		case "success":
+			fmt.Fprintf(&b, "Succeeded: %s/%s [%dms]\n", a.Provider, a.Model, a.LatencyMs)
+		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatTimestamp renders an RFC3339Nano timestamp as DD/MM/YYYY, HH:MM in UTC.
+func formatTimestamp(ts string) string {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return ts
+	}
+	return t.Format("02/01/2006, 15:04")
+}
+
+// failureMessage maps a machine-readable failure class (and optional HTTP status)
+// to a short human-readable description for a failed attempt.
+func failureMessage(class string, httpStatus int) string {
+	if httpStatus > 0 {
+		return fmt.Sprintf("HTTP %d", httpStatus)
+	}
+	switch class {
+	case "unavailable":
+		return "unavailable"
+	case "protocol_unavailable":
+		return "protocol not supported"
+	case "invalid_upstream":
+		return "invalid upstream"
+	case "upstream_unreachable":
+		return "unreachable"
+	case "upstream_timeout":
+		return "timeout"
+	case "upstream_read_error":
+		return "read error"
+	case "client_timeout":
+		return "client timeout"
+	case "client_cancelled":
+		return "client cancelled"
+	default:
+		return class
+	}
 }
 
 // clientKeyName resolves a client key's display name. It is best-effort; an
@@ -227,26 +260,6 @@ func (s *Server) clientKeyName(ctx context.Context, id string) string {
 	var name string
 	_ = s.db.SQL.QueryRowContext(ctx, `SELECT name FROM client_keys WHERE id=?`, id).Scan(&name)
 	return name
-}
-
-// lastFailedAttempt returns the most recent upstream attempt that failed.
-func lastFailedAttempt(attempts []requestAttempt) (requestAttempt, bool) {
-	for i := len(attempts) - 1; i >= 0; i-- {
-		if attempts[i].result == "failed" {
-			return attempts[i], true
-		}
-	}
-	return requestAttempt{}, false
-}
-
-// successAttempt returns the most recent upstream attempt that succeeded.
-func successAttempt(attempts []requestAttempt) (requestAttempt, bool) {
-	for i := len(attempts) - 1; i >= 0; i-- {
-		if attempts[i].result == "success" {
-			return attempts[i], true
-		}
-	}
-	return requestAttempt{}, false
 }
 
 // sendTestNotification sends a harmless "Tiller test notification" to the
@@ -267,7 +280,6 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		Event:     eventTest,
 		Severity:  severityWarning,
 		Timestamp: database.Now(),
-		Summary:   "Tiller test notification",
 	}
 	body := []byte(payload.humanMessage())
 	ctx, cancel := context.WithTimeout(r.Context(), notificationTimeout)
