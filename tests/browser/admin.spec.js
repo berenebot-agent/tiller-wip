@@ -79,7 +79,8 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.locator('#copy-state')).toHaveText('Copied to clipboard.');
   await page.getByRole('button', { name: 'I have stored the key' }).click();
   await expect(secret).toHaveText('');
-  await expect(page.locator('#clients-body tr')).toHaveCount(1);
+  await expect(page.locator('#clients-body tr.group-row')).toHaveCount(1);
+  await expect(page.locator('#clients-body tr.group-toggle')).toHaveCount(1);
 
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
@@ -1031,4 +1032,61 @@ test('activity loads clear a previously shown error on success', async ({ page }
   await page.locator('#global-activity-search').fill(clientName);
   await expect(page.locator('#global-activity-error')).toHaveText('');
   await page.locator('#global-activity-search').fill('');
+});
+
+test('client key group: listing badge, create/edit dialog, and filter', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const defaultClient = 'browser-group-default';
+  const groupedClient = 'browser-group-lab';
+  const groupName = 'testing';
+
+  // Create one key with an explicit group and one with the default.
+  const create = async (name, group) => {
+    const res = await page.request.post('/api/admin/client-keys', {
+      headers: { 'X-CSRF-Token': csrf },
+      data: group ? { name, group } : { name }
+    });
+    expect(res.status()).toBe(201);
+  };
+  await create(defaultClient, null);
+  await create(groupedClient, groupName);
+
+  await page.locator('#nav-links').getByRole('link', { name: 'Client Keys' }).click();
+  await expect(page.locator('#view-clients')).toBeVisible();
+
+  // Listing groups keys under collapsible group headings (like Real Models).
+  const groupedHeader = page.locator('#clients-body tr.group-toggle .group-label', { hasText: groupName });
+  await expect(groupedHeader).toHaveText(groupName);
+  const defaultHeader = page.locator('#clients-body tr.group-toggle .group-label', { hasText: 'default' });
+  await expect(defaultHeader).toHaveText('default');
+
+  // A group heading toggles its rows open/closed.
+  const groupedRow = page.locator('#clients-body tr.group-row', { hasText: groupedClient });
+  await expect(groupedRow).toBeVisible();
+  await groupedHeader.click();
+  await expect(groupedRow).toBeHidden();
+  await groupedHeader.click();
+  await expect(groupedRow).toBeVisible();
+
+  // Filter by group narrows the visible group headings.
+  await page.locator('#client-group-filter').selectOption(groupName);
+  await expect(groupedHeader).toBeVisible();
+  await expect(defaultHeader).toBeHidden();
+  await page.locator('#client-group-filter').selectOption('');
+  await expect(defaultHeader).toBeVisible();
+
+  // Edit dialog prefills the group.
+  await groupedRow.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
+  await expect(page.locator('#form-dialog input[name="group"]')).toHaveValue(groupName);
+  await page.locator('#form-dialog').getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.locator('#form-dialog')).toBeHidden();
+
+  // Create dialog defaults group to "default".
+  await page.getByRole('button', { name: '+ Create client key' }).click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
+  await expect(page.locator('#form-dialog input[name="group"]')).toHaveValue('default');
 });
