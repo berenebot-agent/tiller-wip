@@ -85,10 +85,16 @@ docker run --rm --network host \
 playwright_status=$?
 echo "==> Capturing router logs for debugging"
 docker logs "$router_name" > "$router_log" 2>&1 || true
-echo "    router log: $router_log ($(wc -l < "$router_log") lines)"
+router_lines=$(wc -l < "$router_log" 2>/dev/null || echo 0)
+echo "    router log: $router_log ($router_lines lines)"
+# Always upload router log as artifact for post-mortem, even on success
+mkdir -p ./test-debug
+cp "$router_log" ./test-debug/router.log 2>/dev/null || true
 # Surface the last 200 lines of router logs on test failure for fast diagnosis
 if [ "$playwright_status" -ne 0 ]; then
     echo "==> Playwright failed — last 200 lines of router log:"
-    tail -n 200 "$router_log" >&2
+    tail -n 200 "$router_log" >&2 || true
+    echo "==> Searching router log for known failure patterns:"
+    grep -iE "discover|refresh|models.dev|http" "$router_log" | tail -30 >&2 || true
 fi
 exit $playwright_status
