@@ -352,10 +352,40 @@ function mountInlineRoutePicker(root, client) {
     else { hidden.value = ''; input.value = ''; }
   });
 }
+// openRoutePicker is the mobile card's quick route change: a target-only
+// dialog with the current target pre-selected, instead of the full client
+// Settings dialog. It PATCHes just the binding — name and other settings are
+// untouched — and new requests use the new target immediately.
+function openRoutePicker(client) {
+  openEntity({
+    eyebrow: 'CHANGE ROUTE',
+    title: `Route · ${client.name}`,
+    fields: `<label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model. New requests use the new target immediately.</small></label>`,
+    submit: 'Apply route',
+    onMount: form => {
+      mountSingleTargetPicker($('[data-single-target]', form), client);
+      // Blank-on-focus like the desktop inline picker: focusing the
+      // pre-filled route field clears it so typing filters from the first
+      // keystroke; clicking away without a selection restores the saved
+      // route.
+      const input = $('input[type="text"]', form), hidden = $('input[type="hidden"]', form);
+      const saved = { value: hidden.value, label: input.value };
+      input.addEventListener('focus', () => { if (input.value || hidden.value) { input.value = ''; hidden.value = ''; } });
+      input.addEventListener('blur', () => { if (!hidden.value && saved.value) { hidden.value = saved.value; input.value = saved.label; } });
+    },
+    onSubmit: async form => {
+      const selected = String(new FormData(form).get('single_target') || ''), split = selected.indexOf(':');
+      if (split < 1) throw new Error('Choose an available real or virtual target.');
+      await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify({ single_target_type: selected.slice(0, split), single_target_id: selected.slice(split + 1) }) });
+      flash('Route updated. New requests use the new target immediately.');
+      await loadClients();
+    }
+  });
+}
 function clientCard(client) {
   const statusDot = `<span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span>`;
   const routeAction = client.type === 'single'
-    ? `<button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Change route</button>`
+    ? `<button class="btn btn-small btn-secondary" data-client-route="${h(client.id)}">Change route</button>`
     : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Catalogue permissions</button>`;
   const routeSummary = client.type === 'single'
     ? `<code class="model-id ${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</code>${client.single_target_available === false ? '<span class="client-route-broken">Unavailable</span>' : ''}`
@@ -396,6 +426,7 @@ function renderClients() {
   }).join('');
   $$('[data-inline-route]').forEach(box => mountInlineRoutePicker(box.closest('.client-route-picker'), state.clients.find(item => item.id === box.closest('.client-route-picker').dataset.clientId)));
   $$('[data-client-models]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientModels)));
+  $$('[data-client-route]').forEach(button => button.onclick = () => openRoutePicker(state.clients.find(item => item.id === button.dataset.clientRoute)));
   $$('[data-client-activity]').forEach(button => button.onclick = () => openActivity(state.clients.find(item => item.id === button.dataset.clientActivity))); $$('[data-client-rotate]').forEach(button => button.onclick = () => rotateClient(button.dataset.clientRotate)); $$('[data-client-edit]').forEach(button => button.onclick = () => openClient(state.clients.find(item => item.id === button.dataset.clientEdit))); $$('[data-client-delete]').forEach(button => button.onclick = () => deleteClient(button.dataset.clientDelete));
 }
 // Mobile card accordion: tapping a card head expands its detail in place,
