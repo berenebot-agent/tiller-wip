@@ -76,13 +76,16 @@ fi
 
 echo "==> Running Playwright browser suite"
 router_log="/tmp/router.log"
-docker run --rm --network host \
-    -e TILLER_BROWSER_BASE_URL="http://127.0.0.1:$router_port" \
-    -e TILLER_BROWSER_MOCK_BASE_URL="http://127.0.0.1:$mock_port/v1" \
+# `set -e` above terminates the script on a non-zero exit. Run the container
+# in a subshell so `set -e` in THIS shell is not triggered; capture the exit
+# code explicitly so we always reach the post-mortem and artifact upload.
+playwright_status=0
+sh -c 'docker run --rm --network host \
+    -e TILLER_BROWSER_BASE_URL="http://127.0.0.1:'"$router_port"'" \
+    -e TILLER_BROWSER_MOCK_BASE_URL="http://127.0.0.1:'"$mock_port"'/v1" \
     -e TILLER_BROWSER_ADMIN_USERNAME=admin \
-    -e TILLER_BROWSER_ADMIN_PASSWORD="$password" \
-    tiller-router-browser-tests:dev
-playwright_status=$?
+    -e TILLER_BROWSER_ADMIN_PASSWORD="'"$password"'" \
+    tiller-router-browser-tests:dev' || playwright_status=$?
 echo "==> Capturing router logs for debugging"
 docker logs "$router_name" > "$router_log" 2>&1 || true
 router_lines=$(wc -l < "$router_log" 2>/dev/null || echo 0)
