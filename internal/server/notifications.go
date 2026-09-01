@@ -170,16 +170,22 @@ func (s *Server) buildNotificationPayload(event string, row *logRow, route resol
 
 // heading returns the short human-readable title for the notification. It is
 // sent as the X-Title header so ntfy (and similar) render it as the heading.
+// The model in question (the virtual model, falling back to the requested model)
+// is included so the alert is identifiable at a glance.
 func (p notificationPayload) heading() string {
+	model := p.VirtualModel
+	if model == "" {
+		model = p.RequestedModel
+	}
 	switch p.Event {
 	case eventFallback:
-		return "Tiller fallback"
+		return "Tiller Fallback - " + model
 	case eventAllFailed:
-		return "Tiller routing failed"
+		return "Tiller Routing Failed - " + model
 	case eventTest:
-		return "Tiller test notification"
+		return "Tiller Test Notification"
 	default:
-		return "Tiller notification"
+		return "Tiller Notification"
 	}
 }
 

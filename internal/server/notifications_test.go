@@ -238,7 +238,7 @@ func TestNotificationTestEndpoint(t *testing.T) {
 		t.Fatalf("test notification: %d", status)
 	}
 	p := waitForNotification(t, received)
-	if !strings.Contains(p, "Tiller test notification") {
+	if !strings.Contains(p, "Tiller Test Notification") {
 		t.Fatalf("unexpected test message: %q", p)
 	}
 }
@@ -272,7 +272,7 @@ func TestNotificationFallbackEvent(t *testing.T) {
 	}
 	p := waitForNotification(t, received)
 	for _, want := range []string{
-		"Tiller fallback",
+		"Tiller Fallback - " + canonical,
 		"Client: notify client",
 		"Requested model: " + canonical,
 		"Failed #1: provider-a/model-a",
@@ -309,7 +309,7 @@ func TestNotificationAllTargetsFailedEvent(t *testing.T) {
 	}
 	p := waitForNotification(t, received)
 	for _, want := range []string{
-		"Tiller routing failed",
+		"Tiller Routing Failed - " + canonical,
 		"Client: notify client",
 		"Requested model: " + canonical,
 		"Failed #1: provider-a/model-a",
