@@ -20,11 +20,10 @@ services:
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
 
       # Behind a reverse proxy (Caddy / Nginx / Traefik / etc.) that sets
-      # X-Forwarded-For and Forwarded, enable these so the router trusts the
-      # proxy-supplied client IP. Both default to off; do NOT enable without
-      # also setting TILLER_TRUSTED_PROXY to the proxy's CIDR.
-      # TILLER_TRUST_PROXY_HEADERS: "true"
-      # TILLER_TRUSTED_PROXY: 172.18.0.0
+      # X-Forwarded-For and Forwarded, set TILLER_TRUSTED_PROXY in .env to the
+      # proxy's IP/CIDR so the router trusts the proxy-supplied client IP.
+      # Leave unset to disable proxy-header trust.
+      TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
     volumes:
       - ./data:/data
     healthcheck:

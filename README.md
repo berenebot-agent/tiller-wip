@@ -197,6 +197,21 @@ The repository's `docker-compose.yml` builds locally instead of pulling an image
 
 The service runs read-only with all capabilities dropped, as a non-root user, persisting state in `./data`.
 
+### Other compose / env options
+
+The repo's `docker-compose.yml` plus `.env` cover the most common customisations without editing any Go code. The full list of recognised variables is in `.env.example`.
+
+```bash
+TILLER_ADMIN_USERNAME=admin                          # admin login for the web UI
+TILLER_ADMIN_PASSWORD=replace-with-a-long-random-password   # admin password
+TILLER_PORT=8080                                     # host port (default 8080)
+TILLER_UID=1000                                      # run as your uid (avoids sudo chown)
+TILLER_GID=1000                                      # run as your gid
+TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy if using one
+TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
+TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
+```
+
 ### First steps
 
 1. **Add a provider** — in **Providers**, `+ Add provider`. Choose the type, name the instance, add its API credential. Tiller discovers the model catalogue where supported.
