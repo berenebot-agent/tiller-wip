@@ -20,7 +20,9 @@ cleanup() {
     docker rm -f "$name" >/dev/null 2>&1 || true
     if [ -n "${data_dir:-}" ]; then
         docker run --rm -v "$data_dir:/d" --user root alpine chown -R "${host_uid:-0}:${host_gid:-0}" /d >/dev/null 2>&1 || true
-        rm -rf "$data_dir"
+        # Teardown must not fail the run (the chown-back helper above can fail
+        # transiently, leaving the dir owned by 65532 and rm would EPERM).
+        rm -rf "$data_dir" || true
     fi
     [ -z "${cookie_jar:-}" ] || rm -f "$cookie_jar"
     [ -z "${backup_file:-}" ] || rm -f "$backup_file"
