@@ -36,6 +36,7 @@ func (m *Manager) Refresh(ctx context.Context, providerID string) error {
 	defer lock.Unlock()
 	provider, err := m.loadProvider(ctx, providerID)
 	if err != nil {
+		slog.Error("tiller: provider refresh: loadProvider failed", "provider_id", providerID, "error", err)
 		return err
 	}
 	models, discoverErr := m.registry.Discover(ctx, provider)
@@ -57,6 +58,7 @@ func (m *Manager) Refresh(ctx context.Context, providerID string) error {
 		return discoverErr
 	}
 	if err := m.applyCatalogue(ctx, providerID, models); err != nil {
+		slog.Error("tiller: provider refresh: applyCatalogue failed", "provider_id", providerID, "model_count", len(models), "error", err)
 		return err
 	}
 	return nil
