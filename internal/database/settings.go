@@ -16,6 +16,7 @@ const (
 	SettingNotificationsEventFallback  = "notifications_event_fallback"
 	SettingNotificationsEventAllFailed = "notifications_event_all_failed"
 	SettingNotificationsAuthHeader     = "notifications_auth_header"
+	SettingNotificationsCooldownSeconds = "notifications_cooldown_seconds"
 )
 
 // GetSetting returns the raw string value for a settings key.
@@ -81,19 +82,21 @@ func (d *DB) GetFallbackTimeout(ctx context.Context) (int, error) {
 
 // NotificationSettings holds the installation-global outbound webhook
 // notification configuration. Event toggles default to enabled so a configured
-// webhook starts notifying immediately.
+// webhook starts notifying immediately. CooldownSeconds defaults to 60 so repeat
+// alerts for the same event + model are throttled to one per minute.
 type NotificationSettings struct {
-	Enabled        bool
-	WebhookURL     string
-	EventFallback  bool
-	EventAllFailed bool
-	AuthHeader     string
+	Enabled          bool
+	WebhookURL       string
+	EventFallback    bool
+	EventAllFailed   bool
+	AuthHeader       string
+	CooldownSeconds  int
 }
 
 // GetNotificationSettings reads the notification configuration, with sane
 // defaults if a key is missing or malformed.
 func (d *DB) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
-	ns := NotificationSettings{EventFallback: true, EventAllFailed: true}
+	ns := NotificationSettings{EventFallback: true, EventAllFailed: true, CooldownSeconds: 60}
 	if v, e := d.GetBool(ctx, SettingNotificationsEnabled); e == nil {
 		ns.Enabled = v
 	} else if !errors.Is(e, sql.ErrNoRows) {
@@ -116,6 +119,11 @@ func (d *DB) GetNotificationSettings(ctx context.Context) (NotificationSettings,
 	}
 	if v, e := d.GetSetting(ctx, SettingNotificationsAuthHeader); e == nil {
 		ns.AuthHeader = v
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return ns, e
+	}
+	if v, e := d.GetInt(ctx, SettingNotificationsCooldownSeconds); e == nil {
+		ns.CooldownSeconds = v
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return ns, e
 	}

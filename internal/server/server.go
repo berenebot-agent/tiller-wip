@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
@@ -37,6 +38,10 @@ type Server struct {
 	// notifications. It has a short timeout so a slow webhook can never
 	// materially delay an inference request.
 	notifyClient *http.Client
+	// notifyCooldownMu guards notifyLastSent, the in-memory last-sent timestamps
+	// used to throttle repeat notifications for the same event + model.
+	notifyCooldownMu sync.Mutex
+	notifyLastSent   map[string]time.Time
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
 	loginLimiter *loginLimiter
 }
@@ -64,7 +69,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
+	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
 }
 
 func (s *Server) StartBackground(ctx context.Context) {

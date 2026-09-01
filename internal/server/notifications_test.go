@@ -161,12 +161,16 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	if v, ok := payload["notifications_auth_header_set"].(bool); !ok || v {
 		t.Fatalf("auth header should default to unset, got %v", payload["notifications_auth_header_set"])
 	}
+	if v, ok := payload["notifications_cooldown_seconds"].(float64); !ok || v != 60 {
+		t.Fatalf("cooldown should default to 60, got %v", payload["notifications_cooldown_seconds"])
+	}
 
 	status, _, _ = api.request("PUT", "/api/admin/settings", map[string]any{
 		"notifications_enabled":          true,
 		"notifications_webhook_url":      "https://ntfy.example.com/tiller",
 		"notifications_event_fallback":   false,
 		"notifications_event_all_failed": true,
+		"notifications_cooldown_seconds": 120,
 		"notifications_auth_header":      "Bearer secret-token",
 	})
 	if status != 204 {
@@ -187,6 +191,9 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	}
 	if v, ok := payload["notifications_auth_header_set"].(bool); !ok || !v {
 		t.Fatalf("auth header set flag not persisted: %v", payload["notifications_auth_header_set"])
+	}
+	if v, ok := payload["notifications_cooldown_seconds"].(float64); !ok || v != 120 {
+		t.Fatalf("cooldown not persisted: %v", payload["notifications_cooldown_seconds"])
 	}
 	// The secret value itself must never be returned.
 	if _, ok := payload["notifications_auth_header"].(string); ok {
@@ -365,6 +372,44 @@ func TestNotificationEventToggleRespected(t *testing.T) {
 	select {
 	case p := <-received:
 		t.Fatalf("notification should not fire when fallback event disabled, got %+v", p)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
+	received := make(chan receivedNotification, 2)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
+		w.WriteHeader(200)
+	}))
+	defer webhook.Close()
+
+	api, secret, canonical := notificationTestHarness(t, failUpstream(t), okUpstream(t))
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{
+		"notifications_enabled":          true,
+		"notifications_webhook_url":      webhook.URL,
+		"notifications_event_fallback":   true,
+		"notifications_event_all_failed": true,
+		"notifications_cooldown_seconds": 60,
+	})
+	if status != 204 {
+		t.Fatalf("update settings: %d", status)
+	}
+	// First fallback for the model -> notification delivered.
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("request should succeed, got %d", resp.StatusCode)
+	}
+	waitForNotification(t, received)
+	// Second fallback for the same model within the cooldown -> suppressed.
+	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("request should succeed, got %d", resp.StatusCode)
+	}
+	select {
+	case p := <-received:
+		t.Fatalf("duplicate notification should be suppressed by cooldown, got %+v", p)
 	case <-time.After(500 * time.Millisecond):
 	}
 }

@@ -112,6 +112,19 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 	if event == eventAllFailed && !cfg.EventAllFailed {
 		return
 	}
+	// Throttle repeat notifications for the same event + model within the
+	// cooldown window. The manual test notification is never throttled.
+	if cfg.CooldownSeconds > 0 && event != eventTest {
+		key := event + "|" + payload.VirtualModel
+		s.notifyCooldownMu.Lock()
+		now := time.Now()
+		if last, ok := s.notifyLastSent[key]; ok && now.Sub(last) < time.Duration(cfg.CooldownSeconds)*time.Second {
+			s.notifyCooldownMu.Unlock()
+			return
+		}
+		s.notifyLastSent[key] = now
+		s.notifyCooldownMu.Unlock()
+	}
 	body := []byte(payload.humanMessage())
 	reqCtx, cancel := context.WithTimeout(ctx, notificationTimeout)
 	defer cancel()
