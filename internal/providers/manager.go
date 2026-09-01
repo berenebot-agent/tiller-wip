@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
+	"log/slog"
 	"net"
 	"regexp"
 	"strings"
@@ -39,6 +40,16 @@ func (m *Manager) Refresh(ctx context.Context, providerID string) error {
 	}
 	models, discoverErr := m.registry.Discover(ctx, provider)
 	if discoverErr != nil {
+		// Diagnostic only (no behavior change): surface the exact discovery
+		// error so CI failures like the browser-suite "initial discovery
+		// failed." flake are self-identifying instead of guessing. Writes to
+		// the default slog logger (stderr) -> lands in `docker logs router`.
+		slog.Error("tiller: provider discovery failed",
+			"provider_id", providerID,
+			"provider", provider.Name,
+			"base_url", provider.BaseURL,
+			"error", discoverErr,
+		)
 		_, storeErr := m.db.ExecContext(ctx, `UPDATE providers SET last_refresh_error=?,updated_at=? WHERE id=?`, safeRefreshError(discoverErr), database.Now(), providerID)
 		if storeErr != nil {
 			return storeErr
