@@ -80,6 +80,17 @@ func TestTrustProxyRequiresTrustedProxy(t *testing.T) {
 		t.Error("TrustProxy and TrustedProxy should both be set")
 	}
 
+	// A bare IP (no /prefix) is treated as /32.
+	t.Setenv("TILLER_TRUST_PROXY_HEADERS", "true")
+	t.Setenv("TILLER_TRUSTED_PROXY", "10.1.1.18")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("bare IP for TILLER_TRUSTED_PROXY should load as /32: %v", err)
+	}
+	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "10.1.1.18/32" {
+		t.Errorf("TrustedProxy should be 10.1.1.18/32, got %v", c.TrustedProxy)
+	}
+
 	// Proxy trust on with no trusted proxy is a hard error.
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	if _, err := Load(); err == nil {

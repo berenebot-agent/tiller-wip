@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -45,7 +46,11 @@ func Load() (Config, error) {
 		c.TrustProxy = v
 	}
 	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
-		v, err := netip.ParsePrefix(raw)
+		value := raw
+		if !strings.Contains(value, "/") {
+			value = value + "/32"
+		}
+		v, err := netip.ParsePrefix(value)
 		if err != nil {
 			return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
 		}
