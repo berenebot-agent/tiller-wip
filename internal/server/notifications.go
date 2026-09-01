@@ -247,7 +247,11 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		adminError(w, 502, "delivery_failed", fmt.Sprintf("The webhook returned HTTP %d.", resp.StatusCode))
+		msg := fmt.Sprintf("The webhook returned HTTP %d.", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			msg += " The endpoint rejected the request — the topic may be private/claimed or require an Authorization header."
+		}
+		adminError(w, 502, "delivery_failed", msg)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"delivered": true})
