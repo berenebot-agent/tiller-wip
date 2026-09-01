@@ -254,6 +254,34 @@ $('#close-capabilities').onclick = $('#done-capabilities').onclick = () => $('#c
 $('#add-virtual-group').onclick = () => openVirtualGroup(); $('#add-virtual-model').onclick = () => openVirtualModel();
 function openVirtualGroup(group = null) { openEntity({ eyebrow: 'VIRTUAL NAMESPACE', title: group ? `Rename ${group.name}` : 'Create virtual group', fields: `<label>Group name <input name="name" value="${h(group?.name || '')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>Lowercase slug. Shares the provider namespace.</small></label>${group ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>I understand that every model ID in this group will change.</span></label>' : ''}`, submit: group ? 'Rename group' : 'Create group', onMount: group ? form => { const nameInput = $('[name="name"]', form), wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === group.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); } : null, onSubmit: async form => { const values = new FormData(form); if (group) await api(`/api/admin/virtual-groups/${group.id}`, { method: 'PATCH', body: JSON.stringify({ name: values.get('name'), confirm_breaking_change: values.get('confirm') === 'on' }) }); else await api('/api/admin/virtual-groups', { method: 'POST', body: JSON.stringify({ name: values.get('name') }) }); flash(group ? 'Virtual group renamed.' : 'Virtual group created.'); await loadVirtual(); } }); }
 async function deleteVirtualGroup(id) { const group = state.groups.find(item => item.id === id); if (!await confirmAction({ title: `Delete group ${group.name}?`, copy: 'Only empty virtual groups can be deleted.', action: 'Delete group', typeMatch: group.name, typeLabel: 'group name' })) return; try { await api(`/api/admin/virtual-groups/${id}`, { method: 'DELETE' }); flash('Virtual group deleted.'); await loadVirtual(); } catch (error) { flash(errorMessage(error), 'error'); } }
+// Position a combobox list within the visual viewport, opening upward when there
+// isn't enough room below (e.g. the mobile virtual keyboard is open). The list is
+// position:fixed, so coordinates are viewport-relative.
+function positionComboboxList(list, input, minWidth) {
+  const box = input.getBoundingClientRect();
+  const vv = window.visualViewport;
+  const vvTop = vv ? vv.offsetTop : 0;
+  const vvBottom = vv ? vvTop + vv.height : window.innerHeight;
+  const vvWidth = vv ? vv.width : window.innerWidth;
+  const width = Math.max(box.width, minWidth || 0);
+  const left = Math.min(box.left, Math.max(8, vvWidth - width - 8));
+  const spaceBelow = vvBottom - box.bottom - 8;
+  const spaceAbove = box.top - vvTop - 8;
+  const openUp = spaceBelow < 80;
+  const maxH = Math.max(80, Math.min(360, openUp ? spaceAbove : spaceBelow));
+  list.style.maxHeight = `${maxH}px`;
+  list.style.left = `${left}px`;
+  list.style.width = `${width}px`;
+  if (openUp) {
+    // Anchor the list's bottom just above the input; it grows upward, capped to
+    // the space above (so it stays within the visual viewport).
+    list.style.top = 'auto';
+    list.style.bottom = `${window.innerHeight - box.top + 3}px`;
+  } else {
+    list.style.top = `${box.bottom + 3}px`;
+    list.style.bottom = 'auto';
+  }
+}
 function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minWidth }) {
   const list = document.createElement('ul'); list.className = 'combobox-list'; list.setAttribute('role', 'listbox'); list.hidden = true;
   input.setAttribute('role', 'combobox'); input.setAttribute('aria-autocomplete', 'list'); input.setAttribute('aria-expanded', 'false'); input.setAttribute('autocomplete', 'off'); input.setAttribute('spellcheck', 'false'); input.placeholder = placeholder || 'Type to filter…';
@@ -263,7 +291,8 @@ function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minW
   const render = (showAll = false) => {
     const term = showAll ? '' : input.value.trim().toLowerCase();
     items = options.filter(opt => !term || opt.label.toLowerCase().includes(term));
-    list.innerHTML = items.map((opt, i) => `<li role="option" data-i="${i}" ${i === active ? 'aria-selected="true"' : ''} ${opt.disabled ? 'aria-disabled="true"' : ''}>${h(opt.label)}${opt.muted ? '<small> — retired</small>' : ''}${opt.disabled ? '<small> — unavailable</small>' : ''}</li>`).join(''); const box=input.getBoundingClientRect(); const width=Math.max(box.width,minWidth||0); const left=Math.min(box.left,Math.max(8,window.innerWidth-width-8)); list.style.left=`${left}px`; list.style.top=`${box.bottom+3}px`; list.style.width=`${width}px`;
+    list.innerHTML = items.map((opt, i) => `<li role="option" data-i="${i}" ${i === active ? 'aria-selected="true"' : ''} ${opt.disabled ? 'aria-disabled="true"' : ''}>${h(opt.label)}${opt.muted ? '<small> — retired</small>' : ''}${opt.disabled ? '<small> — unavailable</small>' : ''}</li>`).join('');
+    positionComboboxList(list, input, minWidth);
     list.hidden = !items.length; open = !list.hidden; input.setAttribute('aria-expanded', String(open));
     if (active >= items.length) active = items.length - 1;
   };
@@ -384,31 +413,37 @@ function openRoutePicker(client) {
 }
 // Keep the mobile route picker (a bottom sheet) above the virtual keyboard.
 // The Visual Viewport API reports the keyboard as a shrink of the visual
-// viewport; we lift the dialog and cap the dropdown to the space above it.
+// viewport; we lift the dialog so it stays above the keyboard. The combobox
+// dropdown itself is repositioned by positionComboboxList (see below).
 function positionRoutePickerAboveKeyboard() {
   const dialog = $('#form-dialog');
   if (!dialog.classList.contains('route-picker-dialog')) return;
   const vv = window.visualViewport;
   if (!vv) return;
   const keyboardHeight = Math.max(0, window.innerHeight - vv.height);
-  const list = $('.combobox-list', dialog);
   if (keyboardHeight > 0) {
+    // vv.height is already the space above the keyboard — don't subtract the
+    // keyboard again (that compressed the sheet until Apply/Cancel vanished).
     dialog.style.bottom = `${keyboardHeight}px`;
-    dialog.style.maxHeight = `${vv.height - keyboardHeight - 8}px`;
-    const input = $('[data-single-target] input[type="text"]', dialog);
-    if (input && list) {
-      const available = vv.height - (input.getBoundingClientRect().bottom - vv.offsetTop) - 8;
-      list.style.maxHeight = `${Math.max(120, Math.min(360, available))}px`;
-    }
+    dialog.style.maxHeight = `${vv.height - 16}px`;
   } else {
     dialog.style.bottom = '';
     dialog.style.maxHeight = '';
-    if (list) list.style.maxHeight = '';
   }
 }
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', positionRoutePickerAboveKeyboard);
   window.visualViewport.addEventListener('scroll', positionRoutePickerAboveKeyboard);
+  // Reposition any open combobox list when the keyboard opens/closes so it stays
+  // within the visual viewport (e.g. the mobile route picker's dropdown).
+  const repositionOpenLists = () => {
+    document.querySelectorAll('.combobox-list:not([hidden])').forEach(list => {
+      const input = list.parentElement?.querySelector('input[type="text"]');
+      if (input) positionComboboxList(list, input);
+    });
+  };
+  window.visualViewport.addEventListener('resize', repositionOpenLists);
+  window.visualViewport.addEventListener('scroll', repositionOpenLists);
 }
 function clientCard(client) {
   const statusDot = `<span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span>`;
