@@ -90,9 +90,9 @@ Enable it, set any HTTP(S) endpoint (an
 [ntfy](https://ntfy.sh) topic is the simplest self-hosted example), and pick the
 events: *Fallback occurred* (an ordered-fallback virtual model advanced to a
 later target) and *All targets failed* (every eligible target was attempted and
-none succeeded). Payloads are metadata-only JSON with the same privacy boundary
-as Activity — no prompts, responses, or credentials — plus a short human-readable
-summary. Delivery is best-effort with a short timeout: a failed notification is
+none succeeded). Messages are human-readable plain text with an `X-Title` heading
+and carry only metadata with the same privacy boundary as Activity — no prompts,
+responses, or credentials. Delivery is best-effort with a short timeout: a failed notification is
 recorded in diagnostics and never fails, delays, or alters an inference request,
 and there is no queue or retry engine. An optional `Authorization` header is
 stored for endpoints that need one; it is write-only (never displayed again) and

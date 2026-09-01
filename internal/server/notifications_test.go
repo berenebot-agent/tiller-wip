@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -127,14 +128,14 @@ func okUpstream(t *testing.T) http.HandlerFunc {
 }
 
 // waitForNotification blocks until a notification arrives or the timeout elapses.
-func waitForNotification(t *testing.T, ch <-chan notificationPayload) notificationPayload {
+func waitForNotification(t *testing.T, ch <-chan string) string {
 	t.Helper()
 	select {
 	case p := <-ch:
 		return p
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for notification")
-		return notificationPayload{}
+		return ""
 	}
 }
 
@@ -214,11 +215,10 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 }
 
 func TestNotificationTestEndpoint(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan string, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- string(body)
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -238,20 +238,19 @@ func TestNotificationTestEndpoint(t *testing.T) {
 		t.Fatalf("test notification: %d", status)
 	}
 	p := waitForNotification(t, received)
-	if p.Event != eventTest || p.Summary != "Tiller test notification" {
-		t.Fatalf("unexpected test payload: %+v", p)
+	if !strings.Contains(p, "Tiller test notification") {
+		t.Fatalf("unexpected test message: %q", p)
 	}
 }
 
 func TestNotificationFallbackEvent(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan string, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer webhook-token" {
 			t.Errorf("webhook did not receive the configured Authorization header")
 		}
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- string(body)
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -272,41 +271,26 @@ func TestNotificationFallbackEvent(t *testing.T) {
 		t.Fatalf("fallback request should succeed, got %d", resp.StatusCode)
 	}
 	p := waitForNotification(t, received)
-	if p.Event != eventFallback {
-		t.Fatalf("expected fallback event, got %s", p.Event)
-	}
-	if p.Severity != severityWarning {
-		t.Fatalf("fallback severity should be warning, got %s", p.Severity)
-	}
-	if p.VirtualModel != canonical {
-		t.Fatalf("virtual model = %q, want %q", p.VirtualModel, canonical)
-	}
-	if p.FromProvider != "provider-a" || p.FromModel != "model-a" {
-		t.Fatalf("from target wrong: %s/%s", p.FromProvider, p.FromModel)
-	}
-	if p.ToProvider != "provider-b" || p.ToModel != "model-b" {
-		t.Fatalf("to target wrong: %s/%s", p.ToProvider, p.ToModel)
-	}
-	if p.AttemptCount != 2 {
-		t.Fatalf("attempt count = %d, want 2", p.AttemptCount)
-	}
-	if p.ClientKey != "notify client" {
-		t.Fatalf("client key = %q, want notify client", p.ClientKey)
-	}
-	if p.FinalStatus != 200 {
-		t.Fatalf("final status = %d, want 200 (the upstream 2xx must be captured, not the pre-response 0)", p.FinalStatus)
-	}
-	if p.Summary == "" {
-		t.Fatal("summary should not be empty")
+	for _, want := range []string{
+		"Tiller fallback",
+		"Client key: notify client",
+		"Virtual model: " + canonical,
+		"From: provider-a/model-a",
+		"To: provider-b/model-b",
+		"Attempts: 2",
+		"Status: 200",
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("message missing %q: %q", want, p)
+		}
 	}
 }
 
 func TestNotificationAllTargetsFailedEvent(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan string, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- string(body)
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -326,26 +310,24 @@ func TestNotificationAllTargetsFailedEvent(t *testing.T) {
 		t.Fatalf("all-targets-failed request should be 503, got %d", resp.StatusCode)
 	}
 	p := waitForNotification(t, received)
-	if p.Event != eventAllFailed {
-		t.Fatalf("expected all-failed event, got %s", p.Event)
-	}
-	if p.Severity != severityError {
-		t.Fatalf("all-failed severity should be error, got %s", p.Severity)
-	}
-	if p.AttemptCount != 2 {
-		t.Fatalf("attempt count = %d, want 2", p.AttemptCount)
-	}
-	if p.FinalStatus != 503 {
-		t.Fatalf("final status = %d, want 503", p.FinalStatus)
+	for _, want := range []string{
+		"Tiller routing failed",
+		"Client key: notify client",
+		"Virtual model: " + canonical,
+		"Attempts: 2",
+		"Status: 503",
+	} {
+		if !strings.Contains(p, want) {
+			t.Fatalf("message missing %q: %q", want, p)
+		}
 	}
 }
 
 func TestNotificationEventToggleRespected(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan string, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- string(body)
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -367,7 +349,7 @@ func TestNotificationEventToggleRespected(t *testing.T) {
 	}
 	select {
 	case p := <-received:
-		t.Fatalf("notification should not fire when fallback event disabled, got %+v", p)
+		t.Fatalf("notification should not fire when fallback event disabled, got %q", p)
 	case <-time.After(500 * time.Millisecond):
 	}
 }

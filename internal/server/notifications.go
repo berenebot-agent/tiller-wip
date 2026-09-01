@@ -3,9 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
@@ -108,11 +108,7 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 	if event == eventAllFailed && !cfg.EventAllFailed {
 		return
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		s.logger.Warn("notification payload marshal failed", "event", event, "error", err.Error())
-		return
-	}
+	body := []byte(payload.humanMessage())
 	reqCtx, cancel := context.WithTimeout(ctx, notificationTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, cfg.WebhookURL, bytes.NewReader(body))
@@ -120,7 +116,8 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 		s.logger.Warn("notification request build failed", "event", event, "error", err.Error())
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("X-Title", payload.heading())
 	req.Header.Set("User-Agent", "Tiller-Router/1")
 	if cfg.AuthHeader != "" {
 		req.Header.Set("Authorization", cfg.AuthHeader)
@@ -175,6 +172,55 @@ func (s *Server) buildNotificationPayload(event string, row *logRow, route resol
 	return p
 }
 
+// heading returns the short human-readable title for the notification. It is
+// sent as the X-Title header so ntfy (and similar) render it as the heading.
+func (p notificationPayload) heading() string {
+	switch p.Event {
+	case eventFallback:
+		return "Tiller fallback"
+	case eventAllFailed:
+		return "Tiller routing failed"
+	case eventTest:
+		return "Tiller test notification"
+	default:
+		return "Tiller notification"
+	}
+}
+
+// humanMessage renders the payload as a human-readable plain-text message. It
+// carries only metadata (the same privacy boundary as Activity) — no prompts,
+// responses, tool arguments, reasoning, or credentials.
+func (p notificationPayload) humanMessage() string {
+	var b strings.Builder
+	b.WriteString(p.heading())
+	b.WriteString("\n")
+	if p.ClientKey != "" {
+		fmt.Fprintf(&b, "Client key: %s\n", p.ClientKey)
+	}
+	if p.RequestedModel != "" {
+		fmt.Fprintf(&b, "Requested model: %s\n", p.RequestedModel)
+	}
+	if p.VirtualModel != "" {
+		fmt.Fprintf(&b, "Virtual model: %s\n", p.VirtualModel)
+	}
+	if p.FromProvider != "" || p.FromModel != "" {
+		fmt.Fprintf(&b, "From: %s/%s\n", p.FromProvider, p.FromModel)
+	}
+	if p.ToProvider != "" || p.ToModel != "" {
+		fmt.Fprintf(&b, "To: %s/%s\n", p.ToProvider, p.ToModel)
+	}
+	if p.Reason != "" {
+		fmt.Fprintf(&b, "Reason: %s\n", p.Reason)
+	}
+	if p.AttemptCount > 0 {
+		fmt.Fprintf(&b, "Attempts: %d\n", p.AttemptCount)
+	}
+	if p.FinalStatus > 0 {
+		fmt.Fprintf(&b, "Status: %d\n", p.FinalStatus)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // clientKeyName resolves a client key's display name. It is best-effort; an
 // empty name is acceptable in a notification payload.
 func (s *Server) clientKeyName(ctx context.Context, id string) string {
@@ -223,11 +269,7 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		Timestamp: database.Now(),
 		Summary:   "Tiller test notification",
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		adminError(w, 500, "internal_error", "Could not build the test notification.")
-		return
-	}
+	body := []byte(payload.humanMessage())
 	ctx, cancel := context.WithTimeout(r.Context(), notificationTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.WebhookURL, bytes.NewReader(body))
@@ -235,7 +277,8 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_webhook_url", "The configured webhook URL is invalid.")
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("X-Title", payload.heading())
 	req.Header.Set("User-Agent", "Tiller-Router/1")
 	if cfg.AuthHeader != "" {
 		req.Header.Set("Authorization", cfg.AuthHeader)
@@ -249,7 +292,7 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := fmt.Sprintf("The webhook returned HTTP %d.", resp.StatusCode)
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			msg += " The endpoint rejected the request — the topic may be private/claimed or require an Authorization header."
+			msg += " The endpoint rejected the request — a saved Authorization header is being sent and may be invalid; clear it in the notifications settings if the endpoint doesn't require one."
 		}
 		adminError(w, 502, "delivery_failed", msg)
 		return
