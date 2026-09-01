@@ -235,11 +235,11 @@ func (p notificationPayload) heading() string {
 	case eventTest:
 		return "Tiller Test Notification"
 	case eventClientKeyCreated:
-		return "New client key created"
+		return "Tiller Client key created"
 	case eventClientKeyDeleted:
-		return "Client key deleted"
+		return "Tiller Client key deleted"
 	case eventAdminLogin:
-		return "Admin login"
+		return "Tiller Admin login"
 	default:
 		return "Tiller Notification"
 	}

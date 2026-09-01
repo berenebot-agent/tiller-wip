@@ -39,10 +39,17 @@ REPO_ROOT="$SCRIPT_DIR"
 TTY_FLAG=""
 if [ -t 1 ]; then TTY_FLAG="-it"; fi
 
+# Pass through the opt-in example-notifications flag so the test can reach the
+# real ntfy topic. Other env vars are intentionally not forwarded.
+ENV_FLAGS="-e GOFLAGS=-p=2"
+if [ -n "${TILLER_NOTIFY_EXAMPLES:-}" ]; then
+    ENV_FLAGS="$ENV_FLAGS -e TILLER_NOTIFY_EXAMPLES=$TILLER_NOTIFY_EXAMPLES"
+fi
+
 exec docker run $TTY_FLAG --rm \
     --memory="$MEM_LIMIT" \
     --memory-swap="$MEM_LIMIT" \
-    -e GOFLAGS="-p=2" \
+    $ENV_FLAGS \
     -v "$MOD_CACHE:/go/pkg/mod" \
     -v "$BUILD_CACHE:/root/.cache/go-build" \
     -v "$REPO_ROOT:/src" \

@@ -465,7 +465,7 @@ func TestAdminEventNotifications(t *testing.T) {
 	}
 	keyID := payload["id"].(string)
 	n := waitForNotification(t, received)
-	if n.title != "New client key created" {
+	if n.title != "Tiller Client key created" {
 		t.Fatalf("unexpected title: %q", n.title)
 	}
 	if !strings.Contains(n.body, "Client: alert-key") {
@@ -478,7 +478,7 @@ func TestAdminEventNotifications(t *testing.T) {
 		t.Fatalf("delete key: %d", status)
 	}
 	n = waitForNotification(t, received)
-	if n.title != "Client key deleted" {
+	if n.title != "Tiller Client key deleted" {
 		t.Fatalf("unexpected title: %q", n.title)
 	}
 	if !strings.Contains(n.body, "Client: alert-key") {
@@ -491,7 +491,7 @@ func TestAdminEventNotifications(t *testing.T) {
 		t.Fatalf("login: %d", status)
 	}
 	n = waitForNotification(t, received)
-	if n.title != "Admin login" {
+	if n.title != "Tiller Admin login" {
 		t.Fatalf("unexpected title: %q", n.title)
 	}
 	if !strings.Contains(n.body, "User: admin") {
