@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"hash/fnv"
+	"net"
+	"regexp"
 	"sync"
 	"time"
 
@@ -177,12 +179,27 @@ func refreshJitter(providerID string) time.Duration {
 	_, _ = h.Write([]byte(providerID))
 	return time.Duration(int64(h.Sum32()%7200)-3600) * time.Second
 }
+
+var discoveryHTTPStatus = regexp.MustCompile(`^model discovery returned HTTP ([0-9]{3})$`)
+
 func safeRefreshError(err error) string {
-	msg := fmt.Sprintf("%v", err)
-	if len(msg) > 1000 {
-		msg = msg[:1000]
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "Provider discovery timed out."
 	}
-	return msg
+	if errors.Is(err, context.Canceled) {
+		return "Provider discovery was cancelled."
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		if networkError.Timeout() {
+			return "Provider discovery timed out."
+		}
+		return "Provider discovery request failed."
+	}
+	if match := discoveryHTTPStatus.FindStringSubmatch(err.Error()); len(match) == 2 {
+		return "Provider discovery returned HTTP " + match[1] + "."
+	}
+	return "Provider discovery failed."
 }
 
 func nullableInt(v int) any {

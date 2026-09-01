@@ -79,10 +79,11 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.locator('#copy-state')).toHaveText('Copied to clipboard.');
   await page.getByRole('button', { name: 'I have stored the key' }).click();
   await expect(secret).toHaveText('');
-  await expect(page.locator('#clients-body tr')).toHaveCount(1);
+  await expect(page.locator('#clients-body tr.group-row')).toHaveCount(1);
+  await expect(page.locator('#clients-body tr.group-toggle')).toHaveCount(1);
 
   await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
   await expect(page.locator('#top-status')).toHaveText('READY');
   await expect(page.locator('.backup-warning')).toContainText('recoverable provider API credentials');
   await expect(page.locator('#fallback-form input[name="fallback_timeout_seconds"]')).toHaveValue('60');
@@ -233,7 +234,7 @@ test('Real Models expands large provider groups in cancellable batches', async (
   const totalRows = 95;
   await createProvider(page, csrf, providerName);
 
-  await page.getByRole('button', { name: 'Real Models' }).click();
+  await page.getByRole('link', { name: 'Real Models' }).click();
   const header = page.locator(`[data-group-toggle="models"][data-group-key="${providerName}"]`);
   await expect(header).toBeVisible();
 
@@ -315,7 +316,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   await createProvider(page, csrf, providerName);
   await createClient(page, csrf, clientName);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const clientRow = page.locator('#clients-body tr', { hasText: clientName });
   await expect(clientRow).toBeVisible();
 
@@ -380,7 +381,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   const virtualResponse = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'coding', target_provider_id: provider.id, target_model_id: real.id } });
   expect(virtualResponse.status()).toBe(201);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   await page.getByRole('button', { name: '+ Create client key' }).click();
   await page.getByLabel('Client name').fill(clientName);
   await page.locator('#form-dialog select[name="type"]').selectOption('single');
@@ -456,7 +457,7 @@ test('single-route inline picker: typeahead selects and tick applies', async ({ 
   });
   expect(createRes.status()).toBe(201);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const row = page.locator('#clients-body tr', { hasText: clientName });
   await expect(row).toBeVisible();
 
@@ -504,7 +505,7 @@ test('single-route inline picker: red X cancels without saving', async ({ page }
   expect(createRes.status()).toBe(201);
   const secret = (await createRes.json()).secret;
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const row = page.locator('#clients-body tr', { hasText: clientName });
   await expect(row).toBeVisible();
   const inlineRoute = row.locator('[data-inline-route] input[type="text"]');
@@ -541,7 +542,7 @@ test('single-route inline picker: clicking away without selecting reverts to the
   });
   expect(createRes.status()).toBe(201);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const row = page.locator('#clients-body tr', { hasText: clientName });
   await expect(row).toBeVisible();
   const inlineRoute = row.locator('[data-inline-route] input[type="text"]');
@@ -576,7 +577,7 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   });
   expect(catRes.status()).toBe(201);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   let row = page.locator('#clients-body tr', { hasText: clientName });
   await expect(row).toBeVisible();
   await expect(row.getByRole('button', { name: `Manage models for ${clientName}` })).toBeVisible();
@@ -628,7 +629,7 @@ test('permission bulk enable/disable applies only to current available models', 
   await mockRemoveModel(page, 'bulk-retired');
   await refreshProviderApi(page, csrf, provider.id);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const clientRow = page.locator('#clients-body tr', { hasText: clientName });
   await expect(clientRow).toBeVisible();
 
@@ -722,7 +723,7 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   await mockAddModel(page, 'reopen-extra');
   await refreshProviderApi(page, csrf, provider.id);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const clientRow = page.locator('#clients-body tr', { hasText: clientName });
   await expect(clientRow).toBeVisible();
 
@@ -787,7 +788,7 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
   const virtualResponse = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'coding', target_provider_id: provider.id, target_model_id: real.id } });
   expect(virtualResponse.status()).toBe(201);
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const clientRow = page.locator('#clients-body tr', { hasText: clientName });
   await expect(clientRow).toBeVisible();
 
@@ -882,7 +883,7 @@ test('global activity renders across clients, searches, and pages', async ({ pag
   }
 
   // Navigate to Settings and verify the Global activity section renders.
-  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
@@ -930,7 +931,7 @@ test('activity pagination handles empty results and the exact-page boundary', as
   // Client B will accumulate EXACTLY `limit` (50) rows of activity.
   const clientB = await createClient(page, csrf, 'boundary-full-client');
 
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const clientARow = page.locator('#clients-body tr', { hasText: clientA.name });
   await expect(clientARow).toBeVisible();
 
@@ -948,7 +949,7 @@ test('activity pagination handles empty results and the exact-page boundary', as
 
   // 2. Global activity empty rendering: filter to a term that matches nothing so
   //    the section renders its empty state (earlier browser tests leave rows behind).
-  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await page.locator('#global-activity-search').fill('zzz-no-match-boundary');
   await expect(page.locator('#global-activity-empty')).toBeVisible();
@@ -975,7 +976,7 @@ test('activity pagination handles empty results and the exact-page boundary', as
   // 3. Exact-page boundary (exactly `limit` rows): the per-client dialog must show
   //    all 50 rows with "1–50" and the "Older" button DISABLED because there are
   //    no more pages — clicking it could otherwise fetch an empty "51–50" page.
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const clientBRow = page.locator('#clients-body tr', { hasText: clientB.name });
   await expect(clientBRow).toBeVisible();
   await clientBRow.getByRole('button', { name: 'Activity' }).click();
@@ -986,13 +987,17 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await expect(page.locator('#activity-next')).toBeDisabled();
   await expect(page.locator('#activity-prev')).toBeDisabled();
 
-  // Cleanup: discard client B's activity so unrelated later tests stay isolated.
+  // Clearing activity is a destructive action and requires explicit confirmation.
+  await page.getByRole('button', { name: 'Clear activity' }).click();
+  await expect(page.locator('#confirm-dialog')).toBeVisible();
+  await expect(page.locator('#confirm-copy')).toContainText('permanently deleted');
+  await page.locator('#confirm-action').click();
+  await expect(page.locator('#activity-empty')).toBeVisible();
+  await expect(page.locator('#activity-count')).toHaveText('0 results');
+
+  // Cleanup: close the now-empty activity dialog so unrelated later tests stay isolated.
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
-  const clearRes = await page.request.delete(`/api/admin/client-keys/${clientB.id}/activity`, {
-    headers: { 'X-CSRF-Token': csrf }
-  });
-  expect(clearRes.status()).toBe(204);
 });
 
 test('activity loads clear a previously shown error on success', async ({ page }) => {
@@ -1007,7 +1012,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
 
   // 1. Per-client dialog: plant a sentinel error, then a successful re-load
   //    (debounced search) must clear it so no stale error lingers.
-  await page.getByRole('button', { name: 'Client Keys' }).click();
+  await page.getByRole('link', { name: 'Client Keys' }).click();
   const clientRow = page.locator('#clients-body tr', { hasText: clientName });
   await expect(clientRow).toBeVisible();
   await clientRow.getByRole('button', { name: 'Activity' }).click();
@@ -1023,7 +1028,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
   await expect(page.locator('#activity-dialog')).toBeHidden();
 
   // 2. Global activity section: same sentinel-then-success pattern must clear the error.
-  await page.locator('#nav-links').getByRole('button', { name: 'Settings' }).click();
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
 
@@ -1031,4 +1036,61 @@ test('activity loads clear a previously shown error on success', async ({ page }
   await page.locator('#global-activity-search').fill(clientName);
   await expect(page.locator('#global-activity-error')).toHaveText('');
   await page.locator('#global-activity-search').fill('');
+});
+
+test('client key group: listing badge, create/edit dialog, and filter', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const defaultClient = 'browser-group-default';
+  const groupedClient = 'browser-group-lab';
+  const groupName = 'testing';
+
+  // Create one key with an explicit group and one with the default.
+  const create = async (name, group) => {
+    const res = await page.request.post('/api/admin/client-keys', {
+      headers: { 'X-CSRF-Token': csrf },
+      data: group ? { name, group } : { name }
+    });
+    expect(res.status()).toBe(201);
+  };
+  await create(defaultClient, null);
+  await create(groupedClient, groupName);
+
+  await page.locator('#nav-links').getByRole('link', { name: 'Client Keys' }).click();
+  await expect(page.locator('#view-clients')).toBeVisible();
+
+  // Listing groups keys under collapsible group headings (like Real Models).
+  const groupedHeader = page.locator('#clients-body tr.group-toggle .group-label', { hasText: groupName });
+  await expect(groupedHeader).toHaveText(groupName);
+  const defaultHeader = page.locator('#clients-body tr.group-toggle .group-label', { hasText: 'default' });
+  await expect(defaultHeader).toHaveText('default');
+
+  // A group heading toggles its rows open/closed.
+  const groupedRow = page.locator('#clients-body tr.group-row', { hasText: groupedClient });
+  await expect(groupedRow).toBeVisible();
+  await groupedHeader.click();
+  await expect(groupedRow).toBeHidden();
+  await groupedHeader.click();
+  await expect(groupedRow).toBeVisible();
+
+  // Filter by group narrows the visible group headings.
+  await page.locator('#client-group-filter').selectOption(groupName);
+  await expect(groupedHeader).toBeVisible();
+  await expect(defaultHeader).toBeHidden();
+  await page.locator('#client-group-filter').selectOption('');
+  await expect(defaultHeader).toBeVisible();
+
+  // Edit dialog prefills the group.
+  await groupedRow.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
+  await expect(page.locator('#form-dialog input[name="group"]')).toHaveValue(groupName);
+  await page.locator('#form-dialog').getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.locator('#form-dialog')).toBeHidden();
+
+  // Create dialog defaults group to "default".
+  await page.getByRole('button', { name: '+ Create client key' }).click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
+  await expect(page.locator('#form-dialog input[name="group"]')).toHaveValue('default');
 });

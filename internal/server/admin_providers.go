@@ -250,7 +250,10 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this provider first.")
 		return
 	}
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models WHERE target_provider_id=?`, providerID).Scan(&refs); err != nil {
+	// virtual_model_targets is the functional source of truth. This includes
+	// references in every ordered position, not only the compatibility primary
+	// columns on virtual_models.
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE m.provider_id=?`, providerID).Scan(&refs); err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
 	}
@@ -284,24 +287,24 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 type modelView struct {
-	ID               string             `json:"id"`
-	ProviderID       string             `json:"provider_id"`
-	ProviderName     string             `json:"provider_name"`
-	UpstreamModelID  string             `json:"upstream_model_id"`
-	CanonicalModelID string             `json:"canonical_model_id"`
-	DisplayName      string             `json:"display_name"`
-	ContextLength    *int64             `json:"context_length"`
-	MaxOutputTokens  *int64             `json:"max_output_tokens"`
-	NativeProtocol   providers.Protocol `json:"native_protocol,omitempty"`
-	SupportsTools    *bool              `json:"supports_tools"`
-	SupportsVision   *bool              `json:"supports_vision"`
-	SupportsReasoning *bool             `json:"supports_reasoning"`
-	SupportsStructuredOutput *bool      `json:"supports_structured_output"`
-	InputModalities  []string           `json:"input_modalities,omitempty"`
-	OutputModalities []string           `json:"output_modalities,omitempty"`
-	Available        bool               `json:"available"`
-	FirstSeenAt      string             `json:"first_seen_at"`
-	LastSeenAt       string             `json:"last_seen_at"`
+	ID                       string             `json:"id"`
+	ProviderID               string             `json:"provider_id"`
+	ProviderName             string             `json:"provider_name"`
+	UpstreamModelID          string             `json:"upstream_model_id"`
+	CanonicalModelID         string             `json:"canonical_model_id"`
+	DisplayName              string             `json:"display_name"`
+	ContextLength            *int64             `json:"context_length"`
+	MaxOutputTokens          *int64             `json:"max_output_tokens"`
+	NativeProtocol           providers.Protocol `json:"native_protocol,omitempty"`
+	SupportsTools            *bool              `json:"supports_tools"`
+	SupportsVision           *bool              `json:"supports_vision"`
+	SupportsReasoning        *bool              `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool              `json:"supports_structured_output"`
+	InputModalities          []string           `json:"input_modalities,omitempty"`
+	OutputModalities         []string           `json:"output_modalities,omitempty"`
+	Available                bool               `json:"available"`
+	FirstSeenAt              string             `json:"first_seen_at"`
+	LastSeenAt               string             `json:"last_seen_at"`
 }
 
 func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +359,7 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM providers`).Scan(&providersCount)
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=1`).Scan(&available)
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=0`).Scan(&retired)
-	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE m.available=0 OR p.enabled=0`).Scan(&broken)
+	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v WHERE NOT EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)`).Scan(&broken)
 	writeJSON(w, 200, map[string]any{"status": "ready", "providers": providersCount, "available_models": available, "retired_models": retired, "broken_virtual_models": broken})
 }
 
@@ -389,6 +392,9 @@ func decodeModalities(v sql.NullString) []string {
 // any false -> false; else any nil -> nil (unknown); else true. An empty input
 // yields nil (unknown).
 func triStateANDBool(flags []*bool) *bool {
+	if len(flags) == 0 {
+		return nil
+	}
 	hasUnknown := false
 	for _, f := range flags {
 		if f == nil {

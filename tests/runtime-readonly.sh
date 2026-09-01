@@ -18,7 +18,12 @@ base="http://127.0.0.1:$port"
 
 cleanup() {
     docker rm -f "$name" >/dev/null 2>&1 || true
-    rm -rf "${data_dir:-}" "${cookie_jar:-}" "${backup_file:-}"
+    if [ -n "${data_dir:-}" ]; then
+        docker run --rm -v "$data_dir:/d" --user root alpine chown -R "${host_uid:-0}:${host_gid:-0}" /d >/dev/null 2>&1 || true
+        rm -rf "$data_dir"
+    fi
+    [ -z "${cookie_jar:-}" ] || rm -f "$cookie_jar"
+    [ -z "${backup_file:-}" ] || rm -f "$backup_file"
 }
 trap cleanup EXIT INT TERM
 cleanup
@@ -26,9 +31,11 @@ cleanup
 data_dir=$(mktemp -d)
 cookie_jar=$(mktemp)
 backup_file=$(mktemp)
+host_uid=$(id -u)
+host_gid=$(id -g)
 
-# Host dir for the /data bind mount, writable by the non-root runtime user.
-chmod 777 "$data_dir"
+# The runtime process owns /data so database.Open can tighten it to 0700.
+docker run --rm -v "$data_dir:/d" --user root alpine chown 65532:65532 /d
 
 echo "==> Building tiller-router:dev"
 docker build -t tiller-router:dev "$repo_dir"
@@ -45,7 +52,7 @@ docker run --rm -d --name "$name" --network host \
     -e TILLER_ADMIN_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$port" \
     -e TILLER_DATA_DIR=/data \
-    -e TILLER_TRUST_PROXY_HEADERS=true \
+    -e TILLER_TRUST_PROXY_HEADERS=false \
     tiller-router:dev >/dev/null
 
 echo "==> Waiting for readiness"
@@ -74,7 +81,7 @@ echo "    /health/ready -> $ready_code"
 [ "$ready_code" = "200" ] || { echo "FAIL: /health/ready returned $ready_code" >&2; exit 1; }
 
 echo "==> Migrations/startup wrote to /data bind mount"
-[ -f "$data_dir/tiller-router.db" ] || { echo "FAIL: no tiller-router.db under /data" >&2; exit 1; }
+docker run --rm -v "$data_dir:/d:ro" --user root alpine test -f /d/tiller-router.db || { echo "FAIL: no tiller-router.db under /data" >&2; exit 1; }
 echo "    $data_dir/tiller-router.db present"
 
 echo "==> docker inspect runtime settings"
@@ -101,7 +108,7 @@ echo "    backup export -> $backup_code"
 header=$(head -c 15 "$backup_file")
 echo "    backup header: $header"
 [ "$header" = "SQLite format 3" ] || { echo "FAIL: backup is not a valid SQLite file" >&2; exit 1; }
-[ -d "$data_dir/backups" ] || { echo "FAIL: backup did not write under /data/backups" >&2; exit 1; }
+docker run --rm -v "$data_dir:/d:ro" --user root alpine test -d /d/backups || { echo "FAIL: backup did not write under /data/backups" >&2; exit 1; }
 
 echo "==> Write behavior demonstration (read-only shell container, identical flags)"
 # The scratch image has no shell, so the authoritative read-only check is

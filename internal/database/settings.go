@@ -8,15 +8,15 @@ import (
 )
 
 const (
-	SettingDefaultLoggingEnabled       = "default_logging_enabled"
-	SettingDefaultRetentionDays        = "default_retention_days"
-	SettingFallbackTimeoutSeconds      = "fallback_timeout_seconds"
-	SettingNotificationsEnabled        = "notifications_enabled"
-	SettingNotificationsWebhookURL     = "notifications_webhook_url"
-	SettingNotificationsEventFallback  = "notifications_event_fallback"
-	SettingNotificationsEventAllFailed = "notifications_event_all_failed"
-	SettingNotificationsAuthHeader     = "notifications_auth_header"
-	SettingNotificationsCooldownSeconds = "notifications_cooldown_seconds"
+	SettingDefaultLoggingEnabled              = "default_logging_enabled"
+	SettingDefaultRetentionDays               = "default_retention_days"
+	SettingFallbackTimeoutSeconds             = "fallback_timeout_seconds"
+	SettingNotificationsEnabled               = "notifications_enabled"
+	SettingNotificationsWebhookURL            = "notifications_webhook_url"
+	SettingNotificationsEventFallback         = "notifications_event_fallback"
+	SettingNotificationsEventAllFailed        = "notifications_event_all_failed"
+	SettingNotificationsAuthHeader            = "notifications_auth_header"
+	SettingNotificationsCooldownSeconds       = "notifications_cooldown_seconds"
 	SettingNotificationsEventClientKeyCreated = "notifications_event_client_key_created"
 	SettingNotificationsEventClientKeyDeleted = "notifications_event_client_key_deleted"
 	SettingNotificationsEventAdminLogin       = "notifications_event_admin_login"
@@ -88,12 +88,12 @@ func (d *DB) GetFallbackTimeout(ctx context.Context) (int, error) {
 // webhook starts notifying immediately. CooldownSeconds defaults to 60 so repeat
 // alerts for the same event + model are throttled to one per minute.
 type NotificationSettings struct {
-	Enabled          bool
-	WebhookURL       string
-	EventFallback    bool
-	EventAllFailed   bool
-	AuthHeader       string
-	CooldownSeconds  int
+	Enabled               bool
+	WebhookURL            string
+	EventFallback         bool
+	EventAllFailed        bool
+	AuthHeader            string
+	CooldownSeconds       int
 	EventClientKeyCreated bool
 	EventClientKeyDeleted bool
 	EventAdminLogin       bool

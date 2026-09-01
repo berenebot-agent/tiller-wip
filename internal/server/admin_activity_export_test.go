@@ -567,3 +567,53 @@ func TestActivityCSVExportNeutralizesFormulaModel(t *testing.T) {
 		t.Fatalf("formula-prefixed model not neutralized in export: %q", got)
 	}
 }
+
+func TestActivityExposesCacheCreationTokensAndEmptyExport(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	insertLogRow(t, db, "row-cache-creation", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(10), int64Ptr(2), "upstream-cache", "req-cache", nil, "2026-01-01T00:00:01Z")
+	if _, err := db.SQL.Exec(`UPDATE request_logs SET cache_creation_input_tokens=42 WHERE id=?`, "row-cache-creation"); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != 200 {
+		t.Fatalf("activity: %d %v", status, payload)
+	}
+	row := payload["data"].([]any)[0].(map[string]any)
+	if row["cache_creation_input_tokens"] != float64(42) {
+		t.Fatalf("cache creation tokens missing from activity JSON: %v", row)
+	}
+	status, body := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var column int
+	for i, name := range records[0] {
+		if name == "cache_creation_input_tokens" {
+			column = i
+		}
+	}
+	if records[1][column] != "42" {
+		t.Fatalf("cache creation tokens missing from CSV: %v", records[1])
+	}
+
+	// A client with no rows still receives a valid header-only export and a
+	// readable, client-derived filename.
+	emptyID, _ := createClientWithModel(t, api, "empty-export-client")
+	resp, err := api.client.Get(api.base + "/api/admin/client-keys/" + emptyID + "/activity/export")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	emptyBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Disposition"), "empty-export-client") {
+		t.Fatalf("empty export response: status=%d disposition=%q", resp.StatusCode, resp.Header.Get("Content-Disposition"))
+	}
+	emptyRecords, err := csv.NewReader(strings.NewReader(strings.TrimPrefix(string(emptyBody), "\xEF\xBB\xBF"))).ReadAll()
+	if err != nil || len(emptyRecords) != 1 {
+		t.Fatalf("empty export should contain only headers: records=%v err=%v", emptyRecords, err)
+	}
+}

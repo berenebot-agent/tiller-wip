@@ -12,10 +12,21 @@ import (
 	"github.com/tiller-router/tiller-router/internal/id"
 )
 
+var clientKeyGroupPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$`)
+
+func normalizeClientKeyGroup(group string) string {
+	group = strings.TrimSpace(group)
+	if group == "" {
+		return "default"
+	}
+	return group
+}
+
 type clientKeyView struct {
 	ID                    string  `json:"id"`
 	Name                  string  `json:"name"`
 	Description           string  `json:"description"`
+	Group                 string  `json:"group"`
 	Fingerprint           string  `json:"fingerprint"`
 	Enabled               bool    `json:"enabled"`
 	LoggingEnabled        bool    `json:"logging_enabled"`
@@ -65,8 +76,9 @@ func upsertSingleBinding(tx *sql.Tx, clientID, modelName, targetType, targetID, 
 
 func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
+	groupFilter := strings.TrimSpace(r.URL.Query().Get("group"))
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT c.id,c.name,c.description,c.secret_fingerprint,c.enabled,c.logging_enabled,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
+	query := `SELECT c.id,c.name,c.description,c.key_group,c.secret_fingerprint,c.enabled,c.logging_enabled,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
 		coalesce(b.exposed_model_name,''),
 		CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
 		coalesce(b.real_model_id,b.virtual_model_id,''),
@@ -77,7 +89,15 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 		FROM client_keys c LEFT JOIN client_single_bindings b ON b.client_key_id=c.id
 		LEFT JOIN provider_models rm ON rm.id=b.real_model_id LEFT JOIN providers rp ON rp.id=rm.provider_id
 		LEFT JOIN virtual_models vm ON vm.id=b.virtual_model_id LEFT JOIN virtual_provider_groups vg ON vg.id=vm.virtual_group_id
-		WHERE c.name LIKE ? OR c.description LIKE ? ORDER BY c.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
+		WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?)`
+	args := []any{pattern, pattern, pattern}
+	if groupFilter != "" {
+		query += ` AND c.key_group = ?`
+		args = append(args, groupFilter)
+	}
+	query += ` ORDER BY c.name LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list client keys.")
 		return
@@ -88,7 +108,7 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 		var v clientKeyView
 		var enabled, loggingEnabled int
 		var targetAvailable int
-		if rows.Scan(&v.ID, &v.Name, &v.Description, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &targetAvailable) != nil {
+		if rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &targetAvailable) != nil {
 			adminError(w, 500, "database_error", "Could not list client keys.")
 			return
 		}
@@ -104,6 +124,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name             string `json:"name"`
 		Description      string `json:"description"`
+		Group            string `json:"group"`
 		Type             string `json:"type"`
 		SingleModelName  string `json:"single_model_name"`
 		SingleTargetType string `json:"single_target_type"`
@@ -114,6 +135,11 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
+	group := normalizeClientKeyGroup(input.Group)
+	if !clientKeyGroupPattern.MatchString(group) {
+		adminError(w, 400, "invalid_group", "Group names must be 1-63 characters using letters, digits, spaces, dots, dashes, or underscores.")
+		return
+	}
 	if input.Type == "" {
 		input.Type = "catalogue"
 	}
@@ -162,7 +188,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO client_keys(id,name,description,selector,secret_hash,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,updated_at,key_type) VALUES(?,?,?,?,?,?,1,?,?,?,?,?)`, clientID, input.Name, input.Description, generated.Selector, generated.Hash, generated.Fingerprint, boolInt(loggingEnabled), retentionDays, now, now, input.Type)
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO client_keys(id,name,description,key_group,selector,secret_hash,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,updated_at,key_type) VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?)`, clientID, input.Name, input.Description, group, generated.Selector, generated.Hash, generated.Fingerprint, boolInt(loggingEnabled), retentionDays, now, now, input.Type)
 	if err == nil && input.Type == "single" {
 		err = upsertSingleBinding(tx, clientID, input.SingleModelName, input.SingleTargetType, input.SingleTargetID, now)
 	}
@@ -194,6 +220,7 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name                   *string `json:"name"`
 		Description            *string `json:"description"`
+		Group                  *string `json:"group"`
 		Enabled                *bool   `json:"enabled"`
 		LoggingEnabled         *bool   `json:"logging_enabled"`
 		RetentionDays          *int    `json:"retention_days"`
@@ -218,9 +245,9 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback()
-	var name, description, keyType string
+	var name, description, keyType, keyGroup string
 	var enabled, loggingEnabled, retentionDays int
-	if err = tx.QueryRowContext(r.Context(), `SELECT name,description,enabled,logging_enabled,retention_days,key_type FROM client_keys WHERE id=?`, clientID).Scan(&name, &description, &enabled, &loggingEnabled, &retentionDays, &keyType); err == sql.ErrNoRows {
+	if err = tx.QueryRowContext(r.Context(), `SELECT name,description,key_group,enabled,logging_enabled,retention_days,key_type FROM client_keys WHERE id=?`, clientID).Scan(&name, &description, &keyGroup, &enabled, &loggingEnabled, &retentionDays, &keyType); err == sql.ErrNoRows {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	} else if err != nil {
@@ -232,6 +259,13 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Description != nil {
 		description = *input.Description
+	}
+	if input.Group != nil {
+		keyGroup = normalizeClientKeyGroup(*input.Group)
+		if !clientKeyGroupPattern.MatchString(keyGroup) {
+			adminError(w, 400, "invalid_group", "Group names must be 1-63 characters using letters, digits, spaces, dots, dashes, or underscores.")
+			return
+		}
 	}
 	if input.Enabled != nil {
 		enabled = boolInt(*input.Enabled)
@@ -292,7 +326,7 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	now := database.Now()
-	_, err = tx.ExecContext(r.Context(), `UPDATE client_keys SET name=?,description=?,enabled=?,logging_enabled=?,retention_days=?,key_type=?,updated_at=? WHERE id=?`, name, description, enabled, loggingEnabled, retentionDays, keyType, now, clientID)
+	_, err = tx.ExecContext(r.Context(), `UPDATE client_keys SET name=?,description=?,key_group=?,enabled=?,logging_enabled=?,retention_days=?,key_type=?,updated_at=? WHERE id=?`, name, description, keyGroup, enabled, loggingEnabled, retentionDays, keyType, now, clientID)
 	if err == nil && (keyType == "single" || bindingSupplied) {
 		err = upsertSingleBinding(tx, clientID, modelName, targetType, targetID, now)
 	}
@@ -425,7 +459,7 @@ func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 		_ = virtualRows.Scan(&g.ID, &g.Name, &feeder)
 		g.NewModelsEnabled = scanBool(feeder)
 		g.Models = []permissionModel{}
-		rows, _ := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),(p.enabled=1 AND m.available=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN providers p ON p.id=v.target_provider_id JOIN provider_models m ON m.id=v.target_provider_model_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id WHERE v.virtual_group_id=? ORDER BY v.name`, clientID, g.ID)
+		rows, _ := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id WHERE v.virtual_group_id=? ORDER BY v.name`, clientID, g.ID)
 		for rows.Next() {
 			var m permissionModel
 			var enabled, available int

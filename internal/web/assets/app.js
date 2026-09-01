@@ -1,7 +1,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null };
-const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
+const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
@@ -72,6 +72,7 @@ let filterTimers = new Map();
 function filterInput(selector, callback) { $(selector).addEventListener('input', event => { clearTimeout(filterTimers.get(selector)); filterTimers.set(selector, setTimeout(() => callback(event.target.value), 180)); }); }
 filterInput('#provider-search', loadProviders); filterInput('#model-search', loadModels); filterInput('#virtual-search', loadVirtual); filterInput('#client-search', loadClients);
 $('#show-retired').addEventListener('change', renderModels);
+$('#client-group-filter').addEventListener('change', loadClients);
 
 async function loadProviders(search = $('#provider-search').value) {
   const [result, types] = await Promise.all([api(`/api/admin/providers?limit=200&search=${encodeURIComponent(search || '')}`), state.providerTypes.length ? Promise.resolve({ data: state.providerTypes }) : api('/api/admin/provider-types')]);
@@ -121,7 +122,7 @@ async function refreshModels(id) { const button = $(`[data-refresh-models="${CSS
 async function deleteProvider(id) { const provider = state.providers.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${provider.name}?`, copy: 'All discovered models and their client permissions will be removed. Deletion is blocked while a virtual model references this provider.', action: 'Delete provider', typeMatch: provider.name, typeLabel: 'provider name' })) return; try { await api(`/api/admin/providers/${id}`, { method: 'DELETE' }); flash('Provider deleted.'); await loadProviders(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function loadModels(search = $('#model-search').value) { const [result, usage] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage')]); state.models = result.data; state.usage = usage; renderModels(); }
-function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 8 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
+function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 8 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
 function toggleGroup(event) {
   const header = event.currentTarget;
   const pendingFrame = groupRevealFrames.get(header);
@@ -136,7 +137,7 @@ function toggleGroup(event) {
   header.dataset.expanded = String(nowExpanded);
   header.setAttribute('aria-expanded', String(nowExpanded));
   $('.group-arrow', header).textContent = nowExpanded ? GROUP_ARROW.up : GROUP_ARROW.down;
-  const store = header.dataset.groupToggle === 'models' ? collapsedModels : collapsedVirtual;
+  const store = header.dataset.groupToggle === 'models' ? collapsedModels : header.dataset.groupToggle === 'clients' ? collapsedClients : collapsedVirtual;
   const key = header.dataset.groupKey;
   if (nowExpanded) store.delete(key); else store.add(key);
 
@@ -254,6 +255,34 @@ $('#close-capabilities').onclick = $('#done-capabilities').onclick = () => $('#c
 $('#add-virtual-group').onclick = () => openVirtualGroup(); $('#add-virtual-model').onclick = () => openVirtualModel();
 function openVirtualGroup(group = null) { openEntity({ eyebrow: 'VIRTUAL NAMESPACE', title: group ? `Rename ${group.name}` : 'Create virtual group', fields: `<label>Group name <input name="name" value="${h(group?.name || '')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>Lowercase slug. Shares the provider namespace.</small></label>${group ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>I understand that every model ID in this group will change.</span></label>' : ''}`, submit: group ? 'Rename group' : 'Create group', onMount: group ? form => { const nameInput = $('[name="name"]', form), wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === group.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); } : null, onSubmit: async form => { const values = new FormData(form); if (group) await api(`/api/admin/virtual-groups/${group.id}`, { method: 'PATCH', body: JSON.stringify({ name: values.get('name'), confirm_breaking_change: values.get('confirm') === 'on' }) }); else await api('/api/admin/virtual-groups', { method: 'POST', body: JSON.stringify({ name: values.get('name') }) }); flash(group ? 'Virtual group renamed.' : 'Virtual group created.'); await loadVirtual(); } }); }
 async function deleteVirtualGroup(id) { const group = state.groups.find(item => item.id === id); if (!await confirmAction({ title: `Delete group ${group.name}?`, copy: 'Only empty virtual groups can be deleted.', action: 'Delete group', typeMatch: group.name, typeLabel: 'group name' })) return; try { await api(`/api/admin/virtual-groups/${id}`, { method: 'DELETE' }); flash('Virtual group deleted.'); await loadVirtual(); } catch (error) { flash(errorMessage(error), 'error'); } }
+// Position a combobox list within the visual viewport, opening upward when there
+// isn't enough room below (e.g. the mobile virtual keyboard is open). The list is
+// position:fixed, so coordinates are viewport-relative.
+function positionComboboxList(list, input, minWidth) {
+  const box = input.getBoundingClientRect();
+  const vv = window.visualViewport;
+  const vvTop = vv ? vv.offsetTop : 0;
+  const vvBottom = vv ? vvTop + vv.height : window.innerHeight;
+  const vvWidth = vv ? vv.width : window.innerWidth;
+  const width = Math.max(box.width, minWidth || 0);
+  const left = Math.min(box.left, Math.max(8, vvWidth - width - 8));
+  const spaceBelow = vvBottom - box.bottom - 8;
+  const spaceAbove = box.top - vvTop - 8;
+  const openUp = spaceBelow < 80;
+  const maxH = Math.max(80, Math.min(360, openUp ? spaceAbove : spaceBelow));
+  list.style.maxHeight = `${maxH}px`;
+  list.style.left = `${left}px`;
+  list.style.width = `${width}px`;
+  if (openUp) {
+    // Anchor the list's bottom just above the input; it grows upward, capped to
+    // the space above (so it stays within the visual viewport).
+    list.style.top = 'auto';
+    list.style.bottom = `${window.innerHeight - box.top + 3}px`;
+  } else {
+    list.style.top = `${box.bottom + 3}px`;
+    list.style.bottom = 'auto';
+  }
+}
 function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minWidth }) {
   const list = document.createElement('ul'); list.className = 'combobox-list'; list.setAttribute('role', 'listbox'); list.hidden = true;
   input.setAttribute('role', 'combobox'); input.setAttribute('aria-autocomplete', 'list'); input.setAttribute('aria-expanded', 'false'); input.setAttribute('autocomplete', 'off'); input.setAttribute('spellcheck', 'false'); input.placeholder = placeholder || 'Type to filter…';
@@ -263,7 +292,8 @@ function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minW
   const render = (showAll = false) => {
     const term = showAll ? '' : input.value.trim().toLowerCase();
     items = options.filter(opt => !term || opt.label.toLowerCase().includes(term));
-    list.innerHTML = items.map((opt, i) => `<li role="option" data-i="${i}" ${i === active ? 'aria-selected="true"' : ''} ${opt.disabled ? 'aria-disabled="true"' : ''}>${h(opt.label)}${opt.muted ? '<small> — retired</small>' : ''}${opt.disabled ? '<small> — unavailable</small>' : ''}</li>`).join(''); const box=input.getBoundingClientRect(); const width=Math.max(box.width,minWidth||0); const left=Math.min(box.left,Math.max(8,window.innerWidth-width-8)); list.style.left=`${left}px`; list.style.top=`${box.bottom+3}px`; list.style.width=`${width}px`;
+    list.innerHTML = items.map((opt, i) => `<li role="option" data-i="${i}" ${i === active ? 'aria-selected="true"' : ''} ${opt.disabled ? 'aria-disabled="true"' : ''}>${h(opt.label)}${opt.muted ? '<small> — retired</small>' : ''}${opt.disabled ? '<small> — unavailable</small>' : ''}</li>`).join('');
+    positionComboboxList(list, input, minWidth);
     list.hidden = !items.length; open = !list.hidden; input.setAttribute('aria-expanded', String(open));
     if (active >= items.length) active = items.length - 1;
   };
@@ -298,7 +328,20 @@ function openVirtualModel(model = null) { if (!state.models.length) { flash('Dis
 }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ]; const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; if (model) { payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); flash('Virtual route created.'); } await loadVirtual(); } }); }
 async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
-async function loadClients(search = $('#client-search').value) { const [result, usage, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage'), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]); state.clients = result.data; state.usage = usage; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data; renderClients(); }
+async function loadClients() {
+  const search = $('#client-search').value, group = $('#client-group-filter').value;
+  const [result, usage, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/usage'), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
+  state.clients = result.data; state.usage = usage; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data;
+  renderClientGroupFilter();
+  renderClients();
+}
+function renderClientGroupFilter() {
+  const select = $('#client-group-filter');
+  const current = select.value;
+  const groups = [...new Set(state.clients.map(c => c.group).filter(Boolean))].sort();
+  select.innerHTML = '<option value="">All groups</option>' + groups.map(g => `<option value="${h(g)}">${h(g)}</option>`).join('');
+  select.value = groups.includes(current) ? current : '';
+}
 function singleTargetOptions(client = null) {
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = [
@@ -384,31 +427,37 @@ function openRoutePicker(client) {
 }
 // Keep the mobile route picker (a bottom sheet) above the virtual keyboard.
 // The Visual Viewport API reports the keyboard as a shrink of the visual
-// viewport; we lift the dialog and cap the dropdown to the space above it.
+// viewport; we lift the dialog so it stays above the keyboard. The combobox
+// dropdown itself is repositioned by positionComboboxList (see below).
 function positionRoutePickerAboveKeyboard() {
   const dialog = $('#form-dialog');
   if (!dialog.classList.contains('route-picker-dialog')) return;
   const vv = window.visualViewport;
   if (!vv) return;
   const keyboardHeight = Math.max(0, window.innerHeight - vv.height);
-  const list = $('.combobox-list', dialog);
   if (keyboardHeight > 0) {
+    // vv.height is already the space above the keyboard — don't subtract the
+    // keyboard again (that compressed the sheet until Apply/Cancel vanished).
     dialog.style.bottom = `${keyboardHeight}px`;
-    dialog.style.maxHeight = `${vv.height - keyboardHeight - 8}px`;
-    const input = $('[data-single-target] input[type="text"]', dialog);
-    if (input && list) {
-      const available = vv.height - (input.getBoundingClientRect().bottom - vv.offsetTop) - 8;
-      list.style.maxHeight = `${Math.max(120, Math.min(360, available))}px`;
-    }
+    dialog.style.maxHeight = `${vv.height - 16}px`;
   } else {
     dialog.style.bottom = '';
     dialog.style.maxHeight = '';
-    if (list) list.style.maxHeight = '';
   }
 }
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', positionRoutePickerAboveKeyboard);
   window.visualViewport.addEventListener('scroll', positionRoutePickerAboveKeyboard);
+  // Reposition any open combobox list when the keyboard opens/closes so it stays
+  // within the visual viewport (e.g. the mobile route picker's dropdown).
+  const repositionOpenLists = () => {
+    document.querySelectorAll('.combobox-list:not([hidden])').forEach(list => {
+      const input = list.parentElement?.querySelector('input[type="text"]');
+      if (input) positionComboboxList(list, input);
+    });
+  };
+  window.visualViewport.addEventListener('resize', repositionOpenLists);
+  window.visualViewport.addEventListener('scroll', repositionOpenLists);
 }
 function clientCard(client) {
   const statusDot = `<span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span>`;
@@ -422,6 +471,7 @@ function clientCard(client) {
     <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
       ${statusDot}
       <span class="client-card-name">${h(client.name)}</span>
+      ${client.group ? `<span class="group-badge">${h(client.group)}</span>` : ''}
       <span class="client-card-desc">${h(client.description || 'No description')}</span>
       <span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span>
       <span class="client-card-chevron" aria-hidden="true">▾</span>
@@ -433,6 +483,7 @@ function clientCard(client) {
       <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
       ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
       <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
+      ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
       <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
@@ -443,15 +494,25 @@ function clientCard(client) {
     </div>
   </article>`;
 }
+function clientRow(client) {
+  const routeCell = client.type === 'single'
+    ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
+    : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
+  return `<td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>`;
+}
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
   $('#clients-cards').innerHTML = state.clients.map(clientCard).join('');
-  $('#clients-body').innerHTML = state.clients.map(client => {
-    const routeCell = client.type === 'single'
-      ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
-      : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-    return `<tr><td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td></tr>`;
+  const byGroup = new Map();
+  state.clients.forEach(client => { const g = client.group || 'default'; if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push(client); });
+  $('#clients-body').innerHTML = [...byGroup.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([group, clients]) => {
+    const singles = clients.filter(c => c.type === 'single').length;
+    const catalogues = clients.length - singles;
+    const note = singles && catalogues ? `${catalogues} catalogue · ${singles} single` : singles ? `${singles} single` : `${catalogues} catalogue`;
+    const collapsed = collapsedClients.has(group);
+    return groupBanner('clients', group, group, note, `${clients.length}`, '') + groupRows(clients.map(clientRow), group, collapsed);
   }).join('');
+  $$('.group-toggle', $('#clients-body')).forEach(header => header.onclick = toggleGroup);
   $$('[data-inline-route]').forEach(box => mountInlineRoutePicker(box.closest('.client-route-picker'), state.clients.find(item => item.id === box.closest('.client-route-picker').dataset.clientId)));
   $$('[data-client-models]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientModels)));
   $$('[data-client-route]').forEach(button => button.onclick = () => openRoutePicker(state.clients.find(item => item.id === button.dataset.clientRoute)));
@@ -478,7 +539,7 @@ function openClient(client = null) {
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
     title: client ? `Settings · ${client.name}` : 'Create client key',
-    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${singleFields}${operationalFields}`,
+    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${singleFields}${operationalFields}<label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label>`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
       const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
@@ -494,7 +555,7 @@ function openClient(client = null) {
     },
     onSubmit: async form => {
       const values = new FormData(form);
-      const payload = { name: values.get('name'), description: values.get('description') };
+      const payload = { name: values.get('name'), description: values.get('description'), group: values.get('group') };
       if (client) {
         payload.enabled = values.get('enabled') === 'on';
         payload.logging_enabled = values.get('logging_enabled') === 'on';
@@ -666,8 +727,8 @@ $('#save-permissions').onclick = async () => {
 };
 
 const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
-async function openActivity(client) { activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; await loadActivity(); $('#activity-dialog').showModal(); }
-async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; await loadActivity(); $('#activity-dialog').showModal(); }
+async function openActivity(client) { activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; $('#clear-activity').hidden = false; await loadActivity(); $('#activity-dialog').showModal(); }
+async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; await loadActivity(); $('#activity-dialog').showModal(); }
 async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
 function activityAttempt(attempt, index) { return `<div class="activity-attempt ${attempt.result === 'success' ? 'attempt-success' : 'attempt-failed'}"><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code>${h(attempt.provider)}/${h(attempt.model)}</code></span><span class="attempt-latency">${attempt.latency_ms} ms</span><span class="attempt-status">${attempt.http_status || h(attempt.result)}</span></div>`; }
 function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map(activityAttempt).join('')}</div>`; }
@@ -679,6 +740,18 @@ $('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activit
 $('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
 $('#export-activity').onclick = () => $('#export-dialog').showModal();
+$('#clear-activity').onclick = async () => {
+  if (activityState.kind !== 'client' || !activityState.client) return;
+  if (!await confirmAction({ title: `Clear ${activityState.client.name} activity?`, copy: 'All recorded request metadata for this client will be permanently deleted.', action: 'Clear activity' })) return;
+  const button = $('#clear-activity'); button.disabled = true; $('#activity-error').textContent = '';
+  try {
+    await api(`/api/admin/client-keys/${activityState.client.id}/activity`, { method: 'DELETE' });
+    activityState.offset = 0;
+    flash('Client activity cleared.');
+    await loadActivity();
+  } catch (error) { $('#activity-error').textContent = errorMessage(error); }
+  finally { button.disabled = false; }
+};
 $('#close-export').onclick = () => $('#export-dialog').close();
 $$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick = () => { const period = button.dataset.exportPeriod; const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity/export` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity/export` : `/api/admin/virtual-models/${activityState.modelID}/activity/export`; const url = `${base}?period=${period}&search=${encodeURIComponent(activityState.search || '')}`; const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); $('#export-dialog').close(); });
 
