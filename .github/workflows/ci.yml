@@ -40,15 +40,5 @@ jobs:
         uses: actions/checkout@v4
       - name: Run browser checks
         run: ./tests/browser/run.sh
-      - name: Upload browser debug artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: browser-debug
-          path: |
-            test-debug/
-            test-results/
-          if-no-files-found: ignore
-          retention-days: 3
       - name: Run read-only runtime checks
         run: ./tests/runtime-readonly.sh
