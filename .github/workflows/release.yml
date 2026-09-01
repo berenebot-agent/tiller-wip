@@ -65,12 +65,19 @@ jobs:
         id: release
         shell: bash
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
-            echo "Refusing non-alpha or malformed release tag: $GITHUB_REF_NAME" >&2
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-(alpha|beta|rc)\.[0-9]+$ ]]; then
+            echo "Refusing non-alpha/beta/rc or malformed release tag: $GITHUB_REF_NAME" >&2
             exit 1
           fi
           version="${GITHUB_REF_NAME#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Channel tag: alpha releases tag 'alpha', beta/rc tag 'beta'. 'latest'
+          # always moves to the newest release (alpha or beta).
+          if [[ "$GITHUB_REF_NAME" =~ -alpha\. ]]; then
+            echo "channel=alpha" >> "$GITHUB_OUTPUT"
+          else
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+          fi
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       - name: Set up Docker Buildx
@@ -89,7 +96,7 @@ jobs:
           tags: |
             type=raw,value=${{ github.ref_name }}
             type=raw,value=${{ steps.release.outputs.version }}
-            type=raw,value=alpha
+            type=raw,value=${{ steps.release.outputs.channel }}
             type=raw,value=latest
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -102,7 +109,7 @@ jobs:
           build-args: |
             TILLER_VERSION=${{ steps.release.outputs.version }}
             TILLER_COMMIT=${{ github.sha }}
-      - name: Create GitHub prerelease
+      - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Tiller Router $GITHUB_REF_NAME" --prerelease --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Tiller Router $GITHUB_REF_NAME" --generate-notes

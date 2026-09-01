@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,14 +26,25 @@ type DB struct {
 	Path string
 }
 
+// ErrDataDirUnwritable is wrapped and returned by Open when the data directory
+// is not owned by (and therefore not writable to) the runtime user — typically
+// a fresh rootful-Docker bind mount created on the host as root. Callers can
+// detect it to surface a precise first-run remediation (host-side chown)
+// instead of a cryptic chmod EPERM.
+var ErrDataDirUnwritable = errors.New("data directory is not writable by the runtime user")
+
 func Open(ctx context.Context, path string) (*DB, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
 	// The data dir may pre-exist (e.g. a host bind-mount) with looser perms;
-	// MkdirAll won't tighten an existing dir, so chmod it explicitly.
+	// MkdirAll won't tighten an existing dir, so chmod it explicitly. Chmod can
+	// only be performed by the directory's owner, so a dir owned by someone
+	// else — a fresh rootful-Docker bind mount created as root — fails with
+	// EPERM. Surface that specific case with a helpful sentinel rather than the
+	// bare "operation not permitted".
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
+		return nil, mapDataDirChmodErr(filepath.Dir(path), err)
 	}
 	dsnURL := url.URL{Scheme: "file", Path: path}
 	query := dsnURL.Query()
@@ -74,6 +86,18 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, err
 	}
 	return d, nil
+}
+
+// mapDataDirChmodErr rewrites a chmod failure on the data directory so the
+// common fresh-deployment case — a bind-mounted dir the runtime user doesn't
+// own, which chmods with EPERM ("operation not permitted") — surfaces a helpful
+// sentinel (ErrDataDirUnwritable) instead of the bare "operation not permitted".
+// Any other chmod error passes through unchanged.
+func mapDataDirChmodErr(dir string, err error) error {
+	if errors.Is(err, syscall.EPERM) {
+		return fmt.Errorf("%w %q (chmod: %w)", ErrDataDirUnwritable, dir, err)
+	}
+	return err
 }
 
 // restrictFileMode chmods the given SQLite file and any existing -wal/-shm

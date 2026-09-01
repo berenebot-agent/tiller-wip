@@ -54,6 +54,18 @@ func run(logger *slog.Logger) error {
 	}
 	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"))
 	if err != nil {
+		if errors.Is(err, database.ErrDataDirUnwritable) {
+			logger.Error(
+				"data directory is not writable by the runtime user — the container runs as uid "+
+					"65532 by default, but the bind-mounted directory is owned by someone else (a fresh "+
+					"rootful-Docker bind mount is created as root). Fix ownership once, then up again.",
+				"dir", cfg.DataDir,
+				"uid", os.Getuid(),
+				"fix", "sudo chown -R 65532:65532 ./data",
+				"alt", "set TILLER_UID and TILLER_GID in .env to the uid:gid that owns ./data",
+				"see", "README 'Create the data directory'",
+			)
+		}
 		return fmt.Errorf("open database: %w", err)
 	}
 	defer db.Close()

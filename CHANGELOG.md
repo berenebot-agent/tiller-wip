@@ -1,8 +1,24 @@
 # Changelog
 
 All notable changes to Tiller Router are recorded here. This project follows
-semantic versioning conventions where practical; the alpha API and deployment
-behavior may still change.
+semantic versioning conventions where practical; the beta API and deployment
+behavior may still change before a stable `1.0`.
+
+## [0.1.0-beta.1] - 2026-09-01
+
+Initial public FOSS beta release.
+
+Tiller Router moves from alpha to beta: the routing core, deployment model and
+security posture are treated as more settled, with a clear 1.0 path.
+
+### Fixed
+
+- On first launch with a fresh bind-mounted `./data` directory (created as root
+  by rootful Docker), startup now logs an actionable one-time remediation
+  (`sudo chown -R 65532:65532 ./data`, or `TILLER_UID`/`TILLER_GID` in `.env`)
+  instead of the cryptic `open database: chmod /data: operation not permitted`.
+  The underlying error now surfaces a detectable
+  `ErrDataDirUnwritable` sentinel.
 
 ## [0.1.0-alpha.1] - 2026-09-01
 
@@ -32,7 +48,7 @@ Initial public FOSS alpha release.
   defaults may change between releases.
 - Provider integrations are contract-tested with local mocks; external provider
   accounts and every provider/model combination are not continuously live
-  tested. See [provider support](docs/provider-support.md).
+  tested. See the provider matrix in the README.
 - Provider credential encryption at rest, multi-user/SaaS operation, and
   Kubernetes deployment are outside this release's scope.
 - Model capabilities and streaming/tool behavior depend on the selected

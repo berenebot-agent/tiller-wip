@@ -1,6 +1,6 @@
 # Contributing to Tiller Router
 
-Thanks for helping improve Tiller Router. It is an alpha, single-service Docker
+Thanks for helping improve Tiller Router. It is a beta, single-service Docker
 Compose project. Small, focused changes are easiest to review.
 
 ## Before opening a change

@@ -3,8 +3,10 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -152,5 +154,25 @@ func TestBackfillMigration(t *testing.T) {
 	}
 	if kind.Valid || modelID.Valid || routeModel.Valid {
 		t.Fatalf("unmappable row should stay NULL: kind=%q id=%q model=%q", kind.String, modelID.String, routeModel.String)
+	}
+}
+
+func TestMapDataDirChmodErr(t *testing.T) {
+	// A chmod whose EPERM means the caller doesn't own the dir (the fresh
+	// root-owned bind-mount case) must surface the ErrDataDirUnwritable sentinel
+	// so main can print a first-run remediation instead of "operation not
+	// permitted".
+	synthetic := &os.PathError{Op: "chmod", Path: "/data", Err: syscall.EPERM}
+	mapped := mapDataDirChmodErr("/data", synthetic)
+	if !errors.Is(mapped, ErrDataDirUnwritable) {
+		t.Fatalf("EPERM chmod should wrap ErrDataDirUnwritable, got: %v", mapped)
+	}
+	if !errors.Is(mapped, synthetic) {
+		t.Fatalf("wrapped error should preserve the underlying chmod error, got: %v", mapped)
+	}
+	// Non-EPERM chmod errors pass through untouched.
+	other := &os.PathError{Op: "chmod", Path: "/data", Err: syscall.ENOSPC}
+	if got := mapDataDirChmodErr("/data", other); got != other {
+		t.Fatalf("non-EPERM chmod error should pass through unchanged, got: %v", got)
 	}
 }
