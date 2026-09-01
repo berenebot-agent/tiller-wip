@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -8,7 +9,9 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,15 +129,22 @@ func okUpstream(t *testing.T) http.HandlerFunc {
 	})
 }
 
+// receivedNotification captures the X-Title header and body of a delivered
+// webhook notification.
+type receivedNotification struct {
+	title string
+	body  string
+}
+
 // waitForNotification blocks until a notification arrives or the timeout elapses.
-func waitForNotification(t *testing.T, ch <-chan notificationPayload) notificationPayload {
+func waitForNotification(t *testing.T, ch <-chan receivedNotification) receivedNotification {
 	t.Helper()
 	select {
 	case p := <-ch:
 		return p
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for notification")
-		return notificationPayload{}
+		return receivedNotification{}
 	}
 }
 
@@ -153,12 +163,28 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	if v, ok := payload["notifications_auth_header_set"].(bool); !ok || v {
 		t.Fatalf("auth header should default to unset, got %v", payload["notifications_auth_header_set"])
 	}
+	if v, ok := payload["notifications_cooldown_seconds"].(float64); !ok || v != 60 {
+		t.Fatalf("cooldown should default to 60, got %v", payload["notifications_cooldown_seconds"])
+	}
+	if v, ok := payload["notifications_event_client_key_created"].(bool); !ok || v {
+		t.Fatalf("client-key-created should default to disabled, got %v", payload["notifications_event_client_key_created"])
+	}
+	if v, ok := payload["notifications_event_client_key_deleted"].(bool); !ok || v {
+		t.Fatalf("client-key-deleted should default to disabled, got %v", payload["notifications_event_client_key_deleted"])
+	}
+	if v, ok := payload["notifications_event_admin_login"].(bool); !ok || !v {
+		t.Fatalf("admin-login should default to enabled, got %v", payload["notifications_event_admin_login"])
+	}
 
 	status, _, _ = api.request("PUT", "/api/admin/settings", map[string]any{
 		"notifications_enabled":          true,
 		"notifications_webhook_url":      "https://ntfy.example.com/tiller",
 		"notifications_event_fallback":   false,
 		"notifications_event_all_failed": true,
+		"notifications_cooldown_seconds": 120,
+		"notifications_event_client_key_created": true,
+		"notifications_event_client_key_deleted": true,
+		"notifications_event_admin_login":       false,
 		"notifications_auth_header":      "Bearer secret-token",
 	})
 	if status != 204 {
@@ -179,6 +205,18 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	}
 	if v, ok := payload["notifications_auth_header_set"].(bool); !ok || !v {
 		t.Fatalf("auth header set flag not persisted: %v", payload["notifications_auth_header_set"])
+	}
+	if v, ok := payload["notifications_cooldown_seconds"].(float64); !ok || v != 120 {
+		t.Fatalf("cooldown not persisted: %v", payload["notifications_cooldown_seconds"])
+	}
+	if v, ok := payload["notifications_event_client_key_created"].(bool); !ok || !v {
+		t.Fatalf("client-key-created not persisted: %v", payload["notifications_event_client_key_created"])
+	}
+	if v, ok := payload["notifications_event_client_key_deleted"].(bool); !ok || !v {
+		t.Fatalf("client-key-deleted not persisted: %v", payload["notifications_event_client_key_deleted"])
+	}
+	if v, ok := payload["notifications_event_admin_login"].(bool); !ok || v {
+		t.Fatalf("admin-login not persisted: %v", payload["notifications_event_admin_login"])
 	}
 	// The secret value itself must never be returned.
 	if _, ok := payload["notifications_auth_header"].(string); ok {
@@ -214,11 +252,10 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 }
 
 func TestNotificationTestEndpoint(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -237,21 +274,23 @@ func TestNotificationTestEndpoint(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("test notification: %d", status)
 	}
-	p := waitForNotification(t, received)
-	if p.Event != eventTest || p.Summary != "Tiller test notification" {
-		t.Fatalf("unexpected test payload: %+v", p)
+	n := waitForNotification(t, received)
+	if n.title != "Tiller Test Notification" {
+		t.Fatalf("unexpected title: %q", n.title)
+	}
+	if n.body == "" {
+		t.Fatal("test notification body should not be empty")
 	}
 }
 
 func TestNotificationFallbackEvent(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer webhook-token" {
 			t.Errorf("webhook did not receive the configured Authorization header")
 		}
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -271,42 +310,27 @@ func TestNotificationFallbackEvent(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("fallback request should succeed, got %d", resp.StatusCode)
 	}
-	p := waitForNotification(t, received)
-	if p.Event != eventFallback {
-		t.Fatalf("expected fallback event, got %s", p.Event)
+	n := waitForNotification(t, received)
+	if n.title != "Tiller Fallback - "+canonical {
+		t.Fatalf("unexpected title: %q", n.title)
 	}
-	if p.Severity != severityWarning {
-		t.Fatalf("fallback severity should be warning, got %s", p.Severity)
-	}
-	if p.VirtualModel != canonical {
-		t.Fatalf("virtual model = %q, want %q", p.VirtualModel, canonical)
-	}
-	if p.FromProvider != "provider-a" || p.FromModel != "model-a" {
-		t.Fatalf("from target wrong: %s/%s", p.FromProvider, p.FromModel)
-	}
-	if p.ToProvider != "provider-b" || p.ToModel != "model-b" {
-		t.Fatalf("to target wrong: %s/%s", p.ToProvider, p.ToModel)
-	}
-	if p.AttemptCount != 2 {
-		t.Fatalf("attempt count = %d, want 2", p.AttemptCount)
-	}
-	if p.ClientKey != "notify client" {
-		t.Fatalf("client key = %q, want notify client", p.ClientKey)
-	}
-	if p.FinalStatus != 200 {
-		t.Fatalf("final status = %d, want 200 (the upstream 2xx must be captured, not the pre-response 0)", p.FinalStatus)
-	}
-	if p.Summary == "" {
-		t.Fatal("summary should not be empty")
+	for _, want := range []string{
+		"Client: notify client",
+		"Requested model: " + canonical,
+		"Failed #1: provider-a/model-a",
+		"Succeeded: provider-b/model-b",
+	} {
+		if !strings.Contains(n.body, want) {
+			t.Fatalf("message missing %q: %q", want, n.body)
+		}
 	}
 }
 
 func TestNotificationAllTargetsFailedEvent(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -325,27 +349,30 @@ func TestNotificationAllTargetsFailedEvent(t *testing.T) {
 	if resp.StatusCode != 503 {
 		t.Fatalf("all-targets-failed request should be 503, got %d", resp.StatusCode)
 	}
-	p := waitForNotification(t, received)
-	if p.Event != eventAllFailed {
-		t.Fatalf("expected all-failed event, got %s", p.Event)
+	n := waitForNotification(t, received)
+	if n.title != "Tiller Routing Failed - "+canonical {
+		t.Fatalf("unexpected title: %q", n.title)
 	}
-	if p.Severity != severityError {
-		t.Fatalf("all-failed severity should be error, got %s", p.Severity)
+	for _, want := range []string{
+		"Client: notify client",
+		"Requested model: " + canonical,
+		"Failed #1: provider-a/model-a",
+		"Failed #2: provider-b/model-b",
+	} {
+		if !strings.Contains(n.body, want) {
+			t.Fatalf("message missing %q: %q", want, n.body)
+		}
 	}
-	if p.AttemptCount != 2 {
-		t.Fatalf("attempt count = %d, want 2", p.AttemptCount)
-	}
-	if p.FinalStatus != 503 {
-		t.Fatalf("final status = %d, want 503", p.FinalStatus)
+	if strings.Contains(n.body, "Succeeded:") {
+		t.Fatalf("all-targets-failed message must not contain a Succeeded line: %q", n.body)
 	}
 }
 
 func TestNotificationEventToggleRespected(t *testing.T) {
-	received := make(chan notificationPayload, 1)
+	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p notificationPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		received <- p
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
 		w.WriteHeader(200)
 	}))
 	defer webhook.Close()
@@ -369,6 +396,176 @@ func TestNotificationEventToggleRespected(t *testing.T) {
 	case p := <-received:
 		t.Fatalf("notification should not fire when fallback event disabled, got %+v", p)
 	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
+	received := make(chan receivedNotification, 2)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
+		w.WriteHeader(200)
+	}))
+	defer webhook.Close()
+
+	api, secret, canonical := notificationTestHarness(t, failUpstream(t), okUpstream(t))
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{
+		"notifications_enabled":          true,
+		"notifications_webhook_url":      webhook.URL,
+		"notifications_event_fallback":   true,
+		"notifications_event_all_failed": true,
+		"notifications_cooldown_seconds": 60,
+	})
+	if status != 204 {
+		t.Fatalf("update settings: %d", status)
+	}
+	// First fallback for the model -> notification delivered.
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("request should succeed, got %d", resp.StatusCode)
+	}
+	waitForNotification(t, received)
+	// Second fallback for the same model within the cooldown -> suppressed.
+	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("request should succeed, got %d", resp.StatusCode)
+	}
+	select {
+	case p := <-received:
+		t.Fatalf("duplicate notification should be suppressed by cooldown, got %+v", p)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+func TestAdminEventNotifications(t *testing.T) {
+	received := make(chan receivedNotification, 4)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
+		w.WriteHeader(200)
+	}))
+	defer webhook.Close()
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{
+		"notifications_enabled":                    true,
+		"notifications_webhook_url":                webhook.URL,
+		"notifications_event_client_key_created":   true,
+		"notifications_event_client_key_deleted":  true,
+		"notifications_event_admin_login":          true,
+	})
+	if status != 204 {
+		t.Fatalf("update settings: %d", status)
+	}
+
+	// Create a client key -> notification.
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	keyID := payload["id"].(string)
+	n := waitForNotification(t, received)
+	if n.title != "Tiller Client key created" {
+		t.Fatalf("unexpected title: %q", n.title)
+	}
+	if !strings.Contains(n.body, "Client: alert-key") {
+		t.Fatalf("message missing client name: %q", n.body)
+	}
+
+	// Delete the client key -> notification.
+	status, _, _ = api.request("DELETE", "/api/admin/client-keys/"+keyID, nil)
+	if status != 204 {
+		t.Fatalf("delete key: %d", status)
+	}
+	n = waitForNotification(t, received)
+	if n.title != "Tiller Client key deleted" {
+		t.Fatalf("unexpected title: %q", n.title)
+	}
+	if !strings.Contains(n.body, "Client: alert-key") {
+		t.Fatalf("message missing client name: %q", n.body)
+	}
+
+	// Admin login -> notification.
+	status, _, _ = api.request("POST", "/api/admin/session", map[string]any{"username": "admin", "password": "correct horse"})
+	if status != 200 {
+		t.Fatalf("login: %d", status)
+	}
+	n = waitForNotification(t, received)
+	if n.title != "Tiller Admin login" {
+		t.Fatalf("unexpected title: %q", n.title)
+	}
+	if !strings.Contains(n.body, "User: admin") {
+		t.Fatalf("message missing user: %q", n.body)
+	}
+}
+
+func TestAdminEventToggleRespected(t *testing.T) {
+	received := make(chan receivedNotification, 1)
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		received <- receivedNotification{title: r.Header.Get("X-Title"), body: string(body)}
+		w.WriteHeader(200)
+	}))
+	defer webhook.Close()
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	// Notifications enabled, but the client-key-created toggle is off.
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{
+		"notifications_enabled":     true,
+		"notifications_webhook_url": webhook.URL,
+	})
+	if status != 204 {
+		t.Fatalf("update settings: %d", status)
+	}
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	select {
+	case p := <-received:
+		t.Fatalf("notification should not fire when toggle disabled, got %+v", p)
+	case <-time.After(500 * time.Millisecond):
+	}
+}
+
+// TestSendExampleNotificationsToNtfy sends one example of every notification
+// type to the real ntfy topic. It is opt-in (TILLER_NOTIFY_EXAMPLES=1) because
+// it hits the real network.
+func TestSendExampleNotificationsToNtfy(t *testing.T) {
+	if os.Getenv("TILLER_NOTIFY_EXAMPLES") == "" {
+		t.Skip("set TILLER_NOTIFY_EXAMPLES=1 to send example notifications to the real ntfy topic")
+	}
+	topic := "https://ntfy.sh/tiller_test_8913ubc081"
+	examples := []notificationPayload{
+		{Event: eventFallback, Severity: severityWarning, Timestamp: database.Now(), ClientKey: "Agentbox Hermes Argus", RequestedModel: "main/argus", VirtualModel: "main/argus", Attempts: []notificationAttempt{
+			{Provider: "nvidia", Model: "moonshotai/kimi-k3", Result: "failed", FailureClass: "http_500", HTTPStatus: 500, LatencyMs: 1234},
+			{Provider: "ollama", Model: "deepseek-v4-flash:0731", Result: "success", LatencyMs: 890},
+		}},
+		{Event: eventAllFailed, Severity: severityError, Timestamp: database.Now(), ClientKey: "Agentbox Hermes Argus", RequestedModel: "main/argus", VirtualModel: "main/argus", Attempts: []notificationAttempt{
+			{Provider: "nvidia", Model: "moonshotai/kimi-k3", Result: "failed", FailureClass: "http_500", HTTPStatus: 500, LatencyMs: 1234},
+			{Provider: "ollama", Model: "deepseek-v4-flash:0731", Result: "failed", FailureClass: "upstream_timeout", LatencyMs: 5000},
+		}},
+		{Event: eventTest, Severity: severityWarning, Timestamp: database.Now()},
+		{Event: eventClientKeyCreated, Severity: severityInfo, Timestamp: database.Now(), Message: "Client: demo-key\nType: catalogue"},
+		{Event: eventClientKeyDeleted, Severity: severityInfo, Timestamp: database.Now(), Message: "Client: demo-key"},
+		{Event: eventAdminLogin, Severity: severityInfo, Timestamp: database.Now(), Message: "User: admin\nIP: 192.0.2.1"},
+	}
+	for _, p := range examples {
+		body := []byte(p.humanMessage())
+		req, err := http.NewRequest(http.MethodPost, topic, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+		req.Header.Set("X-Title", p.heading())
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("delivery failed for %s: %v", p.Event, err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			t.Fatalf("delivery failed for %s: HTTP %d", p.Event, resp.StatusCode)
+		}
 	}
 }
 

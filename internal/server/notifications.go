@@ -3,9 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
@@ -17,18 +17,23 @@ const (
 	eventFallback   = "virtual_model_fallback"
 	eventAllFailed  = "virtual_model_failed"
 	eventTest       = "test"
+	eventClientKeyCreated = "client_key_created"
+	eventClientKeyDeleted = "client_key_deleted"
+	eventAdminLogin       = "admin_login"
 	severityWarning = "warning"
 	severityError   = "error"
+	severityInfo    = "info"
 )
 
 // notificationTimeout bounds a single best-effort webhook delivery. Delivery
 // is fire-and-forget and never blocks or delays the inference request.
 const notificationTimeout = 5 * time.Second
 
-// notificationPayload is the stable, metadata-only JSON body sent to the
-// webhook. It shares the Activity privacy boundary: it never contains prompts,
-// responses, tool arguments/results, reasoning, provider keys, client key
-// plaintext, auth headers, cookies, or credentials.
+// notificationPayload is the metadata captured for a single routing event. It
+// is rendered as a human-readable plain-text message for the webhook. It shares
+// the Activity privacy boundary: it never contains prompts, responses, tool
+// arguments/results, reasoning, provider keys, client key plaintext, auth
+// headers, cookies, or credentials.
 type notificationPayload struct {
 	Event          string `json:"event"`
 	Severity       string `json:"severity"`
@@ -36,23 +41,29 @@ type notificationPayload struct {
 	ClientKey      string `json:"client_key"`
 	RequestedModel string `json:"requested_model"`
 	VirtualModel   string `json:"virtual_model,omitempty"`
-	FromProvider   string `json:"from_provider,omitempty"`
-	FromModel      string `json:"from_model,omitempty"`
-	ToProvider     string `json:"to_provider,omitempty"`
-	ToModel        string `json:"to_model,omitempty"`
-	Reason         string `json:"reason,omitempty"`
 	AttemptCount   int    `json:"attempt_count"`
-	FinalStatus    int    `json:"final_status"`
-	Summary        string `json:"summary"`
+	Attempts       []notificationAttempt `json:"attempts,omitempty"`
+	// Message, when set, is the full human-readable body for non-routing
+	// (admin) events. It is rendered verbatim instead of the routing format.
+	Message string `json:"message,omitempty"`
+}
+
+// notificationAttempt is the per-target outcome of a routed request.
+type notificationAttempt struct {
+	Provider     string `json:"provider"`
+	Model        string `json:"model"`
+	Result       string `json:"result"`
+	FailureClass string `json:"failure_class,omitempty"`
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	LatencyMs    int64  `json:"latency_ms"`
 }
 
 // maybeNotify emits a single logical notification for a routed request based on
 // its final outcome. The payload is built synchronously here (before the
 // goroutine) because the caller's logRow continues to be mutated after this
-// call; finalStatus is the client-facing status the request will return, which
-// is not yet recorded on the row. Only the delivery runs detached, so it never
-// blocks or alters the client response.
-func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Response, finalStatus int) {
+// call. Only the delivery runs detached, so it never blocks or alters the
+// client response.
+func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Response) {
 	var event string
 	switch {
 	case resp != nil && row.fallbackUsed:
@@ -62,7 +73,27 @@ func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Respon
 	default:
 		return
 	}
-	payload := s.buildNotificationPayload(event, row, route, finalStatus)
+	payload := s.buildNotificationPayload(event, row, route)
+	go s.deliverNotification(event, payload)
+}
+
+// subjectToCooldown reports whether an event is throttled by the notification
+// cooldown. Only routing events (fallback, all-failed) are throttled; the manual
+// test and discrete admin events are not.
+func subjectToCooldown(event string) bool {
+	return event == eventFallback || event == eventAllFailed
+}
+
+// notifyAdminEvent emits a best-effort notification for a discrete admin action
+// (e.g. client key created/deleted, admin login). It is fire-and-forget and never
+// blocks the admin request. The message is the full human-readable body.
+func (s *Server) notifyAdminEvent(event, message string) {
+	payload := notificationPayload{
+		Event:     event,
+		Severity:  severityInfo,
+		Timestamp: database.Now(),
+		Message:   message,
+	}
 	go s.deliverNotification(event, payload)
 }
 
@@ -108,11 +139,30 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 	if event == eventAllFailed && !cfg.EventAllFailed {
 		return
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		s.logger.Warn("notification payload marshal failed", "event", event, "error", err.Error())
+	if event == eventClientKeyCreated && !cfg.EventClientKeyCreated {
 		return
 	}
+	if event == eventClientKeyDeleted && !cfg.EventClientKeyDeleted {
+		return
+	}
+	if event == eventAdminLogin && !cfg.EventAdminLogin {
+		return
+	}
+	// Throttle repeat notifications for the same event + model within the
+	// cooldown window. Only routing events are throttled; the manual test and
+	// discrete admin events are not.
+	if cfg.CooldownSeconds > 0 && subjectToCooldown(event) {
+		key := event + "|" + payload.VirtualModel
+		s.notifyCooldownMu.Lock()
+		now := time.Now()
+		if last, ok := s.notifyLastSent[key]; ok && now.Sub(last) < time.Duration(cfg.CooldownSeconds)*time.Second {
+			s.notifyCooldownMu.Unlock()
+			return
+		}
+		s.notifyLastSent[key] = now
+		s.notifyCooldownMu.Unlock()
+	}
+	body := []byte(payload.humanMessage())
 	reqCtx, cancel := context.WithTimeout(ctx, notificationTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, cfg.WebhookURL, bytes.NewReader(body))
@@ -120,7 +170,8 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 		s.logger.Warn("notification request build failed", "event", event, "error", err.Error())
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("X-Title", payload.heading())
 	req.Header.Set("User-Agent", "Tiller-Router/1")
 	if cfg.AuthHeader != "" {
 		req.Header.Set("Authorization", cfg.AuthHeader)
@@ -137,9 +188,7 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 // from the request's routing outcome. Only metadata already recorded for
 // Activity is used; no request or response content is ever included. It runs
 // synchronously in the request goroutine (before delivery is spawned).
-// finalStatus is the client-facing status the request will return (the row's
-// own httpStatus is not always set yet at the call site).
-func (s *Server) buildNotificationPayload(event string, row *logRow, route resolvedRoute, finalStatus int) notificationPayload {
+func (s *Server) buildNotificationPayload(event string, row *logRow, route resolvedRoute) notificationPayload {
 	p := notificationPayload{
 		Event:          event,
 		Timestamp:      row.createdAt,
@@ -147,32 +196,126 @@ func (s *Server) buildNotificationPayload(event string, row *logRow, route resol
 		RequestedModel: row.requestedModel,
 		VirtualModel:   route.RouteModel,
 		AttemptCount:   attemptCount(row.attempts),
-		FinalStatus:    finalStatus,
+	}
+	for _, a := range row.attempts {
+		p.Attempts = append(p.Attempts, notificationAttempt{
+			Provider:     a.provider,
+			Model:        a.model,
+			Result:       a.result,
+			FailureClass: a.failureClass,
+			HTTPStatus:   a.httpStatus,
+			LatencyMs:    a.latencyMs,
+		})
 	}
 	switch event {
 	case eventFallback:
 		p.Severity = severityWarning
-		if from, ok := lastFailedAttempt(row.attempts); ok {
-			p.FromProvider, p.FromModel = from.provider, from.model
-		}
-		if to, ok := successAttempt(row.attempts); ok {
-			p.ToProvider, p.ToModel = to.provider, to.model
-		}
-		if row.fallbackReason != nil {
-			p.Reason = *row.fallbackReason
-		}
-		p.Summary = fmt.Sprintf("Tiller fallback: %s — %s/%s → %s/%s", route.RouteModel, p.FromProvider, p.FromModel, p.ToProvider, p.ToModel)
 	case eventAllFailed:
 		p.Severity = severityError
-		if row.fallbackReason != nil {
-			p.Reason = *row.fallbackReason
-		}
-		p.Summary = fmt.Sprintf("Tiller routing failed: %s — %d targets attempted, no target succeeded", route.RouteModel, p.AttemptCount)
 	case eventTest:
 		p.Severity = severityWarning
-		p.Summary = "Tiller test notification"
 	}
 	return p
+}
+
+// heading returns the short human-readable title for the notification. It is
+// sent as the X-Title header so ntfy (and similar) render it as the heading.
+// The model in question (the virtual model, falling back to the requested model)
+// is included so the alert is identifiable at a glance.
+func (p notificationPayload) heading() string {
+	model := p.VirtualModel
+	if model == "" {
+		model = p.RequestedModel
+	}
+	switch p.Event {
+	case eventFallback:
+		return "Tiller Fallback - " + model
+	case eventAllFailed:
+		return "Tiller Routing Failed - " + model
+	case eventTest:
+		return "Tiller Test Notification"
+	case eventClientKeyCreated:
+		return "Tiller Client key created"
+	case eventClientKeyDeleted:
+		return "Tiller Client key deleted"
+	case eventAdminLogin:
+		return "Tiller Admin login"
+	default:
+		return "Tiller Notification"
+	}
+}
+
+// humanMessage renders the payload as a human-readable plain-text message. It
+// carries only metadata (the same privacy boundary as Activity) — no prompts,
+// responses, tool arguments, reasoning, or credentials.
+func (p notificationPayload) humanMessage() string {
+	var b strings.Builder
+	if p.Timestamp != "" {
+		b.WriteString(formatTimestamp(p.Timestamp))
+		b.WriteString("\n\n")
+	}
+	if p.Message != "" {
+		b.WriteString(p.Message)
+		return strings.TrimRight(b.String(), "\n")
+	}
+	if p.ClientKey != "" {
+		fmt.Fprintf(&b, "Client: %s\n", p.ClientKey)
+	}
+	if p.RequestedModel != "" {
+		fmt.Fprintf(&b, "Requested model: %s", p.RequestedModel)
+		if p.VirtualModel != "" && p.VirtualModel != p.RequestedModel {
+			fmt.Fprintf(&b, " Served model: %s", p.VirtualModel)
+		}
+		b.WriteString("\n")
+	}
+	failed := 0
+	for _, a := range p.Attempts {
+		switch a.Result {
+		case "failed":
+			failed++
+			fmt.Fprintf(&b, "Failed #%d: %s/%s [%s, %dms]\n", failed, a.Provider, a.Model, failureMessage(a.FailureClass, a.HTTPStatus), a.LatencyMs)
+		case "success":
+			fmt.Fprintf(&b, "Succeeded: %s/%s [%dms]\n", a.Provider, a.Model, a.LatencyMs)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// formatTimestamp renders an RFC3339Nano timestamp as DD/MM/YYYY, HH:MM in UTC.
+func formatTimestamp(ts string) string {
+	t, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return ts
+	}
+	return t.Format("02/01/2006, 15:04")
+}
+
+// failureMessage maps a machine-readable failure class (and optional HTTP status)
+// to a short human-readable description for a failed attempt.
+func failureMessage(class string, httpStatus int) string {
+	if httpStatus > 0 {
+		return fmt.Sprintf("HTTP %d", httpStatus)
+	}
+	switch class {
+	case "unavailable":
+		return "unavailable"
+	case "protocol_unavailable":
+		return "protocol not supported"
+	case "invalid_upstream":
+		return "invalid upstream"
+	case "upstream_unreachable":
+		return "unreachable"
+	case "upstream_timeout":
+		return "timeout"
+	case "upstream_read_error":
+		return "read error"
+	case "client_timeout":
+		return "client timeout"
+	case "client_cancelled":
+		return "client cancelled"
+	default:
+		return class
+	}
 }
 
 // clientKeyName resolves a client key's display name. It is best-effort; an
@@ -181,26 +324,6 @@ func (s *Server) clientKeyName(ctx context.Context, id string) string {
 	var name string
 	_ = s.db.SQL.QueryRowContext(ctx, `SELECT name FROM client_keys WHERE id=?`, id).Scan(&name)
 	return name
-}
-
-// lastFailedAttempt returns the most recent upstream attempt that failed.
-func lastFailedAttempt(attempts []requestAttempt) (requestAttempt, bool) {
-	for i := len(attempts) - 1; i >= 0; i-- {
-		if attempts[i].result == "failed" {
-			return attempts[i], true
-		}
-	}
-	return requestAttempt{}, false
-}
-
-// successAttempt returns the most recent upstream attempt that succeeded.
-func successAttempt(attempts []requestAttempt) (requestAttempt, bool) {
-	for i := len(attempts) - 1; i >= 0; i-- {
-		if attempts[i].result == "success" {
-			return attempts[i], true
-		}
-	}
-	return requestAttempt{}, false
 }
 
 // sendTestNotification sends a harmless "Tiller test notification" to the
@@ -221,13 +344,8 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		Event:     eventTest,
 		Severity:  severityWarning,
 		Timestamp: database.Now(),
-		Summary:   "Tiller test notification",
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		adminError(w, 500, "internal_error", "Could not build the test notification.")
-		return
-	}
+	body := []byte(payload.humanMessage())
 	ctx, cancel := context.WithTimeout(r.Context(), notificationTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.WebhookURL, bytes.NewReader(body))
@@ -235,7 +353,8 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_webhook_url", "The configured webhook URL is invalid.")
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	req.Header.Set("X-Title", payload.heading())
 	req.Header.Set("User-Agent", "Tiller-Router/1")
 	if cfg.AuthHeader != "" {
 		req.Header.Set("Authorization", cfg.AuthHeader)
@@ -247,7 +366,11 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		adminError(w, 502, "delivery_failed", fmt.Sprintf("The webhook returned HTTP %d.", resp.StatusCode))
+		msg := fmt.Sprintf("The webhook returned HTTP %d.", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			msg += " The endpoint rejected the request — a saved Authorization header is being sent and may be invalid; clear it in the notifications settings if the endpoint doesn't require one."
+		}
+		adminError(w, 502, "delivery_failed", msg)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"delivered": true})

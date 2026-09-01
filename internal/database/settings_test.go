@@ -71,3 +71,31 @@ func TestFallbackTimeout(t *testing.T) {
 		t.Fatalf("fallback timeout after set = %d, %v; want 120, nil", v, err)
 	}
 }
+
+func TestNotificationCooldownDefault(t *testing.T) {
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	ns, err := db.GetNotificationSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ns.CooldownSeconds != 60 {
+		t.Fatalf("default cooldown = %d, want 60", ns.CooldownSeconds)
+	}
+
+	if err := db.SetSetting(ctx, SettingNotificationsCooldownSeconds, "0"); err != nil {
+		t.Fatal(err)
+	}
+	ns, err = db.GetNotificationSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ns.CooldownSeconds != 0 {
+		t.Fatalf("cooldown after set = %d, want 0", ns.CooldownSeconds)
+	}
+}

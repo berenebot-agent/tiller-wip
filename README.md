@@ -90,9 +90,9 @@ Enable it, set any HTTP(S) endpoint (an
 [ntfy](https://ntfy.sh) topic is the simplest self-hosted example), and pick the
 events: *Fallback occurred* (an ordered-fallback virtual model advanced to a
 later target) and *All targets failed* (every eligible target was attempted and
-none succeeded). Payloads are metadata-only JSON with the same privacy boundary
-as Activity — no prompts, responses, or credentials — plus a short human-readable
-summary. Delivery is best-effort with a short timeout: a failed notification is
+none succeeded). Messages are human-readable plain text with an `X-Title` heading
+and carry only metadata with the same privacy boundary as Activity — no prompts,
+responses, or credentials. Delivery is best-effort with a short timeout: a failed notification is
 recorded in diagnostics and never fails, delays, or alters an inference request,
 and there is no queue or retry engine. An optional `Authorization` header is
 stored for endpoints that need one; it is write-only (never displayed again) and
@@ -156,17 +156,23 @@ examples.
 All dependency resolution, building, and Go tests run inside Docker via the
 `./tiller-go.sh` wrapper, which uses persistent bind-mounted caches and a RAM
 cap (no Go needs to be installed on the host). The browser and compatibility
-tests are fully containerized and need no host Go either:
+tests are fully containerized and need no host Go either. The test Dockerfiles
+use BuildKit RUN cache mounts and every test build passes `--pull=false`, so
+base images and package downloads (the large Playwright base image, apk/npm/pip
+packages) are reused locally instead of being re-downloaded on every run:
 
 ```sh
 ./tiller-go.sh mod tidy
 ./tiller-go.sh test ./...
-docker build -t tiller-router:dev .
-docker build -t tiller-router-browser-tests:dev tests/browser
-docker build -t tiller-router-sdk-probes:dev tests/compatibility
-docker build -f tests/compatibility/hermes.Dockerfile -t tiller-router-hermes-probe:dev tests/compatibility
-./tests/compatibility/run.sh
+docker build --pull=false -t tiller-router:dev .
+./tests/browser/run.sh        # build + start router & mock from a fresh temp DB, run Playwright, teardown
+./tests/compatibility/run.sh  # SDK + Codex/OpenCode/Claude-Code/Hermes probes
 ```
+
+`./tests/browser/run.sh` builds the router and browser images once, starts the
+mock upstream and a router from a **fresh ephemeral data dir** (so no state
+leaks between runs), runs the Playwright suite, and tears everything down —
+the single documented entry point for the UI tests.
 
 The test suite covers Argon2id key handling, migrations and namespace
 constraints, consistent backup, provider registry/discovery pagination,

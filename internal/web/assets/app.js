@@ -63,7 +63,7 @@ async function navigate(view) {
   try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'settings') await loadSettings(); }
   catch (error) { flash(errorMessage(error), 'error'); }
 }
-$$('[data-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.view)));
+$$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
 window.addEventListener('popstate', () => navigate(viewFromHash()));
 $('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
@@ -308,12 +308,14 @@ function singleTargetOptions(client = null) {
   if (client?.single_target_id && !options.some(item => item.kind === client.single_target_type && item.id === client.single_target_id)) options.unshift({ value:`${client.single_target_type}:${client.single_target_id}`, kind:client.single_target_type, id:client.single_target_id, label:`${client.single_target_type === 'virtual' ? 'Virtual' : 'Real'} · ${client.single_target_canonical || 'Unavailable target'}`, canonical:client.single_target_canonical || 'Unavailable target', disabled:true });
   return options.sort((a,b) => a.label.localeCompare(b.label));
 }
-function mountSingleTargetPicker(root, client, onChange = null, onEnter = null) {
+function mountSingleTargetPicker(root, client, onChange = null, onEnter = null, prefill = true) {
   const input = $('input[type="text"]', root), hidden = $('input[type="hidden"]', root), options = singleTargetOptions(client);
   const currentValue = client?.single_target_id ? `${client.single_target_type}:${client.single_target_id}` : '';
   const picker = combobox({ input, hidden, options, placeholder:'Search real or virtual models…', onSelect:onChange, onEnter });
-  const current = options.find(item => item.value === currentValue);
-  if (current) { hidden.value = current.value; input.value = current.label; }
+  if (prefill) {
+    const current = options.find(item => item.value === currentValue);
+    if (current) { hidden.value = current.value; input.value = current.label; }
+  }
   return picker;
 }
 function mountInlineRoutePicker(root, client) {
@@ -352,10 +354,66 @@ function mountInlineRoutePicker(root, client) {
     else { hidden.value = ''; input.value = ''; }
   });
 }
+// openRoutePicker is the mobile card's quick route change: a target-only
+// dialog with the current target pre-selected, instead of the full client
+// Settings dialog. It PATCHes just the binding — name and other settings are
+// untouched — and new requests use the new target immediately.
+function openRoutePicker(client) {
+  const dialog = $('#form-dialog');
+  // Mobile: render as a bottom sheet that stays above the virtual keyboard.
+  dialog.classList.add('route-picker-dialog');
+  dialog.addEventListener('close', () => dialog.classList.remove('route-picker-dialog'), { once: true });
+  openEntity({
+    eyebrow: 'CHANGE ROUTE',
+    title: `Route · ${client.name}`,
+    fields: `<label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model. New requests use the new target immediately.</small></label>`,
+    submit: 'Apply route',
+    onMount: form => {
+      // Start empty and focused so the user can type ahead from the first
+      // keystroke, like the desktop inline route box.
+      mountSingleTargetPicker($('[data-single-target]', form), client, null, null, false);
+    },
+    onSubmit: async form => {
+      const selected = String(new FormData(form).get('single_target') || ''), split = selected.indexOf(':');
+      if (split < 1) throw new Error('Choose an available real or virtual target.');
+      await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify({ single_target_type: selected.slice(0, split), single_target_id: selected.slice(split + 1) }) });
+      flash('Route updated. New requests use the new target immediately.');
+      await loadClients();
+    }
+  });
+}
+// Keep the mobile route picker (a bottom sheet) above the virtual keyboard.
+// The Visual Viewport API reports the keyboard as a shrink of the visual
+// viewport; we lift the dialog and cap the dropdown to the space above it.
+function positionRoutePickerAboveKeyboard() {
+  const dialog = $('#form-dialog');
+  if (!dialog.classList.contains('route-picker-dialog')) return;
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const keyboardHeight = Math.max(0, window.innerHeight - vv.height);
+  const list = $('.combobox-list', dialog);
+  if (keyboardHeight > 0) {
+    dialog.style.bottom = `${keyboardHeight}px`;
+    dialog.style.maxHeight = `${vv.height - keyboardHeight - 8}px`;
+    const input = $('[data-single-target] input[type="text"]', dialog);
+    if (input && list) {
+      const available = vv.height - (input.getBoundingClientRect().bottom - vv.offsetTop) - 8;
+      list.style.maxHeight = `${Math.max(120, Math.min(360, available))}px`;
+    }
+  } else {
+    dialog.style.bottom = '';
+    dialog.style.maxHeight = '';
+    if (list) list.style.maxHeight = '';
+  }
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', positionRoutePickerAboveKeyboard);
+  window.visualViewport.addEventListener('scroll', positionRoutePickerAboveKeyboard);
+}
 function clientCard(client) {
   const statusDot = `<span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span>`;
   const routeAction = client.type === 'single'
-    ? `<button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Change route</button>`
+    ? `<button class="btn btn-small btn-secondary" data-client-route="${h(client.id)}">Change route</button>`
     : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Catalogue permissions</button>`;
   const routeSummary = client.type === 'single'
     ? `<code class="model-id ${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</code>${client.single_target_available === false ? '<span class="client-route-broken">Unavailable</span>' : ''}`
@@ -369,12 +427,12 @@ function clientCard(client) {
       <span class="client-card-chevron" aria-hidden="true">▾</span>
     </button>
     <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
+      <div class="client-card-field"><span class="client-card-label">Route</span><div class="client-card-route">${routeSummary}${routeAction}</div></div>
       <div class="client-card-field"><span class="client-card-label">Description</span><span>${h(client.description || 'No description')}</span></div>
       <div class="client-card-field"><span class="client-card-label">Fingerprint</span><code class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</code></div>
       <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
       ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
       <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
-      <div class="client-card-field"><span class="client-card-label">Route</span><div class="client-card-route">${routeSummary}${routeAction}</div></div>
       <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
@@ -396,6 +454,7 @@ function renderClients() {
   }).join('');
   $$('[data-inline-route]').forEach(box => mountInlineRoutePicker(box.closest('.client-route-picker'), state.clients.find(item => item.id === box.closest('.client-route-picker').dataset.clientId)));
   $$('[data-client-models]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientModels)));
+  $$('[data-client-route]').forEach(button => button.onclick = () => openRoutePicker(state.clients.find(item => item.id === button.dataset.clientRoute)));
   $$('[data-client-activity]').forEach(button => button.onclick = () => openActivity(state.clients.find(item => item.id === button.dataset.clientActivity))); $$('[data-client-rotate]').forEach(button => button.onclick = () => rotateClient(button.dataset.clientRotate)); $$('[data-client-edit]').forEach(button => button.onclick = () => openClient(state.clients.find(item => item.id === button.dataset.clientEdit))); $$('[data-client-delete]').forEach(button => button.onclick = () => deleteClient(button.dataset.clientDelete));
 }
 // Mobile card accordion: tapping a card head expands its detail in place,
@@ -609,17 +668,19 @@ $('#save-permissions').onclick = async () => {
 const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
 async function openActivity(client) { activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; await loadActivity(); $('#activity-dialog').showModal(); }
 async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; await loadActivity(); $('#activity-dialog').showModal(); }
-async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
+async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
 function activityAttempt(attempt, index) { return `<div class="activity-attempt ${attempt.result === 'success' ? 'attempt-success' : 'attempt-failed'}"><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code>${h(attempt.provider)}/${h(attempt.model)}</code></span><span class="attempt-latency">${attempt.latency_ms} ms</span><span class="attempt-status">${attempt.http_status || h(attempt.result)}</span></div>`; }
-function attemptSequence(row) { if (!row.fallback_used || !row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map(activityAttempt).join('')}</div>`; }
-function resolvedActivity(row) { const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', latency_ms: row.latency_ms, http_status: row.http_status, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null; const resolved = row.fallback_used ? '' : fixedAttempt ? `<div class="attempt-sequence">${activityAttempt(fixedAttempt, 0)}</div>` : '<span class="meta-line">—</span>'; const sequence = row.fallback_used ? attemptSequence(row) : ''; const error = row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''; return `${resolved}${sequence}${error}`; }
+function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map(activityAttempt).join('')}</div>`; }
+function resolvedActivity(row) { const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', latency_ms: row.latency_ms, http_status: row.http_status, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null; const resolved = row.fallback_used ? '' : fixedAttempt ? `<div class="attempt-sequence">${activityAttempt(fixedAttempt, 0)}</div>` : ''; const sequence = (row.fallback_used || !fixedAttempt) ? attemptSequence(row) : ''; const error = sequence ? '' : (row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''); return `${resolved}${sequence}${error}`; }
 function requestIdentity(row) { if (row.exposed_model && row.exposed_model !== row.requested_model) { return `<code class="model-id">${h(row.requested_model)}</code><br><span class="meta-line">map &gt; ${h(row.exposed_model)}</span>`; } return `<code class="model-id">${h(row.requested_model)}</code>`; }
 function renderActivity() { const showClient = !activityState.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td><code class="model-id">${h(row.client_request_id)}</code></td></tr>`).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; }
 filterInput('#activity-search', value => { activityState.search = value; activityState.offset = 0; loadActivity(); });
 $('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activityState.offset - activityState.limit); loadActivity(); };
 $('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
-$('#export-activity').onclick = () => { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity/export` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity/export` : `/api/admin/virtual-models/${activityState.modelID}/activity/export`; const url = `${base}?search=${encodeURIComponent(activityState.search || '')}`; const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); };
+$('#export-activity').onclick = () => $('#export-dialog').showModal();
+$('#close-export').onclick = () => $('#export-dialog').close();
+$$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick = () => { const period = button.dataset.exportPeriod; const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity/export` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity/export` : `/api/admin/virtual-models/${activityState.modelID}/activity/export`; const url = `${base}?period=${period}&search=${encodeURIComponent(activityState.search || '')}`; const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); $('#export-dialog').close(); });
 
 // Global activity is a read-only section in the Settings view, distinct from
 // the per-client Activity dialog. It shows metadata across all client keys and
@@ -627,7 +688,7 @@ $('#export-activity').onclick = () => { const base = activityState.kind === 'cli
 // requestIdentity(), rowCache(), lazy attempt fetches) so fallbacks appear
 // identically — the extra Client column is the only difference.
 const globalActivityState = { rows: [], offset: 0, limit: 50, search: '', hasMore: true };
-async function loadGlobalActivity() { globalActivityState.controller?.abort(); globalActivityState.controller = new AbortController(); const { signal } = globalActivityState.controller; try { const result = await api(`/api/admin/activity?limit=${globalActivityState.limit + 1}&offset=${globalActivityState.offset}&search=${encodeURIComponent(globalActivityState.search || '')}`, { signal }); const fetched = result.data; globalActivityState.hasMore = fetched.length > globalActivityState.limit; globalActivityState.rows = fetched.slice(0, globalActivityState.limit); await Promise.all(globalActivityState.rows.filter(row => row.attempt_count > 1).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#global-activity-error').textContent = ''; renderGlobalActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#global-activity-error').textContent = errorMessage(error); } }
+async function loadGlobalActivity() { globalActivityState.controller?.abort(); globalActivityState.controller = new AbortController(); const { signal } = globalActivityState.controller; try { const result = await api(`/api/admin/activity?limit=${globalActivityState.limit + 1}&offset=${globalActivityState.offset}&search=${encodeURIComponent(globalActivityState.search || '')}`, { signal }); const fetched = result.data; globalActivityState.hasMore = fetched.length > globalActivityState.limit; globalActivityState.rows = fetched.slice(0, globalActivityState.limit); await Promise.all(globalActivityState.rows.filter(row => row.attempt_count > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#global-activity-error').textContent = ''; renderGlobalActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#global-activity-error').textContent = errorMessage(error); } }
 function renderGlobalActivity() { $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong class="client-name">${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td><code class="model-id">${h(row.client_request_id)}</code></td></tr>`).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
 filterInput('#global-activity-search', value => { globalActivityState.search = value; globalActivityState.offset = 0; loadGlobalActivity(); });
 $('#global-activity-prev').onclick = () => { globalActivityState.offset = Math.max(0, globalActivityState.offset - globalActivityState.limit); loadGlobalActivity(); };
@@ -635,13 +696,13 @@ $('#global-activity-next').onclick = () => { globalActivityState.offset += globa
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
-async function loadSettings() { const [health, settings] = await Promise.all([api('/api/admin/health'), api('/api/admin/settings')]); $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; await loadGlobalActivity(); }
-async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = ''; const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on' }; if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
+async function loadSettings() { const [health, settings] = await Promise.all([api('/api/admin/health'), api('/api/admin/settings')]); $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; $('[name="notifications_cooldown_seconds"]', nf).value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; await loadGlobalActivity(); }
+async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = ''; const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_event_admin_login: notificationsValues.get('notifications_event_admin_login') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
 $('#save-settings-top').addEventListener('click', saveSettings);
 $('#save-settings-bottom').addEventListener('click', saveSettings);
 $('[name="notifications_auth_header"]', $('#notifications-form')).addEventListener('input', () => { authHeaderDirty = true; authHeaderClear = false; });
-$('#clear-notifications-auth').addEventListener('click', () => { authHeaderClear = true; authHeaderDirty = false; $('[name="notifications_auth_header"]', $('#notifications-form')).value = ''; $('#notifications-auth-note').textContent = 'The saved Authorization header will be removed when settings are saved.'; });
-$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
+$('#clear-notifications-auth').addEventListener('click', async () => { const button = $('#clear-notifications-auth'); button.disabled = true; $('#notifications-error').textContent = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ notifications_auth_header: '' }) }); authHeaderClear = false; authHeaderDirty = false; $('[name="notifications_auth_header"]', $('#notifications-form')).value = ''; $('#notifications-auth-note').textContent = 'Authorization header cleared.'; $('#clear-notifications-auth').hidden = true; } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
+$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
 
 let entitySubmit = null;
 function openEntity({ eyebrow, title, fields, submit, onMount, onSubmit }) { const dialog = $('#form-dialog'), form = $('#entity-form'); $('#dialog-eyebrow').textContent = eyebrow; $('#dialog-title').textContent = title; $('#dialog-fields').innerHTML = fields; $('#dialog-submit').textContent = submit; $('#dialog-error').textContent = ''; entitySubmit = onSubmit; form.onsubmit = handleEntitySubmit; dialog.showModal(); onMount?.(form); setTimeout(() => $('input:not([type="checkbox"]),select,textarea', form)?.focus(), 0); }

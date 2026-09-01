@@ -159,6 +159,17 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
     data: { name: clientName, type: 'single', single_model_name: 'main', single_target_type: 'real', single_target_id: real.id }
   });
   expect(createRes.status()).toBe(201);
+  const secret = (await createRes.json()).secret;
+
+  // Create the alternative virtual target BEFORE opening the quick picker: the
+  // combobox options are built from state when the dialog mounts. The model
+  // name is deliberately unique so it can't match other tests' searches.
+  const models = (await modelsResponse.json()).data;
+  const groupResponse = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'zzz-msf-vg' } });
+  expect(groupResponse.status()).toBe(201);
+  const group = await groupResponse.json();
+  const virtualResponse = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'msf-alt', target_provider_id: provider.id, target_model_id: models.find(model => model.upstream_model_id === 'mock-model')?.id || models[0].id } });
+  expect(virtualResponse.status()).toBe(201);
 
   await page.reload();
   const card = page.locator('.client-card', { hasText: clientName });
@@ -172,10 +183,43 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   // The route is available, so no broken-target badge.
   await expect(detail.locator('.client-route-broken')).toHaveCount(0);
 
-  // "Change route" opens the client Settings dialog, which contains the actual
-  // target picker (the permissions dialog cannot repoint a Single key).
+  // "Change route" opens the target-only quick picker — not the full client
+  // Settings dialog. On mobile it renders as a bottom sheet.
   await detail.getByRole('button', { name: 'Change route' }).click();
-  await expect(page.locator('#form-dialog')).toBeVisible();
+  const dialog = page.locator('#form-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveClass(/route-picker-dialog/);
+  await expect(page.locator('#dialog-title')).toHaveText(`Route · ${clientName}`);
+  // Only the target field: no client-name, model-name, or type fields.
+  await expect(dialog.locator('[name="name"]')).toHaveCount(0);
+  await expect(dialog.locator('[name="single_model_name"]')).toHaveCount(0);
+  await expect(dialog.locator('[name="type"]')).toHaveCount(0);
+  const routeInput = dialog.locator('[data-single-target] input[type="text"]');
+  // Starts empty and focused so the user can type ahead from the first
+  // keystroke, like the desktop inline route box.
+  await expect(routeInput).toHaveValue('');
+  await expect(routeInput).toBeFocused();
+
+  // Click opens the full option list; pick the virtual target created earlier.
+  await routeInput.click();
+  await page.getByRole('option', { name: 'Virtual · zzz-msf-vg/msf-alt' }).click();
+  await expect(routeInput).toHaveValue('Virtual · zzz-msf-vg/msf-alt');
+  await dialog.getByRole('button', { name: 'Apply route' }).click();
+  await expect(dialog).toBeHidden();
+
+  // The card re-renders with the new target; the server binding actually changed.
+  const refreshedCard = page.locator('.client-card', { hasText: clientName });
+  // The accordion restarts collapsed after the re-render, so expand it again.
+  await refreshedCard.locator('.client-card-head').click();
+  const refreshedDetail = refreshedCard.locator('.client-card-detail');
+  await expect(refreshedDetail).toBeVisible();
+  await expect(refreshedDetail.locator('.client-card-route')).toContainText('zzz-msf-vg/msf-alt');
+  const catalogueResponse = await page.request.get('/v1/models', { headers: { Authorization: `Bearer ${secret}` } });
+  expect(catalogueResponse.status()).toBe(200);
+  expect((await catalogueResponse.json()).data.map(model => model.id)).toEqual(['main']);
+
+  // "Settings" in the actions row still opens the full client Settings dialog.
+  await refreshedDetail.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.locator('#form-dialog').getByLabel('Client-facing model name')).toHaveValue('main');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
   await expect(page.locator('#form-dialog')).toBeHidden();

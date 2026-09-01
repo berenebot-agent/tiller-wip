@@ -33,6 +33,10 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"notifications_webhook_url":      notifications.WebhookURL,
 		"notifications_event_fallback":   notifications.EventFallback,
 		"notifications_event_all_failed": notifications.EventAllFailed,
+		"notifications_cooldown_seconds": notifications.CooldownSeconds,
+		"notifications_event_client_key_created": notifications.EventClientKeyCreated,
+		"notifications_event_client_key_deleted": notifications.EventClientKeyDeleted,
+		"notifications_event_admin_login":       notifications.EventAdminLogin,
 		"notifications_auth_header_set":  notifications.AuthHeader != "",
 	})
 }
@@ -46,6 +50,10 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		NotificationsWebhookURL     *string `json:"notifications_webhook_url"`
 		NotificationsEventFallback  *bool   `json:"notifications_event_fallback"`
 		NotificationsEventAllFailed *bool   `json:"notifications_event_all_failed"`
+		NotificationsCooldownSeconds *int   `json:"notifications_cooldown_seconds"`
+		NotificationsEventClientKeyCreated *bool `json:"notifications_event_client_key_created"`
+		NotificationsEventClientKeyDeleted *bool `json:"notifications_event_client_key_deleted"`
+		NotificationsEventAdminLogin       *bool `json:"notifications_event_admin_login"`
 		NotificationsAuthHeader     *string `json:"notifications_auth_header"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
@@ -65,6 +73,10 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 400, "invalid_webhook_url", "The webhook URL must be a valid http(s) URL.")
 			return
 		}
+	}
+	if input.NotificationsCooldownSeconds != nil && *input.NotificationsCooldownSeconds < 0 {
+		adminError(w, 400, "invalid_cooldown", "Notification cooldown must be 0 or more seconds.")
+		return
 	}
 	if input.DefaultLoggingEnabled != nil {
 		if err := s.db.SetSetting(r.Context(), database.SettingDefaultLoggingEnabled, strconv.FormatBool(*input.DefaultLoggingEnabled)); err != nil {
@@ -105,6 +117,30 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.NotificationsEventAllFailed != nil {
 		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventAllFailed, strconv.FormatBool(*input.NotificationsEventAllFailed)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsCooldownSeconds != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsCooldownSeconds, strconv.Itoa(*input.NotificationsCooldownSeconds)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventClientKeyCreated != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventClientKeyCreated, strconv.FormatBool(*input.NotificationsEventClientKeyCreated)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventClientKeyDeleted != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventClientKeyDeleted, strconv.FormatBool(*input.NotificationsEventClientKeyDeleted)); err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+	}
+	if input.NotificationsEventAdminLogin != nil {
+		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventAdminLogin, strconv.FormatBool(*input.NotificationsEventAdminLogin)); err != nil {
 			adminError(w, 500, "database_error", "Could not update settings.")
 			return
 		}

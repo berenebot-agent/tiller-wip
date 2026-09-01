@@ -83,6 +83,32 @@ func TestClientActivityCSVExport(t *testing.T) {
 	}
 }
 
+func TestClientActivityCSVExportPeriodFilter(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	now := time.Now().UTC()
+	insertLogRow(t, db, "row-old", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-old", nil, now.Add(-40*24*time.Hour).Format(time.RFC3339Nano))
+	insertLogRow(t, db, "row-recent", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-recent", nil, now.Add(-time.Hour).Format(time.RFC3339Nano))
+
+	// 24h excludes the 40-day-old row.
+	status, body := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export?period=24h")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, _ := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if len(records) != 2 { // header + 1 row
+		t.Fatalf("24h export should have header + 1 row, got %d", len(records))
+	}
+	// all includes both.
+	status, body = getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export?period=all")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, _ = csv.NewReader(strings.NewReader(body)).ReadAll()
+	if len(records) != 3 { // header + 2 rows
+		t.Fatalf("all export should have header + 2 rows, got %d", len(records))
+	}
+}
+
 func TestClientActivityCSVExportRequiresAdmin(t *testing.T) {
 	api, _, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	req, _ := http.NewRequest("GET", api.base+"/api/admin/client-keys/"+clientID+"/activity/export", nil)

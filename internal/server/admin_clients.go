@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -186,6 +187,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": clientID, "name": input.Name, "type": input.Type, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. It cannot be displayed again."})
+	s.notifyAdminEvent(eventClientKeyCreated, fmt.Sprintf("Client: %s\nType: %s", input.Name, input.Type))
 }
 
 func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
@@ -330,6 +332,14 @@ func (s *Server) rotateClientKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
+	var name string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT name FROM client_keys WHERE id=?`, clientID).Scan(&name); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Client key not found.")
+		return
+	} else if err != nil {
+		adminError(w, 500, "database_error", "Could not delete client key.")
+		return
+	}
 	result, err := s.db.SQL.ExecContext(r.Context(), `DELETE FROM client_keys WHERE id=?`, clientID)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete client key.")
@@ -342,6 +352,7 @@ func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
+	s.notifyAdminEvent(eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
 }
 
 type permissionGroup struct {
