@@ -198,8 +198,6 @@ func (p notificationPayload) humanMessage() string {
 		b.WriteString(formatTimestamp(p.Timestamp))
 		b.WriteString("\n\n")
 	}
-	b.WriteString(p.heading())
-	b.WriteString("\n")
 	if p.ClientKey != "" {
 		fmt.Fprintf(&b, "Client: %s\n", p.ClientKey)
 	}
