@@ -13,7 +13,12 @@ module.exports = defineConfig({
   workers: 1,
   use: {
     baseURL: process.env.TILLER_BROWSER_BASE_URL || 'http://127.0.0.1:18080',
-    trace: 'retain-on-failure'
+    trace: 'retain-on-failure',
+    // Grant clipboard so the secret-copy test can both write and read the OS
+    // clipboard. Without `clipboard-read`, navigator.clipboard.readText()
+    // rejects and the "did the key actually land on the clipboard?" assertion
+    // cannot run.
+    permissions: ['clipboard-read', 'clipboard-write']
   },
   reporter: [['list', { printSteps: false }]]
 });

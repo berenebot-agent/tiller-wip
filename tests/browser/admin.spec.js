@@ -75,8 +75,21 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
 
   const secret = page.locator('#secret-value');
   await expect(secret).toHaveText(/^sk-tr-[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}$/);
+  const expectedSecret = (await secret.textContent()).trim();
   await page.getByRole('button', { name: 'Copy' }).click();
   await expect(page.locator('#copy-state')).toHaveText('Copied to clipboard.');
+  // Guard against the bug class where the UI says "Copied" but the clipboard
+  // is empty. 127.0.0.1 is a secure-context loopback origin so the modern
+  // navigator.clipboard.writeText path runs in CI; this assertion reads the
+  // OS clipboard back and verifies it actually contains the secret, not just
+  // that the state message lies about it. The legacy textarea+execCommand
+  // path (the one the fix targets for LAN HTTP origins) cannot be reliably
+  // verified in headless Chromium — execCommand needs a real user gesture to
+  // land anything — so its authoritative check is a manual LAN test.
+  await expect.poll(
+    () => page.evaluate(() => navigator.clipboard.readText()),
+    { timeout: 3000 }
+  ).toBe(expectedSecret);
   await page.getByRole('button', { name: 'I have stored the key' }).click();
   await expect(secret).toHaveText('');
   await expect(page.locator('#clients-body tr.group-row')).toHaveCount(1);
