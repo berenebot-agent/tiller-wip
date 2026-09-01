@@ -274,6 +274,7 @@ func TestNotificationFallbackEvent(t *testing.T) {
 	for _, want := range []string{
 		"Tiller fallback",
 		"Client: notify client",
+		"Requested model: " + canonical,
 		"Failed #1: provider-a/model-a",
 		"Succeeded: provider-b/model-b",
 	} {
@@ -310,12 +311,16 @@ func TestNotificationAllTargetsFailedEvent(t *testing.T) {
 	for _, want := range []string{
 		"Tiller routing failed",
 		"Client: notify client",
+		"Requested model: " + canonical,
 		"Failed #1: provider-a/model-a",
 		"Failed #2: provider-b/model-b",
 	} {
 		if !strings.Contains(p, want) {
 			t.Fatalf("message missing %q: %q", want, p)
 		}
+	}
+	if strings.Contains(p, "Succeeded:") {
+		t.Fatalf("all-targets-failed message must not contain a Succeeded line: %q", p)
 	}
 }
 
