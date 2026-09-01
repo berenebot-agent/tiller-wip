@@ -43,6 +43,37 @@ func TestClientIPTrustBoundary(t *testing.T) {
 	}
 }
 
+func TestEveryAdministrativeRouteRequiresAuthentication(t *testing.T) {
+	app, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/admin/session"}, {http.MethodDelete, "/api/admin/session"},
+		{http.MethodGet, "/api/admin/provider-types"}, {http.MethodGet, "/api/admin/providers"}, {http.MethodPost, "/api/admin/providers"},
+		{http.MethodPatch, "/api/admin/providers/id"}, {http.MethodDelete, "/api/admin/providers/id"}, {http.MethodPut, "/api/admin/providers/id/credential"},
+		{http.MethodPost, "/api/admin/providers/id/refresh"}, {http.MethodGet, "/api/admin/providers/id/models"}, {http.MethodGet, "/api/admin/models"},
+		{http.MethodGet, "/api/admin/virtual-groups"}, {http.MethodPost, "/api/admin/virtual-groups"}, {http.MethodPatch, "/api/admin/virtual-groups/id"},
+		{http.MethodDelete, "/api/admin/virtual-groups/id"}, {http.MethodGet, "/api/admin/virtual-models"}, {http.MethodPost, "/api/admin/virtual-models"},
+		{http.MethodPatch, "/api/admin/virtual-models/id"}, {http.MethodDelete, "/api/admin/virtual-models/id"}, {http.MethodGet, "/api/admin/client-keys"},
+		{http.MethodPost, "/api/admin/client-keys"}, {http.MethodPatch, "/api/admin/client-keys/id"}, {http.MethodDelete, "/api/admin/client-keys/id"},
+		{http.MethodPost, "/api/admin/client-keys/id/rotate"}, {http.MethodGet, "/api/admin/client-keys/id/permissions"}, {http.MethodPut, "/api/admin/client-keys/id/permissions"},
+		{http.MethodGet, "/api/admin/client-keys/id/activity"}, {http.MethodGet, "/api/admin/client-keys/id/activity/export"}, {http.MethodDelete, "/api/admin/client-keys/id/activity"},
+		{http.MethodGet, "/api/admin/virtual-models/id/activity"}, {http.MethodGet, "/api/admin/virtual-models/id/activity/export"},
+		{http.MethodGet, "/api/admin/models/id/activity"}, {http.MethodGet, "/api/admin/models/id/activity/export"},
+		{http.MethodGet, "/api/admin/settings"}, {http.MethodPut, "/api/admin/settings"}, {http.MethodPost, "/api/admin/notifications/test"},
+		{http.MethodGet, "/api/admin/usage"}, {http.MethodGet, "/api/admin/activity"}, {http.MethodGet, "/api/admin/activity/id/attempts"},
+		{http.MethodGet, "/api/admin/health"}, {http.MethodGet, "/api/admin/backup/export"},
+	}
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			req := httptest.NewRequest(route.method, route.path, nil)
+			response := httptest.NewRecorder()
+			app.Handler().ServeHTTP(response, req)
+			if response.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", response.Code)
+			}
+		})
+	}
+}
+
 func newSecurityTestServer(t *testing.T, cfg config.Config) (*Server, *database.DB) {
 	t.Helper()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
