@@ -6,21 +6,25 @@ services:
       args:
         TILLER_UID: ${TILLER_UID:-65532}
         TILLER_GID: ${TILLER_GID:-65532}
-    
+
     restart: unless-stopped
     read_only: true
     tmpfs:
       - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
     cap_drop:
       - ALL
+    security_opt:
+      - no-new-privileges:true
     environment:
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
-      TILLER_DATA_DIR: /data
-      TILLER_LISTEN_ADDR: :8080
-      TILLER_TRUST_PROXY_HEADERS: ${TILLER_TRUST_PROXY_HEADERS:-false}
-      TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
-      TILLER_MODELS_DEV_ENABLED: ${TILLER_MODELS_DEV_ENABLED:-true}
+
+      # Behind a reverse proxy (Caddy / Nginx / Traefik / etc.) that sets
+      # X-Forwarded-For and Forwarded, enable these so the router trusts the
+      # proxy-supplied client IP. Both default to off; do NOT enable without
+      # also setting TILLER_TRUSTED_PROXY to the proxy's CIDR.
+      # TILLER_TRUST_PROXY_HEADERS: "true"
+      # TILLER_TRUSTED_PROXY: 172.18.0.0
     volumes:
       - ./data:/data
     healthcheck:
@@ -31,5 +35,3 @@ services:
       start_period: 10s
     ports:
       - 0.0.0.0:${TILLER_PORT:-8080}:8080
-    security_opt:
-      - no-new-privileges:true
