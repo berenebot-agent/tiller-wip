@@ -12,13 +12,11 @@
   A lightweight, self-hosted LLM router with a control panel built for people who actually change models.
 </p>
 
-> **Alpha software.** Tiller Router is approaching its first public release. Feedback is welcomed but use with caution.
+> **Alpha software.** Tiller Router is approaching its first public release. Feedback is welcomed and use with caution.
 
 ---
 
 ## Why Tiller exists
-
-Three annoyances kept coming up with a growing collection of LLM agents, coding tools and automations:
 
 1. **Every tool had its own (bad) model selector.** Some bury it in settings, some want model IDs in config files, some barely support changing models at all. Tiller moves model selection out of the tool and into one control panel — change it without touching the clients.
 2. **Cheap and free API access is useful — until it rate-limits.** Tiller gives virtual models an **ordered fallback chain**, so a limited provider is useful without becoming a single point of failure.
