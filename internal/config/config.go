@@ -23,11 +23,11 @@ type Config struct {
 
 func Load() (Config, error) {
 	c := Config{
-		AdminUsername:   os.Getenv("TILLER_ADMIN_USERNAME"),
-		AdminPassword:   os.Getenv("TILLER_ADMIN_PASSWORD"),
-		AdminSessionTTL: 30 * 24 * time.Hour,
-		DataDir:         envDefault("TILLER_DATA_DIR", "/data"),
-		ListenAddr:      envDefault("TILLER_LISTEN_ADDR", ":8080"),
+		AdminUsername:    os.Getenv("TILLER_ADMIN_USERNAME"),
+		AdminPassword:    os.Getenv("TILLER_ADMIN_PASSWORD"),
+		AdminSessionTTL:  30 * 24 * time.Hour,
+		DataDir:          envDefault("TILLER_DATA_DIR", "/data"),
+		ListenAddr:       envDefault("TILLER_LISTEN_ADDR", ":8080"),
 		ModelsDevEnabled: true,
 	}
 	if raw := os.Getenv("TILLER_ADMIN_SESSION_TTL"); raw != "" {

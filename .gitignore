@@ -5,5 +5,10 @@ tests/browser/test-results/
 tests/browser/playwright-report/
 *.log
 .env
-docs/
+# Keep public documentation reviewable. Internal release planning and
+# unpublished roadmap/archive material stay local.
+docs/todo_release.md
+docs/roadmap_*.md
+docs/archive/
+docs/media/
 tests/hermes_test/

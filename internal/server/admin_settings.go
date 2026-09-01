@@ -26,35 +26,35 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"default_logging_enabled":        enabled,
-		"default_retention_days":         retention,
-		"fallback_timeout_seconds":       fallbackTimeout,
-		"notifications_enabled":          notifications.Enabled,
-		"notifications_webhook_url":      notifications.WebhookURL,
-		"notifications_event_fallback":   notifications.EventFallback,
-		"notifications_event_all_failed": notifications.EventAllFailed,
-		"notifications_cooldown_seconds": notifications.CooldownSeconds,
+		"default_logging_enabled":                enabled,
+		"default_retention_days":                 retention,
+		"fallback_timeout_seconds":               fallbackTimeout,
+		"notifications_enabled":                  notifications.Enabled,
+		"notifications_webhook_url":              notifications.WebhookURL,
+		"notifications_event_fallback":           notifications.EventFallback,
+		"notifications_event_all_failed":         notifications.EventAllFailed,
+		"notifications_cooldown_seconds":         notifications.CooldownSeconds,
 		"notifications_event_client_key_created": notifications.EventClientKeyCreated,
 		"notifications_event_client_key_deleted": notifications.EventClientKeyDeleted,
-		"notifications_event_admin_login":       notifications.EventAdminLogin,
-		"notifications_auth_header_set":  notifications.AuthHeader != "",
+		"notifications_event_admin_login":        notifications.EventAdminLogin,
+		"notifications_auth_header_set":          notifications.AuthHeader != "",
 	})
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		DefaultLoggingEnabled       *bool   `json:"default_logging_enabled"`
-		DefaultRetentionDays        *int    `json:"default_retention_days"`
-		FallbackTimeoutSeconds      *int    `json:"fallback_timeout_seconds"`
-		NotificationsEnabled        *bool   `json:"notifications_enabled"`
-		NotificationsWebhookURL     *string `json:"notifications_webhook_url"`
-		NotificationsEventFallback  *bool   `json:"notifications_event_fallback"`
-		NotificationsEventAllFailed *bool   `json:"notifications_event_all_failed"`
-		NotificationsCooldownSeconds *int   `json:"notifications_cooldown_seconds"`
-		NotificationsEventClientKeyCreated *bool `json:"notifications_event_client_key_created"`
-		NotificationsEventClientKeyDeleted *bool `json:"notifications_event_client_key_deleted"`
-		NotificationsEventAdminLogin       *bool `json:"notifications_event_admin_login"`
-		NotificationsAuthHeader     *string `json:"notifications_auth_header"`
+		DefaultLoggingEnabled              *bool   `json:"default_logging_enabled"`
+		DefaultRetentionDays               *int    `json:"default_retention_days"`
+		FallbackTimeoutSeconds             *int    `json:"fallback_timeout_seconds"`
+		NotificationsEnabled               *bool   `json:"notifications_enabled"`
+		NotificationsWebhookURL            *string `json:"notifications_webhook_url"`
+		NotificationsEventFallback         *bool   `json:"notifications_event_fallback"`
+		NotificationsEventAllFailed        *bool   `json:"notifications_event_all_failed"`
+		NotificationsCooldownSeconds       *int    `json:"notifications_cooldown_seconds"`
+		NotificationsEventClientKeyCreated *bool   `json:"notifications_event_client_key_created"`
+		NotificationsEventClientKeyDeleted *bool   `json:"notifications_event_client_key_deleted"`
+		NotificationsEventAdminLogin       *bool   `json:"notifications_event_admin_login"`
+		NotificationsAuthHeader            *string `json:"notifications_auth_header"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())

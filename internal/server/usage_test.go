@@ -116,10 +116,10 @@ func TestUsageCacheHitWindows(t *testing.T) {
 	//  - zero-cache:  cache_read present but 0 (reported cache, no hits).
 	//  - no-cache:    cache_read absent (e.g. Ollama — not reported).
 	rows := []row{
-		{in: 1000, out: 100, cacheRead: 900, hasCache: true},  // 90% hit
-		{in: 1000, out: 100, cacheRead: 500, hasCache: true},  // 50% hit
-		{in: 1000, out: 100, cacheRead: 0, hasCache: true},    // 0% hit (real)
-		{in: 1000, out: 100, cacheRead: 0, hasCache: false},   // missing -> n.a.
+		{in: 1000, out: 100, cacheRead: 900, hasCache: true}, // 90% hit
+		{in: 1000, out: 100, cacheRead: 500, hasCache: true}, // 50% hit
+		{in: 1000, out: 100, cacheRead: 0, hasCache: true},   // 0% hit (real)
+		{in: 1000, out: 100, cacheRead: 0, hasCache: false},  // missing -> n.a.
 	}
 	for i, r := range rows {
 		created := now.Add(-10 * time.Minute).Format(time.RFC3339Nano)

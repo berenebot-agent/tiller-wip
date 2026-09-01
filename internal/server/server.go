@@ -21,6 +21,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	buildversion "github.com/tiller-router/tiller-router/internal/version"
 	webassets "github.com/tiller-router/tiller-router/internal/web"
 )
 
@@ -100,6 +101,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", s.live)
 	mux.HandleFunc("GET /health/ready", s.ready)
+	mux.HandleFunc("GET /health/version", s.versionHealth)
 	mux.HandleFunc("POST /api/admin/session", s.login)
 	mux.Handle("GET /api/admin/session", s.requireAdmin(http.HandlerFunc(s.sessionStatus)))
 	mux.Handle("DELETE /api/admin/session", s.requireAdmin(http.HandlerFunc(s.logout)))
@@ -159,6 +161,12 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
+}
+
+// versionHealth is deliberately public and contains only non-sensitive build
+// metadata, like the other health endpoints.
+func (s *Server) versionHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"version": buildversion.Version, "commit": buildversion.Commit})
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {

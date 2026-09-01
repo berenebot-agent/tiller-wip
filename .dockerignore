@@ -2,6 +2,11 @@
 # data/ dir keeps the build from trying to read the (container-owned, mode-0700)
 # runtime directory in the source tree.
 .git
+.env
+.env.*
+!.env.example
 data/
 docs/example_files
 tests/browser/node_modules
+tests/browser/test-results
+tests/browser/playwright-report

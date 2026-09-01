@@ -16,6 +16,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/server"
+	buildversion "github.com/tiller-router/tiller-router/internal/version"
 )
 
 func main() {
@@ -63,6 +64,7 @@ func run(logger *slog.Logger) error {
 	default:
 		return fmt.Errorf("unknown command %q (expected serve, migrate, or healthcheck)", command)
 	}
+	logger.Info("tiller-router starting", "version", buildversion.Version, "commit", buildversion.Commit)
 	app, err := server.New(cfg, db, logger)
 	if err != nil {
 		return err
