@@ -40,7 +40,7 @@ Guardrails for any coding agent working in this repository. This file does not r
   - **RAM cap:** `--memory=1g` (override: `TILLER_GO_MEM=2g`) + `GOFLAGS=-p=2` (parallelism cap). The cap bounds the container; `-p=2` cuts peak compiler RAM.
   - Image pinned to `golang:1.26.7-alpine` — the same image the Dockerfile build stage uses.
 - Do NOT hand-write `docker run --rm -v "$PWD:/src" ... golang:1.26.7-alpine go ...` — use the wrapper so caches and the RAM cap are always applied. If a script or tool invokes bare `go` on the host, that is the bug — point it at `./tiller-go.sh` instead.
-- The integration/browser/compatibility tests are fully containerized and need no host Go at all — see `tests/compatibility/run.sh` and `tests/browser`.
+- The integration/browser/compatibility tests are fully containerized and need no host Go at all — see `tests/compatibility/run.sh`, `tests/runtime-readonly.sh`, and `tests/browser/run.sh`.
 
 ## Security guardrails
 
@@ -67,3 +67,24 @@ Guardrails for any coding agent working in this repository. This file does not r
 
 - Any change to routing, permissions, or auth should be checked against the relevant V1 Acceptance Test in §28 before being considered done, not just against a new unit test you wrote for the change.
 - §28.4 (virtual routing hides the real target) and §28.5 (immediate remap, no restart) are the two tests most likely to silently regress — re-verify both after any change to virtual model resolution or provider/model mapping.
+
+### How to test — pick the right route (default by change size)
+
+Run the **minimum** tier that matches the change. Do **not** default to the full suite — the heavy tiers are slow. The test packages (all with warm Docker caches):
+
+| Tier | Command | Approx time | What it verifies |
+|---|---|---|---|
+| Go unit/integration | `./tiller-go.sh test ./...` | ~30–60s | Backend logic (auth, config, db, providers, server handlers) |
+| Go vet | `./tiller-go.sh vet ./...` | seconds | Static analysis |
+| Browser / UX | `./tests/browser/run.sh` | ~1¼ min | Admin UI: login, mobile cards, permissions, activity (16 Playwright tests) |
+| Compatibility probes | `./tests/compatibility/run.sh` | ~2–4 min | Real OpenAI/Anthropic SDKs + Codex/OpenCode/Claude-Code CLI + Hermes agent + router restart |
+| Runtime read-only / security | `./tests/runtime-readonly.sh` | ~30–60s | Read-only rootfs, caps-drop, backup export under deployment settings |
+
+**Sensible default by change type:**
+
+- **Minor UX change** (copy, spacing, a label, a CSS tweak, purely presentational markup): **no tests required.** Just confirm the page still renders (sanity) — run the browser suite only if you changed interactive behaviour (handlers, dialogs, navigation).
+- **Minor function change** (small backend/behavioural fix): run **`./tiller-go.sh test ./...`** (and `vet` for Go changes) only. Do not run the browser or compatibility suites unless the change touches the admin UI or a routing/protocol/provider path.
+- **Major feature change, or a change that spans backend + UI / routing / providers / auth**: run the Go tests **and** the browser suite; add `tests/compatibility/run.sh` if the change affects provider protocols, client-facing catalogues, or model resolution, and `tests/runtime-readonly.sh` if it touches deployment/security (volumes, caps, read-only, backup, auth).
+- **Run the full suite only when instructed, or for a significant feature/release.** Otherwise pick the smallest tier that would catch a regression in what you changed.
+
+When a change is purely frontend (`internal/web/assets/**`), the browser suite is the gate; run `./tiller-go.sh test ./...` for sanity but the UI tests are the ones that matter.
