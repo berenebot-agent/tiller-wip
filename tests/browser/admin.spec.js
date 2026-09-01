@@ -76,16 +76,12 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   const secret = page.locator('#secret-value');
   await expect(secret).toHaveText(/^sk-tr-[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}$/);
   const expectedSecret = (await secret.textContent()).trim();
+  // 127.0.0.1 is a secure-context loopback origin, so the native Copy button
+  // must be visible (not hidden) and must actually land the secret on the
+  // OS clipboard — not just claim it.
+  await expect(page.locator('#copy-secret')).toBeVisible();
   await page.getByRole('button', { name: 'Copy' }).click();
   await expect(page.locator('#copy-state')).toHaveText('Copied to clipboard.');
-  // Guard against the bug class where the UI says "Copied" but the clipboard
-  // is empty. 127.0.0.1 is a secure-context loopback origin so the modern
-  // navigator.clipboard.writeText path runs in CI; this assertion reads the
-  // OS clipboard back and verifies it actually contains the secret, not just
-  // that the state message lies about it. The legacy textarea+execCommand
-  // path (the one the fix targets for LAN HTTP origins) cannot be reliably
-  // verified in headless Chromium — execCommand needs a real user gesture to
-  // land anything — so its authoritative check is a manual LAN test.
   await expect.poll(
     () => page.evaluate(() => navigator.clipboard.readText()),
     { timeout: 3000 }
@@ -105,6 +101,32 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+});
+
+test('insecure origin (plain HTTP): one-time-secret hides the Copy button and selects the key', async ({ page }) => {
+  // Over plain HTTP on a LAN IP the browser will not honour a silent clipboard
+  // write, so the UI must NOT claim "Copied". Instead it must hide the Copy
+  // button, highlight the key for the user's own Ctrl/Cmd+C gesture, and say
+  // so. Model that insecure context here by faking isSecureContext=false and
+  // removing the clipboard API before any page script runs.
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true });
+    try { Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }); } catch {}
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await login(page);
+  await page.getByRole('button', { name: '+ Create client key' }).click();
+  await page.getByLabel('Client name').fill('Insecure copy client');
+  await page.getByLabel('Description').fill('Confirms the Copy button is hidden on plain HTTP');
+  await page.getByRole('button', { name: 'Create & show key' }).click();
+
+  const secret = page.locator('#secret-value');
+  await expect(secret).toHaveText(/^sk-tr-[A-Za-z0-9_-]{12}\.[A-Za-z0-9_-]{43}$/);
+  // Copy button must be hidden (it cannot work on plain HTTP)…
+  await expect(page.locator('#copy-secret')).toBeHidden();
+  // …and the state must instruct a manual Ctrl/Cmd+C rather than claim a copy.
+  await expect(page.locator('#copy-state')).toHaveText('Key selected — press Ctrl/Cmd+C to copy it.');
+  await page.getByRole('button', { name: 'I have stored the key' }).click();
 });
 
 test('mobile: Client Keys renders as cards with expandable detail and working actions', async ({ page }) => {
