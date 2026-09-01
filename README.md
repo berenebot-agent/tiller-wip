@@ -31,7 +31,7 @@ Three annoyances kept coming up with a growing collection of LLM agents, coding 
 Tiller sits between your LLM clients and your upstream providers. Clients keep a stable **endpoint, API key and model name**. You change what sits behind it — a route change applies to new requests immediately. Regardless of what model the client requests, Tiller sends the request to your selected model and the client need know no difference. No restart, no CLI, no config editing. Steer a client key from the control panel by picking any real or virtual model:
 
 <p align="center">
-  <img src="docs/media/ss/instant-switch-models.png" width="840" alt="Instant model switch from the Tiller control panel">
+  <img src="assets/media/screenshots/instant-switch-models.png" width="840" alt="Instant model switch from the Tiller control panel">
 </p>
 
 > **Tiller does not try to choose the model for you. It gives you the tiller.**
@@ -67,7 +67,7 @@ The client only knows `main/coding`. You can reorder or replace the targets with
 Configure the ordered target list in the control panel:
 
 <p align="center">
-  <img src="docs/media/ss/auto_fallback.png" width="420" alt="Editing a virtual model's ordered fallback list">
+  <img src="assets/media/screenshots/auto_fallback.png" width="420" alt="Editing a virtual model's ordered fallback list">
 </p>
 
 **Ordered fallback:** if an upstream attempt fails before client-visible output begins, Tiller may try the next configured target. Once output has started, it never splices another model into the response. There is no hidden health-based or random routing — the order you configure is the order Tiller uses.
@@ -75,7 +75,7 @@ Configure the ordered target list in the control panel:
 Each attempt is visible in Activity, including the fallback — the client gets a valid response and never knows there was a failure:
 
 <p align="center">
-  <img src="docs/media/ss/fallback.png" width="840" alt="Activity view showing a failed attempt followed by a successful fallback">
+  <img src="assets/media/screenshots/fallback.png" width="840" alt="Activity view showing a failed attempt followed by a successful fallback">
 </p>
 
 ---
