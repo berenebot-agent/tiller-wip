@@ -144,13 +144,24 @@ Requires Docker and Docker Compose.
    mkdir tiller-router && cd tiller-router
    ```
 
-2. **Create a `docker-compose.yml`:**
+2. **Create the data directory:**
+
+   ```bash
+   mkdir -p ./data
+   ```
+
+   (On Docker Desktop and Podman rootless the bind-mount uid mapping
+   handles permissions automatically. On bare Linux with rootful
+   Docker, run `sudo chown -R 65532:65532 ./data` if the container
+   can't write to `./data`.)
+
+3. **Create a `docker-compose.yml`:**
 
    ```yaml
    services:
      tiller-router:
+       container_name: tiller-router
        image: ghcr.io/dellarb/tiller-router:latest
-       user: "0:0"            # Tiller fixes ./data ownership, then drops to its non-root runtime user
        ports:
          - "8080:8080"
        environment:
@@ -161,7 +172,7 @@ Requires Docker and Docker Compose.
        restart: unless-stopped
    ```
 
-3. **Start Tiller:**
+4. **Start Tiller:**
 
    ```bash
    docker compose up -d
@@ -183,6 +194,21 @@ docker compose up -d --build
 The repository's `docker-compose.yml` builds locally instead of pulling an image; everything else (hardening, volumes, healthcheck) is identical to the prebuilt option above.
 
 The service runs read-only with all capabilities dropped, as a non-root user, persisting state in `./data`.
+
+### Other compose / env options
+
+The repo's `docker-compose.yml` plus `.env` cover the most common customisations without editing any Go code. The full list of recognised variables is in `.env.example`.
+
+```bash
+TILLER_ADMIN_USERNAME=admin                          # admin login for the web UI
+TILLER_ADMIN_PASSWORD=replace-with-a-long-random-password   # admin password
+TILLER_PORT=8080                                     # host port (default 8080)
+TILLER_UID=1000                                      # run as your uid (avoids sudo chown)
+TILLER_GID=1000                                      # run as your gid
+TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy if using one
+TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
+TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
+```
 
 ### First steps
 

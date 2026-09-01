@@ -108,9 +108,9 @@ func peerIP(r *http.Request) string {
 // as an IP; malformed chains are rejected and the direct peer is retained.
 // Traversing right-to-left stops at the first address outside the trusted
 // proxy range, which is the standard proxy-chain trust boundary.
-func clientIP(r *http.Request, trustProxy bool, trustedProxy netip.Prefix) string {
+func clientIP(r *http.Request, trustedProxy netip.Prefix) string {
 	direct := peerIP(r)
-	if !trustProxy || !trustedProxy.IsValid() {
+	if !trustedProxy.IsValid() {
 		return direct
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

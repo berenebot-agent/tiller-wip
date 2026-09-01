@@ -170,7 +170,7 @@ func (s *Server) versionHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	key := clientIP(r, s.config.TrustProxy, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxy)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 		return
@@ -195,7 +195,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, clientIP(r, s.config.TrustProxy, s.config.TrustedProxy)))
+	s.notifyAdminEvent(eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, clientIP(r, s.config.TrustedProxy)))
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 
@@ -266,7 +266,7 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	if !s.config.TrustProxy || !s.config.TrustedProxy.IsValid() {
+	if !s.config.TrustedProxy.IsValid() {
 		return false
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)

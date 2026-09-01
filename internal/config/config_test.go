@@ -12,7 +12,6 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 
 	// Default on when the env var is unset/empty.
 	t.Setenv("TILLER_MODELS_DEV_ENABLED", "")
-	t.Setenv("TILLER_TRUST_PROXY_HEADERS", "")
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	c, err := Load()
 	if err != nil {
@@ -20,9 +19,6 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 	}
 	if !c.ModelsDevEnabled {
 		t.Error("ModelsDevEnabled should default to true")
-	}
-	if c.TrustProxy {
-		t.Error("TrustProxy should default to false")
 	}
 
 	// Explicitly off.
@@ -52,43 +48,45 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 	}
 }
 
-func TestTrustProxyRequiresTrustedProxy(t *testing.T) {
+func TestTrustedProxy(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
 	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 
-	// Proxy trust off (default) with no trusted proxy is valid.
-	t.Setenv("TILLER_TRUST_PROXY_HEADERS", "false")
+	// Unset (default) means proxy-header trust is disabled.
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	c, err := Load()
 	if err != nil {
-		t.Fatalf("proxy trust off with no trusted proxy should load: %v", err)
+		t.Fatalf("no trusted proxy should load: %v", err)
 	}
-	if c.TrustProxy {
-		t.Error("TrustProxy should be false")
+	if c.TrustedProxy.IsValid() {
+		t.Error("TrustedProxy should be invalid when unset")
 	}
 
-	// Proxy trust on with a valid trusted proxy is valid.
-	t.Setenv("TILLER_TRUST_PROXY_HEADERS", "true")
+	// A valid CIDR enables proxy-header trust.
 	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.0/16")
 	c, err = Load()
 	if err != nil {
-		t.Fatalf("proxy trust on with a trusted proxy should load: %v", err)
+		t.Fatalf("valid trusted proxy should load: %v", err)
 	}
-	if !c.TrustProxy || !c.TrustedProxy.IsValid() {
-		t.Error("TrustProxy and TrustedProxy should both be set")
-	}
-
-	// Proxy trust on with no trusted proxy is a hard error.
-	t.Setenv("TILLER_TRUSTED_PROXY", "")
-	if _, err := Load(); err == nil {
-		t.Error("TILLER_TRUST_PROXY_HEADERS=true without TILLER_TRUSTED_PROXY should fail to load")
+	if !c.TrustedProxy.IsValid() {
+		t.Error("TrustedProxy should be set")
 	}
 
-	// Proxy trust on with an invalid trusted proxy is a hard error.
+	// A bare IP (no /prefix) is treated as /32.
+	t.Setenv("TILLER_TRUSTED_PROXY", "10.1.1.18")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("bare IP for TILLER_TRUSTED_PROXY should load as /32: %v", err)
+	}
+	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "10.1.1.18/32" {
+		t.Errorf("TrustedProxy should be 10.1.1.18/32, got %v", c.TrustedProxy)
+	}
+
+	// An invalid trusted proxy is a hard error.
 	t.Setenv("TILLER_TRUSTED_PROXY", "not-a-cidr")
 	if _, err := Load(); err == nil {
-		t.Error("TILLER_TRUST_PROXY_HEADERS=true with an invalid TILLER_TRUSTED_PROXY should fail to load")
+		t.Error("TILLER_TRUSTED_PROXY=not-a-cidr should fail to load")
 	}
 }

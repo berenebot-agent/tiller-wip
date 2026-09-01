@@ -75,20 +75,47 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// targetResolutionHealth reports request outcomes for each resolved target
-// used by a virtual identity.
-// A successful request is an HTTP 2xx response; every other recorded response
-// is treated as a failure. Logs are metadata-only and may be disabled per key.
+// targetResolutionHealth reports request outcomes for each target that was
+// attempted (final attempt resolution + every fallback attempt).
+//
+// The final, resolved target is read from request_logs (resolved_provider,
+// resolved_model — populated for the row that ultimately served the
+// request). Every attempted target, including ones that failed and were
+// then replaced by a fallback, is read from request_attempts. This covers
+// two cases the request_logs row alone misses:
+//
+//   - A fallback target that failed but where a later target succeeded:
+//     the row's resolved_provider/resolved_model point at the later target,
+//     so the failed target would otherwise be invisible.
+//   - A virtual model whose entire fallback chain exhausted: the row is
+//     logged with NULL resolved_provider/resolved_model, so neither the
+//     failed nor any other target appears in target_health without the
+//     attempts join.
+//
+// A successful attempt is an HTTP 2xx response; every other recorded
+// response is treated as a failure. Logs are metadata-only and may be
+// disabled per key.
 func (s *Server) targetResolutionHealth(r *http.Request, c1, c24 string) (map[string]targetResolutionHealth, error) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT l.resolved_provider||'/'||l.resolved_model,
-		max(CASE WHEN l.created_at >= ? AND l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END),
-		max(CASE WHEN l.created_at >= ? AND NOT (l.http_status >= 200 AND l.http_status < 300) THEN 1 ELSE 0 END),
-		max(CASE WHEN l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END)
-		FROM request_logs l
-		JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id) vm
-		  ON `+virtualAttributionJoin()+`
-		WHERE l.created_at >= ? AND l.resolved_provider IS NOT NULL AND l.resolved_model IS NOT NULL
-		GROUP BY l.resolved_provider, l.resolved_model`, c1, c1, c24)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT key,
+		max(success_1h), max(failure_1h), max(success_24h)
+		FROM (
+			SELECT l.resolved_provider||'/'||l.resolved_model AS key,
+				CASE WHEN l.created_at >= ? AND l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END AS success_1h,
+				CASE WHEN l.created_at >= ? AND NOT (l.http_status >= 200 AND l.http_status < 300) THEN 1 ELSE 0 END AS failure_1h,
+				CASE WHEN l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END AS success_24h
+			FROM request_logs l
+			JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id) vm
+			  ON `+virtualAttributionJoin()+`
+			WHERE l.created_at >= ? AND l.resolved_provider IS NOT NULL AND l.resolved_model IS NOT NULL
+			UNION ALL
+			SELECT a.provider||'/'||a.model AS key,
+				CASE WHEN a.created_at >= ? AND a.result='success' THEN 1 ELSE 0 END AS success_1h,
+				CASE WHEN a.created_at >= ? AND a.result IN ('failed','skipped') THEN 1 ELSE 0 END AS failure_1h,
+				CASE WHEN a.result='success' THEN 1 ELSE 0 END AS success_24h
+			FROM request_attempts a
+			WHERE a.created_at >= ?
+		)
+		GROUP BY key`, c1, c1, c24, c1, c1, c24)
 	if err != nil {
 		return nil, err
 	}

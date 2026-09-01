@@ -157,3 +157,71 @@ func TestUsageCacheHitWindows(t *testing.T) {
 		t.Fatalf("expected null (n.a.) cache %% for non-reporting window, got %v", v)
 	}
 }
+
+// TestUsageTargetHealthIncludesFailedAttempts verifies that target_health
+// surfaces targets that were attempted (even when the fallback chain
+// ultimately exhausted and the request_logs row has NULL resolved_provider/
+// resolved_model). Without the request_attempts UNION these targets would
+// silently disappear and the admin UI would show them as untried neutral
+// instead of broken red.
+func TestUsageTargetHealthIncludesFailedAttempts(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	now := time.Now().UTC()
+
+	// Virtual model whose fallback chain exhausted: both targets failed,
+	// no resolved_provider/resolved_model on the parent row.
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,attempt_count,fallback_used,fallback_reason,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"exhausted", clientID, "virtual/coding", "virtual/coding", "virtual", "v1", "virtual/coding", nil, nil, "chat", 0, 503, 10, 2, 1, "upstream_error", "req-exhausted", now.Add(-5*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	// Failed attempt on target A (provider-a/model-a, 401).
+	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"a-failed", "exhausted", 1, "provider-a", "model-a", "failed", 401, "http_401", 5, now.Add(-5*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	// Skipped attempt on target B (provider-a/model-b, disabled).
+	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"b-skipped", "exhausted", 2, "provider-a", "model-b", "skipped", nil, "unavailable", 0, now.Add(-5*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Successful run on a different target (provider-b/model-c) so we have a
+	// confirmed-success entry as well, sanity-checking that the union does
+	// not double-count.
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"happy", clientID, "provider-b/model-c", "provider-b/model-c", "real", "rb1", "provider-b/model-c", "provider-b", "model-c", "chat", 0, 200, 7, "req-happy", now.Add(-2*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c-success", "happy", 1, "provider-b", "model-c", "success", 200, 7, now.Add(-2*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	health := payload["target_health"].(map[string]any)
+
+	// Failed target: success_24h=false, failure_1h=true.
+	if a, ok := health["provider-a/model-a"].(map[string]any); !ok {
+		t.Fatalf("expected failed target in target_health, got %v", health)
+	} else if a["success_24h"] != false || a["failure_1h"] != true || a["success_1h"] != false {
+		t.Fatalf("failed target health wrong: %+v", a)
+	}
+
+	// Skipped target: surfaces as failure too — it was attempted, the
+	// router declined to call it, that is a health signal.
+	if b, ok := health["provider-a/model-b"].(map[string]any); !ok {
+		t.Fatalf("expected skipped target in target_health, got %v", health)
+	} else if b["success_24h"] != false || b["failure_1h"] != true {
+		t.Fatalf("skipped target health wrong: %+v", b)
+	}
+
+	// Successful target: success across the board.
+	if c, ok := health["provider-b/model-c"].(map[string]any); !ok {
+		t.Fatalf("expected success target in target_health, got %v", health)
+	} else if c["success_24h"] != true || c["failure_1h"] != false || c["success_1h"] != true {
+		t.Fatalf("success target health wrong: %+v", c)
+	}
+}

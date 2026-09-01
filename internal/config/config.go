@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,7 +17,6 @@ type Config struct {
 	AdminSessionTTL  time.Duration
 	DataDir          string
 	ListenAddr       string
-	TrustProxy       bool
 	TrustedProxy     netip.Prefix
 	ModelsDevEnabled bool
 }
@@ -37,25 +37,20 @@ func Load() (Config, error) {
 		}
 		c.AdminSessionTTL = v
 	}
-	if raw := os.Getenv("TILLER_TRUST_PROXY_HEADERS"); raw != "" {
-		v, err := strconv.ParseBool(raw)
-		if err != nil {
-			return Config{}, fmt.Errorf("TILLER_TRUST_PROXY_HEADERS: %w", err)
-		}
-		c.TrustProxy = v
-	}
+	// Setting TILLER_TRUSTED_PROXY to a CIDR is the switch that enables
+	// proxy-header trust: forwarded headers are only honoured when the direct
+	// peer is inside that CIDR, so a spoofable header can never be trusted
+	// from an untrusted peer. Leaving it unset disables proxy-header trust.
 	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
-		v, err := netip.ParsePrefix(raw)
+		value := raw
+		if !strings.Contains(value, "/") {
+			value = value + "/32"
+		}
+		v, err := netip.ParsePrefix(value)
 		if err != nil {
 			return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
 		}
 		c.TrustedProxy = v
-	}
-	// Proxy-header trust is only meaningful with an actual trust boundary. If
-	// forwarded headers are trusted, a valid trusted-proxy CIDR is required so
-	// a spoofable header can never be honoured from an untrusted peer.
-	if c.TrustProxy && !c.TrustedProxy.IsValid() {
-		return Config{}, errors.New("TILLER_TRUST_PROXY_HEADERS=true requires TILLER_TRUSTED_PROXY to be set to a valid CIDR")
 	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
 		v, err := strconv.ParseBool(raw)

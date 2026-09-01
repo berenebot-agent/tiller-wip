@@ -58,6 +58,7 @@
 
 .attempt-failed { border-color: #e7c2c1; background: #fff8f8; }
 .attempt-success { border-color: #b9ddca; background: #f4fbf7; }
+.attempt-neutral { border-color: #cdd5db; background: #f5f7f9; }
 .attempt-number { color: #6b8193; font: 700 10px var(--mono); }
 .attempt-route { min-width: 0; }
 .attempt-route code { display: block; overflow: hidden; text-overflow: ellipsis; }
@@ -66,5 +67,6 @@
 .attempt-latency { color: var(--muted); font: 10px var(--mono); }
 .attempt-failed .attempt-status { color: var(--red); }
 .attempt-success .attempt-status { color: var(--green); }
+.attempt-neutral .attempt-status { color: var(--muted); }
 .fallback-label { display: block; margin-top: 4px; color: var(--red); font: 700 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
 .fallback-hint { display: block; margin: 6px 0 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
