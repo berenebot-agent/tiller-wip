@@ -1,10 +1,15 @@
 # Changelog
 
 All notable changes to Tiller Router are recorded here. This project follows
-semantic versioning conventions where practical; the alpha API and deployment
-behavior may still change.
+semantic versioning conventions where practical; the beta API and deployment
+behavior may still change before a stable `1.0`.
 
-## [Unreleased]
+## [0.1.0-beta.1] - 2026-09-01
+
+Initial public FOSS beta release.
+
+Tiller Router moves from alpha to beta: the routing core, deployment model and
+security posture are treated as more settled, with a clear 1.0 path.
 
 ### Fixed
 

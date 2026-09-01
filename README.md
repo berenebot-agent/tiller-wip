@@ -12,7 +12,7 @@
   A lightweight, self-hosted LLM router with a control panel built for people who actually change models.
 </p>
 
-> **Alpha software.** Tiller Router is approaching its first public release. Feedback is welcomed and use with caution.
+> **Beta software.** Tiller Router is in a public beta. The routing core and deployment model are approaching stability, but the API and supported-provider surface may still evolve before a stable `1.0`. Feedback is welcomed but use with caution.
 
 ---
 
@@ -128,7 +128,7 @@ Tiller includes adapters for a broad set of native and OpenAI-compatible provide
 
 </details>
 
-Provider support varies because upstream APIs vary. The first alpha should be treated as **verified for the providers explicitly tested** and compatibility/best-effort for the wider OpenAI-compatible surface.
+Provider support varies because upstream APIs vary. The beta should be treated as **verified for the providers explicitly tested** and compatibility/best-effort for the wider OpenAI-compatible surface.
 
 ---
 
@@ -146,17 +146,14 @@ Requires Docker and Docker Compose.
 
 2. **Create the data directory:**
 
-   ```bash
-   mkdir -p ./data
-   ```
-
    The container runs as a non-root user (`65532`) and can only write to
    `./data` if it *owns* it. On Docker Desktop and Podman rootless the
    bind-mount uid mapping handles this automatically. On bare Linux with
-   rootful Docker, a fresh `./data` is created on the host as **root** and must
-   be handed to the container once before the first `docker compose up`:
+   rootful Docker, a fresh `./data` is created on the host as **root**, so run
+   the ownership fix alongside `mkdir` before the first `docker compose up`:
 
    ```bash
+   mkdir -p ./data
    sudo chown -R 65532:65532 ./data
    ```
 
@@ -288,7 +285,9 @@ It is a focused router for people who want to **control their own clients, provi
 
 ## Data and security
 
-Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material — treat the data directory and its backups as secrets.
+Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material.
+
+**Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets, since anyone who can read the database file can recover your provider keys.
 
 Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records are metadata-only and should not contain prompt or response bodies.
 
@@ -313,9 +312,9 @@ The project currently targets the Go version declared in `go.mod`.
 
 ## Project status
 
-Tiller Router is in **alpha**. The routing model is intentionally narrow and already useful, but the public API, migrations and provider compatibility surface may still evolve before a stable `1.0`. The near-term priority is reliability and hardening.
+Tiller Router is in **beta**. The routing model is intentionally narrow and already useful, but the public API, migrations and provider compatibility surface may still evolve before a stable `1.0`. The near-term priority is reliability and hardening.
 
-Likely post-alpha areas include: additional provider validation, richer provider health, cost-aware routing, additional capability metadata, experimental subscription-backed providers such as Codex, and further hardening and operational polish.
+Likely post-beta areas include: additional provider validation, richer provider health, cost-aware routing, additional capability metadata, experimental subscription-backed providers such as Codex, and further hardening and operational polish.
 
 ---
 

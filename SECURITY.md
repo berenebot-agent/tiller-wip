@@ -1,6 +1,6 @@
 # Security policy
 
-Tiller Router is an alpha release. Please do not disclose a suspected
+Tiller Router is a beta release. Please do not disclose a suspected
 vulnerability in a public issue, discussion, or pull request.
 
 ## Reporting a vulnerability
@@ -17,7 +17,7 @@ credentials, client API keys, session cookies, prompts, and responses.
 
 We will acknowledge reports when practical and coordinate a fix, disclosure,
 and credit with the reporter. There is no guaranteed response or remediation
-SLA for alpha releases.
+SLA for beta releases.
 
 ## Scope and deployment notes
 
@@ -27,6 +27,14 @@ private network when public/direct access is not intended. Keep the admin
 interface private, use HTTPS at the edge, protect `./data`, and never commit
 `.env` or provider credentials. Proxy-header trust must remain disabled unless
 the direct proxy peer is restricted with `TILLER_TRUSTED_PROXY`.
+
+**Provider credentials are not encrypted at rest.** They are stored in
+recoverable form in the SQLite database (`./data`) so Tiller can authenticate
+upstream requests, and credential encryption at rest is a future-roadmap
+consideration (see [docs/roadmap_credential_encryption.md](docs/roadmap_credential_encryption.md)).
+Take care with where you store the persistent database and any backups of it —
+treat `./data` and its backups as secrets, since anyone who can read the
+database file can recover your provider keys.
 
 For questions that are not security reports, please use the project's normal
 public issue and discussion channels.
