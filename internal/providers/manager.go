@@ -174,12 +174,12 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 		}
 	}
 
-	// Mark models that disappeared from the catalogue as unavailable in one
-	// statement using NOT IN. The IN list is always non-empty here: if discovery
-	// returned zero models, seen is empty and the earlier branch above would
-	// have used the simpler bulk update instead. Wait — that's not true when
-	// every model was a duplicate that was filtered out. Guard with a length
-	// check so we never pass an empty IN list to SQLite.
+	// Mark models that vanished from the catalogue (or were deduped away) as
+	// unavailable. Guard len(seen)>0 so we never build an empty IN (...) list;
+	// discovery returning zero usable models falls through to the bulk retire
+	// below. The available=1 predicate mirrors the pre-batch behaviour of only
+	// retiring rows that were previously available (0->0 is already a no-op,
+	// but avoiding the write keeps already-dead rows' updated_at stable).
 	if len(seen) > 0 {
 		placeholders := make([]string, 0, len(seen))
 		args := make([]any, 0, len(seen)+1)
@@ -188,7 +188,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 			placeholders = append(placeholders, "?")
 			args = append(args, upstream)
 		}
-		stmt := `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND upstream_model_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+		stmt := `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND upstream_model_id NOT IN (` + strings.Join(placeholders, ",") + `)`
 		// Prepend `now` to the args since the WHERE clause order is provider_id-first.
 		fullArgs := make([]any, 0, len(args)+1)
 		fullArgs = append(fullArgs, now)
@@ -198,7 +198,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 		}
 	} else {
 		// Discovery returned no usable models. Retire everything for this provider.
-		if _, err := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=?`, now, providerID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1`, now, providerID); err != nil {
 			return err
 		}
 	}
