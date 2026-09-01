@@ -308,12 +308,14 @@ function singleTargetOptions(client = null) {
   if (client?.single_target_id && !options.some(item => item.kind === client.single_target_type && item.id === client.single_target_id)) options.unshift({ value:`${client.single_target_type}:${client.single_target_id}`, kind:client.single_target_type, id:client.single_target_id, label:`${client.single_target_type === 'virtual' ? 'Virtual' : 'Real'} · ${client.single_target_canonical || 'Unavailable target'}`, canonical:client.single_target_canonical || 'Unavailable target', disabled:true });
   return options.sort((a,b) => a.label.localeCompare(b.label));
 }
-function mountSingleTargetPicker(root, client, onChange = null, onEnter = null) {
+function mountSingleTargetPicker(root, client, onChange = null, onEnter = null, prefill = true) {
   const input = $('input[type="text"]', root), hidden = $('input[type="hidden"]', root), options = singleTargetOptions(client);
   const currentValue = client?.single_target_id ? `${client.single_target_type}:${client.single_target_id}` : '';
   const picker = combobox({ input, hidden, options, placeholder:'Search real or virtual models…', onSelect:onChange, onEnter });
-  const current = options.find(item => item.value === currentValue);
-  if (current) { hidden.value = current.value; input.value = current.label; }
+  if (prefill) {
+    const current = options.find(item => item.value === currentValue);
+    if (current) { hidden.value = current.value; input.value = current.label; }
+  }
   return picker;
 }
 function mountInlineRoutePicker(root, client) {
@@ -357,13 +359,19 @@ function mountInlineRoutePicker(root, client) {
 // Settings dialog. It PATCHes just the binding — name and other settings are
 // untouched — and new requests use the new target immediately.
 function openRoutePicker(client) {
+  const dialog = $('#form-dialog');
+  // Mobile: render as a bottom sheet that stays above the virtual keyboard.
+  dialog.classList.add('route-picker-dialog');
+  dialog.addEventListener('close', () => dialog.classList.remove('route-picker-dialog'), { once: true });
   openEntity({
     eyebrow: 'CHANGE ROUTE',
     title: `Route · ${client.name}`,
     fields: `<label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model. New requests use the new target immediately.</small></label>`,
     submit: 'Apply route',
     onMount: form => {
-      mountSingleTargetPicker($('[data-single-target]', form), client);
+      // Start empty and focused so the user can type ahead from the first
+      // keystroke, like the desktop inline route box.
+      mountSingleTargetPicker($('[data-single-target]', form), client, null, null, false);
     },
     onSubmit: async form => {
       const selected = String(new FormData(form).get('single_target') || ''), split = selected.indexOf(':');
@@ -373,6 +381,34 @@ function openRoutePicker(client) {
       await loadClients();
     }
   });
+}
+// Keep the mobile route picker (a bottom sheet) above the virtual keyboard.
+// The Visual Viewport API reports the keyboard as a shrink of the visual
+// viewport; we lift the dialog and cap the dropdown to the space above it.
+function positionRoutePickerAboveKeyboard() {
+  const dialog = $('#form-dialog');
+  if (!dialog.classList.contains('route-picker-dialog')) return;
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const keyboardHeight = Math.max(0, window.innerHeight - vv.height);
+  const list = $('.combobox-list', dialog);
+  if (keyboardHeight > 0) {
+    dialog.style.bottom = `${keyboardHeight}px`;
+    dialog.style.maxHeight = `${vv.height - keyboardHeight - 8}px`;
+    const input = $('[data-single-target] input[type="text"]', dialog);
+    if (input && list) {
+      const available = vv.height - (input.getBoundingClientRect().bottom - vv.offsetTop) - 8;
+      list.style.maxHeight = `${Math.max(120, Math.min(360, available))}px`;
+    }
+  } else {
+    dialog.style.bottom = '';
+    dialog.style.maxHeight = '';
+    if (list) list.style.maxHeight = '';
+  }
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', positionRoutePickerAboveKeyboard);
+  window.visualViewport.addEventListener('scroll', positionRoutePickerAboveKeyboard);
 }
 function clientCard(client) {
   const statusDot = `<span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span>`;
@@ -391,12 +427,12 @@ function clientCard(client) {
       <span class="client-card-chevron" aria-hidden="true">▾</span>
     </button>
     <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
+      <div class="client-card-field"><span class="client-card-label">Route</span><div class="client-card-route">${routeSummary}${routeAction}</div></div>
       <div class="client-card-field"><span class="client-card-label">Description</span><span>${h(client.description || 'No description')}</span></div>
       <div class="client-card-field"><span class="client-card-label">Fingerprint</span><code class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</code></div>
       <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
       ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
       <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
-      <div class="client-card-field"><span class="client-card-label">Route</span><div class="client-card-route">${routeSummary}${routeAction}</div></div>
       <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>

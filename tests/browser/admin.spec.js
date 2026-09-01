@@ -183,21 +183,24 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   // The route is available, so no broken-target badge.
   await expect(detail.locator('.client-route-broken')).toHaveCount(0);
 
-  // "Change route" opens the target-only quick picker pre-selected with the
-  // current target — not the full client Settings dialog.
+  // "Change route" opens the target-only quick picker — not the full client
+  // Settings dialog. On mobile it renders as a bottom sheet.
   await detail.getByRole('button', { name: 'Change route' }).click();
   const dialog = page.locator('#form-dialog');
   await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveClass(/route-picker-dialog/);
   await expect(page.locator('#dialog-title')).toHaveText(`Route · ${clientName}`);
   // Only the target field: no client-name, model-name, or type fields.
   await expect(dialog.locator('[name="name"]')).toHaveCount(0);
   await expect(dialog.locator('[name="single_model_name"]')).toHaveCount(0);
   await expect(dialog.locator('[name="type"]')).toHaveCount(0);
   const routeInput = dialog.locator('[data-single-target] input[type="text"]');
-  await expect(routeInput).toHaveValue(`Real · ${providerName}/mock-model`);
+  // Starts empty and focused so the user can type ahead from the first
+  // keystroke, like the desktop inline route box.
+  await expect(routeInput).toHaveValue('');
+  await expect(routeInput).toBeFocused();
 
-  // Click opens the full option list (the pre-selected value stays until a
-  // selection replaces it); pick the virtual target created earlier.
+  // Click opens the full option list; pick the virtual target created earlier.
   await routeInput.click();
   await page.getByRole('option', { name: 'Virtual · zzz-msf-vg/msf-alt' }).click();
   await expect(routeInput).toHaveValue('Virtual · zzz-msf-vg/msf-alt');

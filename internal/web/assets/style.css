@@ -80,3 +80,17 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
   .clients-table-shell{display:none}
   .client-cards{display:block}
 }
+/* Mobile route picker: a bottom sheet that stays above the virtual keyboard.
+   The JS (positionRoutePickerAboveKeyboard) lifts it via the Visual Viewport
+   API when the keyboard opens. */
+@media(max-width:720px){
+  dialog.route-picker-dialog{
+    position:fixed;
+    inset:auto 0 0 0;
+    width:100%;
+    max-width:100%;
+    margin:0;
+    border-radius:14px 14px 0 0;
+    max-height:92vh;
+  }
+}
