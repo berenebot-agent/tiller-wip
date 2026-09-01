@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/privdrop"
 	"github.com/tiller-router/tiller-router/internal/server"
 	buildversion "github.com/tiller-router/tiller-router/internal/version"
 )
@@ -37,6 +38,20 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	ctx := context.Background()
+	// Started as root (e.g. `user: "0:0"` so a fresh bind-mounted data
+	// directory can be fixed up without host-side chown), hand the data
+	// directory to the runtime user and drop privileges before touching the
+	// database. Already non-root — the normal case — is a no-op. The
+	// healthcheck subcommand never opens the database, so skip the walk.
+	if command != "healthcheck" {
+		dropped, err := privdrop.DropToRuntimeUser(cfg.DataDir)
+		if err != nil {
+			return err
+		}
+		if dropped {
+			logger.Info("dropped privileges to runtime user", "uid", privdrop.DefaultUID, "gid", privdrop.DefaultGID)
+		}
+	}
 	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"))
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)

@@ -44,7 +44,7 @@
   A lightweight, self-hosted LLM router with a control panel built for people who actually change models.
 </p>
 
-> **Alpha software.** Tiller Router is approaching its first public release. Back up your data and expect some rough edges while the project settles.
+> **Alpha software.** Tiller Router is approaching its first public release. Feedback is welcomed but use with caution.
 
 ---
 
@@ -52,7 +52,7 @@
 
 Three annoyances kept coming up with a growing collection of LLM agents, coding tools and automations:
 
-1. **Every tool had its own bad model selector.** Some bury it in settings, some want model IDs in config files, some barely support changing models at all. Tiller moves model selection out of the tool and into one control panel — change it without touching the clients.
+1. **Every tool had its own (bad) model selector.** Some bury it in settings, some want model IDs in config files, some barely support changing models at all. Tiller moves model selection out of the tool and into one control panel — change it without touching the clients.
 2. **Cheap and free API access is useful — until it rate-limits.** Tiller gives virtual models an **ordered fallback chain**, so a limited provider is useful without becoming a single point of failure.
 3. **Provider API keys were scattered everywhere.** Enter provider credentials once in Tiller; clients only ever receive a Tiller key.
 
@@ -60,7 +60,7 @@ Three annoyances kept coming up with a growing collection of LLM agents, coding 
 
 ## What Tiller does
 
-Tiller sits between your LLM clients and your upstream providers. Clients keep a stable **endpoint, API key and model name**. You change what sits behind it — a route change applies to new requests immediately, with no client restart, config edit or credential swap. Steer a client key from the control panel by picking any real or virtual model:
+Tiller sits between your LLM clients and your upstream providers. Clients keep a stable **endpoint, API key and model name**. You change what sits behind it — a route change applies to new requests immediately. Regardless of what model the client requests, Tiller sends the request to your selected model and the client need know no difference. No restart, no CLI, no config editing. Steer a client key from the control panel by picking any real or virtual model:
 
 <p align="center">
   <img src="docs/media/ss/instant-switch-models.png" width="840" alt="Instant model switch from the Tiller control panel">
@@ -72,9 +72,15 @@ Tiller sits between your LLM clients and your upstream providers. Clients keep a
 
 ## Client keys
 
-**Single keys** expose one stable model identity — usually something simple like `main` — bound to any real or virtual model. The key itself defines the route; the model string the client sends cannot escape that binding. Change the route from the control panel and the next request follows it.
+Two client key types cover the two ways tools talk to an LLM API:
 
-**Catalogue keys** expose a controlled subset of Tiller's catalogue through `GET /v1/models`, with per-client model permissions. Useful when the client has a good model picker but you still want centralised credentials, permissions and stable virtual model names.
+### Single — one key, one route
+
+Exposes one stable model identity — usually something simple like `main` — bound to any real or virtual model. The key itself defines the route; the model string the client sends cannot escape that binding. Change the route from the control panel and the next request follows it.
+
+### Catalogue — a controlled model list
+
+Exposes a controlled subset of Tiller's catalogue through `GET /v1/models`, with per-client model permissions. Useful to curate exactly which providers and models appear for a client to save wading through hundreds of rows of models you don't use.
 
 ---
 
@@ -101,7 +107,7 @@ Configure the ordered target list in the control panel:
 Each attempt is visible in Activity, including the fallback — the client gets a valid response and never knows there was a failure:
 
 <p align="center">
-  <img src="docs/media/ss/fallback.png" width="640" alt="Activity view showing a failed attempt followed by a successful fallback">
+  <img src="docs/media/ss/fallback.png" width="840" alt="Activity view showing a failed attempt followed by a successful fallback">
 </p>
 
 ---
@@ -166,46 +172,27 @@ Requires Docker and Docker Compose.
 
 ### Option 1 — Prebuilt image (recommended)
 
-1. **Create a project directory** with a `docker-compose.yml`:
+1. **Prepare a directory:**
+
+   ```bash
+   mkdir tiller-router && cd tiller-router
+   ```
+
+2. **Create a `docker-compose.yml`:**
 
    ```yaml
    services:
      tiller-router:
-       container_name: tiller-router
-       image: ghcr.io/dellarb/tiller-router:alpha
-       restart: unless-stopped
-       read_only: true
-       tmpfs:
-         - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
-       cap_drop:
-         - ALL
+       image: ghcr.io/dellarb/tiller-router:latest
+       user: "0:0"            # Tiller fixes ./data ownership, then drops to its non-root runtime user
+       ports:
+         - "8080:8080"
        environment:
-         TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
-         TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
-         TILLER_DATA_DIR: /data
-         TILLER_LISTEN_ADDR: :8080
-         TILLER_TRUST_PROXY_HEADERS: ${TILLER_TRUST_PROXY_HEADERS:-false}
-         TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
-         TILLER_MODELS_DEV_ENABLED: ${TILLER_MODELS_DEV_ENABLED:-true}
+         TILLER_ADMIN_USERNAME: admin
+         TILLER_ADMIN_PASSWORD: replace-this-with-a-long-random-password
        volumes:
          - ./data:/data
-       healthcheck:
-         test: ["CMD", "/tiller-router", "healthcheck"]
-         interval: 30s
-         timeout: 5s
-         retries: 3
-         start_period: 10s
-       ports:
-         - 0.0.0.0:${TILLER_PORT:-8080}:8080
-       security_opt:
-         - no-new-privileges:true
-   ```
-
-2. **Create your environment file** — create `.env` next to `docker-compose.yml`:
-
-   ```env
-   TILLER_ADMIN_USERNAME=admin
-   TILLER_ADMIN_PASSWORD=replace-this-with-a-long-random-password
+       restart: unless-stopped
    ```
 
 3. **Start Tiller:**
@@ -214,9 +201,9 @@ Requires Docker and Docker Compose.
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080` and log in with the admin credentials from `.env`. For remote access, put Tiller behind an HTTPS reverse proxy.
+   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy.
 
-Images are published to GHCR for `linux/amd64` and `linux/arm64` on every release: `ghcr.io/dellarb/tiller-router:alpha` tracks the current alpha, or pin a specific version such as `ghcr.io/dellarb/tiller-router:v0.1.0-alpha.1`.
+> The repository's `docker-compose.yml` additionally runs the container read-only, drops all Linux capabilities, mounts a scratch `tmpfs`, and defines a container healthcheck — prefer it (or copy those settings) for internet-exposed deployments.
 
 ### Option 2 — Build from source
 
