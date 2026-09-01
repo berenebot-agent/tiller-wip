@@ -8,6 +8,7 @@ import (
 	"hash/fnv"
 	"net"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,59 +67,142 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	}
 	defer tx.Rollback()
 	now := database.Now()
+
+	// Deduplicate by upstream model id while preserving order. Discovery can
+	// legitimately return the same id twice (e.g. duplicated across paged
+	// responses), and we want exactly one row per upstream id.
+	unique := make([]Model, 0, len(models))
 	seen := make(map[string]bool, len(models))
 	for _, model := range models {
 		if model.ID == "" || seen[model.ID] {
 			continue
 		}
 		seen[model.ID] = true
-		var modelID string
-		err := tx.QueryRowContext(ctx, `SELECT id FROM provider_models WHERE provider_id=? AND upstream_model_id=?`, providerID, model.ID).Scan(&modelID)
-		if err == sql.ErrNoRows {
-			modelID, err = id.New()
-			if err != nil {
-				return err
-			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)`, modelID, providerID, model.ID, model.DisplayName, nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens), nullableProtocol(model.NativeProtocol), nullableBool(model.SupportsTools), nullableBool(model.SupportsVision), nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput), nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities), now, now, now, now); err != nil {
-				return err
-			}
-			if _, err = tx.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at)
-				SELECT c.id,'real',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=?`, modelID, now, now, providerID); err != nil {
-				return err
-			}
-		} else if err != nil {
-			return err
-		} else if _, err = tx.ExecContext(ctx, `UPDATE provider_models SET display_name=?,context_length=?,max_output_tokens=?,native_protocol=?,supports_tools=?,supports_vision=?,supports_reasoning=?,supports_structured_output=?,input_modalities=?,output_modalities=?,available=1,last_seen_at=?,updated_at=? WHERE id=?`, model.DisplayName, nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens), nullableProtocol(model.NativeProtocol), nullableBool(model.SupportsTools), nullableBool(model.SupportsVision), nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput), nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities), now, now, modelID); err != nil {
-			return err
-		}
+		unique = append(unique, model)
 	}
-	if len(seen) == 0 {
-		if _, err := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=?`, now, providerID); err != nil {
+
+	// Fetch existing model rows for this provider in a single query so we can
+	// reuse their primary keys on conflict. This avoids an N-statement lookup
+	// inside the loop and lets the upsert be one statement regardless of model
+	// count.
+	existing := make(map[string]string, len(unique))
+	rows, err := tx.QueryContext(ctx, `SELECT id,upstream_model_id FROM provider_models WHERE provider_id=?`, providerID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var modelID, upstream string
+		if err := rows.Scan(&modelID, &upstream); err != nil {
+			rows.Close()
 			return err
 		}
-	} else {
-		rows, err := tx.QueryContext(ctx, `SELECT id,upstream_model_id FROM provider_models WHERE provider_id=? AND available=1`, providerID)
+		existing[upstream] = modelID
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	// Allocate primary keys up front so a single batched UPSERT can carry the
+	// correct id for both new (freshly allocated) and existing rows. SQLite's
+	// ON CONFLICT requires the inserted id to match the existing row's id when
+	// we want to UPDATE non-key columns, so we pre-compute both.
+	ids := make([]string, len(unique))
+	newIDs := make([]string, 0, len(unique))
+	for i, model := range unique {
+		if modelID, ok := existing[model.ID]; ok {
+			ids[i] = modelID
+			continue
+		}
+		newID, err := id.New()
 		if err != nil {
 			return err
 		}
-		var retire []string
-		for rows.Next() {
-			var modelID, upstream string
-			if err := rows.Scan(&modelID, &upstream); err != nil {
-				rows.Close()
-				return err
-			}
-			if !seen[upstream] {
-				retire = append(retire, modelID)
-			}
+		ids[i] = newID
+		newIDs = append(newIDs, newID)
+	}
+
+	// One batched UPSERT for the entire catalogue. The DO UPDATE branch keeps
+	// the row's id stable (re-asserting the same value is a no-op) and refreshes
+	// every metadata field plus available=1 / last_seen_at. Previously this was
+	// O(N) INSERT-or-UPDATE statements inside the transaction.
+	if len(unique) > 0 {
+		const upsertColumns = 17
+		placeholders := make([]string, 0, len(unique))
+		args := make([]any, 0, len(unique)*upsertColumns)
+		for i, model := range unique {
+			placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
+			args = append(args,
+				ids[i], providerID, model.ID, model.DisplayName,
+				nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens),
+				nullableProtocol(model.NativeProtocol),
+				nullableBool(model.SupportsTools), nullableBool(model.SupportsVision),
+				nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
+				nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
+				now, now, now, now,
+			)
 		}
-		rows.Close()
-		for _, modelID := range retire {
-			if _, err := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE id=?`, now, modelID); err != nil {
-				return err
-			}
+		stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
+			strings.Join(placeholders, ",") + `
+			ON CONFLICT(provider_id, upstream_model_id) DO UPDATE SET
+				display_name=excluded.display_name,
+				context_length=excluded.context_length,
+				max_output_tokens=excluded.max_output_tokens,
+				native_protocol=excluded.native_protocol,
+				supports_tools=excluded.supports_tools,
+				supports_vision=excluded.supports_vision,
+				supports_reasoning=excluded.supports_reasoning,
+				supports_structured_output=excluded.supports_structured_output,
+				input_modalities=excluded.input_modalities,
+				output_modalities=excluded.output_modalities,
+				available=1,
+				last_seen_at=excluded.last_seen_at,
+				updated_at=excluded.updated_at`
+		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+			return err
 		}
 	}
+
+	// Seed default permissions for newly-discovered models in a single statement
+	// per model. Each row creates one entry per client_key, mirroring the prior
+	// per-row INSERT. client_group_defaults is read with a LEFT JOIN so clients
+	// without a default row fall back to enabled=0 (matches prior behaviour).
+	for _, newID := range newIDs {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at)
+			SELECT c.id,'real',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=?`, newID, now, now, providerID); err != nil {
+			return err
+		}
+	}
+
+	// Mark models that vanished from the catalogue (or were deduped away) as
+	// unavailable. Guard len(seen)>0 so we never build an empty IN (...) list;
+	// discovery returning zero usable models falls through to the bulk retire
+	// below. The available=1 predicate mirrors the pre-batch behaviour of only
+	// retiring rows that were previously available (0->0 is already a no-op,
+	// but avoiding the write keeps already-dead rows' updated_at stable).
+	if len(seen) > 0 {
+		placeholders := make([]string, 0, len(seen))
+		args := make([]any, 0, len(seen)+1)
+		args = append(args, providerID)
+		for upstream := range seen {
+			placeholders = append(placeholders, "?")
+			args = append(args, upstream)
+		}
+		stmt := `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND upstream_model_id NOT IN (` + strings.Join(placeholders, ",") + `)`
+		// Prepend `now` to the args since the WHERE clause order is provider_id-first.
+		fullArgs := make([]any, 0, len(args)+1)
+		fullArgs = append(fullArgs, now)
+		fullArgs = append(fullArgs, args...)
+		if _, err := tx.ExecContext(ctx, stmt, fullArgs...); err != nil {
+			return err
+		}
+	} else {
+		// Discovery returned no usable models. Retire everything for this provider.
+		if _, err := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1`, now, providerID); err != nil {
+			return err
+		}
+	}
+
 	next := time.Now().UTC().Add(24*time.Hour + refreshJitter(providerID)).Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `UPDATE providers SET last_refresh_at=?,next_refresh_at=?,last_refresh_error=NULL,updated_at=? WHERE id=?`, now, next, now, providerID); err != nil {
 		return err

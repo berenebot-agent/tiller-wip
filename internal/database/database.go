@@ -39,6 +39,16 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	query.Add("_pragma", "foreign_keys(1)")
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "journal_mode(WAL)")
+	// Keep SQLite's scratch/temp files entirely in memory and never on a disk
+	// temp path. Without this, a large catalogue UPSERT can trigger a temp-file
+	// spill, and on constrained CI runners the temp path is intermittently
+	// unresolvable -> SQLITE_IOERR_GETTEMPPATH (6410) at applyCatalogue commit,
+	// which showed up in CI as a browser-suite flake ("Provider was saved, but
+	// initial discovery failed"). This DB is small (a few hundred provider
+	// models at most), so an in-memory temp store is a negligible cost and
+	// removes the whole temp-path failure class. The on-disk DB and WAL are
+	// unaffected.
+	query.Add("_pragma", "temp_store(MEMORY)")
 	dsnURL.RawQuery = query.Encode()
 	dsn := dsnURL.String()
 	db, err := sql.Open("sqlite", dsn)
