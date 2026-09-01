@@ -13,7 +13,7 @@ Guardrails for any coding agent working in this repository. This file does not r
 - Before writing code for a new feature, check whether it's in the V1 spec's functional scope (§3), in §27 Non-Goals, or in the roadmaps' anti-roadmap. A non-goal or roadmap item is fine to build in live dev **with explicit human sign-off**, but never silently and never "just to see."
 - Adding a brand-new dependency, service, or infrastructure component (Redis, Postgres, message queues, vector DBs, Kubernetes, etc.) still requires an explicit, named request from a human.
 - Do not "clean up" the roadmap's phase ordering or scope on your own initiative. Roadmap sequencing is a human decision.
-- If a task requires touching something explicitly marked deferred (e.g. credential encryption, fallback routing) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
+- If a task requires touching something explicitly marked deferred (e.g. credential encryption or provider-health infrastructure) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
 
 ## Deployment model — non-negotiable
 
@@ -51,7 +51,7 @@ Guardrails for any coding agent working in this repository. This file does not r
 
 ## Behavioral guardrails for routing logic
 
-- Never implement silent fallback, silent retry, or silent re-routing to a different model/provider than the one resolved. If a target is broken, fail clearly (per §21) — don't make the router "helpful" by picking something else.
+- Ordered fallback is allowed only for an explicitly configured virtual model and only before client-visible output begins. It must follow the stored target order and remain visible in Activity; every upstream non-2xx/read/connect failure is eligible unless the router itself failed or the client request was cancelled/expired. Direct real-model requests, hidden health-based rerouting, retries of the same target, and post-output stream splicing remain forbidden.
 - Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing throughout the spec — treat any code path that blurs it as a bug.
 - Preserve the real/virtual model permission boundary described in the spec exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
 

@@ -39,9 +39,11 @@ type Server struct {
 	// materially delay an inference request.
 	notifyClient *http.Client
 	// notifyCooldownMu guards notifyLastSent, the in-memory last-sent timestamps
-	// used to throttle repeat notifications for the same event + model.
+	// used to throttle repeat notifications for the same event + model and the
+	// in-flight reservations used to prevent concurrent fanout.
 	notifyCooldownMu sync.Mutex
 	notifyLastSent   map[string]time.Time
+	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
 	loginLimiter *loginLimiter
 }
@@ -69,7 +71,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
+	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -160,7 +162,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
-	key := peerIP(r)
+	key := clientIP(r, s.config.TrustProxy, s.config.TrustedProxy)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 		return
@@ -185,7 +187,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, peerIP(r)))
+	s.notifyAdminEvent(eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, clientIP(r, s.config.TrustProxy, s.config.TrustedProxy)))
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 

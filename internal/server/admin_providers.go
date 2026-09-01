@@ -250,17 +250,9 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this provider first.")
 		return
 	}
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models WHERE target_provider_id=?`, providerID).Scan(&refs); err != nil {
-		adminError(w, 500, "database_error", "Could not delete provider.")
-		return
-	}
-	if refs > 0 {
-		adminError(w, 409, "provider_in_use", "Repoint or delete dependent virtual models first.")
-		return
-	}
-	// A provider can also be referenced as a non-primary target (position 2+)
-	// of a virtual model. Check the full v2 target table so deletion never
-	// slips past a dependency and surfaces as a raw database FK error.
+	// virtual_model_targets is the functional source of truth. This includes
+	// references in every ordered position, not only the compatibility primary
+	// columns on virtual_models.
 	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE m.provider_id=?`, providerID).Scan(&refs); err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
@@ -295,24 +287,24 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 type modelView struct {
-	ID               string             `json:"id"`
-	ProviderID       string             `json:"provider_id"`
-	ProviderName     string             `json:"provider_name"`
-	UpstreamModelID  string             `json:"upstream_model_id"`
-	CanonicalModelID string             `json:"canonical_model_id"`
-	DisplayName      string             `json:"display_name"`
-	ContextLength    *int64             `json:"context_length"`
-	MaxOutputTokens  *int64             `json:"max_output_tokens"`
-	NativeProtocol   providers.Protocol `json:"native_protocol,omitempty"`
-	SupportsTools    *bool              `json:"supports_tools"`
-	SupportsVision   *bool              `json:"supports_vision"`
-	SupportsReasoning *bool             `json:"supports_reasoning"`
-	SupportsStructuredOutput *bool      `json:"supports_structured_output"`
-	InputModalities  []string           `json:"input_modalities,omitempty"`
-	OutputModalities []string           `json:"output_modalities,omitempty"`
-	Available        bool               `json:"available"`
-	FirstSeenAt      string             `json:"first_seen_at"`
-	LastSeenAt       string             `json:"last_seen_at"`
+	ID                       string             `json:"id"`
+	ProviderID               string             `json:"provider_id"`
+	ProviderName             string             `json:"provider_name"`
+	UpstreamModelID          string             `json:"upstream_model_id"`
+	CanonicalModelID         string             `json:"canonical_model_id"`
+	DisplayName              string             `json:"display_name"`
+	ContextLength            *int64             `json:"context_length"`
+	MaxOutputTokens          *int64             `json:"max_output_tokens"`
+	NativeProtocol           providers.Protocol `json:"native_protocol,omitempty"`
+	SupportsTools            *bool              `json:"supports_tools"`
+	SupportsVision           *bool              `json:"supports_vision"`
+	SupportsReasoning        *bool              `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool              `json:"supports_structured_output"`
+	InputModalities          []string           `json:"input_modalities,omitempty"`
+	OutputModalities         []string           `json:"output_modalities,omitempty"`
+	Available                bool               `json:"available"`
+	FirstSeenAt              string             `json:"first_seen_at"`
+	LastSeenAt               string             `json:"last_seen_at"`
 }
 
 func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request) {
@@ -400,6 +392,9 @@ func decodeModalities(v sql.NullString) []string {
 // any false -> false; else any nil -> nil (unknown); else true. An empty input
 // yields nil (unknown).
 func triStateANDBool(flags []*bool) *bool {
+	if len(flags) == 0 {
+		return nil
+	}
 	hasUnknown := false
 	for _, f := range flags {
 		if f == nil {

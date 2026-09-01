@@ -496,6 +496,7 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{
 			map[string]any{"id": "model-a", "context_length": 128000, "max_output_tokens": 16384, "supported_parameters": []string{"tools", "reasoning", "structured_outputs"}, "architecture": map[string]any{"input_modalities": []string{"text", "image"}, "output_modalities": []string{"text"}}},
 			map[string]any{"id": "model-b", "context_length": 262144, "max_output_tokens": 32768},
+			map[string]any{"id": "model-c"},
 		}})
 	}))
 	defer upstream.Close()
@@ -588,6 +589,14 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 		t.Fatalf("virtual mixed: %d %v", status, payload)
 	}
 	mixedID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupID, "name": "unknown-limits", "routing_mode": "ordered_fallback", "targets": []any{
+		map[string]any{"provider_model_id": modelIDs["model-a"], "enabled": true},
+		map[string]any{"provider_model_id": modelIDs["model-c"], "enabled": true},
+	}})
+	if status != 201 {
+		t.Fatalf("virtual unknown limits: %d %v", status, payload)
+	}
+	unknownLimitsID := payload["id"].(string)
 	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupID, "name": "single", "target_provider_id": providerID, "target_model_id": modelIDs["model-a"]})
 	if status != 201 {
 		t.Fatalf("virtual single: %d %v", status, payload)
@@ -597,6 +606,7 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 		map[string]any{"kind": "real", "model_id": modelIDs["model-a"], "enabled": true},
 		map[string]any{"kind": "real", "model_id": modelIDs["model-b"], "enabled": true},
 		map[string]any{"kind": "virtual", "model_id": mixedID, "enabled": true},
+		map[string]any{"kind": "virtual", "model_id": unknownLimitsID, "enabled": true},
 		map[string]any{"kind": "virtual", "model_id": singleID, "enabled": true},
 	}})
 	if status != 204 {
@@ -606,6 +616,13 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 	mixed := byID["virtual/mixed"]
 	if _, ok := mixed["supports_tools"]; ok {
 		t.Fatalf("mixed virtual tools should be unknown (model-b unknown), got %v", mixed["supports_tools"])
+	}
+	unknownLimits := byID["virtual/unknown-limits"]
+	if _, ok := unknownLimits["context_length"]; ok {
+		t.Fatalf("virtual with an unknown eligible context limit must omit context_length: %v", unknownLimits)
+	}
+	if _, ok := unknownLimits["max_output_tokens"]; ok {
+		t.Fatalf("virtual with an unknown eligible output limit must omit max_output_tokens: %v", unknownLimits)
 	}
 	single := byID["virtual/single"]
 	if single["supports_tools"] != float64(1) || single["supports_vision"] != float64(1) {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -146,10 +148,57 @@ func TestProviderProtocolEndpointsAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestAppendEndpointMergesQueries(t *testing.T) {
+	tests := []struct {
+		name, base, endpoint string
+		want                 url.Values
+	}{
+		{name: "no queries", base: "https://example.com/v1", endpoint: "responses", want: url.Values{}},
+		{name: "base query", base: "https://example.com/v1?api-version=2026-01-01", endpoint: "responses", want: url.Values{"api-version": {"2026-01-01"}}},
+		{name: "multiple base values", base: "https://example.com/v1?a=1&a=2&b=hello+world", endpoint: "responses", want: url.Values{"a": {"1", "2"}, "b": {"hello world"}}},
+		{name: "endpoint addition", base: "https://example.com/v1?api-version=2026-01-01", endpoint: "responses?after=cursor", want: url.Values{"api-version": {"2026-01-01"}, "after": {"cursor"}}},
+		{name: "endpoint duplicate wins", base: "https://example.com/v1?mode=base&keep=yes", endpoint: "responses?mode=endpoint&mode=second", want: url.Values{"mode": {"endpoint", "second"}, "keep": {"yes"}}},
+		{name: "encoded values", base: "https://example.com/v1?filter=a%2Fb%3Fc&space=hello%20world", endpoint: "responses?encoded=%5Bone%5D%26%5Btwo%5D", want: url.Values{"filter": {"a/b?c"}, "space": {"hello world"}, "encoded": {"[one]&[two]"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotURL, err := appendEndpoint(test.base, test.endpoint)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := url.Parse(gotURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got.Query(), test.want) {
+				t.Fatalf("query = %#v, want %#v (url %q)", got.Query(), test.want, gotURL)
+			}
+		})
+	}
+}
+
+func TestEndpointPreservesBaseQuery(t *testing.T) {
+	endpoint, err := Endpoint(Instance{Type: "generic-openai", BaseURL: "https://example.com/v1?api-version=2026-01-01&tenant=one"}, ProtocolChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := url.Values{"api-version": {"2026-01-01"}, "tenant": {"one"}}
+	if !reflect.DeepEqual(u.Query(), want) {
+		t.Fatalf("endpoint query = %#v, want %#v", u.Query(), want)
+	}
+}
+
 func TestPagedDiscovery(t *testing.T) {
 	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
+		if got := r.URL.Query().Get("api-version"); got != "2026-01-01" {
+			t.Errorf("base query api-version = %q, want 2026-01-01", got)
+		}
 		if r.Header.Get("Authorization") != "Bearer secret" {
 			t.Error("credential header missing")
 		}
@@ -160,7 +209,7 @@ func TestPagedDiscovery(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "model-a"}}, "has_more": true, "last_id": "first"})
 	}))
 	defer upstream.Close()
-	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "generic-openai", BaseURL: upstream.URL + "/v1", Credential: "secret"})
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "generic-openai", BaseURL: upstream.URL + "/v1?api-version=2026-01-01", Credential: "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}

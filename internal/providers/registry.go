@@ -481,7 +481,16 @@ func appendEndpoint(baseURL, endpoint string) (string, error) {
 	if !strings.HasPrefix(u.Path, "/") {
 		u.Path = "/" + u.Path
 	}
-	u.RawQuery = e.RawQuery
+	query := u.Query()
+	for key, values := range e.Query() {
+		// Endpoint-specific parameters are authoritative for duplicate keys,
+		// while preserving repeated values and all base-only parameters.
+		query.Del(key)
+		for _, value := range values {
+			query.Add(key, value)
+		}
+	}
+	u.RawQuery = query.Encode()
 	return u.String(), nil
 }
 

@@ -200,48 +200,48 @@ func (s *Server) deleteVirtualGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 type virtualModelView struct {
-	ID                    string              `json:"id"`
-	GroupID               string              `json:"group_id"`
-	GroupName             string              `json:"group_name"`
-	Name                  string              `json:"name"`
-	CanonicalModelID      string              `json:"canonical_model_id"`
-	TargetProviderID      string              `json:"target_provider_id"`
-	TargetProviderName    string              `json:"target_provider_name"`
-	TargetModelID         string              `json:"target_model_id"`
-	TargetUpstreamModelID string              `json:"target_upstream_model_id"`
-	RoutingMode           string              `json:"routing_mode"`
-	Targets               []virtualTargetView `json:"targets"`
-	ContextLength         *int64              `json:"context_length"`
-	MaxOutputTokens       *int64              `json:"max_output_tokens"`
-	SupportsTools         *bool               `json:"supports_tools"`
-	SupportsVision        *bool               `json:"supports_vision"`
-	SupportsReasoning     *bool               `json:"supports_reasoning"`
-	SupportsStructuredOutput *bool            `json:"supports_structured_output"`
-	Available             bool                `json:"available"`
-	Warning               string              `json:"warning,omitempty"`
-	CreatedAt             string              `json:"created_at"`
-	UpdatedAt             string              `json:"updated_at"`
+	ID                       string              `json:"id"`
+	GroupID                  string              `json:"group_id"`
+	GroupName                string              `json:"group_name"`
+	Name                     string              `json:"name"`
+	CanonicalModelID         string              `json:"canonical_model_id"`
+	TargetProviderID         string              `json:"target_provider_id"`
+	TargetProviderName       string              `json:"target_provider_name"`
+	TargetModelID            string              `json:"target_model_id"`
+	TargetUpstreamModelID    string              `json:"target_upstream_model_id"`
+	RoutingMode              string              `json:"routing_mode"`
+	Targets                  []virtualTargetView `json:"targets"`
+	ContextLength            *int64              `json:"context_length"`
+	MaxOutputTokens          *int64              `json:"max_output_tokens"`
+	SupportsTools            *bool               `json:"supports_tools"`
+	SupportsVision           *bool               `json:"supports_vision"`
+	SupportsReasoning        *bool               `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool               `json:"supports_structured_output"`
+	Available                bool                `json:"available"`
+	Warning                  string              `json:"warning,omitempty"`
+	CreatedAt                string              `json:"created_at"`
+	UpdatedAt                string              `json:"updated_at"`
 }
 
 type virtualTargetView struct {
-	ID              string `json:"id"`
-	ProviderModelID string `json:"provider_model_id"`
-	ProviderID      string `json:"provider_id"`
-	ProviderName    string `json:"provider_name"`
-	UpstreamModelID string `json:"upstream_model_id"`
-	NativeProtocol  string `json:"native_protocol,omitempty"`
-	Position        int    `json:"position"`
-	Enabled         bool   `json:"enabled"`
-	Available       bool   `json:"available"`
-	Warning         string `json:"warning,omitempty"`
-	ContextLength   *int64 `json:"context_length"`
-	MaxOutputTokens *int64 `json:"max_output_tokens"`
-	SupportsTools   *bool  `json:"supports_tools"`
-	SupportsVision  *bool  `json:"supports_vision"`
-	SupportsReasoning *bool `json:"supports_reasoning"`
-	SupportsStructuredOutput *bool `json:"supports_structured_output"`
-	InputModalities  []string `json:"input_modalities,omitempty"`
-	OutputModalities []string `json:"output_modalities,omitempty"`
+	ID                       string   `json:"id"`
+	ProviderModelID          string   `json:"provider_model_id"`
+	ProviderID               string   `json:"provider_id"`
+	ProviderName             string   `json:"provider_name"`
+	UpstreamModelID          string   `json:"upstream_model_id"`
+	NativeProtocol           string   `json:"native_protocol,omitempty"`
+	Position                 int      `json:"position"`
+	Enabled                  bool     `json:"enabled"`
+	Available                bool     `json:"available"`
+	Warning                  string   `json:"warning,omitempty"`
+	ContextLength            *int64   `json:"context_length"`
+	MaxOutputTokens          *int64   `json:"max_output_tokens"`
+	SupportsTools            *bool    `json:"supports_tools"`
+	SupportsVision           *bool    `json:"supports_vision"`
+	SupportsReasoning        *bool    `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool    `json:"supports_structured_output"`
+	InputModalities          []string `json:"input_modalities,omitempty"`
+	OutputModalities         []string `json:"output_modalities,omitempty"`
 }
 
 func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
@@ -260,20 +260,30 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 500, "database_error", "Could not list virtual models.")
 			return
 		}
-		v.Targets, _ = s.virtualTargets(r, v.ID)
+		v.Targets, err = s.virtualTargets(r, v.ID)
+		if err != nil {
+			adminError(w, 500, "database_error", "Could not list virtual models.")
+			return
+		}
+		eligible := eligibleVirtualTargets(v.Targets)
 		var tools, vision, reasoning, structured []*bool
+		for _, target := range eligible {
+			v.Available = true
+			tools = append(tools, target.SupportsTools)
+			vision = append(vision, target.SupportsVision)
+			reasoning = append(reasoning, target.SupportsReasoning)
+			structured = append(structured, target.SupportsStructuredOutput)
+		}
+		// These legacy fields remain in the DTO for compatibility. They are
+		// populated from the first ordered v2 target, but never drive any
+		// dependency, availability, or capability calculation.
+		if len(v.Targets) > 0 {
+			primary := v.Targets[0]
+			v.TargetProviderID, v.TargetProviderName, v.TargetModelID, v.TargetUpstreamModelID = primary.ProviderID, primary.ProviderName, primary.ProviderModelID, primary.UpstreamModelID
+		}
+		v.ContextLength = aggregateVirtualNumeric(v.Targets, func(target virtualTargetView) *int64 { return target.ContextLength })
+		v.MaxOutputTokens = aggregateVirtualNumeric(v.Targets, func(target virtualTargetView) *int64 { return target.MaxOutputTokens })
 		for _, target := range v.Targets {
-			if target.Enabled && target.Available {
-				v.Available = true
-				tools = append(tools, target.SupportsTools)
-				vision = append(vision, target.SupportsVision)
-				reasoning = append(reasoning, target.SupportsReasoning)
-				structured = append(structured, target.SupportsStructuredOutput)
-			}
-			if v.TargetProviderID == "" {
-				v.TargetProviderID, v.TargetProviderName, v.TargetModelID, v.TargetUpstreamModelID = target.ProviderID, target.ProviderName, target.ProviderModelID, target.UpstreamModelID
-				v.ContextLength, v.MaxOutputTokens = target.ContextLength, target.MaxOutputTokens
-			}
 			if target.Warning != "" {
 				v.Warning = target.Warning
 			}
@@ -283,6 +293,10 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 		v.SupportsReasoning = triStateANDBool(reasoning)
 		v.SupportsStructuredOutput = triStateANDBool(structured)
 		data = append(data, v)
+	}
+	if err := rows.Err(); err != nil {
+		adminError(w, 500, "database_error", "Could not list virtual models.")
+		return
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }

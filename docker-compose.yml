@@ -18,7 +18,7 @@ services:
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
       TILLER_DATA_DIR: /data
       TILLER_LISTEN_ADDR: :8080
-      TILLER_TRUST_PROXY_HEADERS: ${TILLER_TRUST_PROXY_HEADERS:-true}
+      TILLER_TRUST_PROXY_HEADERS: ${TILLER_TRUST_PROXY_HEADERS:-false}
       TILLER_MODELS_DEV_ENABLED: ${TILLER_MODELS_DEV_ENABLED:-true}
     volumes:
       - ./data:/data
@@ -29,7 +29,6 @@ services:
       retries: 3
       start_period: 10s
     ports:
-      - 0.0.0.0:${TILLER_TEST_PORT:-8080}:8080
+      - 0.0.0.0:${TILLER_PORT:-8080}:8080
     security_opt:
       - no-new-privileges:true
-

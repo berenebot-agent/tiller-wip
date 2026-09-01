@@ -12,12 +12,17 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 
 	// Default on when the env var is unset/empty.
 	t.Setenv("TILLER_MODELS_DEV_ENABLED", "")
+	t.Setenv("TILLER_TRUST_PROXY_HEADERS", "")
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	c, err := Load()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !c.ModelsDevEnabled {
 		t.Error("ModelsDevEnabled should default to true")
+	}
+	if c.TrustProxy {
+		t.Error("TrustProxy should default to false")
 	}
 
 	// Explicitly off.

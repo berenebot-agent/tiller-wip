@@ -3,6 +3,8 @@ package server
 import (
 	"net"
 	"net/http"
+	"net/netip"
+	"strings"
 	"sync"
 	"time"
 )
@@ -98,4 +100,43 @@ func peerIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// clientIP returns the address used for client-facing security decisions. A
+// forwarded chain is considered only when the direct peer is inside the
+// explicitly configured trusted-proxy prefix. Every forwarded hop must parse
+// as an IP; malformed chains are rejected and the direct peer is retained.
+// Traversing right-to-left stops at the first address outside the trusted
+// proxy range, which is the standard proxy-chain trust boundary.
+func clientIP(r *http.Request, trustProxy bool, trustedProxy netip.Prefix) string {
+	direct := peerIP(r)
+	if !trustProxy || !trustedProxy.IsValid() {
+		return direct
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !trustedProxy.Contains(peer) {
+		return direct
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	if len(parts) == 1 && strings.TrimSpace(parts[0]) == "" {
+		return direct
+	}
+	addrs := make([]netip.Addr, len(parts))
+	for i, part := range parts {
+		addr, parseErr := netip.ParseAddr(strings.TrimSpace(part))
+		if parseErr != nil {
+			return direct
+		}
+		addrs[i] = addr
+	}
+	for i := len(addrs) - 1; i >= 0; i-- {
+		if !trustedProxy.Contains(addrs[i]) {
+			return addrs[i].String()
+		}
+	}
+	return addrs[0].String()
 }

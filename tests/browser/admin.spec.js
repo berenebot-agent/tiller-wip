@@ -987,13 +987,17 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await expect(page.locator('#activity-next')).toBeDisabled();
   await expect(page.locator('#activity-prev')).toBeDisabled();
 
-  // Cleanup: discard client B's activity so unrelated later tests stay isolated.
+  // Clearing activity is a destructive action and requires explicit confirmation.
+  await page.getByRole('button', { name: 'Clear activity' }).click();
+  await expect(page.locator('#confirm-dialog')).toBeVisible();
+  await expect(page.locator('#confirm-copy')).toContainText('permanently deleted');
+  await page.locator('#confirm-action').click();
+  await expect(page.locator('#activity-empty')).toBeVisible();
+  await expect(page.locator('#activity-count')).toHaveText('0 results');
+
+  // Cleanup: close the now-empty activity dialog so unrelated later tests stay isolated.
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
-  const clearRes = await page.request.delete(`/api/admin/client-keys/${clientB.id}/activity`, {
-    headers: { 'X-CSRF-Token': csrf }
-  });
-  expect(clearRes.status()).toBe(204);
 });
 
 test('activity loads clear a previously shown error on success', async ({ page }) => {

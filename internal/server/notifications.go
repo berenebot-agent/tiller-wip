@@ -3,7 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -14,15 +16,15 @@ import (
 // Notification event identifiers. These are stable, machine-readable values
 // used in the outbound payload's "event" field.
 const (
-	eventFallback   = "virtual_model_fallback"
-	eventAllFailed  = "virtual_model_failed"
-	eventTest       = "test"
+	eventFallback         = "virtual_model_fallback"
+	eventAllFailed        = "virtual_model_failed"
+	eventTest             = "test"
 	eventClientKeyCreated = "client_key_created"
 	eventClientKeyDeleted = "client_key_deleted"
 	eventAdminLogin       = "admin_login"
-	severityWarning = "warning"
-	severityError   = "error"
-	severityInfo    = "info"
+	severityWarning       = "warning"
+	severityError         = "error"
+	severityInfo          = "info"
 )
 
 // notificationTimeout bounds a single best-effort webhook delivery. Delivery
@@ -35,13 +37,13 @@ const notificationTimeout = 5 * time.Second
 // arguments/results, reasoning, provider keys, client key plaintext, auth
 // headers, cookies, or credentials.
 type notificationPayload struct {
-	Event          string `json:"event"`
-	Severity       string `json:"severity"`
-	Timestamp      string `json:"timestamp"`
-	ClientKey      string `json:"client_key"`
-	RequestedModel string `json:"requested_model"`
-	VirtualModel   string `json:"virtual_model,omitempty"`
-	AttemptCount   int    `json:"attempt_count"`
+	Event          string                `json:"event"`
+	Severity       string                `json:"severity"`
+	Timestamp      string                `json:"timestamp"`
+	ClientKey      string                `json:"client_key"`
+	RequestedModel string                `json:"requested_model"`
+	VirtualModel   string                `json:"virtual_model,omitempty"`
+	AttemptCount   int                   `json:"attempt_count"`
 	Attempts       []notificationAttempt `json:"attempts,omitempty"`
 	// Message, when set, is the full human-readable body for non-routing
 	// (admin) events. It is rendered verbatim instead of the routing format.
@@ -149,25 +151,47 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 		return
 	}
 	// Throttle repeat notifications for the same event + model within the
-	// cooldown window. Only routing events are throttled; the manual test and
-	// discrete admin events are not.
-	if cfg.CooldownSeconds > 0 && subjectToCooldown(event) {
-		key := event + "|" + payload.VirtualModel
+	// cooldown window. Reserve the key before starting delivery so concurrent
+	// requests cannot fan out duplicate notifications. Only routing events are
+	// throttled; the manual test and discrete admin events are not.
+	key := event + "|" + payload.VirtualModel
+	reserved := false
+	if subjectToCooldown(event) {
 		s.notifyCooldownMu.Lock()
+		if s.notifyInFlight == nil {
+			s.notifyInFlight = map[string]bool{}
+		}
+		if s.notifyLastSent == nil {
+			s.notifyLastSent = map[string]time.Time{}
+		}
 		now := time.Now()
-		if last, ok := s.notifyLastSent[key]; ok && now.Sub(last) < time.Duration(cfg.CooldownSeconds)*time.Second {
+		if cfg.CooldownSeconds > 0 {
+			if last, ok := s.notifyLastSent[key]; ok && now.Sub(last) < time.Duration(cfg.CooldownSeconds)*time.Second {
+				s.notifyCooldownMu.Unlock()
+				return
+			}
+		}
+		if s.notifyInFlight[key] {
 			s.notifyCooldownMu.Unlock()
 			return
 		}
-		s.notifyLastSent[key] = now
+		s.notifyInFlight[key] = true
+		reserved = true
 		s.notifyCooldownMu.Unlock()
+	}
+	if reserved {
+		defer func() {
+			s.notifyCooldownMu.Lock()
+			delete(s.notifyInFlight, key)
+			s.notifyCooldownMu.Unlock()
+		}()
 	}
 	body := []byte(payload.humanMessage())
 	reqCtx, cancel := context.WithTimeout(ctx, notificationTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, cfg.WebhookURL, bytes.NewReader(body))
 	if err != nil {
-		s.logger.Warn("notification request build failed", "event", event, "error", err.Error())
+		s.logger.Warn("notification delivery failed", "event", event, "error_class", notificationErrorClass(err))
 		return
 	}
 	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
@@ -178,10 +202,30 @@ func (s *Server) deliverNotification(event string, payload notificationPayload) 
 	}
 	resp, err := s.notifyClient.Do(req)
 	if err != nil {
-		s.logger.Warn("notification delivery failed", "event", event, "error", err.Error())
+		s.logger.Warn("notification delivery failed", "event", event, "error_class", notificationErrorClass(err))
 		return
 	}
 	_ = resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		s.logger.Warn("notification delivery failed", "event", event, "status", resp.StatusCode)
+		return
+	}
+	if reserved {
+		s.notifyCooldownMu.Lock()
+		s.notifyLastSent[key] = time.Now()
+		s.notifyCooldownMu.Unlock()
+	}
+}
+
+func notificationErrorClass(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	return "transport"
 }
 
 // buildNotificationPayload assembles the metadata-only payload for an event
@@ -361,7 +405,7 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.notifyClient.Do(req)
 	if err != nil {
-		adminError(w, 502, "delivery_failed", "The test notification could not be delivered: "+err.Error())
+		adminError(w, 502, "delivery_failed", "The test notification could not be delivered ("+notificationErrorClass(err)+").")
 		return
 	}
 	_ = resp.Body.Close()

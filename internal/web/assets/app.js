@@ -727,8 +727,8 @@ $('#save-permissions').onclick = async () => {
 };
 
 const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
-async function openActivity(client) { activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; await loadActivity(); $('#activity-dialog').showModal(); }
-async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; await loadActivity(); $('#activity-dialog').showModal(); }
+async function openActivity(client) { activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; $('#clear-activity').hidden = false; await loadActivity(); $('#activity-dialog').showModal(); }
+async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; await loadActivity(); $('#activity-dialog').showModal(); }
 async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
 function activityAttempt(attempt, index) { return `<div class="activity-attempt ${attempt.result === 'success' ? 'attempt-success' : 'attempt-failed'}"><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code>${h(attempt.provider)}/${h(attempt.model)}</code></span><span class="attempt-latency">${attempt.latency_ms} ms</span><span class="attempt-status">${attempt.http_status || h(attempt.result)}</span></div>`; }
 function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map(activityAttempt).join('')}</div>`; }
@@ -740,6 +740,18 @@ $('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activit
 $('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
 $('#export-activity').onclick = () => $('#export-dialog').showModal();
+$('#clear-activity').onclick = async () => {
+  if (activityState.kind !== 'client' || !activityState.client) return;
+  if (!await confirmAction({ title: `Clear ${activityState.client.name} activity?`, copy: 'All recorded request metadata for this client will be permanently deleted.', action: 'Clear activity' })) return;
+  const button = $('#clear-activity'); button.disabled = true; $('#activity-error').textContent = '';
+  try {
+    await api(`/api/admin/client-keys/${activityState.client.id}/activity`, { method: 'DELETE' });
+    activityState.offset = 0;
+    flash('Client activity cleared.');
+    await loadActivity();
+  } catch (error) { $('#activity-error').textContent = errorMessage(error); }
+  finally { button.disabled = false; }
+};
 $('#close-export').onclick = () => $('#export-dialog').close();
 $$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick = () => { const period = button.dataset.exportPeriod; const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity/export` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity/export` : `/api/admin/virtual-models/${activityState.modelID}/activity/export`; const url = `${base}?period=${period}&search=${encodeURIComponent(activityState.search || '')}`; const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); $('#export-dialog').close(); });
 

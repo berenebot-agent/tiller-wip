@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,15 +178,15 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 	}
 
 	status, _, _ = api.request("PUT", "/api/admin/settings", map[string]any{
-		"notifications_enabled":          true,
-		"notifications_webhook_url":      "https://ntfy.example.com/tiller",
-		"notifications_event_fallback":   false,
-		"notifications_event_all_failed": true,
-		"notifications_cooldown_seconds": 120,
+		"notifications_enabled":                  true,
+		"notifications_webhook_url":              "https://ntfy.example.com/tiller",
+		"notifications_event_fallback":           false,
+		"notifications_event_all_failed":         true,
+		"notifications_cooldown_seconds":         120,
 		"notifications_event_client_key_created": true,
 		"notifications_event_client_key_deleted": true,
-		"notifications_event_admin_login":       false,
-		"notifications_auth_header":      "Bearer secret-token",
+		"notifications_event_admin_login":        false,
+		"notifications_auth_header":              "Bearer secret-token",
 	})
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
@@ -280,6 +281,23 @@ func TestNotificationTestEndpoint(t *testing.T) {
 	}
 	if n.body == "" {
 		t.Fatal("test notification body should not be empty")
+	}
+}
+
+func TestNotificationTestEndpointSanitisesTransportErrors(t *testing.T) {
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	const secret = "must-not-appear"
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{"notifications_webhook_url": "http://127.0.0.1:1/notify?token=" + secret})
+	if status != http.StatusNoContent {
+		t.Fatalf("update settings: %d", status)
+	}
+	status, payload, _ := api.request("POST", "/api/admin/notifications/test", nil)
+	if status != http.StatusBadGateway {
+		t.Fatalf("test notification status = %d, want 502", status)
+	}
+	encoded, _ := json.Marshal(payload)
+	if bytes.Contains(encoded, []byte(secret)) || bytes.Contains(encoded, []byte("127.0.0.1")) {
+		t.Fatalf("transport error exposed webhook request details: %s", encoded)
 	}
 }
 
@@ -448,11 +466,11 @@ func TestAdminEventNotifications(t *testing.T) {
 
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{
-		"notifications_enabled":                    true,
-		"notifications_webhook_url":                webhook.URL,
-		"notifications_event_client_key_created":   true,
-		"notifications_event_client_key_deleted":  true,
-		"notifications_event_admin_login":          true,
+		"notifications_enabled":                  true,
+		"notifications_webhook_url":              webhook.URL,
+		"notifications_event_client_key_created": true,
+		"notifications_event_client_key_deleted": true,
+		"notifications_event_admin_login":        true,
 	})
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
@@ -617,5 +635,161 @@ func TestNotificationFailureDoesNotFailInference(t *testing.T) {
 	}
 	if elapsed > 2*time.Second {
 		t.Fatalf("notification delivery materially delayed the response: %v", elapsed)
+	}
+}
+
+func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *database.DB, *httptest.Server) {
+	t.Helper()
+	webhook := httptest.NewServer(handler)
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		webhook.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		webhook.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(webhook.Close)
+	for key, value := range map[string]string{
+		database.SettingNotificationsEnabled:         "true",
+		database.SettingNotificationsWebhookURL:      webhook.URL,
+		database.SettingNotificationsEventFallback:   "true",
+		database.SettingNotificationsCooldownSeconds: "0",
+	} {
+		if err := db.SetSetting(context.Background(), key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return app, db, webhook
+}
+
+func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
+	var status atomic.Int32
+	var requests atomic.Int32
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(int(status.Load()))
+	}))
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := eventFallback + "|" + payload.VirtualModel
+	for _, code := range []int{200, 204, 401, 429, 500} {
+		status.Store(int32(code))
+		app.notifyCooldownMu.Lock()
+		delete(app.notifyLastSent, key)
+		app.notifyCooldownMu.Unlock()
+		app.deliverNotification(eventFallback, payload)
+		app.notifyCooldownMu.Lock()
+		_, recorded := app.notifyLastSent[key]
+		app.notifyCooldownMu.Unlock()
+		if recorded != (code >= 200 && code < 300) {
+			t.Fatalf("HTTP %d recorded cooldown = %v, want %v", code, recorded, code >= 200 && code < 300)
+		}
+	}
+	if got := requests.Load(); got != 5 {
+		t.Fatalf("requests = %d, want one attempt for each status", got)
+	}
+}
+
+func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
+	var status atomic.Int32
+	var requests atomic.Int32
+	app, db, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(int(status.Load()))
+	}))
+	if err := db.SetSetting(context.Background(), database.SettingNotificationsCooldownSeconds, "60"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := eventFallback + "|" + payload.VirtualModel
+	status.Store(500)
+	app.deliverNotification(eventFallback, payload)
+	app.notifyCooldownMu.Lock()
+	_, sentAfterFailure := app.notifyLastSent[key]
+	_, reservedAfterFailure := app.notifyInFlight[key]
+	app.notifyCooldownMu.Unlock()
+	if sentAfterFailure || reservedAfterFailure {
+		t.Fatalf("failed delivery left state: sent=%v reserved=%v", sentAfterFailure, reservedAfterFailure)
+	}
+	status.Store(200)
+	app.deliverNotification(eventFallback, payload)
+	app.deliverNotification(eventFallback, payload)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want failed delivery retried once then cooldown suppression", got)
+	}
+	app.notifyCooldownMu.Lock()
+	_, sentAfterSuccess := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if !sentAfterSuccess {
+		t.Fatal("successful delivery did not record cooldown")
+	}
+}
+
+func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var requests atomic.Int32
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		started <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	firstDone := make(chan struct{})
+	go func() { app.deliverNotification(eventFallback, payload); close(firstDone) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first notification did not start")
+	}
+	secondDone := make(chan struct{})
+	go func() { app.deliverNotification(eventFallback, payload); close(secondDone) }()
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent notification did not observe the in-flight reservation")
+	}
+	close(release)
+	<-firstDone
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests = %d, want one concurrent delivery", got)
+	}
+}
+
+func TestNotificationTimeoutClearsReservation(t *testing.T) {
+	var phase atomic.Int32
+	var requests atomic.Int32
+	release := make(chan struct{})
+	app, db, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		if phase.Load() == 0 {
+			<-release
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	app.notifyClient = &http.Client{Timeout: 20 * time.Millisecond}
+	if err := db.SetSetting(context.Background(), database.SettingNotificationsCooldownSeconds, "60"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(eventFallback, payload)
+	app.notifyCooldownMu.Lock()
+	_, sentAfterTimeout := app.notifyLastSent[key]
+	_, reservedAfterTimeout := app.notifyInFlight[key]
+	app.notifyCooldownMu.Unlock()
+	if sentAfterTimeout || reservedAfterTimeout {
+		t.Fatalf("timed-out delivery left state: sent=%v reserved=%v", sentAfterTimeout, reservedAfterTimeout)
+	}
+	phase.Store(1)
+	close(release)
+	app.deliverNotification(eventFallback, payload)
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("requests = %d, want timeout retry", got)
 	}
 }

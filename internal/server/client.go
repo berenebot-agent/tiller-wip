@@ -19,6 +19,10 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
 
+const maxUpstreamNonStreamBytes int64 = 64 << 20
+
+var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
+
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
 	var keyType string
@@ -39,7 +43,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		if real.Valid {
 			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
 		} else {
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT min(m.context_length),min(m.max_output_tokens),`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
 		}
 		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
@@ -55,7 +59,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output FROM (
 	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical, min(t.context_length), min(t.max_output_tokens), `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+` FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
+	SELECT g.name||'/'||v.name canonical, `+conservativeMin("t.context_length")+`, `+conservativeMin("t.max_output_tokens")+`, `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+` FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
 ) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
@@ -110,6 +114,14 @@ func (c modelCapabilities) addTo(entry map[string]any) {
 // NULL; else 1. An empty group yields NULL (unknown).
 func triStateAND(col string) string {
 	return `CASE WHEN COUNT(*)=0 THEN NULL WHEN COUNT(CASE WHEN ` + col + `=0 THEN 1 END)>0 THEN 0 WHEN COUNT(CASE WHEN ` + col + ` IS NULL THEN 1 END)>0 THEN NULL ELSE 1 END`
+}
+
+// conservativeMin advertises a numeric limit only when every eligible target
+// reports a positive value. A missing value must keep the aggregate unknown:
+// assuming the minimum of the known subset could overstate an unreported
+// target's safe limit.
+func conservativeMin(col string) string {
+	return `CASE WHEN COUNT(*)=0 OR COUNT(` + col + `)<>COUNT(*) OR MIN(` + col + `)<=0 THEN NULL ELSE MIN(` + col + `) END`
 }
 
 type resolvedRoute struct {
@@ -289,7 +301,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var translated bool
 	var cancel context.CancelFunc
 	protocolUnavailable := false
+	terminalPreflightClass := ""
 	for _, candidate := range candidates {
+		if ctxErr := r.Context().Err(); ctxErr != nil {
+			class := "client_cancelled"
+			if errors.Is(ctxErr, context.DeadlineExceeded) {
+				class = "client_timeout"
+			}
+			row.httpStatus = 502
+			row.errorText = strPtr(class)
+			row.fallbackReason = strPtr(class)
+			inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
+			return
+		}
 		attemptStart := time.Now()
 		if !candidate.Available {
 			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
@@ -306,9 +330,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if translated {
 			attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID)
 			if err != nil {
+				code := "translation_error"
+				var unsupported unsupportedFeature
+				if errors.As(err, &unsupported) {
+					code = "unsupported_feature"
+				}
 				row.httpStatus = 400
-				row.errorText = strPtr("translation_error")
-				inferenceError(w, 400, "invalid_request_error", "translation_error", err.Error(), incoming == providers.ProtocolMessages)
+				row.errorText = strPtr(code)
+				inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
 				return
 			}
 		} else {
@@ -384,15 +413,22 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if e = preflightResponse(response); e != nil {
 			response.Body.Close()
 			attemptCancel()
-			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: "upstream_read_error", latencyMs: time.Since(attemptStart).Milliseconds()})
+			class := "upstream_read_error"
+			message := "The upstream provider could not complete the request."
+			if errors.Is(e, errUpstreamResponseTooLarge) {
+				class = "upstream_response_too_large"
+				message = "The upstream provider response exceeded Tiller's non-streaming response limit."
+			}
+			terminalPreflightClass = class
+			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
 			if !route.Virtual || r.Context().Err() != nil {
 				row.httpStatus = 502
-				row.errorText = strPtr("upstream_read_error")
-				inferenceError(w, 502, "api_error", "upstream_read_error", "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+				row.errorText = strPtr(class)
+				inferenceError(w, 502, "api_error", class, message, incoming == providers.ProtocolMessages)
 				return
 			}
 			row.fallbackUsed = true
-			row.fallbackReason = strPtr("upstream_read_error")
+			row.fallbackReason = strPtr(class)
 			continue
 		}
 		route, resp, cancel = candidate, response, attemptCancel
@@ -404,6 +440,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// client response.
 	s.maybeNotify(row, route, resp)
 	if resp == nil {
+		if terminalPreflightClass == "upstream_response_too_large" {
+			row.httpStatus = 502
+			row.errorText = strPtr(terminalPreflightClass)
+			inferenceError(w, 502, "api_error", terminalPreflightClass, "The upstream provider response exceeded Tiller's non-streaming response limit.", incoming == providers.ProtocolMessages)
+			return
+		}
 		if protocolUnavailable {
 			row.httpStatus = 400
 			row.errorText = strPtr("protocol_unavailable")
@@ -460,7 +502,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		return
 	}
 	// Non-streaming JSON body: read fully to extract usage, then rewrite.
-	body, err = io.ReadAll(io.LimitReader(reader, 64<<20))
+	body, err = io.ReadAll(reader)
 	if err != nil {
 		row.httpStatus = 502
 		row.errorText = strPtr("upstream_read_error")
@@ -485,6 +527,10 @@ func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 // before Tiller commits anything to the client. This preserves the no-splice
 // rule while allowing a different virtual target after a pre-output failure.
 func preflightResponse(resp *http.Response) error {
+	return preflightResponseLimit(resp, maxUpstreamNonStreamBytes)
+}
+
+func preflightResponseLimit(resp *http.Response, limit int64) error {
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		first := make([]byte, 1)
 		n, err := resp.Body.Read(first)
@@ -494,9 +540,12 @@ func preflightResponse(resp *http.Response) error {
 		resp.Body = bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(first[:n]), resp.Body), closer: resp.Body}
 		return nil
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return err
+	}
+	if int64(len(body)) > limit {
+		return errUpstreamResponseTooLarge
 	}
 	resp.Body = bufferedReadCloser{Reader: bytes.NewReader(body), closer: resp.Body}
 	return nil
