@@ -146,13 +146,24 @@ Requires Docker and Docker Compose.
    mkdir tiller-router && cd tiller-router
    ```
 
-2. **Create a `docker-compose.yml`:**
+2. **Create the data directory:**
+
+   ```bash
+   mkdir -p ./data
+   ```
+
+   (On Docker Desktop and Podman rootless the bind-mount uid mapping
+   handles permissions automatically. On bare Linux with rootful
+   Docker, run `sudo chown -R 65532:65532 ./data` if the container
+   can't write to `./data`.)
+
+3. **Create a `docker-compose.yml`:**
 
    ```yaml
    services:
      tiller-router:
+       container_name: tiller-router
        image: ghcr.io/dellarb/tiller-router:latest
-       user: "0:0"            # Tiller fixes ./data ownership, then drops to its non-root runtime user
        ports:
          - "8080:8080"
        environment:
@@ -163,7 +174,7 @@ Requires Docker and Docker Compose.
        restart: unless-stopped
    ```
 
-3. **Start Tiller:**
+4. **Start Tiller:**
 
    ```bash
    docker compose up -d
