@@ -4,6 +4,17 @@ All notable changes to Tiller Router are recorded here. This project follows
 semantic versioning conventions where practical; the alpha API and deployment
 behavior may still change.
 
+## [Unreleased]
+
+### Fixed
+
+- On first launch with a fresh bind-mounted `./data` directory (created as root
+  by rootful Docker), startup now logs an actionable one-time remediation
+  (`sudo chown -R 65532:65532 ./data`, or `TILLER_UID`/`TILLER_GID` in `.env`)
+  instead of the cryptic `open database: chmod /data: operation not permitted`.
+  The underlying error now surfaces a detectable
+  `ErrDataDirUnwritable` sentinel.
+
 ## [0.1.0-alpha.1] - 2026-09-01
 
 Initial public FOSS alpha release.

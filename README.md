@@ -150,10 +150,20 @@ Requires Docker and Docker Compose.
    mkdir -p ./data
    ```
 
-   (On Docker Desktop and Podman rootless the bind-mount uid mapping
-   handles permissions automatically. On bare Linux with rootful
-   Docker, run `sudo chown -R 65532:65532 ./data` if the container
-   can't write to `./data`.)
+   The container runs as a non-root user (`65532`) and can only write to
+   `./data` if it *owns* it. On Docker Desktop and Podman rootless the
+   bind-mount uid mapping handles this automatically. On bare Linux with
+   rootful Docker, a fresh `./data` is created on the host as **root** and must
+   be handed to the container once before the first `docker compose up`:
+
+   ```bash
+   sudo chown -R 65532:65532 ./data
+   ```
+
+   If you skip this on plain Linux, startup fails with
+   `open database: chmod /data: operation not permitted`; the container now
+   logs the same owner fix at runtime. Alternative: set `TILLER_UID`/`TILLER_GID`
+   in `.env` to the uid:gid that actually owns `./data` (see below).
 
 3. **Create a `docker-compose.yml`:**
 
