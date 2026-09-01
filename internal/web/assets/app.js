@@ -364,14 +364,6 @@ function openRoutePicker(client) {
     submit: 'Apply route',
     onMount: form => {
       mountSingleTargetPicker($('[data-single-target]', form), client);
-      // Blank-on-focus like the desktop inline picker: focusing the
-      // pre-filled route field clears it so typing filters from the first
-      // keystroke; clicking away without a selection restores the saved
-      // route.
-      const input = $('input[type="text"]', form), hidden = $('input[type="hidden"]', form);
-      const saved = { value: hidden.value, label: input.value };
-      input.addEventListener('focus', () => { if (input.value || hidden.value) { input.value = ''; hidden.value = ''; } });
-      input.addEventListener('blur', () => { if (!hidden.value && saved.value) { hidden.value = saved.value; input.value = saved.label; } });
     },
     onSubmit: async form => {
       const selected = String(new FormData(form).get('single_target') || ''), split = selected.indexOf(':');
