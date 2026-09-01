@@ -75,9 +75,20 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 echo "==> Running Playwright browser suite"
+router_log="/tmp/router.log"
 docker run --rm --network host \
     -e TILLER_BROWSER_BASE_URL="http://127.0.0.1:$router_port" \
     -e TILLER_BROWSER_MOCK_BASE_URL="http://127.0.0.1:$mock_port/v1" \
     -e TILLER_BROWSER_ADMIN_USERNAME=admin \
     -e TILLER_BROWSER_ADMIN_PASSWORD="$password" \
     tiller-router-browser-tests:dev
+playwright_status=$?
+echo "==> Capturing router logs for debugging"
+docker logs "$router_name" > "$router_log" 2>&1 || true
+echo "    router log: $router_log ($(wc -l < "$router_log") lines)"
+# Surface the last 200 lines of router logs on test failure for fast diagnosis
+if [ "$playwright_status" -ne 0 ]; then
+    echo "==> Playwright failed — last 200 lines of router log:"
+    tail -n 200 "$router_log" >&2
+fi
+exit $playwright_status
