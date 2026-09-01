@@ -213,6 +213,7 @@ func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request)
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
 		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
+	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
 	rows, err := s.queryActivityExport(r.Context(), where, args)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not export activity.")
@@ -238,6 +239,7 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
 		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
+	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
 	rows, err := s.queryActivityExport(r.Context(), where, args)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not export activity.")
@@ -263,6 +265,7 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?)`
 		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
+	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
 	rows, err := s.queryActivityExport(r.Context(), where, args)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not export activity.")
@@ -430,6 +433,31 @@ func neutralizeCSVField(s string) string {
 		return "'" + s
 	}
 	return s
+}
+
+// periodCutoff returns the UTC cutoff for a CSV export period, and whether a
+// filter applies. "all" (or empty/unknown) returns no filter.
+func periodCutoff(period string) (time.Time, bool) {
+	switch strings.TrimSpace(period) {
+	case "24h":
+		return time.Now().UTC().Add(-24 * time.Hour), true
+	case "7d":
+		return time.Now().UTC().Add(-7 * 24 * time.Hour), true
+	case "30d":
+		return time.Now().UTC().Add(-30 * 24 * time.Hour), true
+	default:
+		return time.Time{}, false
+	}
+}
+
+// applyExportPeriod appends a created_at cutoff to the export WHERE clause for
+// the given period query param. Returns the updated where/args.
+func applyExportPeriod(where string, args []any, period string) (string, []any) {
+	if cutoff, ok := periodCutoff(period); ok {
+		where += ` AND rl.created_at >= ?`
+		args = append(args, cutoff.Format(time.RFC3339Nano))
+	}
+	return where, args
 }
 
 var _ = sql.ErrNoRows
