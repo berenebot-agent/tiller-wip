@@ -459,7 +459,7 @@ func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 		_ = virtualRows.Scan(&g.ID, &g.Name, &feeder)
 		g.NewModelsEnabled = scanBool(feeder)
 		g.Models = []permissionModel{}
-		rows, _ := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),(p.enabled=1 AND m.available=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN providers p ON p.id=v.target_provider_id JOIN provider_models m ON m.id=v.target_provider_model_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id WHERE v.virtual_group_id=? ORDER BY v.name`, clientID, g.ID)
+		rows, _ := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id WHERE v.virtual_group_id=? ORDER BY v.name`, clientID, g.ID)
 		for rows.Next() {
 			var m permissionModel
 			var enabled, available int

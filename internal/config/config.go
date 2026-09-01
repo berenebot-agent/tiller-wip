@@ -51,6 +51,12 @@ func Load() (Config, error) {
 		}
 		c.TrustedProxy = v
 	}
+	// Proxy-header trust is only meaningful with an actual trust boundary. If
+	// forwarded headers are trusted, a valid trusted-proxy CIDR is required so
+	// a spoofable header can never be honoured from an untrusted peer.
+	if c.TrustProxy && !c.TrustedProxy.IsValid() {
+		return Config{}, errors.New("TILLER_TRUST_PROXY_HEADERS=true requires TILLER_TRUSTED_PROXY to be set to a valid CIDR")
+	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
 		v, err := strconv.ParseBool(raw)
 		if err != nil {

@@ -258,6 +258,17 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 409, "provider_in_use", "Repoint or delete dependent virtual models first.")
 		return
 	}
+	// A provider can also be referenced as a non-primary target (position 2+)
+	// of a virtual model. Check the full v2 target table so deletion never
+	// slips past a dependency and surfaces as a raw database FK error.
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE m.provider_id=?`, providerID).Scan(&refs); err != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
+		return
+	}
+	if refs > 0 {
+		adminError(w, 409, "provider_in_use", "Repoint or delete dependent virtual models first.")
+		return
+	}
 	var name string
 	if err = tx.QueryRowContext(r.Context(), `SELECT name FROM providers WHERE id=?`, providerID).Scan(&name); err == sql.ErrNoRows {
 		adminError(w, 404, "not_found", "Provider not found.")
@@ -356,7 +367,7 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM providers`).Scan(&providersCount)
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=1`).Scan(&available)
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=0`).Scan(&retired)
-	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v JOIN provider_models m ON m.id=v.target_provider_model_id JOIN providers p ON p.id=v.target_provider_id WHERE m.available=0 OR p.enabled=0`).Scan(&broken)
+	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v WHERE NOT EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)`).Scan(&broken)
 	writeJSON(w, 200, map[string]any{"status": "ready", "providers": providersCount, "available_models": available, "retired_models": retired, "broken_virtual_models": broken})
 }
 

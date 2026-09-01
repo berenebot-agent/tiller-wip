@@ -39,7 +39,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		if real.Valid {
 			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
 		} else {
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT min(m.context_length),min(m.max_output_tokens),`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=? AND t.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT min(m.context_length),min(m.max_output_tokens),`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
 		}
 		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
