@@ -22,7 +22,9 @@ cleanup() {
 	docker rm -f "$proxy_name" "$router_name" >/dev/null 2>&1 || true
 	docker network rm "$network_name" >/dev/null 2>&1 || true
 	docker run --rm -v "$data_dir:/d" --user root alpine chown -R "$host_uid:$host_gid" /d >/dev/null 2>&1 || true
-	rm -rf "$state_dir"
+	# Teardown must not fail the run (chown-back helper above can fail
+	# transiently, leaving the dir owned by 65532 and rm would EPERM).
+	rm -rf "$state_dir" || true
 }
 trap cleanup EXIT INT TERM
 

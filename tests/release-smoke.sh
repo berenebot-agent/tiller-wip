@@ -27,9 +27,11 @@ remove_router() {
 cleanup() {
 	remove_router
 	# The runtime user tightens /data to 0700. Restore ownership before the
-	# shell removes the temporary bind-mount source.
+	# shell removes the temporary bind-mount source. Teardown must not fail
+	# the run: if this chown-back helper fails the dir stays owned by 65532
+	# and rm below would EPERM under set -e, turning a green run red.
 	docker run --rm -v "$data_dir:/d" --user root alpine chown -R "$host_uid:$host_gid" /d >/dev/null 2>&1 || true
-	rm -rf "$data_dir" "$cookie_jar"
+	rm -rf "$data_dir" "$cookie_jar" || true
 	docker image rm "$image" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT INT TERM

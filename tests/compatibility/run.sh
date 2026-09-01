@@ -25,7 +25,10 @@ cleanup() {
     # The router chowns/chmods our temp dir as UID 65532; chown it back to our
     # UID first so rm can remove it (only possible as root via a helper).
     docker run --rm -v "$data_dir:/d" --user root alpine chown -R 1000:1000 /d >/dev/null 2>&1 || true
-    rm -rf "$data_dir"
+    # Teardown must not fail the run: if the chown-back helper failed (e.g. the
+    # Docker daemon hiccup) the temp dir stays owned by 65532 and this rm would
+    # EPERM under set -e, turning a green run red. Best-effort cleanup only.
+    rm -rf "$data_dir" || true
 }
 trap cleanup EXIT INT TERM
 stop_containers
