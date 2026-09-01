@@ -174,7 +174,13 @@ async function loadVirtual(search = $('#virtual-search').value) {
 }
 function resolutionIndicator(target) {
   const health = state.usage?.target_health?.[`${target.provider_name}/${target.upstream_model_id}`];
-  const status = !health?.success_24h ? ['bad', '×', 'No successful resolution in the last 24 hours'] : health.failure_1h ? ['warn', '−', 'Failures recorded in the last hour'] : ['good', '✓', 'Resolving successfully'];
+  const status = health === undefined
+    ? ['neutral', '○', 'No activity recorded']
+    : !health?.success_24h
+      ? ['bad', '×', 'No successful resolution in the last 24 hours']
+      : health.failure_1h
+        ? ['warn', '−', 'Failures recorded in the last hour']
+        : ['good', '✓', 'Resolving successfully'];
   return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[2]}" title="${status[2]}">${status[1]}</span>`;
 }
 function renderVirtual() {
