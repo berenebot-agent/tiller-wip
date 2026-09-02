@@ -76,6 +76,39 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		}
 		_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt)
 	}
+	s.recordLastOutcome(row)
+}
+
+// recordLastOutcome updates the in-memory per-real-model last-request outcome
+// for every target the request actually attempted. It is best-effort and never
+// fails the request.
+//
+// Outcomes are derived from row.attempts, not row.resolvedProvider/Model, so
+// failure paths (where the client never received a 2xx and the resolved
+// fields are nil) are still recorded. "skipped" attempts represent targets
+// that were never actually called (unavailable, protocol mismatch) and are
+// intentionally ignored so they don't force a red dot.
+func (s *Server) recordLastOutcome(row *logRow) {
+	if len(row.attempts) == 0 {
+		return
+	}
+	s.lastOutcomeMu.Lock()
+	if s.lastOutcome == nil {
+		s.lastOutcome = map[string]lastOutcome{}
+	}
+	for _, attempt := range row.attempts {
+		switch attempt.result {
+		case "success":
+			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: row.createdAt, Status: attempt.httpStatus, IsSuccess: true}
+		case "failed":
+			status := attempt.httpStatus
+			if status == 0 {
+				status = row.httpStatus
+			}
+			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: row.createdAt, Status: status, IsSuccess: false}
+		}
+	}
+	s.lastOutcomeMu.Unlock()
 }
 
 func nullInt(v int) any {

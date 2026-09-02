@@ -104,6 +104,139 @@ func TestUsageEndpointEmpty(t *testing.T) {
 	}
 }
 
+// TestUsageTargetLastOutcome verifies that a routed request records its outcome
+// in the in-memory target_last_outcome map and that it is surfaced by the usage
+// endpoint keyed by "provider_name/upstream_model_id".
+func TestUsageTargetLastOutcome(t *testing.T) {
+	api, _, _, secret := loggingTestHarness(t, mockUpstream(t))
+
+	// No requests yet: usage should expose an empty (or absent) map.
+	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	if v, ok := payload["target_last_outcome"]; ok {
+		if m := v.(map[string]any); len(m) != 0 {
+			t.Fatalf("expected empty target_last_outcome before traffic, got %v", m)
+		}
+	}
+
+	// Drive a successful request through provider-a/model-a.
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("request status %d", resp.StatusCode)
+	}
+
+	status, payload, _ = api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	last, ok := payload["target_last_outcome"].(map[string]any)["provider-a/model-a"].(map[string]any)
+	if !ok {
+		t.Fatalf("provider-a/model-a missing from target_last_outcome: %v", payload["target_last_outcome"])
+	}
+	if last["status"] != float64(200) {
+		t.Fatalf("last status = %v, want 200", last["status"])
+	}
+	if last["is_success"] != true {
+		t.Fatalf("last is_success = %v, want true", last["is_success"])
+	}
+	if at, _ := last["at"].(string); at == "" {
+		t.Fatal("expected a last_outcome timestamp")
+	}
+}
+
+// TestRecordLastOutcomeNoAttempts verifies that a log row with no attempted
+// targets (e.g. model-not-found, translation error, client cancellation) does
+// not touch the in-memory outcome map.
+func TestRecordLastOutcomeNoAttempts(t *testing.T) {
+	s := &Server{}
+	row := &logRow{httpStatus: 404, errorText: strPtr("model_not_found")}
+	s.recordLastOutcome(row)
+	s.lastOutcomeMu.RLock()
+	defer s.lastOutcomeMu.RUnlock()
+	if len(s.lastOutcome) != 0 {
+		t.Fatalf("recordLastOutcome wrote an outcome without any attempted target: %v", s.lastOutcome)
+	}
+}
+
+// TestRecordLastOutcomeFailedAttempt records a red outcome for the target that
+// was actually attempted and failed, even though no resolved target was set on
+// the row. This is the case where the original implementation silently dropped
+// the failure and left the dot grey.
+func TestRecordLastOutcomeFailedAttempt(t *testing.T) {
+	s := &Server{}
+	row := &logRow{
+		httpStatus: 502,
+		createdAt:  "2026-09-02T12:00:00Z",
+		attempts: []requestAttempt{
+			{provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 502, failureClass: "upstream_unreachable"},
+		},
+	}
+	s.recordLastOutcome(row)
+	s.lastOutcomeMu.RLock()
+	defer s.lastOutcomeMu.RUnlock()
+	out, ok := s.lastOutcome["main/argus-5.3-codex-spark"]
+	if !ok {
+		t.Fatalf("expected failed target to be recorded: %v", s.lastOutcome)
+	}
+	if out.At != row.createdAt {
+		t.Fatalf("at = %q, want %q", out.At, row.createdAt)
+	}
+	if out.Status != 502 {
+		t.Fatalf("status = %d, want 502", out.Status)
+	}
+	if out.IsSuccess {
+		t.Fatal("expected is_success=false for a failed attempt")
+	}
+}
+
+// TestRecordLastOutcomeSkippedAttempt verifies that a target that was skipped
+// (never actually called — unavailable or protocol mismatch) does not force a
+// red dot.
+func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
+	s := &Server{}
+	row := &logRow{
+		httpStatus: 503,
+		createdAt:  "2026-09-02T12:00:00Z",
+		attempts: []requestAttempt{
+			{provider: "main", model: "argus-5.3-codex-spark", result: "skipped", failureClass: "unavailable"},
+		},
+	}
+	s.recordLastOutcome(row)
+	s.lastOutcomeMu.RLock()
+	defer s.lastOutcomeMu.RUnlock()
+	if _, ok := s.lastOutcome["main/argus-5.3-codex-spark"]; ok {
+		t.Fatalf("skipped target should not be recorded: %v", s.lastOutcome)
+	}
+}
+
+// TestRecordLastOutcomeOrderedFallback records per-target outcomes across an
+// ordered fallback chain: the failed target turns red, the succeeding target
+// turns green, each reflecting its own last outcome.
+func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
+	s := &Server{}
+	row := &logRow{
+		httpStatus: 200,
+		createdAt:  "2026-09-02T12:00:00Z",
+		attempts: []requestAttempt{
+			{provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 503, failureClass: "http_503"},
+			{provider: "main", model: "backup-model", result: "success", httpStatus: 200},
+		},
+	}
+	s.recordLastOutcome(row)
+	s.lastOutcomeMu.RLock()
+	defer s.lastOutcomeMu.RUnlock()
+	failed, ok := s.lastOutcome["main/argus-5.3-codex-spark"]
+	if !ok || failed.IsSuccess {
+		t.Fatalf("expected failed target red: %v", s.lastOutcome)
+	}
+	success, ok := s.lastOutcome["main/backup-model"]
+	if !ok || !success.IsSuccess {
+		t.Fatalf("expected succeeding target green: %v", s.lastOutcome)
+	}
+}
+
 func TestUsageCacheHitWindows(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := time.Now().UTC()

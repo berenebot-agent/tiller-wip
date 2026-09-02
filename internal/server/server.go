@@ -46,6 +46,19 @@ type Server struct {
 	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
 	loginLimiter *loginLimiter
+	// lastOutcome holds the most recent request outcome per real model, keyed
+	// by "provider_name/upstream_model_id". It lives in RAM (never persisted) so
+	// it is cleared on restart. Written on each routed request; read by the
+	// admin usage endpoint to drive the per-target resolution dots.
+	lastOutcomeMu sync.RWMutex
+	lastOutcome   map[string]lastOutcome
+}
+
+// lastOutcome is the most recent request result for a single real model.
+type lastOutcome struct {
+	At        string `json:"at"`         // RFC3339Nano timestamp; empty = never
+	Status    int    `json:"status"`     // HTTP status of the last request
+	IsSuccess bool   `json:"is_success"` // whether that status was 2xx
 }
 
 type contextKey string
@@ -71,7 +84,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
+	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), lastOutcome: map[string]lastOutcome{}}, nil
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
