@@ -294,7 +294,11 @@ func (s *Server) secureRequest(r *http.Request) bool {
 
 // requestClientIP returns the client address suitable for forwarding to an
 // anonymous provider. Forwarded headers are accepted only from the configured
-// trusted proxy; otherwise the direct peer address is used.
+// trusted proxy; otherwise the direct peer address is used. When the direct
+// peer is trusted, the authoritative X-Real-IP header is preferred, and
+// X-Forwarded-For is only consulted with explicit chain semantics (walking
+// right-to-left and removing trusted hops) so a spoofable leftmost value can
+// never be trusted.
 func (s *Server) requestClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -307,13 +311,29 @@ func (s *Server) requestClientIP(r *http.Request) string {
 	if err != nil || !s.config.TrustedProxy.IsValid() || !s.config.TrustedProxy.Contains(peer) {
 		return host
 	}
-	for _, header := range []string{"X-Forwarded-For", "X-Real-IP"} {
-		value := strings.TrimSpace(strings.Split(r.Header.Get(header), ",")[0])
+	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); value != "" {
 		if address, err := netip.ParseAddr(value); err == nil {
 			return address.String()
 		}
 	}
-	return host
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	if len(parts) == 1 && strings.TrimSpace(parts[0]) == "" {
+		return host
+	}
+	addrs := make([]netip.Addr, len(parts))
+	for i, part := range parts {
+		addr, parseErr := netip.ParseAddr(strings.TrimSpace(part))
+		if parseErr != nil {
+			return host
+		}
+		addrs[i] = addr
+	}
+	for i := len(addrs) - 1; i >= 0; i-- {
+		if !s.config.TrustedProxy.Contains(addrs[i]) {
+			return addrs[i].String()
+		}
+	}
+	return addrs[0].String()
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

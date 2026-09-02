@@ -71,6 +71,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.getByRole('button', { name: '+ Add client' }).click();
   await page.getByLabel('Client name').fill('Container browser client');
   await page.getByLabel('Description').fill('Disposable Playwright workflow');
+  await page.locator('select[name="type"]').selectOption('catalogue');
   await page.getByRole('button', { name: 'Create & show key' }).click();
 
   const secret = page.locator('#secret-value');
@@ -118,6 +119,7 @@ test('insecure origin (plain HTTP): one-time-secret hides the Copy button and se
   await page.getByRole('button', { name: '+ Add client' }).click();
   await page.getByLabel('Client name').fill('Insecure copy client');
   await page.getByLabel('Description').fill('Confirms the Copy button is hidden on plain HTTP');
+  await page.locator('select[name="type"]').selectOption('catalogue');
   await page.getByRole('button', { name: 'Create & show key' }).click();
 
   const secret = page.locator('#secret-value');

@@ -98,6 +98,26 @@ func TestTrustedProxy(t *testing.T) {
 		t.Errorf("TrustedProxy should be 10.1.1.18/32, got %v", c.TrustedProxy)
 	}
 
+	// A bare IPv6 address is treated as /128, not widened to /32.
+	t.Setenv("TILLER_TRUSTED_PROXY", "2001:db8::1234")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("bare IPv6 for TILLER_TRUSTED_PROXY should load as /128: %v", err)
+	}
+	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "2001:db8::1234/128" {
+		t.Errorf("TrustedProxy should be 2001:db8::1234/128, got %v", c.TrustedProxy)
+	}
+
+	// An explicit IPv6 CIDR is preserved verbatim.
+	t.Setenv("TILLER_TRUSTED_PROXY", "2001:db8::/32")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("IPv6 CIDR for TILLER_TRUSTED_PROXY should load: %v", err)
+	}
+	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "2001:db8::/32" {
+		t.Errorf("TrustedProxy should be 2001:db8::/32, got %v", c.TrustedProxy)
+	}
+
 	// An invalid trusted proxy is a hard error.
 	t.Setenv("TILLER_TRUSTED_PROXY", "not-a-cidr")
 	if _, err := Load(); err == nil {
