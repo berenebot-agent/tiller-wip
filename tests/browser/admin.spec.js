@@ -1129,3 +1129,133 @@ test('client key group: listing badge, create/edit dialog, and filter', async ({
   await expect(page.locator('#form-dialog')).toBeVisible();
   await expect(page.locator('#form-dialog input[name="group"]')).toHaveValue('default');
 });
+
+test('activity request ID: click-to-copy on secure origin lands the full ID on the clipboard', async ({ page }) => {
+  // Mirrors the secure-context assumption the UI itself makes: 127.0.0.1 is a
+  // secure-context loopback origin, so the request-ID cell should render with
+  // a click affordance and writing the clipboard should succeed.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  const providerName = 'browser-copy-reqid';
+  const clientName = 'browser-copy-reqid-client';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get('/api/admin/models');
+  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  expect(realModel).toBeTruthy();
+  const modelId = `${providerName}/mock-model`;
+  const client = await createClient(page, csrf, clientName);
+
+  // Grant the client access to the provider's model and fire one request so
+  // the activity table has at least one row with a server-assigned
+  // client_request_id.
+  const grantRes = await page.request.put(`/api/admin/client-keys/${client.id}/permissions`, {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { defaults: [], permissions: [{ kind: 'real', model_id: realModel.id, enabled: true }] }
+  });
+  expect(grantRes.status()).toBe(204);
+  const completion = await page.request.post('/v1/chat/completions', {
+    headers: { Authorization: `Bearer ${client.secret}` },
+    data: { model: modelId, messages: [{ role: 'user', content: 'copy-reqid' }] }
+  });
+  expect(completion.status()).toBe(200);
+
+  // Open the per-client Activity dialog.
+  await page.getByRole('link', { name: 'Clients' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(clientRow).toBeVisible();
+  await clientRow.getByRole('button', { name: 'Activity' }).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+
+  // On a secure context the cell must carry the click affordance and the
+  // full request ID in its dataset (the visible text is only the short
+  // 8-char prefix).
+  const requestCell = page.locator('#activity-body tr .activity-request-id').first();
+  await expect(requestCell).toBeVisible();
+  const fullId = await requestCell.getAttribute('data-copy-request-id');
+  expect(fullId).toBeTruthy();
+  expect(fullId.length).toBeGreaterThan(8);
+  expect(await requestCell.getAttribute('role')).toBe('button');
+  expect(await requestCell.getAttribute('tabindex')).toBe('0');
+
+  // Clear any prior clipboard contents so the read assertion is unambiguous.
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await requestCell.click();
+  await expect(requestCell).toHaveText('Copied');
+  await expect(requestCell).toHaveClass(/copied/);
+  await expect.poll(
+    () => page.evaluate(() => navigator.clipboard.readText()),
+    { timeout: 3000 }
+  ).toBe(fullId);
+  // The cell reverts to the short prefix once the "Copied" indicator clears.
+  await expect(requestCell).not.toHaveText('Copied', { timeout: 3000 });
+
+  // Keyboard activation must also copy.
+  await page.evaluate(() => navigator.clipboard.writeText(''));
+  await requestCell.focus();
+  await page.keyboard.press('Enter');
+  await expect.poll(
+    () => page.evaluate(() => navigator.clipboard.readText()),
+    { timeout: 3000 }
+  ).toBe(fullId);
+
+  // The same affordance must exist in the Global activity table.
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('#activity-dialog')).toBeHidden();
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await expect(page.locator('#view-settings')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
+  const globalCell = page.locator('#global-activity-body tr .activity-request-id').first();
+  await expect(globalCell).toBeVisible();
+  const globalId = await globalCell.getAttribute('data-copy-request-id');
+  expect(globalId).toBeTruthy();
+  expect(globalId.length).toBeGreaterThan(8);
+});
+
+test('activity request ID: insecure origin renders a plain tooltip, no click affordance', async ({ page }) => {
+  // On a plain HTTP origin navigator.clipboard.writeText is unavailable, so
+  // the UI must not pretend the cell is clickable. The hover tooltip still
+  // shows the full ID.
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true });
+    try { Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }); } catch {}
+  });
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'browser-copy-reqid-insecure';
+  const clientName = 'browser-copy-reqid-insecure-client';
+  await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get('/api/admin/models');
+  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  expect(realModel).toBeTruthy();
+  const modelId = `${providerName}/mock-model`;
+  const client = await createClient(page, csrf, clientName);
+  const grantRes = await page.request.put(`/api/admin/client-keys/${client.id}/permissions`, {
+    headers: { 'X-CSRF-Token': csrf },
+    data: { defaults: [], permissions: [{ kind: 'real', model_id: realModel.id, enabled: true }] }
+  });
+  expect(grantRes.status()).toBe(204);
+  const completion = await page.request.post('/v1/chat/completions', {
+    headers: { Authorization: `Bearer ${client.secret}` },
+    data: { model: modelId, messages: [{ role: 'user', content: 'copy-reqid-insecure' }] }
+  });
+  expect(completion.status()).toBe(200);
+
+  await page.getByRole('link', { name: 'Clients' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: clientName });
+  await expect(clientRow).toBeVisible();
+  await clientRow.getByRole('button', { name: 'Activity' }).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+
+  const requestCell = page.locator('#activity-body tr .activity-request-id').first();
+  await expect(requestCell).toBeVisible();
+  // No click affordance: no data-copy-request-id, no role/tabindex.
+  expect(await requestCell.getAttribute('data-copy-request-id')).toBeNull();
+  expect(await requestCell.getAttribute('role')).toBeNull();
+  expect(await requestCell.getAttribute('tabindex')).toBeNull();
+  // The full ID is still in the title for hover-to-reveal.
+  const title = await requestCell.getAttribute('title');
+  expect(title?.length || 0).toBeGreaterThan(8);
+});

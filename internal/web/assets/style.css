@@ -94,3 +94,6 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
     max-height:92vh;
   }
 }
+.activity-request-id[data-copy-request-id]{cursor:pointer}
+.activity-request-id[data-copy-request-id]:hover{color:var(--blue)}
+.activity-request-id[data-copy-request-id].copied{color:var(--green)}
