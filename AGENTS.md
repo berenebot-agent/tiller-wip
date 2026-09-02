@@ -15,7 +15,7 @@ Guardrails for any coding agent working in this repository. This file does not r
 - Do not "clean up" the roadmap's phase ordering or scope on your own initiative. Roadmap sequencing is a human decision.
 - If a task requires touching something explicitly marked deferred (e.g. credential encryption or provider-health infrastructure) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
 
-## Deployment model — non-negotiable
+## Deployment model
 
 - Everything runs as a single Docker Compose service under `/opt/tiller-router/`.
 - Bind mounts only. **Never** introduce a Docker named volume.
@@ -23,6 +23,12 @@ Guardrails for any coding agent working in this repository. This file does not r
 - No Kubernetes artifacts of any kind (manifests, Helm, operators). This is Compose-only.
 - Don't add anything that requires a host-published port when a reverse-proxy Docker network is in use.
 - Don't require Docker socket access or privileged mode.
+
+**Out-of-box posture (default, adoption-first):** the default compose runs via a **root-then-drop entrypoint** (container starts as root, `entrypoint.sh` `chown -R` the data bind mount, then `su-exec` drops to a non-root user). This is what makes `docker compose up` work with a fresh `./data` dir — no manual `chmod`/ownership step needed. So out of the box the container is root at boot for the ownership fix, then non-root for the app.
+
+**Hardenable, not required:** the stricter posture (read-only rootfs, `cap_drop: ALL`, no-new-privileges, fully non-root with no root entrypoint) is available and documented in the **advanced/hardened compose** example, for users who want it. The out-of-box image works fine with those flags baked in if a user chooses to harden — the entrypoint is designed not to *require* root at the app level, only for the boot ownership fix. This is an explicit product decision (Ben, 2026-09-02): **adoption first**, hardening opt-in.
+
+- `AGENTS.md` / docs must not treat the strict non-root posture as a hard rule the default build violates. The default is deliberately relaxed for adoption; the advanced compose documents how to harden.
 
 ## Toolchain — Go runs in Docker, never on the host
 
