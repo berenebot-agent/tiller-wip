@@ -12,3 +12,4 @@ AGENTS.md
 # docs/ is local planning material; keep the whole tree out of git.
 docs/
 tests/hermes_test/
+docs/todo_enc_keys.md
