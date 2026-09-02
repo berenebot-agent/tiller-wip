@@ -141,7 +141,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Type == "" {
-		input.Type = "catalogue"
+		input.Type = "single"
 	}
 	if input.Type != "catalogue" && input.Type != "single" {
 		adminError(w, 400, "invalid_client_type", "Client key type must be catalogue or single.")
