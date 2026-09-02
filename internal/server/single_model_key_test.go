@@ -235,3 +235,80 @@ func TestSingleModelKeyEndToEnd(t *testing.T) {
 		t.Fatalf("bound provider deletion not blocked: %d %v", status, payload)
 	}
 }
+
+// TestCatalogueKeyWithStaleBindingDoesNotBlockVirtualOrProviderDelete pins
+// V1 §28.10 ("Bound targets cannot be deleted until affected Single keys
+// are repointed"). Switching a key from Single to Catalogue leaves a
+// client_single_bindings row behind; that row must not block the delete of
+// the bound virtual model or the underlying provider, because the key is
+// no longer a Single key. Only client_keys.key_type='single' rows count.
+func TestCatalogueKeyWithStaleBindingDoesNotBlockVirtualOrProviderDelete(t *testing.T) {
+	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
+
+	var providerID, modelA string
+	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != 201 {
+		t.Fatalf("create virtual group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{
+		"group_id": groupID, "name": "stale-bind-target",
+		"target_provider_id": providerID, "target_model_id": modelA,
+	})
+	if status != 201 {
+		t.Fatalf("create virtual model: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{
+		"name": "stale-bind-key", "type": "single",
+		"single_target_type": "virtual", "single_target_id": virtualID,
+	})
+	if status != 201 {
+		t.Fatalf("create Single key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+
+	status, payload, _ = api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"type": "catalogue"})
+	if status != 204 {
+		t.Fatalf("switch to Catalogue: %d %v", status, payload)
+	}
+
+	var bindingRows int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM client_single_bindings WHERE client_key_id=?`, clientID).Scan(&bindingRows); err != nil {
+		t.Fatal(err)
+	}
+	if bindingRows != 1 {
+		t.Fatalf("expected 1 stale binding row after type switch, got %d", bindingRows)
+	}
+
+	status, payload, _ = api.request("DELETE", "/api/admin/virtual-models/"+virtualID, nil)
+	if status != 204 {
+		t.Fatalf("virtual model delete blocked by catalogue-key stale binding: %d %v", status, payload)
+	}
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM virtual_models WHERE id=?`, virtualID).Scan(&bindingRows); err != nil {
+		t.Fatal(err)
+	}
+	if bindingRows != 0 {
+		t.Fatalf("virtual model row still present after 204: %d", bindingRows)
+	}
+
+	status, payload, _ = api.request("DELETE", "/api/admin/providers/"+providerID, nil)
+	if status != 204 {
+		t.Fatalf("provider delete blocked by catalogue-key stale binding: %d %v", status, payload)
+	}
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM providers WHERE id=?`, providerID).Scan(&bindingRows); err != nil {
+		t.Fatal(err)
+	}
+	if bindingRows != 0 {
+		t.Fatalf("provider row still present after 204: %d", bindingRows)
+	}
+}
