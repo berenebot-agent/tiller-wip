@@ -9,10 +9,6 @@ tests/browser/playwright-report/
 # Strip the homelab-specific deployment context (URLs, RAM tuning, wrapper
 # internals) before any external publish.
 AGENTS.md
-# Keep public documentation reviewable. Internal release planning and
-# unpublished roadmap/archive material stay local.
-docs/todo_release.md
-docs/roadmap_*.md
-docs/archive/
+# docs/ is local planning material; keep the whole tree out of git.
+docs/
 tests/hermes_test/
-docs/todo_enc_keys.md
