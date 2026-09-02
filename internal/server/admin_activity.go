@@ -358,16 +358,16 @@ func (s *Server) listScopedActivity(w http.ResponseWriter, r *http.Request, wher
 	pattern := "%" + search + "%"
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at FROM request_logs WHERE `+where+` AND (requested_model LIKE ? OR coalesce(exposed_model,'') LIKE ? OR coalesce(route_model,'') LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ?) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
 	}
 	defer rows.Close()
-	data := []activityView{}
+	data := []globalActivityView{}
 	for rows.Next() {
-		var v activityView
-		if err := scanActivityRow(rows.Scan, &v, false, nil, nil); err != nil {
+		var v globalActivityView
+		if err := scanActivityRow(rows.Scan, &v.activityView, true, &v.ClientKeyID, &v.ClientName); err != nil {
 			adminError(w, 500, "database_error", "Could not load activity.")
 			return
 		}
