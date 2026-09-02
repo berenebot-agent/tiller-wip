@@ -58,7 +58,7 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 		"nemotron-3-ultra-free",
 		"deepseek-v4-flash-free",
 		"mimo-v2.5-free",
-		"unlisted-free-model",
+		"unlisted-model-free",
 	} {
 		if got := nativeProtocol("opencode-free", modelID); got != ProtocolChat {
 			t.Errorf("opencode-free model %q protocol = %q, want %q", modelID, got, ProtocolChat)
@@ -71,16 +71,17 @@ func TestOpenCodeDescriptors(t *testing.T) {
 		providerType string
 		url          string
 		credential   bool
+		protocols    int
 	}{
-		{"opencode-zen", "https://opencode.ai/zen/v1", true},
-		{"opencode-go", "https://opencode.ai/zen/go/v1", true},
-		{"opencode-free", "https://opencode.ai/zen/v1", false},
+		{"opencode-zen", "https://opencode.ai/zen/v1", true, 3},
+		{"opencode-go", "https://opencode.ai/zen/go/v1", true, 3},
+		{"opencode-free", "https://opencode.ai/zen/v1", false, 1},
 	} {
 		descriptor, ok := Lookup(test.providerType)
 		if !ok {
 			t.Fatalf("missing descriptor %q", test.providerType)
 		}
-		if descriptor.DefaultBaseURL != test.url || descriptor.CredentialNeeded != test.credential || len(descriptor.Protocols) != 3 {
+		if descriptor.DefaultBaseURL != test.url || descriptor.CredentialNeeded != test.credential || len(descriptor.Protocols) != test.protocols {
 			t.Errorf("unexpected %q descriptor: %+v", test.providerType, descriptor)
 		}
 	}

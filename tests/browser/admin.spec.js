@@ -884,7 +884,7 @@ test('global activity renders across clients, searches, and pages', async ({ pag
   const provider = await createProvider(page, csrf, providerName);
   const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsRes.ok()).toBeTruthy();
-  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
 
   const client1 = await createClient(page, csrf, client1Name);
@@ -958,7 +958,7 @@ test('activity pagination handles empty results and the exact-page boundary', as
   const provider = await createProvider(page, csrf, providerName);
   const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsRes.ok()).toBeTruthy();
-  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
 
   // Client A is never used to request, so its activity is empty.
@@ -1142,7 +1142,7 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
   const clientName = 'browser-copy-reqid-client';
   const provider = await createProvider(page, csrf, providerName);
   const modelsRes = await page.request.get('/api/admin/models');
-  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
   const modelId = `${providerName}/mock-model`;
   const client = await createClient(page, csrf, clientName);
@@ -1226,9 +1226,9 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
   const csrf = await adminCsrf(page);
   const providerName = 'browser-copy-reqid-insecure';
   const clientName = 'browser-copy-reqid-insecure-client';
-  await createProvider(page, csrf, providerName);
+  const provider = await createProvider(page, csrf, providerName);
   const modelsRes = await page.request.get('/api/admin/models');
-  const realModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
+  const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
   const modelId = `${providerName}/mock-model`;
   const client = await createClient(page, csrf, clientName);

@@ -107,9 +107,9 @@ func TestUsageEndpointEmpty(t *testing.T) {
 
 // TestUsageTargetLastOutcome verifies that a routed request records its outcome
 // in the in-memory target_last_outcome map and that it is surfaced by the usage
-// endpoint keyed by "provider_name/upstream_model_id".
+// endpoint keyed by provider model ID.
 func TestUsageTargetLastOutcome(t *testing.T) {
-	api, _, _, secret := loggingTestHarness(t, mockUpstream(t))
+	api, db, _, secret := loggingTestHarness(t, mockUpstream(t))
 
 	// No requests yet: usage should expose an empty (or absent) map.
 	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
@@ -132,9 +132,13 @@ func TestUsageTargetLastOutcome(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("usage: %d %v", status, payload)
 	}
-	last, ok := payload["target_last_outcome"].(map[string]any)["provider-a/model-a"].(map[string]any)
+	var modelID string
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelID); err != nil {
+		t.Fatal(err)
+	}
+	last, ok := payload["target_last_outcome"].(map[string]any)[modelID].(map[string]any)
 	if !ok {
-		t.Fatalf("provider-a/model-a missing from target_last_outcome: %v", payload["target_last_outcome"])
+		t.Fatalf("%s missing from target_last_outcome: %v", modelID, payload["target_last_outcome"])
 	}
 	if last["status"] != float64(200) {
 		t.Fatalf("last status = %v, want 200", last["status"])
@@ -171,18 +175,18 @@ func TestRecordLastOutcomeFailedAttempt(t *testing.T) {
 		httpStatus: 502,
 		createdAt:  "2026-09-02T12:00:00Z",
 		attempts: []requestAttempt{
-			{provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 502, failureClass: "upstream_unreachable"},
+			{providerModelID: "pm-failed", provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 502, failureClass: "upstream_unreachable"},
 		},
 	}
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	out, ok := s.lastOutcome["main/argus-5.3-codex-spark"]
+	out, ok := s.lastOutcome["pm-failed"]
 	if !ok {
 		t.Fatalf("expected failed target to be recorded: %v", s.lastOutcome)
 	}
-	if out.At != row.createdAt {
-		t.Fatalf("at = %q, want %q", out.At, row.createdAt)
+	if out.At == "" {
+		t.Fatal("expected a completion timestamp")
 	}
 	if out.Status != 502 {
 		t.Fatalf("status = %d, want 502", out.Status)
@@ -201,13 +205,13 @@ func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
 		httpStatus: 503,
 		createdAt:  "2026-09-02T12:00:00Z",
 		attempts: []requestAttempt{
-			{provider: "main", model: "argus-5.3-codex-spark", result: "skipped", failureClass: "unavailable"},
+			{providerModelID: "pm-skipped", provider: "main", model: "argus-5.3-codex-spark", result: "skipped", failureClass: "unavailable"},
 		},
 	}
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	if _, ok := s.lastOutcome["main/argus-5.3-codex-spark"]; ok {
+	if _, ok := s.lastOutcome["pm-skipped"]; ok {
 		t.Fatalf("skipped target should not be recorded: %v", s.lastOutcome)
 	}
 }
@@ -221,18 +225,18 @@ func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 		httpStatus: 200,
 		createdAt:  "2026-09-02T12:00:00Z",
 		attempts: []requestAttempt{
-			{provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 503, failureClass: "http_503"},
-			{provider: "main", model: "backup-model", result: "success", httpStatus: 200},
+			{providerModelID: "pm-primary", provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 503, failureClass: "http_503"},
+			{providerModelID: "pm-backup", provider: "main", model: "backup-model", result: "success", httpStatus: 200},
 		},
 	}
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	failed, ok := s.lastOutcome["main/argus-5.3-codex-spark"]
+	failed, ok := s.lastOutcome["pm-primary"]
 	if !ok || failed.IsSuccess {
 		t.Fatalf("expected failed target red: %v", s.lastOutcome)
 	}
-	success, ok := s.lastOutcome["main/backup-model"]
+	success, ok := s.lastOutcome["pm-backup"]
 	if !ok || !success.IsSuccess {
 		t.Fatalf("expected succeeding target green: %v", s.lastOutcome)
 	}
@@ -250,7 +254,7 @@ func TestRecordLastOutcomeRunsWhenLoggingDisabled(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("request status %d", resp.StatusCode)
 	}
-	status, payload, _ = api.request("GET", "/api/admin/usage", nil)
+	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
 	if status != 200 {
 		t.Fatalf("usage: %d %v", status, payload)
 	}
