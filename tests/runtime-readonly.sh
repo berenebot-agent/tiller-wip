@@ -36,8 +36,18 @@ backup_file=$(mktemp)
 host_uid=$(id -u)
 host_gid=$(id -g)
 
-# The runtime process owns /data so database.Open can tighten it to 0700.
-docker run --rm -v "$data_dir:/d" --user root alpine chown 65532:65532 /d
+# Host dir for the /data bind mount, owned by the non-root runtime user.
+if ! chmod 700 "$data_dir"; then
+    echo "FAIL: unable to set /data test mount mode to 0700" >&2
+    exit 1
+fi
+if ! chown 65532:65532 "$data_dir" 2>/dev/null &&
+    ! sudo -n chown 65532:65532 "$data_dir" 2>/dev/null &&
+    ! docker run --rm --user 0:0 -v "$data_dir:/data" alpine:3.20 \
+        chown 65532:65532 /data >/dev/null 2>&1; then
+    echo "FAIL: unable to chown /data test mount to UID/GID 65532" >&2
+    exit 1
+fi
 
 echo "==> Building tiller-router:dev"
 docker build -t tiller-router:dev "$repo_dir"
@@ -83,7 +93,15 @@ echo "    /health/ready -> $ready_code"
 [ "$ready_code" = "200" ] || { echo "FAIL: /health/ready returned $ready_code" >&2; exit 1; }
 
 echo "==> Migrations/startup wrote to /data bind mount"
+<<<<<<< HEAD
 docker run --rm -v "$data_dir:/d:ro" --user root alpine test -f /d/tiller-router.db || { echo "FAIL: no tiller-router.db under /data" >&2; exit 1; }
+=======
+if [ ! -f "$data_dir/tiller-router.db" ] && ! docker run --rm --user 0:0 \
+    -v "$data_dir:/data" alpine:3.20 test -f /data/tiller-router.db; then
+    echo "FAIL: no tiller-router.db under /data" >&2
+    exit 1
+fi
+>>>>>>> 16df3f0 (test(runtime): prepare non-root data mount)
 echo "    $data_dir/tiller-router.db present"
 
 echo "==> docker inspect runtime settings"
@@ -110,7 +128,15 @@ echo "    backup export -> $backup_code"
 header=$(head -c 15 "$backup_file")
 echo "    backup header: $header"
 [ "$header" = "SQLite format 3" ] || { echo "FAIL: backup is not a valid SQLite file" >&2; exit 1; }
+<<<<<<< HEAD
 docker run --rm -v "$data_dir:/d:ro" --user root alpine test -d /d/backups || { echo "FAIL: backup did not write under /data/backups" >&2; exit 1; }
+=======
+if [ ! -d "$data_dir/backups" ] && ! docker run --rm --user 0:0 \
+    -v "$data_dir:/data" alpine:3.20 test -d /data/backups; then
+    echo "FAIL: backup did not write under /data/backups" >&2
+    exit 1
+fi
+>>>>>>> 16df3f0 (test(runtime): prepare non-root data mount)
 
 echo "==> Write behavior demonstration (read-only shell container, identical flags)"
 # The scratch image has no shell, so the authoritative read-only check is
