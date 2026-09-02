@@ -5,10 +5,10 @@ Compose project. Small, focused changes are easiest to review.
 
 ## Before opening a change
 
-1. Check existing issues and documentation, especially the V1 specification.
-2. Explain the user-visible behavior, security impact, and any compatibility
-   implications in the change description.
-3. Do not include provider credentials, client keys, session cookies, prompts,
+1. Check existing issues and any in-repo documentation before opening a change.
+   Describe the user-visible behavior, security impact, and compatibility
+   implications directly in the change description.
+2. Do not include provider credentials, client keys, session cookies, prompts,
    response bodies, or private deployment data in commits, tests, or logs.
 
 ## Development and tests
