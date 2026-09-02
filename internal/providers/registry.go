@@ -121,13 +121,16 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 }
 
 func nativeProtocol(providerType, modelID string) Protocol {
-	if providerType == "opencode-zen" || providerType == "opencode-free" {
+	if providerType == "opencode-zen" {
 		if protocol, ok := openCodeZenProtocolByModel[modelID]; ok {
 			return protocol
 		}
 		return ProtocolChat
 	}
 	if providerType == "opencode-go" {
+		return ProtocolChat
+	}
+	if providerType == "opencode-free" {
 		return ProtocolChat
 	}
 	return ""

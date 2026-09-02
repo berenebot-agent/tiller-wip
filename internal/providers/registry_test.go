@@ -53,6 +53,17 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 	if got := nativeProtocol("opencode-zen", "unknown-model"); got != ProtocolChat {
 		t.Fatalf("unknown Zen model protocol = %q, want %q", got, ProtocolChat)
 	}
+	for _, modelID := range []string{
+		"muse-spark-1.2-contributor-free",
+		"nemotron-3-ultra-free",
+		"deepseek-v4-flash-free",
+		"mimo-v2.5-free",
+		"unlisted-free-model",
+	} {
+		if got := nativeProtocol("opencode-free", modelID); got != ProtocolChat {
+			t.Errorf("opencode-free model %q protocol = %q, want %q", modelID, got, ProtocolChat)
+		}
+	}
 }
 
 func TestOpenCodeDescriptors(t *testing.T) {
