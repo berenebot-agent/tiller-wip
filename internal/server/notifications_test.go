@@ -68,7 +68,7 @@ func notificationTestHarness(t *testing.T, failUpstream, okUpstream http.Handler
 			modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
 		}
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "notify client"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "notify client", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -477,7 +477,7 @@ func TestAdminEventNotifications(t *testing.T) {
 	}
 
 	// Create a client key -> notification.
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -535,7 +535,7 @@ func TestAdminEventToggleRespected(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
 	}
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}

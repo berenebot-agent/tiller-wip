@@ -182,13 +182,13 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 		m := raw.(map[string]any)
 		modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Hermes test", "description": "acceptance"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Hermes test", "description": "acceptance", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
 	clientID := payload["id"].(string)
 	clientSecret := payload["secret"].(string)
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Isolated client", "description": "feeder acceptance"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Isolated client", "description": "feeder acceptance", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create second key: %d %v", status, payload)
 	}
@@ -533,7 +533,7 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 		m := raw.(map[string]any)
 		modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "cap client"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "cap client", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}

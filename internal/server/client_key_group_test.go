@@ -38,21 +38,21 @@ func TestClientKeyGroup(t *testing.T) {
 	api.csrf = payload["csrf_token"].(string)
 
 	// Default group is "default" when unspecified.
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "hermes"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "hermes", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
 	defaultID := payload["id"].(string)
 
 	// Explicit group on create.
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "lab", "group": "testing"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "lab", "group": "testing", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key with group: %d %v", status, payload)
 	}
 	groupedID := payload["id"].(string)
 
 	// Invalid group is rejected.
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "bad", "group": "bad//group"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "bad", "group": "bad//group", "type": "catalogue"})
 	if status != 400 {
 		t.Fatalf("invalid group must be rejected: %d %v", status, payload)
 	}
