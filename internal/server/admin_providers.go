@@ -338,6 +338,9 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		_, err = tx.ExecContext(r.Context(), `DELETE FROM client_group_defaults WHERE group_kind='real' AND group_id=?`, providerID)
 	}
 	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `DELETE FROM client_single_bindings WHERE client_key_id IN (SELECT b.client_key_id FROM client_single_bindings b JOIN client_keys c ON c.id=b.client_key_id JOIN provider_models m ON m.id=b.real_model_id WHERE c.key_type='catalogue' AND m.provider_id=?)`, providerID)
+	}
+	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_models WHERE provider_id=?`, providerID)
 	}
 	if err == nil {
