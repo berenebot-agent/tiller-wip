@@ -239,7 +239,7 @@ func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 }
 
 func TestRecordLastOutcomeRunsWhenLoggingDisabled(t *testing.T) {
-	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
+	api, db, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	status, _, _ := api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"logging_enabled": false})
 	if status != 204 {
 		t.Fatalf("disable logging: %d", status)
@@ -254,46 +254,63 @@ func TestRecordLastOutcomeRunsWhenLoggingDisabled(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("usage: %d %v", status, payload)
 	}
-	last := payload["target_last_outcome"].(map[string]any)["provider-a/model-a"].(map[string]any)
+	var modelID string
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelID); err != nil {
+		t.Fatal(err)
+	}
+	last := payload["target_last_outcome"].(map[string]any)[modelID].(map[string]any)
 	if last["status"] != float64(200) || last["is_success"] != true {
 		t.Fatalf("logging-disabled outcome wrong: %v", last)
+	}
+}
+
+func TestRecordLastOutcomeDoesNotCollideForSameUpstreamNames(t *testing.T) {
+	s := &Server{}
+	s.recordLastOutcome(&logRow{attempts: []requestAttempt{
+		{providerModelID: "pm-one", provider: "same", model: "same", result: "failed", httpStatus: 500},
+		{providerModelID: "pm-two", provider: "same", model: "same", result: "success", httpStatus: 200},
+	}})
+	s.lastOutcomeMu.RLock()
+	defer s.lastOutcomeMu.RUnlock()
+	if len(s.lastOutcome) != 2 || s.lastOutcome["pm-one"].IsSuccess || !s.lastOutcome["pm-two"].IsSuccess {
+		t.Fatalf("outcomes were not keyed by provider model ID: %+v", s.lastOutcome)
 	}
 }
 
 func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) {
 	s := &Server{}
 	row := &logRow{httpStatus: 200, createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{
-		{provider: "primary", model: "model-a", result: "failed", httpStatus: 0, failureClass: "upstream_unreachable"},
-		{provider: "backup", model: "model-b", result: "success", httpStatus: 200},
+		{providerModelID: "pm-primary", provider: "primary", model: "model-a", result: "failed", httpStatus: 0, failureClass: "upstream_unreachable"},
+		{providerModelID: "pm-backup", provider: "backup", model: "model-b", result: "success", httpStatus: 200},
 	}}
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	if got := s.lastOutcome["primary/model-a"]; got.Status != 0 || got.IsSuccess {
+	if got := s.lastOutcome["pm-primary"]; got.Status != 0 || got.IsSuccess {
 		t.Fatalf("network failure outcome = %+v, want status 0 and failure", got)
 	}
-	if got := s.lastOutcome["backup/model-b"]; got.Status != 200 || !got.IsSuccess {
+	if got := s.lastOutcome["pm-backup"]; got.Status != 200 || !got.IsSuccess {
 		t.Fatalf("fallback success outcome = %+v", got)
 	}
-	if got := s.lastOutcome["backup/model-b"]; got.At == row.createdAt {
+	if got := s.lastOutcome["pm-backup"]; got.At == row.createdAt {
 		t.Fatalf("outcome timestamp used request start: %+v", got)
 	}
 }
 
 func TestRecordLastOutcomeUsesLaterRecordingTime(t *testing.T) {
 	s := &Server{}
-	first := &logRow{createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{{provider: "provider", model: "model", result: "failed"}}}
+	first := &logRow{createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{{providerModelID: "pm-model", provider: "provider", model: "model", result: "failed"}}}
 	s.recordLastOutcome(first)
 	s.lastOutcomeMu.RLock()
-	firstRecordedAt := s.lastOutcome["provider/model"].At
+	firstRecordedAt := s.lastOutcome["pm-model"].At
 	s.lastOutcomeMu.RUnlock()
 
 	time.Sleep(time.Millisecond)
-	second := &logRow{createdAt: "2026-09-02T11:00:00Z", attempts: []requestAttempt{{provider: "provider", model: "model", result: "success", httpStatus: 200}}}
+	second := &logRow{createdAt: "2026-09-02T11:00:00Z", attempts: []requestAttempt{{providerModelID: "pm-model", provider: "provider", model: "model", result: "success", httpStatus: 200}}}
 	s.recordLastOutcome(second)
 
 	s.lastOutcomeMu.RLock()
-	got := s.lastOutcome["provider/model"]
+	got := s.lastOutcome["pm-model"]
 	s.lastOutcomeMu.RUnlock()
 	firstAt, err := time.Parse(time.RFC3339Nano, firstRecordedAt)
 	if err != nil {

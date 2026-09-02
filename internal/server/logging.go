@@ -43,9 +43,9 @@ type logRow struct {
 }
 
 type requestAttempt struct {
-	provider, model, result, failureClass string
-	httpStatus                            int
-	latencyMs                             int64
+	providerModelID, provider, model, result, failureClass string
+	httpStatus                                             int
+	latencyMs                                              int64
 }
 
 // writeLog persists a request log row. It is best-effort: a failed insert logs
@@ -126,13 +126,16 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	}
 	recordedAt := database.Now()
 	for _, attempt := range row.attempts {
+		if attempt.providerModelID == "" {
+			continue
+		}
 		switch attempt.result {
 		case "success":
-			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
+			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
 		case "failed":
 			// Preserve zero: a network failure has no HTTP response, even if a
 			// later fallback succeeds and sets the logical row status to 2xx.
-			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
 		}
 	}
 }

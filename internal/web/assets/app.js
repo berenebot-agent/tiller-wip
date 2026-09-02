@@ -174,7 +174,8 @@ async function loadVirtual(search = $('#virtual-search').value) {
 }
 const RESOLUTION_STALE_MS = 24 * 3600 * 1000;
 function resolutionIndicator(target) {
-  const key = `${target.provider_name}/${target.upstream_model_id}`;
+  const key = target.provider_model_id || target.target_model_id;
+  const legacyKey = `${target.provider_name}/${target.upstream_model_id}`;
   const last = state.usage?.target_last_outcome?.[key];
   const status = last
     ? !last.at
@@ -185,7 +186,7 @@ function resolutionIndicator(target) {
           ? ['good', '✓', 'Resolving successfully']
           : ['bad', '×', 'Last request failed']
     : (() => {
-      const health = state.usage?.target_health?.[key];
+      const health = state.usage?.target_health?.[legacyKey];
       return health === undefined
         ? ['neutral', '○', 'No activity recorded']
         : !health.success_24h
