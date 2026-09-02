@@ -47,10 +47,10 @@
 
 .activity-attempt {
   display: grid;
-  grid-template-columns: 25px minmax(0, 1fr) auto auto;
+  grid-template-columns: 19px minmax(0, 1fr) auto auto;
   align-items: center;
-  gap: 7px;
-  padding: 4px 7px;
+  gap: 4px;
+  padding: 3px 5px;
   border: 1px solid #d8e1e8;
   border-radius: 3px;
   white-space: nowrap;
@@ -61,7 +61,7 @@
 .attempt-neutral { border-color: #cdd5db; background: #f5f7f9; }
 .attempt-number { color: #6b8193; font: 700 10px var(--mono); }
 .attempt-route { min-width: 0; }
-.attempt-route code { display: block; overflow: hidden; text-overflow: ellipsis; }
+.attempt-route code { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .attempt-route small { display: block; color: var(--muted); font-size: 10px; }
 .attempt-status { font: 700 11px var(--mono); }
 .attempt-latency { color: var(--muted); font: 10px var(--mono); }
