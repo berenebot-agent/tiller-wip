@@ -66,6 +66,15 @@ Guardrails for any coding agent working in this repository. This file describes 
 - The request touches credential handling, auth, or logging in a way not explicitly covered by the security guardrails above.
 - You find an actual inconsistency between the docs and the current code — report it, don't resolve it silently.
 
+## Branching and commits
+
+- After completing a change, ask the human whether to commit on the current branch (and
+  handle the branch/PR later) or create a new branch and open a PR now.
+- For small, low-risk changes that are part of a larger in-progress task, committing in
+  place is often fine — the branch/PR can come after.
+- Do not create a branch or PR unless the human has indicated one is wanted for this
+  change.
+
 ## Testing expectations
 
 - Any change to routing, permissions, or auth should be verified against existing tests (unit, browser, or compatibility — pick the smallest tier that would catch a regression), not just against a new test you wrote for the change.
