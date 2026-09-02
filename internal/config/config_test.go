@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/netip"
 	"testing"
 )
 
@@ -72,6 +73,19 @@ func TestTrustedProxy(t *testing.T) {
 	}
 	if !c.TrustedProxy.IsValid() {
 		t.Error("TrustedProxy should be set")
+	}
+	if c.TrustedProxy != netip.MustParsePrefix("172.18.0.0/16") {
+		t.Errorf("TrustedProxy = %s, want 172.18.0.0/16", c.TrustedProxy)
+	}
+
+	// A bare proxy address is treated as a single-address CIDR.
+	t.Setenv("TILLER_TRUSTED_PROXY", "10.1.1.18")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("bare trusted proxy address should load: %v", err)
+	}
+	if c.TrustedProxy != netip.MustParsePrefix("10.1.1.18/32") {
+		t.Errorf("TrustedProxy = %s, want 10.1.1.18/32", c.TrustedProxy)
 	}
 
 	// A bare IP (no /prefix) is treated as /32.

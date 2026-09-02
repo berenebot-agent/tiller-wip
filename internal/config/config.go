@@ -48,7 +48,11 @@ func Load() (Config, error) {
 		}
 		v, err := netip.ParsePrefix(value)
 		if err != nil {
-			return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+			addr, addrErr := netip.ParseAddr(raw)
+			if addrErr != nil {
+				return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+			}
+			v = netip.PrefixFrom(addr, addr.BitLen())
 		}
 		c.TrustedProxy = v
 	}
