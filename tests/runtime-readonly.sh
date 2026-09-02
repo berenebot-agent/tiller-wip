@@ -54,7 +54,7 @@ docker run --rm -d --name "$name" --network host \
     -e TILLER_ADMIN_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$port" \
     -e TILLER_DATA_DIR=/data \
-    -e TILLER_TRUST_PROXY_HEADERS=false \
+    -e TILLER_TRUSTED_PROXY=127.0.0.0/8 \
     tiller-router:dev >/dev/null
 
 echo "==> Waiting for readiness"
