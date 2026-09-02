@@ -61,6 +61,7 @@ var descriptors = []Descriptor{
 	{Type: "minimax", Label: "MiniMax", DefaultBaseURL: "https://api.minimax.io/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
+	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "lm-studio", Label: "LM Studio", DefaultBaseURL: "http://host.docker.internal:1234/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -120,7 +121,7 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 }
 
 func nativeProtocol(providerType, modelID string) Protocol {
-	if providerType == "opencode-zen" {
+	if providerType == "opencode-zen" || providerType == "opencode-free" {
 		if protocol, ok := openCodeZenProtocolByModel[modelID]; ok {
 			return protocol
 		}
@@ -189,6 +190,20 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	}
 	if err != nil {
 		return nil, err
+	}
+	// opencode-free is the anonymous, keyless tier — only models whose ID
+	// ends with -free are usable without a credential. The upstream catalogue
+	// at /zen/v1/models lists all 64 Zen models, so we filter here to surface
+	// only the 7 free ones. The suffix convention is used by the provider and
+	// is stable for future free models.
+	if provider.Type == "opencode-free" {
+		filtered := models[:0]
+		for _, m := range models {
+			if strings.HasSuffix(m.ID, "-free") {
+				filtered = append(filtered, m)
+			}
+		}
+		models = filtered
 	}
 	// Merge models.dev capability metadata as a fallback so real models whose
 	// provider does not report capabilities still surface useful metadata. The

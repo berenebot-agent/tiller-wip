@@ -175,7 +175,7 @@ func TestModelsDevProviderKeyMapping(t *testing.T) {
 		"openrouter": "openrouter", "deepseek": "deepseek", "nvidia-nim": "nvidia",
 		"zai": "zhipuai", "gemini": "google", "alibaba-qwen": "alibaba",
 		"fireworks": "fireworks-ai", "azure-openai": "azure", "opencode-zen": "opencode",
-		"opencode-go": "opencode", "openai": "openai", "anthropic": "anthropic",
+		"opencode-go": "opencode", "opencode-free": "opencode", "openai": "openai", "anthropic": "anthropic",
 		"groq": "groq", "mistral": "mistral", "xai": "xai", "cerebras": "cerebras",
 		"perplexity": "perplexity", "minimax": "minimax", "huggingface": "huggingface",
 	} {
