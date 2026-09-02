@@ -112,7 +112,7 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 	"gpt-5.1-codex-max": ProtocolResponses, "gpt-5.1-codex-mini": ProtocolResponses, "gpt-5": ProtocolResponses,
 	"gpt-5-codex": ProtocolResponses, "gpt-5-nano": ProtocolResponses, "grok-4.6": ProtocolResponses,
 	"grok-4.5": ProtocolResponses, "grok-build-0.1": ProtocolResponses, "muse-spark-1.2": ProtocolResponses,
-	"claude-fable-5":                  ProtocolMessages, "claude-opus-5": ProtocolMessages, "claude-opus-4.8": ProtocolMessages,
+	"claude-fable-5": ProtocolMessages, "claude-opus-5": ProtocolMessages, "claude-opus-4.8": ProtocolMessages,
 	"claude-opus-4.7": ProtocolMessages, "claude-opus-4.6": ProtocolMessages, "claude-opus-4.5": ProtocolMessages,
 	"claude-sonnet-5": ProtocolMessages, "claude-sonnet-4.6": ProtocolMessages, "claude-sonnet-4.5": ProtocolMessages,
 	"claude-haiku-4.5": ProtocolMessages, "qwen3.7-max": ProtocolMessages, "qwen3.7-plus": ProtocolMessages,
