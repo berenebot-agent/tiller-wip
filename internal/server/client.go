@@ -19,6 +19,7 @@ import (
 )
 
 const maxUpstreamNonStreamBytes int64 = 64 << 20
+const maxUpstreamErrorBytes int64 = 1 << 20
 
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
 
@@ -358,6 +359,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set("User-Agent", "Tiller-Router/1")
+		if candidate.Provider.Type == "opencode-free" {
+			if clientIP := s.requestClientIP(r); clientIP != "" {
+				req.Header.Set("X-Real-IP", clientIP)
+			}
+		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
 		response, e := s.providers.Registry().HTTPClient().Do(req)
 		if e != nil {
@@ -391,6 +397,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			class := fmt.Sprintf("http_%d", response.StatusCode)
+			var upstreamErrorBody []byte
+			var upstreamErrorReadErr error
+			if !route.Virtual {
+				upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
+			}
 			response.Body.Close()
 			attemptCancel()
 			row.attempts = append(row.attempts, requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
@@ -401,6 +412,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				if upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
+					copySafeResponseHeaders(w.Header(), response.Header)
+					upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
+					if route.UpstreamModelID != route.RequestedModel {
+						upstreamErrorBody = bytes.ReplaceAll(upstreamErrorBody, []byte(route.UpstreamModelID), []byte(route.RequestedModel))
+					}
+					w.WriteHeader(response.StatusCode)
+					_, _ = w.Write(upstreamErrorBody)
+					return
+				}
 				inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
 				return
 			}

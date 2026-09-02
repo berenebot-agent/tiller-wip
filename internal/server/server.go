@@ -292,6 +292,30 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
+// requestClientIP returns the client address suitable for forwarding to an
+// anonymous provider. Forwarded headers are accepted only from the configured
+// trusted proxy; otherwise the direct peer address is used.
+func (s *Server) requestClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if host == "" {
+		return ""
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !s.config.TrustedProxy.IsValid() || !s.config.TrustedProxy.Contains(peer) {
+		return host
+	}
+	for _, header := range []string{"X-Forwarded-For", "X-Real-IP"} {
+		value := strings.TrimSpace(strings.Split(r.Header.Get(header), ",")[0])
+		if address, err := netip.ParseAddr(value); err == nil {
+			return address.String()
+		}
+	}
+	return host
+}
+
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
