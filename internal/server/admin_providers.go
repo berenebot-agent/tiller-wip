@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -80,6 +81,25 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_provider_type", "Unknown provider type.")
 		return
 	}
+	if input.Name == "" {
+		input.Name = descriptor.Type
+	}
+	input.Name = strings.ToLower(strings.TrimSpace(input.Name))
+	// Matches DB CHECK: name=lower(name) AND length 1..63 AND GLOB '[a-z0-9-]*' AND first/last [a-z0-9]
+	if len(input.Name) < 1 || len(input.Name) > 63 {
+		adminError(w, 400, "invalid_provider_name", "Provider name must be 1-63 lowercase alphanumerics/hyphens.")
+		return
+	}
+	if input.Name[0] == '-' || input.Name[len(input.Name)-1] == '-' {
+		adminError(w, 400, "invalid_provider_name", "Provider name must start and end with alphanumeric.")
+		return
+	}
+	for _, ch := range input.Name {
+		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+			adminError(w, 400, "invalid_provider_name", "Provider name may only contain lowercase letters, digits, and hyphens.")
+			return
+		}
+	}
 	if input.BaseURL == "" {
 		input.BaseURL = descriptor.DefaultBaseURL
 	}
@@ -106,24 +126,62 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := database.Now()
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not create provider.")
-		return
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'real',?)`, input.Name, providerID); err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, providerID, input.Name, input.Type, input.BaseURL, nullableString(input.Credential), boolInt(enabled), providers.EncodeProtocols(protocols), now, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'real',?,0,? FROM client_keys`, providerID, now)
-	}
-	if err != nil || tx.Commit() != nil {
-		if database.IsConstraint(err) {
-			adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
-		} else {
-			adminError(w, 500, "database_error", "Could not create provider.")
+	baseName := input.Name
+	var committed bool
+	var lastErr error
+	for attempt := 0; attempt < 100; attempt++ {
+		candidate := baseName
+		if attempt > 0 {
+			suffix := fmt.Sprintf("-%d", attempt+1)
+			maxBase := 63 - len(suffix)
+			b := baseName
+			if len(b) > maxBase {
+				b = b[:maxBase]
+			}
+			b = strings.TrimRight(b, "-")
+			if b == "" {
+				b = baseName[:1]
+			}
+			candidate = b + suffix
 		}
+		input.Name = candidate
+		tx, txErr := s.db.SQL.BeginTx(r.Context(), nil)
+		if txErr != nil {
+			adminError(w, 500, "database_error", "Could not create provider.")
+			return
+		}
+		func() {
+			defer tx.Rollback()
+			if _, lastErr = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'real',?)`, input.Name, providerID); lastErr == nil {
+				_, lastErr = tx.ExecContext(r.Context(), `INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, providerID, input.Name, input.Type, input.BaseURL, nullableString(input.Credential), boolInt(enabled), providers.EncodeProtocols(protocols), now, now)
+			}
+			if lastErr == nil {
+				_, lastErr = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'real',?,0,? FROM client_keys`, providerID, now)
+			}
+			if lastErr == nil {
+				lastErr = tx.Commit()
+			}
+			if lastErr == nil {
+				committed = true
+			}
+		}()
+		if committed {
+			break
+		}
+		if lastErr != nil && database.IsConstraint(lastErr) {
+			continue
+		}
+		if lastErr != nil {
+			if database.IsConstraint(lastErr) {
+				adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
+			} else {
+				adminError(w, 500, "database_error", "Could not create provider.")
+			}
+			return
+		}
+	}
+	if !committed {
+		adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
 		return
 	}
 	refreshCtx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
