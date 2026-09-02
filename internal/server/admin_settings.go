@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -78,79 +79,47 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_cooldown", "Notification cooldown must be 0 or more seconds.")
 		return
 	}
-	if input.DefaultLoggingEnabled != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingDefaultLoggingEnabled, strconv.FormatBool(*input.DefaultLoggingEnabled)); err != nil {
+	// Each entry writes its setting only when the field was supplied (non-nil),
+	// so a PATCH touches exactly the fields present. The auth header is a
+	// secret: it is never returned by GET; a non-nil value here replaces it
+	// (empty string clears it) and a nil value leaves it unchanged.
+	type settingUpdate struct {
+		value any // *bool / *int / *string; nil skips the write
+		key   string
+	}
+	updates := []settingUpdate{
+		{key: database.SettingDefaultLoggingEnabled, value: input.DefaultLoggingEnabled},
+		{key: database.SettingDefaultRetentionDays, value: input.DefaultRetentionDays},
+		{key: database.SettingFallbackTimeoutSeconds, value: input.FallbackTimeoutSeconds},
+		{key: database.SettingNotificationsEnabled, value: input.NotificationsEnabled},
+		{key: database.SettingNotificationsWebhookURL, value: input.NotificationsWebhookURL},
+		{key: database.SettingNotificationsEventFallback, value: input.NotificationsEventFallback},
+		{key: database.SettingNotificationsEventAllFailed, value: input.NotificationsEventAllFailed},
+		{key: database.SettingNotificationsCooldownSeconds, value: input.NotificationsCooldownSeconds},
+		{key: database.SettingNotificationsEventClientKeyCreated, value: input.NotificationsEventClientKeyCreated},
+		{key: database.SettingNotificationsEventClientKeyDeleted, value: input.NotificationsEventClientKeyDeleted},
+		{key: database.SettingNotificationsEventAdminLogin, value: input.NotificationsEventAdminLogin},
+		{key: database.SettingNotificationsAuthHeader, value: input.NotificationsAuthHeader},
+	}
+	for _, u := range updates {
+		if u.value == nil || reflect.ValueOf(u.value).IsNil() {
+			continue
+		}
+		var value string
+		switch v := u.value.(type) {
+		case *bool:
+			value = strconv.FormatBool(*v)
+		case *int:
+			value = strconv.Itoa(*v)
+		case *string:
+			value = *v
+		}
+		if err := s.db.SetSetting(r.Context(), u.key, value); err != nil {
 			adminError(w, 500, "database_error", "Could not update settings.")
 			return
 		}
-	}
-	if input.DefaultRetentionDays != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingDefaultRetentionDays, strconv.Itoa(*input.DefaultRetentionDays)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.FallbackTimeoutSeconds != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingFallbackTimeoutSeconds, strconv.Itoa(*input.FallbackTimeoutSeconds)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-		s.providers.Registry().SetResponseHeaderTimeout(time.Duration(*input.FallbackTimeoutSeconds) * time.Second)
-	}
-	if input.NotificationsEnabled != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEnabled, strconv.FormatBool(*input.NotificationsEnabled)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.NotificationsWebhookURL != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsWebhookURL, *input.NotificationsWebhookURL); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.NotificationsEventFallback != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventFallback, strconv.FormatBool(*input.NotificationsEventFallback)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.NotificationsEventAllFailed != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventAllFailed, strconv.FormatBool(*input.NotificationsEventAllFailed)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.NotificationsCooldownSeconds != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsCooldownSeconds, strconv.Itoa(*input.NotificationsCooldownSeconds)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.NotificationsEventClientKeyCreated != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventClientKeyCreated, strconv.FormatBool(*input.NotificationsEventClientKeyCreated)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.NotificationsEventClientKeyDeleted != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventClientKeyDeleted, strconv.FormatBool(*input.NotificationsEventClientKeyDeleted)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	if input.NotificationsEventAdminLogin != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsEventAdminLogin, strconv.FormatBool(*input.NotificationsEventAdminLogin)); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
-		}
-	}
-	// The auth header is a secret: it is never returned by GET. A non-nil value
-	// here replaces it (empty string clears it); a nil value leaves it unchanged.
-	if input.NotificationsAuthHeader != nil {
-		if err := s.db.SetSetting(r.Context(), database.SettingNotificationsAuthHeader, *input.NotificationsAuthHeader); err != nil {
-			adminError(w, 500, "database_error", "Could not update settings.")
-			return
+		if u.key == database.SettingFallbackTimeoutSeconds {
+			s.providers.Registry().SetResponseHeaderTimeout(time.Duration(*input.FallbackTimeoutSeconds) * time.Second)
 		}
 	}
 	w.WriteHeader(204)

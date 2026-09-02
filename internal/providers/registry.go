@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -264,7 +265,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			}
 			sp := item.SupportedParameters
 			arch := item.Architecture
-			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID), SupportsTools: triBool(len(sp) > 0, contains(sp, "tools")), SupportsVision: triBool(len(arch.InputModalities) > 0, contains(arch.InputModalities, "image")), SupportsReasoning: triBool(len(sp) > 0, contains(sp, "reasoning")), SupportsStructuredOutput: triBool(len(sp) > 0, contains(sp, "structured_outputs")), InputModalities: arch.InputModalities, OutputModalities: arch.OutputModalities})
+			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID), SupportsTools: triBool(len(sp) > 0, slices.Contains(sp, "tools")), SupportsVision: triBool(len(arch.InputModalities) > 0, slices.Contains(arch.InputModalities, "image")), SupportsReasoning: triBool(len(sp) > 0, slices.Contains(sp, "reasoning")), SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")), InputModalities: arch.InputModalities, OutputModalities: arch.OutputModalities})
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break
@@ -539,15 +540,6 @@ func firstPositive(values ...int) int {
 		}
 	}
 	return 0
-}
-
-func contains(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 // triBool returns a tri-state capability value: nil when the provider did not

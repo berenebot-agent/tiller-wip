@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -373,5 +372,3 @@ func (s *Server) exportBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Tiller-Secret-Material", "provider-credentials")
 	http.ServeFile(w, r, path)
 }
-
-var _ = sql.ErrNoRows

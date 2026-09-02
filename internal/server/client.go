@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -129,7 +128,6 @@ type resolvedRoute struct {
 	UpstreamModelID, RequestedModel     string
 	NativeProtocol                      providers.Protocol
 	Virtual, Available                  bool
-	RoutingMode                         string
 	Targets                             []resolvedRoute
 	RouteKind, RouteModelID, RouteModel string
 }
@@ -177,9 +175,6 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		}
 	}
 	if route.RouteKind == "virtual" {
-		if err = tx.QueryRowContext(ctx, `SELECT routing_mode FROM virtual_models WHERE id=?`, route.RouteModelID).Scan(&route.RoutingMode); err != nil {
-			return resolvedRoute{}, err
-		}
 		rows, e := tx.QueryContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
 		if e != nil {
 			return resolvedRoute{}, e
@@ -410,7 +405,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			row.fallbackReason = strPtr(class)
 			continue
 		}
-		if e = preflightResponse(response); e != nil {
+		if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
 			response.Body.Close()
 			attemptCancel()
 			class := "upstream_read_error"
@@ -523,13 +518,10 @@ type bufferedReadCloser struct {
 
 func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 
-// preflightResponse ensures a successful upstream response has produced data
-// before Tiller commits anything to the client. This preserves the no-splice
-// rule while allowing a different virtual target after a pre-output failure.
-func preflightResponse(resp *http.Response) error {
-	return preflightResponseLimit(resp, maxUpstreamNonStreamBytes)
-}
-
+// preflightResponseLimit ensures a successful upstream response has produced
+// data before Tiller commits anything to the client. This preserves the
+// no-splice rule while allowing a different virtual target after a pre-output
+// failure.
 func preflightResponseLimit(resp *http.Response, limit int64) error {
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		first := make([]byte, 1)
@@ -658,10 +650,4 @@ func rewriteModel(value any, upstream, requested string) {
 			rewriteModel(item, upstream, requested)
 		}
 	}
-}
-
-func sameHost(rawA, rawB string) bool {
-	a, _ := url.Parse(rawA)
-	b, _ := url.Parse(rawB)
-	return a.Scheme == b.Scheme && a.Host == b.Host
 }

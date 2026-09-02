@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -214,7 +215,7 @@ func visionFromModalities(input []string) (bool, bool) {
 	if len(input) == 0 {
 		return false, false
 	}
-	return contains(input, "image"), true
+	return slices.Contains(input, "image"), true
 }
 
 // LoadModelsDevCache synchronously loads the cached models.dev dataset from

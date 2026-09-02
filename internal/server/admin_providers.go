@@ -363,8 +363,6 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"status": "ready", "providers": providersCount, "available_models": available, "retired_models": retired, "broken_virtual_models": broken})
 }
 
-var _ = json.Valid
-
 // triBoolFromInt converts a nullable tri-state capability column (NULL/0/1)
 // into a *bool (nil = unknown).
 func triBoolFromInt(v sql.NullInt64) *bool {
