@@ -544,7 +544,7 @@ function openClient(client = null) {
   const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
-    title: client ? `Settings · ${client.name}` : 'Create client key',
+    title: client ? `Settings · ${client.name}` : 'Create client',
     fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${singleFields}${operationalFields}<label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label>`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
