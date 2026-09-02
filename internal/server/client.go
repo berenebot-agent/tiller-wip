@@ -278,6 +278,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", incoming == providers.ProtocolMessages)
 		return
 	} else if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("resolveRoute failed", "client_request_id", row.clientRequestID, "requested_model", requested, "error", err.Error())
+		}
 		row.httpStatus = 500
 		row.errorText = strPtr("database_error")
 		inferenceError(w, 500, "server_error", "database_error", "Could not resolve the model.", incoming == providers.ProtocolMessages)
