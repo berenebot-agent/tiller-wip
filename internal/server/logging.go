@@ -54,6 +54,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if row == nil {
 		return
 	}
+	s.recordLastOutcome(row)
 	var enabled int
 	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
 		return
@@ -109,6 +110,29 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		}
 	}
 	s.lastOutcomeMu.Unlock()
+}
+
+// recordLastOutcome updates operational target status from actual attempts.
+// Skipped targets were not called and therefore do not receive an outcome.
+func (s *Server) recordLastOutcome(row *logRow) {
+	if len(row.attempts) == 0 {
+		return
+	}
+	s.lastOutcomeMu.Lock()
+	defer s.lastOutcomeMu.Unlock()
+	if s.lastOutcome == nil {
+		s.lastOutcome = map[string]lastOutcome{}
+	}
+	for _, attempt := range row.attempts {
+		switch attempt.result {
+		case "success":
+			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: row.createdAt, Status: attempt.httpStatus, IsSuccess: true}
+		case "failed":
+			// Preserve zero: a network failure has no HTTP response, even if a
+			// later fallback succeeds and sets the logical row status to 2xx.
+			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: row.createdAt, Status: attempt.httpStatus, IsSuccess: false}
+		}
+	}
 }
 
 func nullInt(v int) any {

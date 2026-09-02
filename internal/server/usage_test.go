@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"io"
 	"testing"
 	"time"
 )
@@ -234,6 +235,45 @@ func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 	success, ok := s.lastOutcome["main/backup-model"]
 	if !ok || !success.IsSuccess {
 		t.Fatalf("expected succeeding target green: %v", s.lastOutcome)
+	}
+}
+
+func TestRecordLastOutcomeRunsWhenLoggingDisabled(t *testing.T) {
+	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
+	status, _, _ := api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"logging_enabled": false})
+	if status != 204 {
+		t.Fatalf("disable logging: %d", status)
+	}
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("request status %d", resp.StatusCode)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	last := payload["target_last_outcome"].(map[string]any)["provider-a/model-a"].(map[string]any)
+	if last["status"] != float64(200) || last["is_success"] != true {
+		t.Fatalf("logging-disabled outcome wrong: %v", last)
+	}
+}
+
+func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) {
+	s := &Server{}
+	row := &logRow{httpStatus: 200, createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{
+		{provider: "primary", model: "model-a", result: "failed", httpStatus: 0, failureClass: "upstream_unreachable"},
+		{provider: "backup", model: "model-b", result: "success", httpStatus: 200},
+	}}
+	s.recordLastOutcome(row)
+	s.lastOutcomeMu.RLock()
+	defer s.lastOutcomeMu.RUnlock()
+	if got := s.lastOutcome["primary/model-a"]; got.Status != 0 || got.IsSuccess {
+		t.Fatalf("network failure outcome = %+v, want status 0 and failure", got)
+	}
+	if got := s.lastOutcome["backup/model-b"]; got.Status != 200 || !got.IsSuccess {
+		t.Fatalf("fallback success outcome = %+v", got)
 	}
 }
 
