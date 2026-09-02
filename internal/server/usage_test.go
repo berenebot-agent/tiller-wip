@@ -275,6 +275,40 @@ func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) 
 	if got := s.lastOutcome["backup/model-b"]; got.Status != 200 || !got.IsSuccess {
 		t.Fatalf("fallback success outcome = %+v", got)
 	}
+	if got := s.lastOutcome["backup/model-b"]; got.At == row.createdAt {
+		t.Fatalf("outcome timestamp used request start: %+v", got)
+	}
+}
+
+func TestRecordLastOutcomeUsesLaterRecordingTime(t *testing.T) {
+	s := &Server{}
+	first := &logRow{createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{{provider: "provider", model: "model", result: "failed"}}}
+	s.recordLastOutcome(first)
+	s.lastOutcomeMu.RLock()
+	firstRecordedAt := s.lastOutcome["provider/model"].At
+	s.lastOutcomeMu.RUnlock()
+
+	time.Sleep(time.Millisecond)
+	second := &logRow{createdAt: "2026-09-02T11:00:00Z", attempts: []requestAttempt{{provider: "provider", model: "model", result: "success", httpStatus: 200}}}
+	s.recordLastOutcome(second)
+
+	s.lastOutcomeMu.RLock()
+	got := s.lastOutcome["provider/model"]
+	s.lastOutcomeMu.RUnlock()
+	firstAt, err := time.Parse(time.RFC3339Nano, firstRecordedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotAt, err := time.Parse(time.RFC3339Nano, got.At)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotAt.After(firstAt) {
+		t.Fatalf("later outcome timestamp did not advance: first=%s got=%s", firstRecordedAt, got.At)
+	}
+	if got.Status != 200 || !got.IsSuccess {
+		t.Fatalf("later outcome did not win: %+v", got)
+	}
 }
 
 func TestUsageCacheHitWindows(t *testing.T) {

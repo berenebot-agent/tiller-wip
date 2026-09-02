@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
@@ -123,14 +124,15 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	if s.lastOutcome == nil {
 		s.lastOutcome = map[string]lastOutcome{}
 	}
+	recordedAt := database.Now()
 	for _, attempt := range row.attempts {
 		switch attempt.result {
 		case "success":
-			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: row.createdAt, Status: attempt.httpStatus, IsSuccess: true}
+			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
 		case "failed":
 			// Preserve zero: a network failure has no HTTP response, even if a
 			// later fallback succeeds and sets the logical row status to 2xx.
-			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: row.createdAt, Status: attempt.httpStatus, IsSuccess: false}
+			s.lastOutcome[attempt.provider+"/"+attempt.model] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
 		}
 	}
 }
