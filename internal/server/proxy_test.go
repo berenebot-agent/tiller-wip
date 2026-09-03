@@ -106,8 +106,8 @@ func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
 	}
 }
 
-func TestChatToResponsesPreservesDeveloperAndInstructionContentArrays(t *testing.T) {
-	body := []byte(`{"model":"virtual/coding","messages":[{"role":"system","content":[{"type":"text","text":"system rule"}]},{"role":"developer","content":[{"type":"text","text":"developer rule"}]},{"role":"user","content":"hello"}]}`)
+func TestChatToResponsesPreservesTypedMessageRolesAndOrder(t *testing.T) {
+	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"hello"},{"role":"system","content":[{"type":"text","text":"system rule"}]},{"role":"developer","content":[{"type":"text","text":"developer rule"}]}]}`)
 	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
 	if err != nil {
 		t.Fatal(err)
@@ -116,27 +116,29 @@ func TestChatToResponsesPreservesDeveloperAndInstructionContentArrays(t *testing
 	if err := json.Unmarshal(translated, &got); err != nil {
 		t.Fatal(err)
 	}
-	want := []any{
-		map[string]any{"type": "input_text", "text": "system rule"},
-		map[string]any{"type": "input_text", "text": "developer rule"},
-	}
-	if !reflect.DeepEqual(got["instructions"], want) {
-		t.Fatalf("instructions = %#v, want %#v", got["instructions"], want)
+	if _, ok := got["instructions"]; ok {
+		t.Fatalf("unexpected instructions: %#v", got["instructions"])
 	}
 	input := got["input"].([]any)
-	if len(input) != 1 || input[0].(map[string]any)["role"] != "user" {
-		t.Fatalf("developer message leaked or user message missing: %#v", input)
+	if len(input) != 3 {
+		t.Fatalf("input = %#v, want three messages", input)
+	}
+	for i, role := range []string{"user", "system", "developer"} {
+		item := input[i].(map[string]any)
+		if item["type"] != "message" || item["role"] != role {
+			t.Fatalf("input[%d] = %#v, want typed %s message", i, item, role)
+		}
 	}
 }
 
 func TestChatToResponsesSupportsToolChoice(t *testing.T) {
 	for _, tc := range []struct {
 		choice string
-		want   map[string]any
+		want   any
 	}{
-		{choice: "none", want: map[string]any{"type": "none"}},
-		{choice: "auto", want: map[string]any{"type": "auto"}},
-		{choice: "required", want: map[string]any{"type": "any"}},
+		{choice: "none", want: "none"},
+		{choice: "auto", want: "auto"},
+		{choice: "required", want: "required"},
 	} {
 		t.Run(tc.choice, func(t *testing.T) {
 			body, _ := json.Marshal(map[string]any{
@@ -154,6 +156,41 @@ func TestChatToResponsesSupportsToolChoice(t *testing.T) {
 				t.Fatalf("tool_choice = %#v, want %#v", got["tool_choice"], tc.want)
 			}
 		})
+	}
+
+	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"hello"}],"tool_choice":{"type":"function","function":{"name":"lookup"}}}`)
+	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(translated, &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]any{"type": "function", "name": "lookup"}; !reflect.DeepEqual(got["tool_choice"], want) {
+		t.Fatalf("named tool_choice = %#v, want %#v", got["tool_choice"], want)
+	}
+}
+
+func TestChatToResponsesOmitsEmptyAssistantTextWithToolCalls(t *testing.T) {
+	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"look up the weather"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_123","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"assistant","content":"I found it.","tool_calls":[{"id":"call_456","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Perth\"}"}}]},{"role":"tool","tool_call_id":"call_123","content":"sunny"}]}`)
+	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(translated, &got); err != nil {
+		t.Fatal(err)
+	}
+	input := got["input"].([]any)
+	if len(input) != 5 {
+		t.Fatalf("input = %#v, want user, function_call, assistant message, function_call, function_call_output", input)
+	}
+	if input[1].(map[string]any)["type"] != "function_call" {
+		t.Fatalf("input[1] = %#v, want function_call", input[1])
+	}
+	if input[2].(map[string]any)["type"] != "message" || input[2].(map[string]any)["role"] != "assistant" {
+		t.Fatalf("input[2] = %#v, want assistant message", input[2])
 	}
 }
 

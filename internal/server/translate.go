@@ -239,9 +239,6 @@ func chatToMessagesRequest(chat map[string]any) map[string]any {
 func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 	out := map[string]any{"model": chat["model"]}
 
-	var instructions string
-	var instructionParts []any
-	arrayInstructions := false
 	var input []any
 
 	if messages := asSlice(chat["messages"]); messages != nil {
@@ -254,20 +251,11 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 
 			switch role {
 			case "system", "developer":
-				content, err := chatContentToResponsesParts(msg["content"])
+				item, err := messageToResponsesItem(msg, role)
 				if err != nil {
 					return nil, err
 				}
-				if _, ok := msg["content"].(string); ok && len(content) > 0 {
-					text, _ := content[0].(map[string]any)
-					if instructions != "" {
-						instructions += "\n\n"
-					}
-					instructions += fmt.Sprint(text["text"])
-				} else if len(content) > 0 {
-					arrayInstructions = true
-					instructionParts = append(instructionParts, content...)
-				}
+				input = append(input, item)
 
 			case "user":
 				item, err := userMessageToResponsesItem(msg)
@@ -279,11 +267,13 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 			case "assistant":
 				if calls := asSlice(msg["tool_calls"]); calls != nil && len(calls) > 0 {
 					// Assistant tool calls remain separate typed Responses items.
-					item, err := assistantMessageToResponsesItem(msg)
-					if err != nil {
-						return nil, err
+					if hasChatMessageContent(msg["content"]) {
+						item, err := assistantMessageToResponsesItem(msg)
+						if err != nil {
+							return nil, err
+						}
+						input = append(input, item)
 					}
-					input = append(input, item)
 					for _, callRaw := range calls {
 						call, ok := callRaw.(map[string]any)
 						fn, fnOK := call["function"].(map[string]any)
@@ -324,14 +314,6 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 		}
 	}
 
-	if arrayInstructions {
-		if instructions != "" {
-			instructionParts = append([]any{map[string]any{"type": "input_text", "text": instructions}}, instructionParts...)
-		}
-		out["instructions"] = instructionParts
-	} else if instructions != "" {
-		out["instructions"] = instructions
-	}
 	out["input"] = input
 
 	for _, key := range []string{"temperature", "top_p", "stream", "metadata", "tool_choice"} {
@@ -768,15 +750,30 @@ func asSlice(value any) []any {
 }
 
 func userMessageToResponsesItem(msg map[string]any) (map[string]any, error) {
+	return messageToResponsesItem(msg, "user")
+}
+
+func messageToResponsesItem(msg map[string]any, role string) (map[string]any, error) {
 	parts, err := chatContentToResponsesParts(msg["content"])
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
 		"type":    "message",
-		"role":    "user",
+		"role":    role,
 		"content": parts,
 	}, nil
+}
+
+func hasChatMessageContent(value any) bool {
+	switch content := value.(type) {
+	case string:
+		return content != ""
+	case []any:
+		return len(content) > 0
+	default:
+		return value != nil
+	}
 }
 
 func assistantMessageToResponsesItem(msg map[string]any) (map[string]any, error) {
@@ -832,17 +829,19 @@ func convertToolChoice(value any) (any, error) {
 	switch v := value.(type) {
 	case string:
 		switch v {
-		case "none", "auto":
-			return map[string]any{"type": v}, nil
-		case "required":
-			return map[string]any{"type": "any"}, nil
+		case "none", "auto", "required":
+			return v, nil
 		default:
 			return nil, unsupportedFeature{"tool_choice " + v}
 		}
 	case map[string]any:
+		if v["type"] != "function" {
+			return nil, unsupportedFeature{"tool_choice"}
+		}
 		fn, _ := v["function"].(map[string]any)
-		if fn != nil && fn["name"] != nil {
-			return map[string]any{"type": "function", "name": fn["name"]}, nil
+		name, nameOK := fn["name"].(string)
+		if nameOK && name != "" {
+			return map[string]any{"type": "function", "name": name}, nil
 		}
 		return nil, unsupportedFeature{"named tool_choice"}
 	default:
