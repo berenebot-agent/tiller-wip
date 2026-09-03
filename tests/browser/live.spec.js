@@ -23,7 +23,7 @@ test('live refresh: transient errors retain one reconnecting EventSource', async
     const { LiveStream } = await import('/live.js');
     const stream = new LiveStream('/api/admin/live');
     stream.open();
-    const source = window.__liveEventSources[0];
+    const source = window.__liveEventSources.at(-1);
     source.onerror();
     return {
       count: window.__liveEventSources.length,
