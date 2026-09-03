@@ -262,10 +262,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
-	var stream bool
-	if json.Unmarshal(raw["stream"], &stream) == nil {
-		row.streaming = stream
-	}
 	originalBody := append([]byte(nil), body...)
 	start := time.Now()
 	streamed := false

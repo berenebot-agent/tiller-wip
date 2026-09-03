@@ -100,6 +100,24 @@ func mockUpstream(t *testing.T) http.HandlerFunc {
 	})
 }
 
+func mockJSONUpstream(t *testing.T) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "response-1", "object": "chat.completion", "model": "model-a",
+			"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+		})
+	})
+}
+
 func clientCall(t *testing.T, base, secret, path string, body any) (*http.Response, map[string]any) {
 	t.Helper()
 	var reader io.Reader
@@ -193,6 +211,9 @@ func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("stream status %d", resp.StatusCode)
 	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("stream content type = %q", resp.Header.Get("Content-Type"))
+	}
 	// A guessed/disabled model logs a failure with error_text populated.
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/nope", "messages": []any{map[string]any{"role": "user", "content": "x"}}})
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -226,6 +247,27 @@ func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
 	}
 	if stream["cache_read_input_tokens"] == nil || stream["cache_read_input_tokens"] != float64(3) {
 		t.Fatalf("streaming prompt-cache tokens not captured (expected cache_read=3): %v", stream)
+	}
+}
+
+func TestRequestLoggingStreamRequestWithJSONResponseIsNotStreaming(t *testing.T) {
+	api, _, clientID, secret := loggingTestHarness(t, mockJSONUpstream(t))
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{
+		"model": "provider-a/model-a", "stream": true, "messages": []any{},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("JSON response was returned as SSE")
+	}
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK {
+		t.Fatalf("activity: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["streaming"] != false {
+		t.Fatalf("streaming metadata = %v, want false", data)
 	}
 }
 
