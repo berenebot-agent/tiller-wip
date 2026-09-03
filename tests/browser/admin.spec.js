@@ -1056,13 +1056,17 @@ test('virtual-model target combobox: exact upstream_model_id match auto-accepts 
   const provider = await createProvider(page, csrf, providerName);
 
   // Add a second upstream model so we can prove exact-match resolves to it,
-  // not whatever the combobox pre-selects.
-  await mockAddModel(page, 'extra-upstream');
+  // not whatever the combobox pre-selects. Name it so it sorts after
+  // 'mock-model' (the mock's only default) — the router's models endpoint
+  // orders by upstream_model_id, so 'mock-model' becomes option[0] and the
+  // typed match can only land on this second one via the auto-accept.
+  const extraModelID = 'zoo-extra';
+  await mockAddModel(page, extraModelID);
   await refreshProviderApi(page, csrf, provider.id);
 
   const modelsRes = await page.request.get('/api/admin/models?all=1');
   const allModels = (await modelsRes.json()).data;
-  const extra = allModels.find(m => m.provider_name === providerName && m.upstream_model_id === 'extra-upstream');
+  const extra = allModels.find(m => m.provider_name === providerName && m.upstream_model_id === extraModelID);
   expect(extra).toBeTruthy();
   const mock = allModels.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
   expect(mock).toBeTruthy();
@@ -1092,7 +1096,7 @@ test('virtual-model target combobox: exact upstream_model_id match auto-accepts 
   await fixedInput.press('Control+A');
   await fixedInput.press('Delete');
   await expect(fixedHidden).toHaveValue('');
-  await fixedInput.fill('extra-upstream');
+  await fixedInput.fill(extraModelID);
   await expect(fixedHidden).toHaveValue(extra.id);
   await expect(fixedHidden).not.toHaveValue(preSelectedId);
 
@@ -1123,7 +1127,7 @@ test('virtual-model target combobox: exact upstream_model_id match auto-accepts 
   const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-exact-match-vg')).json();
   const group = groupList.data.find(g => g.name === 'vm-exact-match-vg');
   if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
-  await mockRemoveModel(page, 'extra-upstream');
+  await mockRemoveModel(page, extraModelID);
   await refreshProviderApi(page, csrf, provider.id);
 });
 
