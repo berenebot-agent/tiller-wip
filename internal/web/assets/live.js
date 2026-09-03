@@ -39,12 +39,9 @@ export class LiveStream {
     es.addEventListener('outcome', (e) => { if (current()) this.dispatch('outcome', e.data); });
     es.addEventListener('activity', (e) => { if (current()) this.dispatch('activity', e.data); });
     es.addEventListener('snapshot', (e) => { if (current()) this.dispatch('snapshot', e.data); });
-    es.onerror = () => {
-      if (!current()) return;
-      // Stop the browser's automatic reconnect before releasing ownership.
-      es.close();
-      this.es = null;
-    };
+    // Keep ownership during transient failures so EventSource can reconnect.
+    // Explicit close() remains the only path that releases this connection.
+    es.onerror = () => {};
   }
 
   close() {
