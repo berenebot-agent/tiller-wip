@@ -21,6 +21,11 @@ password=browser-test-password
 workers=${TILLER_BROWSER_WORKERS:-${PLAYWRIGHT_WORKERS:-3}}
 run_id=tiller-browser-$$
 ports_file=$(mktemp)
+# Per-run scratch: holds the activity router's host-mounted data dir (so the
+# activity lane can seed rows directly via fixturectl) and the extracted
+# fixturectl binary. Cleaned up on exit (falling back to a root throwaway
+# container because the router chowns the data dir away from the invoking user).
+run_dir=$(mktemp -d /tmp/tiller-browser-run.XXXXXX)
 
 case "$workers" in
     ''|*[!0-9]*|0) echo "TILLER_BROWSER_WORKERS must be a positive integer" >&2; exit 2 ;;
@@ -38,6 +43,11 @@ stop_containers() {
 cleanup() {
     stop_containers
     rm -f "$ports_file"
+    if [ -n "${run_dir:-}" ] && [ -d "$run_dir" ]; then
+        if ! rm -rf "$run_dir" 2>/dev/null; then
+            docker run --rm -v "$run_dir:/cleanup:rw" python:3.13-alpine python -c "import shutil; shutil.rmtree('/cleanup')" >/dev/null 2>&1 || true
+        fi
+    fi
 }
 trap cleanup EXIT INT TERM
 stop_containers
@@ -53,6 +63,14 @@ docker build --pull=false -t tiller-router:dev "$repo_dir"
 
 echo "==> Building tiller-router-browser-tests:dev (cached)"
 docker build --pull=false -t tiller-router-browser-tests:dev "$repo_dir/tests/browser"
+
+echo "==> Building fixturectl (cached) and extracting the binary"
+docker build --pull=false -q -t tiller-router-fixturectl:dev -f "$repo_dir/tests/fixturectl/Dockerfile" "$repo_dir" >/dev/null
+fixture_cid=$(docker create tiller-router-fixturectl:dev /fixturectl)
+docker cp "$fixture_cid:/fixturectl" "$run_dir/fixturectl"
+docker rm "$fixture_cid" >/dev/null
+chmod +x "$run_dir/fixturectl"
+mkdir "$run_dir/activity-data"
 
 echo "==> Starting $workers isolated mock/router pairs"
 for i in $(seq 0 $((workers - 1))); do
@@ -78,7 +96,13 @@ docker run --rm -d --name "$run_id-mock-activity" --network host \
     -v "$repo_dir/tests/compatibility/mock_upstream.py:/mock_upstream.py:ro" \
     -e TILLER_MOCK_PORT="$activity_mock_port" \
     python:3.13-alpine python /mock_upstream.py >/dev/null
+# The activity router's /data is a host mount so fixturectl (invoked by the
+# activity spec, against the same mount inside the browser container) can seed
+# rows directly. Started as root so the router's own privdrop chowns the fresh
+# mount to its runtime user, exactly like the documented compose posture.
 docker run --rm -d --name "$run_id-router-activity" --network host \
+    --user 0:0 \
+    -v "$run_dir/activity-data:/data" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$activity_router_port" \
     -e TILLER_ADMIN_USERNAME=admin \
     -e TILLER_ADMIN_PASSWORD="$password" \
@@ -136,6 +160,10 @@ docker run --rm --network host \
     -e PLAYWRIGHT_WORKERS=1 \
     -e TILLER_BROWSER_ADMIN_USERNAME=admin \
     -e TILLER_BROWSER_ADMIN_PASSWORD="$password" \
+    -e TILLER_FIXTURE_BIN=/usr/local/bin/fixturectl \
+    -e TILLER_FIXTURE_DB=/fixture-data/tiller-router.db \
+    -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
+    -v "$run_dir/activity-data:/fixture-data:rw" \
     tiller-router-browser-tests:dev npx playwright test activity.spec.js &
 activity_pid=$!
 
