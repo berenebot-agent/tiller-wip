@@ -7,5 +7,5 @@ COPY package.json ./
 # (set in run.sh) also reuses the big playwright base image when we already
 # have that tag locally.
 RUN --mount=type=cache,target=/root/.npm npm install --ignore-scripts --no-audit --no-fund
-COPY playwright.config.js admin.spec.js ./
+COPY *.js ./
 CMD ["npm", "test"]
