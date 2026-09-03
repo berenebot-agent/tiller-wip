@@ -173,29 +173,35 @@ async function loadVirtual(search = $('#virtual-search').value) {
   state.groups = groups.data; state.virtualModels = virtualModels.data; state.providers = providersResult.data; state.models = modelsResult.data; state.usage = usage; renderVirtual();
 }
 const RESOLUTION_STALE_MS = 24 * 3600 * 1000;
+const RESOLUTION_ICONS = {
+  good: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg>',
+  bad: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3.4 3.4l5.2 5.2M8.6 3.4l-5.2 5.2"/></svg>',
+  warn: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h6"/></svg>',
+  neutral: '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="2.4" fill="currentColor"/></svg>'
+};
 function resolutionIndicator(target) {
   const key = target.provider_model_id || target.target_model_id;
   const legacyKey = `${target.provider_name}/${target.upstream_model_id}`;
   const last = state.usage?.target_last_outcome?.[key];
   const status = last
     ? !last.at
-      ? ['neutral', '○', 'No activity recorded']
+      ? ['neutral', 'No activity recorded']
       : (Date.now() - new Date(last.at).getTime()) > RESOLUTION_STALE_MS
-        ? ['neutral', '○', 'No activity in 24h']
+        ? ['neutral', 'No activity in 24h']
         : last.is_success
-          ? ['good', '✓', 'Resolving successfully']
-          : ['bad', '×', 'Last request failed']
+          ? ['good', 'Resolving successfully']
+          : ['bad', 'Last request failed']
     : (() => {
       const health = state.usage?.target_health?.[legacyKey];
       return health === undefined
-        ? ['neutral', '○', 'No activity recorded']
+        ? ['neutral', 'No activity recorded']
         : !health.success_24h
-          ? ['bad', '×', 'No successful resolution in the last 24 hours']
+          ? ['bad', 'No successful resolution in the last 24 hours']
           : health.failure_1h
-            ? ['warn', '−', 'Failures recorded in the last hour']
-            : ['good', '✓', 'Resolving successfully'];
+            ? ['warn', 'Failures recorded in the last hour']
+            : ['good', 'Resolving successfully'];
       })();
-  return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[2]}" title="${status[2]}">${status[1]}</span>`;
+  return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[1]}" title="${status[1]}">${RESOLUTION_ICONS[status[0]]}</span>`;
 }
 function renderVirtual() {
   const searching = ($('#virtual-search').value || '').trim().length > 0;
