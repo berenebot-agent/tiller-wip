@@ -37,7 +37,6 @@ mkdir -p "$run_dir/playwright-results" "$run_dir/activity-data"
 # line of the run is prefixed with the elapsed time since the run started
 # (via tests/scripts/ts-filter.py) so a single log scan tells you exactly
 # when each step happened.
-export TS_START="$EPOCHREALTIME"
 RUN_LOG="$run_dir/run.log"
 exec > >(python3 -u tests/scripts/ts-filter.py | tee "$RUN_LOG") 2>&1
 

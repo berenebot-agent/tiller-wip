@@ -11,9 +11,8 @@ mkdir -p "$sdk_data_dir" "$hermes_data_dir"
 
 # Log capture: always write full output to a per-run log file. Every line is
 # prefixed with the elapsed time since the run started (via
-# tests/scripts/ts-filter.py) so a single log scan tells you exactly when
-# each step happened.
-export TS_START="$EPOCHREALTIME"
+# tests/scripts/ts-filter.py, which captures its own start at process spawn)
+# so a single log scan tells you exactly when each step happened.
 LOG_FILE="tests/logs/compat/$(date -u +%Y%m%dT%H%M%S)-compat.log"
 ts=$(date +%s)
 exec > >(python3 -u tests/scripts/ts-filter.py | tee "$LOG_FILE") 2>&1
@@ -40,6 +39,12 @@ cleanup() {
     docker run --rm -v "$sdk_data_dir:/d" --user root alpine chown -R 1000:1000 /d >/dev/null 2>&1 || true
     docker run --rm -v "$hermes_data_dir:/d" --user root alpine chown -R 1000:1000 /d >/dev/null 2>&1 || true
     rm -rf "$sdk_data_dir" "$hermes_data_dir" || true
+    # Always print where the log lives, even on early failure (e.g. when the
+    # build stage aborts before sdk/hermes statuses are assigned). Lets the
+    # reader find the captured detail without re-running.
+    rc=${sdk_status:-0}
+    [ -n "${hermes_status:-}" ] && [ "$hermes_status" -ne 0 ] && rc="$hermes_status"
+    echo "==> compatibility suite: rc=$rc, log: $LOG_FILE" >&2
 }
 trap cleanup EXIT INT TERM
 stop_containers
