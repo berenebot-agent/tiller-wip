@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/auth"
 )
 
 // Live SSE refresh for the admin UI.
@@ -30,6 +32,8 @@ const (
 	liveDebounceInterval = 2 * time.Second
 	liveIdleInterval     = 5 * time.Second
 )
+
+var liveSessionCheckInterval = time.Minute
 
 // liveHub holds the subscriber set and the outcome delta channel. The
 // dispatcher goroutine lifecycle is driven by subscribe/unsubscribe.
@@ -194,6 +198,15 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 
 	ch := s.liveHub.subscribe()
 	defer s.liveHub.unsubscribe(ch)
+	cookie, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return
+	}
+	session := r.Context().Value(adminSessionKey).(auth.Session)
+	validate := time.NewTicker(liveSessionCheckInterval)
+	defer validate.Stop()
+	expires := time.NewTimer(time.Until(session.ExpiresAt))
+	defer expires.Stop()
 
 	// Baseline snapshot on connect (and reconnect) so the client reconciles
 	// anything it may have missed while disconnected.
@@ -208,6 +221,20 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-expires.C:
+			return
+		case <-validate.C:
+			current, ok := s.sessions.Validate(cookie.Value)
+			if !ok {
+				return
+			}
+			if !expires.Stop() {
+				select {
+				case <-expires.C:
+				default:
+				}
+			}
+			expires.Reset(time.Until(current.ExpiresAt))
 		case msg, ok := <-ch:
 			if !ok {
 				return

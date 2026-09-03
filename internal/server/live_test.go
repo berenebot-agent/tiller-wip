@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -212,5 +213,38 @@ func TestLiveContextCancelUnsubscribes(t *testing.T) {
 			t.Fatal("subscriber not removed after context cancel")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestLiveTerminatesWhenSessionIsRevoked(t *testing.T) {
+	previous := liveSessionCheckInterval
+	liveSessionCheckInterval = 10 * time.Millisecond
+	t.Cleanup(func() { liveSessionCheckInterval = previous })
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	req, _ := http.NewRequest(http.MethodGet, api.base+"/api/admin/live", nil)
+	cookie := api.client.Jar.Cookies(req.URL)[0]
+	req.AddCookie(cookie)
+	resp, err := api.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	readSSE(t, bufio.NewReader(resp.Body)) // baseline snapshot
+
+	closed := make(chan error, 1)
+	go func() {
+		_, err := io.ReadAll(resp.Body)
+		closed <- err
+	}()
+	api.server.sessions.Delete(cookie.Value)
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("read revoked stream: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("revoked live session remained connected")
 	}
 }

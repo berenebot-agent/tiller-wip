@@ -14,6 +14,7 @@ export class LiveStream {
     this.url = url;
     this.handlers = new Map();
     this.es = null;
+    this.generation = 0;
     this.visible = !document.hidden;
     document.addEventListener('visibilitychange', () => {
       this.visible = !document.hidden;
@@ -31,23 +32,28 @@ export class LiveStream {
   open() {
     if (this.es || !this.visible) return;
     const es = new EventSource(this.url);
+    const generation = ++this.generation;
     this.es = es;
-    es.onmessage = (e) => this.dispatch('message', e.data);
-    es.addEventListener('outcome', (e) => this.dispatch('outcome', e.data));
-    es.addEventListener('activity', (e) => this.dispatch('activity', e.data));
-    es.addEventListener('snapshot', (e) => this.dispatch('snapshot', e.data));
+    const current = () => this.es === es && this.generation === generation;
+    es.onmessage = (e) => { if (current()) this.dispatch('message', e.data); };
+    es.addEventListener('outcome', (e) => { if (current()) this.dispatch('outcome', e.data); });
+    es.addEventListener('activity', (e) => { if (current()) this.dispatch('activity', e.data); });
+    es.addEventListener('snapshot', (e) => { if (current()) this.dispatch('snapshot', e.data); });
     es.onerror = () => {
-      // EventSource auto-reconnects; just drop the dead reference so a later
-      // open() (e.g. on tab re-show) starts a fresh connection.
-      if (this.es === es) this.es = null;
+      if (!current()) return;
+      // Stop the browser's automatic reconnect before releasing ownership.
+      es.close();
+      this.es = null;
     };
   }
 
   close() {
-    if (this.es) {
-      this.es.close();
+    const es = this.es;
+    if (es) {
+      es.close();
       this.es = null;
     }
+    this.generation++;
   }
 
   dispatch(event, data) {

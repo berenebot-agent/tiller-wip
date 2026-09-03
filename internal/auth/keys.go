@@ -325,6 +325,25 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	return session, true
 }
 
+// Validate checks the persisted session without extending its sliding expiry.
+// Long-lived requests use this so an open connection cannot keep a session
+// alive indefinitely while still observing revocation.
+func (s *SessionStore) Validate(token string) (Session, bool) {
+	selector, secret, ok := parseSessionToken(token)
+	if !ok {
+		return Session{}, false
+	}
+	var csrfToken, tokenHash, expiresAt string
+	if err := s.db.QueryRow(`SELECT csrf_token, token_hash, expires_at FROM admin_sessions WHERE id=?`, selector).Scan(&csrfToken, &tokenHash, &expiresAt); err != nil {
+		return Session{}, false
+	}
+	exp, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil || !time.Now().Before(exp) || !VerifySecret(secret, tokenHash) {
+		return Session{}, false
+	}
+	return Session{CSRFToken: csrfToken, ExpiresAt: exp}, true
+}
+
 func (s *SessionStore) Delete(token string) {
 	selector, _, ok := parseSessionToken(token)
 	if !ok {
