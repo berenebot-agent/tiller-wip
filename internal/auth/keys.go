@@ -70,13 +70,8 @@ func VerifySecret(secret, encoded string) bool {
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {
 		return false
 	}
-	var memory uint32
-	var iterations uint32
-	var parallelism uint8
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &iterations, &parallelism); err != nil {
-		return false
-	}
-	if memory != argonMemory || iterations != argonIterations || parallelism != argonParallelism {
+	memory, iterations, parallelism, err := ArgonParameters(encoded)
+	if err != nil || memory != argonMemory || iterations != argonIterations || parallelism != argonParallelism {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])

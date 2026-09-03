@@ -68,7 +68,7 @@ func notificationTestHarness(t *testing.T, failUpstream, okUpstream http.Handler
 			modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
 		}
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "notify client"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "notify client", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -477,7 +477,7 @@ func TestAdminEventNotifications(t *testing.T) {
 	}
 
 	// Create a client key -> notification.
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -535,7 +535,7 @@ func TestAdminEventToggleRespected(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
 	}
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -592,10 +592,10 @@ func TestSendExampleNotificationsToNtfy(t *testing.T) {
 // protocol-mismatched) are not "attempted" and must not inflate the count.
 func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
 	attempts := []requestAttempt{
-		{provider: "a", model: "m", result: "skipped", failureClass: "unavailable"},
-		{provider: "b", model: "m", result: "failed", failureClass: "http_500"},
-		{provider: "c", model: "m", result: "skipped", failureClass: "protocol_unavailable"},
-		{provider: "d", model: "m", result: "success"},
+		{providerModelID: "pm-a", provider: "a", model: "m", result: "skipped", failureClass: "unavailable"},
+		{providerModelID: "pm-b", provider: "b", model: "m", result: "failed", failureClass: "http_500"},
+		{providerModelID: "pm-c", provider: "c", model: "m", result: "skipped", failureClass: "protocol_unavailable"},
+		{providerModelID: "pm-d", provider: "d", model: "m", result: "success"},
 	}
 	if got := attemptCount(attempts); got != 2 {
 		t.Fatalf("attemptCount = %d, want 2 (only real upstream attempts)", got)
@@ -603,7 +603,7 @@ func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
 	if hasFailedAttempt(attempts) != true {
 		t.Fatal("hasFailedAttempt should be true with one failed attempt")
 	}
-	allSkipped := []requestAttempt{{provider: "a", model: "m", result: "skipped", failureClass: "unavailable"}}
+	allSkipped := []requestAttempt{{providerModelID: "pm-a", provider: "a", model: "m", result: "skipped", failureClass: "unavailable"}}
 	if hasFailedAttempt(allSkipped) {
 		t.Fatal("hasFailedAttempt must be false when targets were only skipped")
 	}

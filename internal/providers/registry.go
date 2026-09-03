@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -60,6 +61,7 @@ var descriptors = []Descriptor{
 	{Type: "minimax", Label: "MiniMax", DefaultBaseURL: "https://api.minimax.io/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
+	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "opencode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "lm-studio", Label: "LM Studio", DefaultBaseURL: "http://host.docker.internal:1234/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -110,8 +112,7 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 	"gpt-5.1-codex-max": ProtocolResponses, "gpt-5.1-codex-mini": ProtocolResponses, "gpt-5": ProtocolResponses,
 	"gpt-5-codex": ProtocolResponses, "gpt-5-nano": ProtocolResponses, "grok-4.6": ProtocolResponses,
 	"grok-4.5": ProtocolResponses, "grok-build-0.1": ProtocolResponses, "muse-spark-1.2": ProtocolResponses,
-	"muse-spark-1.2-contributor-free": ProtocolResponses,
-	"claude-fable-5":                  ProtocolMessages, "claude-opus-5": ProtocolMessages, "claude-opus-4.8": ProtocolMessages,
+	"claude-fable-5": ProtocolMessages, "claude-opus-5": ProtocolMessages, "claude-opus-4.8": ProtocolMessages,
 	"claude-opus-4.7": ProtocolMessages, "claude-opus-4.6": ProtocolMessages, "claude-opus-4.5": ProtocolMessages,
 	"claude-sonnet-5": ProtocolMessages, "claude-sonnet-4.6": ProtocolMessages, "claude-sonnet-4.5": ProtocolMessages,
 	"claude-haiku-4.5": ProtocolMessages, "qwen3.7-max": ProtocolMessages, "qwen3.7-plus": ProtocolMessages,
@@ -119,6 +120,9 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 }
 
 func nativeProtocol(providerType, modelID string) Protocol {
+	if (providerType == "opencode-zen" || providerType == "opencode-free") && strings.HasSuffix(modelID, "-free") {
+		return ProtocolChat
+	}
 	if providerType == "opencode-zen" {
 		if protocol, ok := openCodeZenProtocolByModel[modelID]; ok {
 			return protocol
@@ -188,6 +192,20 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	}
 	if err != nil {
 		return nil, err
+	}
+	// opencode-free is the anonymous, keyless tier — only models whose ID
+	// ends with -free are usable without a credential. The upstream catalogue
+	// at /zen/v1/models lists all 64 Zen models, so we filter here to surface
+	// only the 7 free ones. The suffix convention is used by the provider and
+	// is stable for future free models.
+	if provider.Type == "opencode-free" {
+		filtered := models[:0]
+		for _, m := range models {
+			if strings.HasSuffix(m.ID, "-free") {
+				filtered = append(filtered, m)
+			}
+		}
+		models = filtered
 	}
 	// Merge models.dev capability metadata as a fallback so real models whose
 	// provider does not report capabilities still surface useful metadata. The
@@ -264,7 +282,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			}
 			sp := item.SupportedParameters
 			arch := item.Architecture
-			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID), SupportsTools: triBool(len(sp) > 0, contains(sp, "tools")), SupportsVision: triBool(len(arch.InputModalities) > 0, contains(arch.InputModalities, "image")), SupportsReasoning: triBool(len(sp) > 0, contains(sp, "reasoning")), SupportsStructuredOutput: triBool(len(sp) > 0, contains(sp, "structured_outputs")), InputModalities: arch.InputModalities, OutputModalities: arch.OutputModalities})
+			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID), SupportsTools: triBool(len(sp) > 0, slices.Contains(sp, "tools")), SupportsVision: triBool(len(arch.InputModalities) > 0, slices.Contains(arch.InputModalities, "image")), SupportsReasoning: triBool(len(sp) > 0, slices.Contains(sp, "reasoning")), SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")), InputModalities: arch.InputModalities, OutputModalities: arch.OutputModalities})
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break
@@ -539,15 +557,6 @@ func firstPositive(values ...int) int {
 		}
 	}
 	return 0
-}
-
-func contains(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
-	}
-	return false
 }
 
 // triBool returns a tri-state capability value: nil when the provider did not

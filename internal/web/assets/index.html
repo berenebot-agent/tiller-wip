@@ -29,7 +29,7 @@
       <div class="nav-inner">
         <a class="brand" href="#clients" data-view="clients" aria-label="Tiller Router home"><img class="brand-mark" src="/media/tiller-mark.svg" alt=""><span>TILLER <b>ROUTER</b></span></a>
         <div class="nav-links" id="nav-links">
-          <a href="#clients" data-view="clients" class="active">Client Keys</a>
+          <a href="#clients" data-view="clients" class="active">Clients</a>
           <a href="#providers" data-view="providers">Providers</a>
           <a href="#models" data-view="models">Real Models</a>
           <a href="#virtual" data-view="virtual">Virtual Models</a>
@@ -58,15 +58,15 @@
 
       <section class="view" id="view-virtual" aria-labelledby="virtual-title">
         <header class="dashboard-header"><div><h1 id="virtual-title">Virtual Models</h1></div><div class="header-actions"><button class="btn btn-secondary" id="add-virtual-group">+ Group</button><button class="btn btn-primary" id="add-virtual-model">+ Virtual model</button></div></header>
-        <div class="route-legend"><span><i class="virtual-node"></i> Client-facing identity</span><b>→</b><span><i class="real-node"></i> Resolved upstream target</span><em>No fallback or health-based rerouting</em></div>
+
         <div class="filter-bar"><label class="search-field"><span>Search</span><input id="virtual-search" type="search" placeholder="Virtual or target model"></label></div>
         <div class="table-shell"><table class="form-table route-table"><thead><tr><th>Virtual identity</th><th class="route-arrow"></th><th>Resolved target</th><th>State</th><th>1h</th><th>24h</th><th>7d</th><th class="actions-head">Actions</th></tr></thead><tbody id="virtual-body"></tbody></table><div class="empty-state" id="virtual-empty" hidden><span>→</span><h2>No virtual routes</h2><p>Create a group, then map a stable virtual model identity.</p></div></div>
       </section>
 
       <section class="view" id="view-clients" aria-labelledby="clients-title">
-        <header class="dashboard-header"><div><h1 id="clients-title">Client Keys</h1></div><button class="btn btn-primary" id="add-client">+ Create client key</button></header>
+        <header class="dashboard-header"><div><h1 id="clients-title">Clients</h1></div><button class="btn btn-primary" id="add-client">+ Add client</button></header>
         <div class="filter-bar"><label class="search-field"><span>Search</span><input id="client-search" type="search" placeholder="Client name, description, or group"></label><label class="filter-field"><span>Group</span><select id="client-group-filter"><option value="">All groups</option></select></label></div>
-        <div class="table-shell clients-table-shell"><table class="form-table clients-table"><thead><tr><th>Client</th><th>Key info</th><th>Route</th><th>1h</th><th>24h</th><th>7d</th><th class="actions-head">Actions</th></tr></thead><tbody id="clients-body"></tbody></table></div><div class="empty-state" id="clients-empty" hidden><span>KEY</span><h2>No client keys</h2><p>Create a Catalogue key for model permissions or a Single key for one centrally controlled route.</p></div>
+        <div class="table-shell clients-table-shell"><table class="form-table clients-table"><thead><tr><th>Client</th><th>Key info</th><th>Route</th><th>1h</th><th>24h</th><th>7d</th><th class="actions-head">Actions</th></tr></thead><tbody id="clients-body"></tbody></table></div><div class="empty-state" id="clients-empty" hidden><span>KEY</span><h2>No clients</h2><p>Create a Catalogue client for model permissions or a Single client for one centrally controlled route.</p></div>
         <div class="client-cards" id="clients-cards"></div>
       </section>
 

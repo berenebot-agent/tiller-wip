@@ -511,12 +511,21 @@ func (s *Server) deleteVirtualModel(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var bindings int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings WHERE virtual_model_id=?`, modelID).Scan(&bindings); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings b JOIN client_keys c ON c.id = b.client_key_id WHERE b.virtual_model_id=? AND c.key_type='single'`, modelID).Scan(&bindings); err != nil {
 		adminError(w, 500, "database_error", "Could not delete virtual model.")
 		return
 	}
 	if bindings > 0 {
 		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this virtual model first.")
+		return
+	}
+	// Catalogue-type client keys may carry a stale client_single_bindings row
+	// from a prior Single-key configuration. Such rows are inert (catalogue
+	// keys are resolved through client_model_permissions, not the binding),
+	// but their ON DELETE RESTRICT foreign key would otherwise block this
+	// delete. Drop them explicitly so the spec's "Single keys" intent wins.
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM client_single_bindings WHERE virtual_model_id=? AND client_key_id IN (SELECT id FROM client_keys WHERE key_type='catalogue')`, modelID); err != nil {
+		adminError(w, 500, "database_error", "Could not delete virtual model.")
 		return
 	}
 	_, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='virtual' AND model_id=?`, modelID)

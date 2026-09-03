@@ -59,7 +59,7 @@ func loggingTestHarness(t *testing.T, upstream http.HandlerFunc) (*testAPI, *dat
 	if modelID == "" {
 		t.Fatal("mock upstream did not expose model-a")
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "test client", "description": "logging"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "test client", "description": "logging", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -347,7 +347,7 @@ func TestClientKeyCreationCopiesLoggingDefaults(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
 	}
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "copied", "description": "defaults"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "copied", "description": "defaults", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}

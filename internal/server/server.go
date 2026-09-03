@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,6 +46,19 @@ type Server struct {
 	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
 	loginLimiter *loginLimiter
+	// lastOutcome holds the most recent request outcome per real model, keyed
+	// by "provider_name/upstream_model_id". It lives in RAM (never persisted) so
+	// it is cleared on restart. Written on each routed request; read by the
+	// admin usage endpoint to drive the per-target resolution dots.
+	lastOutcomeMu sync.RWMutex
+	lastOutcome   map[string]lastOutcome
+}
+
+// lastOutcome is the most recent request result for a single real model.
+type lastOutcome struct {
+	At        string `json:"at"`         // RFC3339Nano timestamp; empty = never
+	Status    int    `json:"status"`     // HTTP status of the last request
+	IsSuccess bool   `json:"is_success"` // whether that status was 2xx
 }
 
 type contextKey string
@@ -72,7 +84,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
+	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), lastOutcome: map[string]lastOutcome{}}, nil
 }
 
 func (s *Server) StartBackground(ctx context.Context) {
@@ -280,6 +292,50 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
+// requestClientIP returns the client address suitable for forwarding to an
+// anonymous provider. Forwarded headers are accepted only from the configured
+// trusted proxy; otherwise the direct peer address is used. When the direct
+// peer is trusted, the authoritative X-Real-IP header is preferred, and
+// X-Forwarded-For is only consulted with explicit chain semantics (walking
+// right-to-left and removing trusted hops) so a spoofable leftmost value can
+// never be trusted.
+func (s *Server) requestClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if host == "" {
+		return ""
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !s.config.TrustedProxy.IsValid() || !s.config.TrustedProxy.Contains(peer) {
+		return host
+	}
+	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); value != "" {
+		if address, err := netip.ParseAddr(value); err == nil {
+			return address.String()
+		}
+	}
+	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	if len(parts) == 1 && strings.TrimSpace(parts[0]) == "" {
+		return host
+	}
+	addrs := make([]netip.Addr, len(parts))
+	for i, part := range parts {
+		addr, parseErr := netip.ParseAddr(strings.TrimSpace(part))
+		if parseErr != nil {
+			return host
+		}
+		addrs[i] = addr
+	}
+	for i := len(addrs) - 1; i >= 0; i-- {
+		if !s.config.TrustedProxy.Contains(addrs[i]) {
+			return addrs[i].String()
+		}
+	}
+	return addrs[0].String()
+}
+
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -294,6 +350,9 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
+		if strings.HasPrefix(r.URL.Path, "/health/") {
+			return
+		}
 		s.logger.Info("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
 	})
 }
@@ -373,5 +432,3 @@ func (s *Server) exportBackup(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Tiller-Secret-Material", "provider-credentials")
 	http.ServeFile(w, r, path)
 }
-
-var _ = sql.ErrNoRows

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
@@ -42,9 +43,9 @@ type logRow struct {
 }
 
 type requestAttempt struct {
-	provider, model, result, failureClass string
-	httpStatus                            int
-	latencyMs                             int64
+	providerModelID, provider, model, result, failureClass string
+	httpStatus                                             int
+	latencyMs                                              int64
 }
 
 // writeLog persists a request log row. It is best-effort: a failed insert logs
@@ -54,6 +55,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if row == nil {
 		return
 	}
+	s.recordLastOutcome(row)
 	var enabled int
 	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
 		return
@@ -75,6 +77,33 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 			continue
 		}
 		_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt)
+	}
+}
+
+// recordLastOutcome updates operational target status from actual attempts.
+// Skipped targets were not called and therefore do not receive an outcome.
+func (s *Server) recordLastOutcome(row *logRow) {
+	if len(row.attempts) == 0 {
+		return
+	}
+	s.lastOutcomeMu.Lock()
+	defer s.lastOutcomeMu.Unlock()
+	if s.lastOutcome == nil {
+		s.lastOutcome = map[string]lastOutcome{}
+	}
+	recordedAt := database.Now()
+	for _, attempt := range row.attempts {
+		if attempt.providerModelID == "" {
+			continue
+		}
+		switch attempt.result {
+		case "success":
+			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
+		case "failed":
+			// Preserve zero: a network failure has no HTTP response, even if a
+			// later fallback succeeds and sets the logical row status to 2xx.
+			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+		}
 	}
 }
 

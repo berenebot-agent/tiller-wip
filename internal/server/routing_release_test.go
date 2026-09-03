@@ -193,7 +193,7 @@ func TestDirectRealRequestDoesNotInheritVirtualFallback(t *testing.T) {
 			modelID = model["id"].(string)
 		}
 	}
-	status, keyPayload, _ := api.request(http.MethodPost, "/api/admin/client-keys", map[string]any{"name": "direct client"})
+	status, keyPayload, _ := api.request(http.MethodPost, "/api/admin/client-keys", map[string]any{"name": "direct client", "type": "catalogue"})
 	if status != http.StatusCreated {
 		t.Fatalf("create direct client: %d %v", status, keyPayload)
 	}

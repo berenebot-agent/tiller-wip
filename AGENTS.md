@@ -1,21 +1,19 @@
 # AGENTS.md — Tiller Router
 
-Guardrails for any coding agent working in this repository. This file does not restate the spec — it tells you how to behave around it.
+Guardrails for any coding agent working in this repository. This file describes how the repo works and the coding rules to follow — it is not a specification document and does not restate the design.
 
 ## Source of truth
 
-- `tiller-router-v1-specification.md` is the reference spec. It is **no longer frozen**: in live dev it may be amended with explicit human sign-off, and diverging implementation (a planned change, not an accident) is acceptable when the human is driving it.
-- `tiller-router-roadmap-v2-core.md` describes deferred core work (active phases plus a Deferred Backlog). `tiller-router-roadmap-saas-multiuser.md` describes deferred multi-user/SaaS work. These are a backlog of ideas, not commitments.
-- If the two documents conflict, or a request conflicts with an approved change, ask rather than silently picking one — but do not treat the spec/roadmap as an impassable wall in live dev.
+- Decisions live in code, in commit history, and in conversation with the human driving the change. If a request conflicts with existing code, surface the conflict and ask before proceeding — but do not treat the current implementation as an impassable wall in live dev.
 
 ## Scope discipline
 
-- Before writing code for a new feature, check whether it's in the V1 spec's functional scope (§3), in §27 Non-Goals, or in the roadmaps' anti-roadmap. A non-goal or roadmap item is fine to build in live dev **with explicit human sign-off**, but never silently and never "just to see."
+- Before writing code for a new feature, confirm the scope with the human driving the change. Anything deferred is fine to build in live dev with explicit human sign-off, but never silently and never "just to see."
 - Adding a brand-new dependency, service, or infrastructure component (Redis, Postgres, message queues, vector DBs, Kubernetes, etc.) still requires an explicit, named request from a human.
-- Do not "clean up" the roadmap's phase ordering or scope on your own initiative. Roadmap sequencing is a human decision.
+- Do not "clean up" the deferred-work backlog's phase ordering or scope on your own initiative. Backlog sequencing is a human decision.
 - If a task requires touching something explicitly marked deferred (e.g. credential encryption or provider-health infrastructure) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
 
-## Deployment model — non-negotiable
+## Deployment model
 
 - Everything runs as a single Docker Compose service under `/opt/tiller-router/`.
 - Bind mounts only. **Never** introduce a Docker named volume.
@@ -23,6 +21,12 @@ Guardrails for any coding agent working in this repository. This file does not r
 - No Kubernetes artifacts of any kind (manifests, Helm, operators). This is Compose-only.
 - Don't add anything that requires a host-published port when a reverse-proxy Docker network is in use.
 - Don't require Docker socket access or privileged mode.
+
+**Out-of-box posture (default, adoption-first):** the default compose runs via a **root-then-drop entrypoint** (container starts as root, `entrypoint.sh` `chown -R` the data bind mount, then `su-exec` drops to a non-root user). This is what makes `docker compose up` work with a fresh `./data` dir — no manual `chmod`/ownership step needed. So out of the box the container is root at boot for the ownership fix, then non-root for the app.
+
+**Hardenable, not required:** the stricter posture (read-only rootfs, `cap_drop: ALL`, no-new-privileges, fully non-root with no root entrypoint) is available and documented in the **advanced/hardened compose** example, for users who want it. The out-of-box image works fine with those flags baked in if a user chooses to harden — the entrypoint is designed not to *require* root at the app level, only for the boot ownership fix. This is an explicit product decision (Ben, 2026-09-02): **adoption first**, hardening opt-in.
+
+- `AGENTS.md` / docs must not treat the strict non-root posture as a hard rule the default build violates. The default is deliberately relaxed for adoption; the advanced compose documents how to harden.
 
 ## Toolchain — Go runs in Docker, never on the host
 
@@ -46,26 +50,34 @@ Guardrails for any coding agent working in this repository. This file does not r
 - Never re-display, log, or expose provider credentials or client API keys in plaintext after creation — including in error messages, stack traces, and debug output.
 - Client API keys are hash-only at rest, using a memory-hard KDF (argon2id preferred). Never swap in a fast hash (SHA-256, MD5, etc.) for "simplicity" or test convenience — including in tests, unless the test explicitly mocks the hashing layer.
 - Never log prompt or response bodies, tool arguments, or reasoning content — not even at debug/trace level, not even temporarily "to help debug."
-- Backup/export files contain recoverable provider credentials until credential encryption at rest ships (roadmap). Any code that touches export/download must not weaken or bypass the admin-auth gate on that endpoint.
+- Backup/export files contain recoverable provider credentials until credential encryption at rest ships (deferred). Any code that touches export/download must not weaken or bypass the admin-auth gate on that endpoint.
 - Treat any new admin-facing endpoint as requiring authentication by default. If you're unsure whether a new route needs auth, it needs auth.
 
 ## Behavioral guardrails for routing logic
 
 - Ordered fallback is allowed only for an explicitly configured virtual model and only before client-visible output begins. It must follow the stored target order and remain visible in Activity; every upstream non-2xx/read/connect failure is eligible unless the router itself failed or the client request was cancelled/expired. Direct real-model requests, hidden health-based rerouting, retries of the same target, and post-output stream splicing remain forbidden.
-- Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing throughout the spec — treat any code path that blurs it as a bug.
-- Preserve the real/virtual model permission boundary described in the spec exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
+- Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing — treat any code path that blurs it as a bug.
+- Preserve the real/virtual model permission boundary exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
 
 ## When to stop and ask instead of proceeding
 
 - The request would add a brand-new dependency, service, or infrastructure component that the human has not explicitly named.
 - The request would change client-facing model IDs, provider names, or virtual model names (renames are breaking — confirm intent before touching).
 - The request touches credential handling, auth, or logging in a way not explicitly covered by the security guardrails above.
-- You find an actual inconsistency between the spec and the roadmap, or between either document and the current code — report it, don't resolve it silently.
+- You find an actual inconsistency between the docs and the current code — report it, don't resolve it silently.
+
+## Branching and commits
+
+- After completing a change, ask the human whether to commit on the current branch (and
+  handle the branch/PR later) or create a new branch and open a PR now.
+- For small, low-risk changes that are part of a larger in-progress task, committing in
+  place is often fine — the branch/PR can come after.
+- Do not create a branch or PR unless the human has indicated one is wanted for this
+  change.
 
 ## Testing expectations
 
-- Any change to routing, permissions, or auth should be checked against the relevant V1 Acceptance Test in §28 before being considered done, not just against a new unit test you wrote for the change.
-- §28.4 (virtual routing hides the real target) and §28.5 (immediate remap, no restart) are the two tests most likely to silently regress — re-verify both after any change to virtual model resolution or provider/model mapping.
+- Any change to routing, permissions, or auth should be verified against existing tests (unit, browser, or compatibility — pick the smallest tier that would catch a regression), not just against a new test you wrote for the change.
 
 ### How to test — pick the right route (default by change size)
 

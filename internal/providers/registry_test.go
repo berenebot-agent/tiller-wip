@@ -13,7 +13,7 @@ import (
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
-	for _, providerType := range []string{"openai", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
+	for _, providerType := range []string{"openai", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
 		if _, ok := Lookup(providerType); !ok {
 			t.Errorf("missing provider type %s", providerType)
 		}
@@ -53,21 +53,35 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 	if got := nativeProtocol("opencode-zen", "unknown-model"); got != ProtocolChat {
 		t.Fatalf("unknown Zen model protocol = %q, want %q", got, ProtocolChat)
 	}
+	for _, modelID := range []string{
+		"muse-spark-1.2-contributor-free",
+		"nemotron-3-ultra-free",
+		"deepseek-v4-flash-free",
+		"mimo-v2.5-free",
+		"unlisted-model-free",
+	} {
+		if got := nativeProtocol("opencode-free", modelID); got != ProtocolChat {
+			t.Errorf("opencode-free model %q protocol = %q, want %q", modelID, got, ProtocolChat)
+		}
+	}
 }
 
 func TestOpenCodeDescriptors(t *testing.T) {
 	for _, test := range []struct {
 		providerType string
 		url          string
+		credential   bool
+		protocols    int
 	}{
-		{"opencode-zen", "https://opencode.ai/zen/v1"},
-		{"opencode-go", "https://opencode.ai/zen/go/v1"},
+		{"opencode-zen", "https://opencode.ai/zen/v1", true, 3},
+		{"opencode-go", "https://opencode.ai/zen/go/v1", true, 3},
+		{"opencode-free", "https://opencode.ai/zen/v1", false, 1},
 	} {
 		descriptor, ok := Lookup(test.providerType)
 		if !ok {
 			t.Fatalf("missing descriptor %q", test.providerType)
 		}
-		if descriptor.DefaultBaseURL != test.url || !descriptor.CredentialNeeded || len(descriptor.Protocols) != 3 {
+		if descriptor.DefaultBaseURL != test.url || descriptor.CredentialNeeded != test.credential || len(descriptor.Protocols) != test.protocols {
 			t.Errorf("unexpected %q descriptor: %+v", test.providerType, descriptor)
 		}
 	}
@@ -106,6 +120,52 @@ func TestOpenCodeDiscoveryAssignsNativeProtocols(t *testing.T) {
 	for modelID, protocol := range want {
 		if got[modelID] != protocol {
 			t.Errorf("model %q protocol = %q, want %q", modelID, got[modelID], protocol)
+		}
+	}
+}
+
+func TestOpenCodeFreeDiscoveryFiltersToFreeModels(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("discovery path = %q, want /v1/models", r.URL.Path)
+			http.Error(w, "wrong path", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "" {
+			t.Errorf("opencode-free should not send Authorization, got %q", r.Header.Get("Authorization"))
+			http.Error(w, "unexpected credential", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"id": "gpt-5.5"},
+			map[string]any{"id": "deepseek-v4-flash-free"},
+			map[string]any{"id": "muse-spark-1.2-contributor-free"},
+			map[string]any{"id": "claude-opus-4.6"},
+			map[string]any{"id": "mimo-v2.5-free"},
+			map[string]any{"id": "plain-model"},
+		}})
+	}))
+	defer upstream.Close()
+
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "opencode-free", BaseURL: upstream.URL + "/v1", Credential: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("expected 3 free models, got %d: %v", len(models), models)
+	}
+	ids := make(map[string]bool)
+	for _, m := range models {
+		ids[m.ID] = true
+	}
+	for _, want := range []string{"deepseek-v4-flash-free", "muse-spark-1.2-contributor-free", "mimo-v2.5-free"} {
+		if !ids[want] {
+			t.Errorf("missing free model %q in %v", want, ids)
+		}
+	}
+	for _, notWant := range []string{"gpt-5.5", "claude-opus-4.6", "plain-model"} {
+		if ids[notWant] {
+			t.Errorf("non-free model %q should have been filtered", notWant)
 		}
 	}
 }

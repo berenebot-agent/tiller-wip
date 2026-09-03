@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -80,6 +81,25 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_provider_type", "Unknown provider type.")
 		return
 	}
+	if input.Name == "" {
+		input.Name = descriptor.Type
+	}
+	input.Name = strings.ToLower(strings.TrimSpace(input.Name))
+	// Matches DB CHECK: name=lower(name) AND length 1..63 AND GLOB '[a-z0-9-]*' AND first/last [a-z0-9]
+	if len(input.Name) < 1 || len(input.Name) > 63 {
+		adminError(w, 400, "invalid_provider_name", "Provider name must be 1-63 lowercase alphanumerics/hyphens.")
+		return
+	}
+	if input.Name[0] == '-' || input.Name[len(input.Name)-1] == '-' {
+		adminError(w, 400, "invalid_provider_name", "Provider name must start and end with alphanumeric.")
+		return
+	}
+	for _, ch := range input.Name {
+		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+			adminError(w, 400, "invalid_provider_name", "Provider name may only contain lowercase letters, digits, and hyphens.")
+			return
+		}
+	}
 	if input.BaseURL == "" {
 		input.BaseURL = descriptor.DefaultBaseURL
 	}
@@ -106,24 +126,62 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := database.Now()
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not create provider.")
-		return
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'real',?)`, input.Name, providerID); err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, providerID, input.Name, input.Type, input.BaseURL, nullableString(input.Credential), boolInt(enabled), providers.EncodeProtocols(protocols), now, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'real',?,0,? FROM client_keys`, providerID, now)
-	}
-	if err != nil || tx.Commit() != nil {
-		if database.IsConstraint(err) {
-			adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
-		} else {
-			adminError(w, 500, "database_error", "Could not create provider.")
+	baseName := input.Name
+	var committed bool
+	var lastErr error
+	for attempt := 0; attempt < 100; attempt++ {
+		candidate := baseName
+		if attempt > 0 {
+			suffix := fmt.Sprintf("-%d", attempt+1)
+			maxBase := 63 - len(suffix)
+			b := baseName
+			if len(b) > maxBase {
+				b = b[:maxBase]
+			}
+			b = strings.TrimRight(b, "-")
+			if b == "" {
+				b = baseName[:1]
+			}
+			candidate = b + suffix
 		}
+		input.Name = candidate
+		tx, txErr := s.db.SQL.BeginTx(r.Context(), nil)
+		if txErr != nil {
+			adminError(w, 500, "database_error", "Could not create provider.")
+			return
+		}
+		func() {
+			defer tx.Rollback()
+			if _, lastErr = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'real',?)`, input.Name, providerID); lastErr == nil {
+				_, lastErr = tx.ExecContext(r.Context(), `INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, providerID, input.Name, input.Type, input.BaseURL, nullableString(input.Credential), boolInt(enabled), providers.EncodeProtocols(protocols), now, now)
+			}
+			if lastErr == nil {
+				_, lastErr = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'real',?,0,? FROM client_keys`, providerID, now)
+			}
+			if lastErr == nil {
+				lastErr = tx.Commit()
+			}
+			if lastErr == nil {
+				committed = true
+			}
+		}()
+		if committed {
+			break
+		}
+		if lastErr != nil && database.IsConstraint(lastErr) {
+			continue
+		}
+		if lastErr != nil {
+			if database.IsConstraint(lastErr) {
+				adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
+			} else {
+				adminError(w, 500, "database_error", "Could not create provider.")
+			}
+			return
+		}
+	}
+	if !committed {
+		adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
 		return
 	}
 	refreshCtx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
@@ -242,12 +300,21 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	defer tx.Rollback()
 	var refs int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings b JOIN provider_models m ON m.id=b.real_model_id WHERE m.provider_id=?`, providerID).Scan(&refs); err != nil {
+	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings b JOIN client_keys c ON c.id = b.client_key_id JOIN provider_models m ON m.id = b.real_model_id WHERE m.provider_id=? AND c.key_type='single'`, providerID).Scan(&refs); err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
 	}
 	if refs > 0 {
 		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this provider first.")
+		return
+	}
+	// Catalogue-type client keys may carry a stale client_single_bindings row
+	// from a prior Single-key configuration. Such rows are inert (catalogue
+	// keys are resolved through client_model_permissions, not the binding),
+	// but their ON DELETE RESTRICT foreign key would otherwise block this
+	// delete. Drop them explicitly so the spec's "Single keys" intent wins.
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM client_single_bindings WHERE real_model_id IN (SELECT id FROM provider_models WHERE provider_id=?) AND client_key_id IN (SELECT id FROM client_keys WHERE key_type='catalogue')`, providerID); err != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
 	}
 	// virtual_model_targets is the functional source of truth. This includes
@@ -269,6 +336,9 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	_, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='real' AND model_id IN (SELECT id FROM provider_models WHERE provider_id=?)`, providerID)
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `DELETE FROM client_group_defaults WHERE group_kind='real' AND group_id=?`, providerID)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(r.Context(), `DELETE FROM client_single_bindings WHERE client_key_id IN (SELECT b.client_key_id FROM client_single_bindings b JOIN client_keys c ON c.id=b.client_key_id JOIN provider_models m ON m.id=b.real_model_id WHERE c.key_type='catalogue' AND m.provider_id=?)`, providerID)
 	}
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_models WHERE provider_id=?`, providerID)
@@ -362,8 +432,6 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v WHERE NOT EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)`).Scan(&broken)
 	writeJSON(w, 200, map[string]any{"status": "ready", "providers": providersCount, "available_models": available, "retired_models": retired, "broken_virtual_models": broken})
 }
-
-var _ = json.Valid
 
 // triBoolFromInt converts a nullable tri-state capability column (NULL/0/1)
 // into a *bool (nil = unknown).

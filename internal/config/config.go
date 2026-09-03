@@ -42,13 +42,19 @@ func Load() (Config, error) {
 	// peer is inside that CIDR, so a spoofable header can never be trusted
 	// from an untrusted peer. Leaving it unset disables proxy-header trust.
 	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
-		value := raw
-		if !strings.Contains(value, "/") {
-			value = value + "/32"
-		}
-		v, err := netip.ParsePrefix(value)
-		if err != nil {
-			return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+		var v netip.Prefix
+		if strings.Contains(raw, "/") {
+			parsed, err := netip.ParsePrefix(raw)
+			if err != nil {
+				return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+			}
+			v = parsed
+		} else {
+			addr, err := netip.ParseAddr(raw)
+			if err != nil {
+				return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+			}
+			v = netip.PrefixFrom(addr, addr.BitLen())
 		}
 		c.TrustedProxy = v
 	}

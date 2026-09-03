@@ -39,7 +39,7 @@ func createClientWithModel(t *testing.T, api *testAPI, name string) (string, str
 	if modelID == "" {
 		t.Fatal("mock upstream did not expose model-a")
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": name, "description": "global activity"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": name, "description": "global activity", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}

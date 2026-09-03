@@ -65,14 +65,27 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"client_keys":    clientKeys,
-		"virtual_models": virtualModels,
-		"target_health":  targetHealth,
-		"real_models":    realModels,
-		"client_cache":   clientCache,
-		"virtual_cache":  virtualCache,
-		"real_cache":     realCache,
+		"client_keys":         clientKeys,
+		"virtual_models":      virtualModels,
+		"target_health":       targetHealth,
+		"real_models":         realModels,
+		"client_cache":        clientCache,
+		"virtual_cache":       virtualCache,
+		"real_cache":          realCache,
+		"target_last_outcome": s.lastOutcomeSnapshot(),
 	})
+}
+
+// lastOutcomeSnapshot returns a copy of the in-memory per-real-model last
+// request outcomes, keyed by "provider_name/upstream_model_id".
+func (s *Server) lastOutcomeSnapshot() map[string]lastOutcome {
+	s.lastOutcomeMu.RLock()
+	defer s.lastOutcomeMu.RUnlock()
+	out := make(map[string]lastOutcome, len(s.lastOutcome))
+	for k, v := range s.lastOutcome {
+		out[k] = v
+	}
+	return out
 }
 
 // targetResolutionHealth reports request outcomes for each target that was

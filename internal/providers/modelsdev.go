@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -65,25 +66,26 @@ type modelsDevLimit struct {
 // provider key. Providers not listed here are never enriched (their models.dev
 // key is unknown or ambiguous).
 var modelsDevProviderKey = map[string]string{
-	"openrouter":   "openrouter",
-	"deepseek":     "deepseek",
-	"nvidia-nim":   "nvidia",
-	"zai":          "zhipuai",
-	"gemini":       "google",
-	"alibaba-qwen": "alibaba",
-	"fireworks":    "fireworks-ai",
-	"azure-openai": "azure",
-	"opencode-zen": "opencode",
-	"opencode-go":  "opencode",
-	"openai":       "openai",
-	"anthropic":    "anthropic",
-	"groq":         "groq",
-	"mistral":      "mistral",
-	"xai":          "xai",
-	"cerebras":     "cerebras",
-	"perplexity":   "perplexity",
-	"minimax":      "minimax",
-	"huggingface":  "huggingface",
+	"openrouter":    "openrouter",
+	"deepseek":      "deepseek",
+	"nvidia-nim":    "nvidia",
+	"zai":           "zhipuai",
+	"gemini":        "google",
+	"alibaba-qwen":  "alibaba",
+	"fireworks":     "fireworks-ai",
+	"azure-openai":  "azure",
+	"opencode-zen":  "opencode",
+	"opencode-go":   "opencode",
+	"opencode-free": "opencode",
+	"openai":        "openai",
+	"anthropic":     "anthropic",
+	"groq":          "groq",
+	"mistral":       "mistral",
+	"xai":           "xai",
+	"cerebras":      "cerebras",
+	"perplexity":    "perplexity",
+	"minimax":       "minimax",
+	"huggingface":   "huggingface",
 }
 
 // ollamaLabInference maps a recognizable model-family root (the lowercased,
@@ -214,7 +216,7 @@ func visionFromModalities(input []string) (bool, bool) {
 	if len(input) == 0 {
 		return false, false
 	}
-	return contains(input, "image"), true
+	return slices.Contains(input, "image"), true
 }
 
 // LoadModelsDevCache synchronously loads the cached models.dev dataset from
