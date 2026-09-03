@@ -211,7 +211,7 @@ function renderVirtual() {
     const broken = models.filter(m => !m.available).length;
     const note = broken ? `${broken} broken target` : (models.length ? 'group' : 'empty group');
     const actions = grp ? `<button class="btn btn-small btn-secondary" data-group-edit="${h(grp.id)}">Edit</button><button class="btn btn-small btn-danger" data-group-delete="${h(grp.id)}">Delete</button>` : '';
-    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><code class="model-id">${h(model.canonical_model_id)}</code><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${badge(model.available, model.available ? 'Routable' : 'Broken target', model.available ? 'good' : 'bad')}${model.warning ? `<span class="error-text">${h(model.warning)}</span>` : ''}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
+    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><div class="client-name-line"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(model.available ? 'Routable' : 'Broken target')}" title="${h(model.available ? 'Routable' : 'Broken target')}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(model.canonical_model_id)}</strong></div><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
   }).join('');
   $('#virtual-body').innerHTML = html;
   patchVirtualActivityRows();
@@ -228,49 +228,30 @@ function patchVirtualActivityRows() {
   $$('tr[data-virtual-id]', $('#virtual-body')).forEach(row => {
     const model = state.virtualModels.find(item => item.id === row.dataset.virtualId);
     if (!model) return;
-    const nameCell = row.cells[0];
-    if (!$('.client-name-line', nameCell)) {
-      const name = $('.model-id', nameCell);
-      if (name) {
-        const line = document.createElement('div');
-        line.className = 'client-name-line';
-        const dot = document.createElement('span');
-        dot.className = `status-dot ${model.available ? 'status-dot-enabled' : 'status-dot-disabled'}`;
-        dot.setAttribute('role', 'img');
-        dot.setAttribute('aria-label', model.available ? 'Routable' : 'Broken target');
-        dot.title = model.available ? 'Routable' : 'Broken target';
-        const strong = document.createElement('strong');
-        strong.textContent = name.textContent;
-        line.append(dot, strong);
-        name.replaceWith(line);
-      }
-    }
-    const stateCell = row.cells[3];
-    $('.badge', stateCell)?.remove();
-    if (!$('.activity-spinner', stateCell)) {
-      const spinner = document.createElement('span');
-      spinner.className = 'activity-spinner';
-      spinner.hidden = true;
-      spinner.setAttribute('role', 'img');
-      stateCell.prepend(spinner);
-      for (let i = 0; i < 3; i += 1) spinner.append(document.createElement('i'));
-    }
+    const roundel = $('.status-roundel', row);
+    if (!roundel) return;
+    roundel.classList.toggle('status-roundel-broken', !model.available);
     patchVirtualSpinner(row, state.inflight[model.id]);
   });
 }
 
 function patchVirtualSpinner(row, activity) {
-  const spinner = $('.activity-spinner', row);
-  if (!spinner) return;
+  const roundel = $('.status-roundel', row);
+  if (!roundel) return;
+  const model = state.virtualModels.find(item => item.id === row.dataset.virtualId);
+  if (!model) return;
+  if (!model.available) {
+    roundel.classList.remove('status-roundel-active');
+    roundel.setAttribute('aria-label', 'Broken target');
+    roundel.title = 'Broken target';
+    return;
+  }
   const active = activity?.active > 0;
   const streaming = active && activity?.streaming > 0;
-  const idle = !active;
-  spinner.hidden = false;
-  spinner.classList.toggle('activity-spinner-down', streaming);
-  spinner.classList.toggle('activity-spinner-idle', idle);
-  const label = streaming ? 'Streaming response' : active ? 'Waiting for upstream response' : 'Idle';
-  spinner.setAttribute('aria-label', label);
-  spinner.title = label;
+  roundel.classList.toggle('status-roundel-active', active);
+  const label = streaming ? 'Streaming response' : active ? 'Waiting for upstream response' : 'Routable';
+  roundel.setAttribute('aria-label', label);
+  roundel.title = label;
 }
 
 const capabilityNumber = value => value ? new Intl.NumberFormat().format(value) : 'Not reported';
