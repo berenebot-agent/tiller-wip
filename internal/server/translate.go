@@ -233,10 +233,79 @@ func chatToMessagesRequest(chat map[string]any) map[string]any {
 }
 
 func chatToResponsesRequest(chat map[string]any) map[string]any {
-	out := map[string]any{"model": chat["model"], "input": chat["messages"]}
+	out := map[string]any{"model": chat["model"]}
+
+	var instructions string
+	var input []any
+
+	if messages := asSlice(chat["messages"]); messages != nil {
+		for _, raw := range messages {
+			msg, _ := raw.(map[string]any)
+			role, _ := msg["role"].(string)
+
+			switch role {
+			case "system":
+				if content, ok := msg["content"].(string); ok && content != "" {
+					if instructions != "" {
+						instructions += "\n\n"
+					}
+					instructions += content
+				}
+
+			case "user":
+				input = append(input, userMessageToResponsesItem(msg))
+
+			case "assistant":
+				if calls := asSlice(msg["tool_calls"]); calls != nil && len(calls) > 0 {
+					// Assistant with tool calls: emit message (empty content) + function_call items
+					input = append(input, map[string]any{
+						"type":    "message",
+						"role":    "assistant",
+						"content": []any{},
+					})
+					for _, callRaw := range calls {
+						call, _ := callRaw.(map[string]any)
+						id, _ := call["id"].(string)
+						fn, _ := call["function"].(map[string]any)
+						input = append(input, map[string]any{
+							"type":       "function_call",
+							"call_id":    id,
+							"name":       fn["name"],
+							"arguments":  fn["arguments"],
+						})
+					}
+				} else {
+					input = append(input, assistantMessageToResponsesItem(msg))
+				}
+
+			case "tool":
+				id, _ := msg["tool_call_id"].(string)
+				content := ""
+				if c, ok := msg["content"].(string); ok {
+					content = c
+				}
+				input = append(input, map[string]any{
+					"type":     "function_call_output",
+					"call_id":  id,
+					"output":   content,
+				})
+			}
+		}
+	}
+
+	if instructions != "" {
+		out["instructions"] = instructions
+	}
+	out["input"] = input
+
 	for _, key := range []string{"temperature", "top_p", "stream", "metadata", "tool_choice"} {
 		if v, ok := chat[key]; ok {
-			out[key] = v
+			// Convert tool_choice to Responses format
+			if key == "tool_choice" {
+				out[key] = convertToolChoice(v)
+			} else {
+				out[key] = v
+			}
 		}
 	}
 	if max, ok := chat["max_completion_tokens"]; ok {
@@ -657,6 +726,67 @@ func asSlice(value any) []any {
 	}
 	return nil
 }
+
+func userMessageToResponsesItem(msg map[string]any) map[string]any {
+	parts := chatContentToResponsesParts(msg["content"])
+	return map[string]any{
+		"type":    "message",
+		"role":    "user",
+		"content": parts,
+	}
+}
+
+func assistantMessageToResponsesItem(msg map[string]any) map[string]any {
+	parts := chatContentToResponsesParts(msg["content"])
+	return map[string]any{
+		"type":    "message",
+		"role":    "assistant",
+		"content": parts,
+	}
+}
+
+func chatContentToResponsesParts(value any) []any {
+	if str, ok := value.(string); ok {
+		return []any{map[string]any{"type": "input_text", "text": str}}
+	}
+	parts := []any{}
+	if list := asSlice(value); list != nil {
+		for _, raw := range list {
+			block, _ := raw.(map[string]any)
+			switch block["type"] {
+			case "text":
+				text, _ := block["text"].(string)
+				parts = append(parts, map[string]any{"type": "input_text", "text": text})
+			case "image_url":
+				if url, _ := block["image_url"].(map[string]any); url != nil {
+					parts = append(parts, map[string]any{
+						"type":      "input_image",
+						"image_url": url["url"],
+					})
+				}
+			}
+		}
+	}
+	return parts
+}
+
+func convertToolChoice(value any) any {
+	switch v := value.(type) {
+	case string:
+		if v == "required" {
+			return map[string]any{"type": "any"}
+		}
+		return map[string]any{"type": v}
+	case map[string]any:
+		fn, _ := v["function"].(map[string]any)
+		if fn != nil {
+			return map[string]any{"type": "function", "name": fn["name"]}
+		}
+		return v
+	}
+	return value
+}
+
 func chatContentToAnthropic(value any) []any {
 	if text, ok := value.(string); ok {
 		return []any{map[string]any{"type": "text", "text": text}}
