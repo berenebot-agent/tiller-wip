@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # tests/browser/run.sh — run the Playwright admin UI browser tests.
 #
 # Fully containerized (no host Node/Go needed). Builds the router + browser
@@ -25,11 +25,17 @@ run_start=$(date +%s)
 note_phase() {
     echo "==> $1 ($(( $(date +%s) - run_start ))s elapsed)"
 }
-# Per-run scratch: holds the activity router's host-mounted data dir (so the
-# activity lane can seed rows directly via fixturectl) and the extracted
-# fixturectl binary. Cleaned up on exit (falling back to a root throwaway
-# container because the router chowns the data dir away from the invoking user).
-run_dir=$(mktemp -d /tmp/tiller-browser-run.XXXXXX)
+# Per-run scratch lives under tests/logs/ (gitignored). Holds the activity
+# router's host-mounted data dir, the extracted fixturectl binary, the run
+# log, and the Playwright artifacts (preserved on failure, auto-removed on
+# success). The old /tmp mktemp path had external-permission issues.
+mkdir -p tests/logs
+run_dir="$(pwd)/tests/logs/$run_id"
+mkdir -p "$run_dir/playwright-results" "$run_dir/activity-data"
+# Capture the full run output to a per-run log file. The summary block at the
+# end prints this path; on failure the first error is also inlined.
+RUN_LOG="$run_dir/run.log"
+exec > >(tee "$RUN_LOG") 2>&1
 
 case "$workers" in
     ''|*[!0-9]*|0) echo "TILLER_BROWSER_WORKERS must be a positive integer" >&2; exit 2 ;;
@@ -48,8 +54,21 @@ cleanup() {
     stop_containers
     rm -f "$ports_file"
     if [ -n "${run_dir:-}" ] && [ -d "$run_dir" ]; then
-        if ! rm -rf "$run_dir" 2>/dev/null; then
-            docker run --rm -v "$run_dir:/cleanup:rw" python:3.13-alpine python -c "import shutil; shutil.rmtree('/cleanup')" >/dev/null 2>&1 || true
+        # Preserve the run on failure (artifacts are still in $run_dir for
+        # inspection); clean up on success. The activity router chowns its
+        # data dir to uid 65532, so a plain rm may fail; fall back to a root
+        # throwaway container to remove the tree.
+        if [ "${playwright_status:-0}" -eq 0 ]; then
+            if ! rm -rf "$run_dir" 2>/dev/null; then
+                # The activity router chowns its data dir to uid 65532, so a
+                # plain rm fails. Remove the tree's contents as root (the
+                # mount root itself can't be removed from inside the
+                # container), then let the host rm the now-empty dir.
+                docker run --rm -v "$run_dir:/cleanup:rw" python:3.13-alpine python -c "import shutil,os; [shutil.rmtree(os.path.join('/cleanup',d)) if os.path.isdir(os.path.join('/cleanup',d)) else os.remove(os.path.join('/cleanup',d)) for d in os.listdir('/cleanup')]" >/dev/null 2>&1 || true
+                rm -rf "$run_dir" 2>/dev/null || true
+            fi
+        else
+            echo "==> preserving failed-run artifacts at $run_dir" >&2
         fi
     fi
 }
@@ -74,7 +93,6 @@ fixture_cid=$(docker create tiller-router-fixturectl:dev /fixturectl)
 docker cp "$fixture_cid:/fixturectl" "$run_dir/fixturectl"
 docker rm "$fixture_cid" >/dev/null
 chmod +x "$run_dir/fixturectl"
-mkdir "$run_dir/activity-data"
 note_phase "images built and fixturectl extracted"
 
 echo "==> Starting $workers isolated mock/router pairs"
@@ -177,6 +195,7 @@ while read -r i router_port mock_port; do
         -e PLAYWRIGHT_WORKERS=1 \
         -e TILLER_BROWSER_ADMIN_USERNAME=admin \
         -e TILLER_BROWSER_ADMIN_PASSWORD="$password" \
+        -v "$run_dir/playwright-results:/tests/test-results" \
         tiller-router-browser-tests:dev npx playwright test admin.spec.js live.spec.js --shard="$((i + 1))/$workers" &
     echo "$i $!" >> "$pids_file"
 done < "$ports_file"
@@ -191,6 +210,7 @@ docker run --rm --network host \
     -e TILLER_FIXTURE_DB=/fixture-data/tiller-router.db \
     -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
     -v "$run_dir/activity-data:/fixture-data:rw" \
+    -v "$run_dir/playwright-results:/tests/test-results" \
     tiller-router-browser-tests:dev npx playwright test activity.spec.js &
 activity_pid=$!
 
@@ -201,7 +221,15 @@ done < "$pids_file"
 
 if wait "$activity_pid"; then :; else playwright_status=$?; fi
 rm -f "$pids_file"
+echo
+echo "==> browser suite summary"
+echo "    rc:         $playwright_status"
+echo "    run log:    $RUN_LOG"
 if [ "$playwright_status" -ne 0 ]; then
+    echo "    artifacts:  $run_dir/playwright-results/  (Playwright traces, error-context.md, screenshots)"
+    first_error=$(grep -m1 -E 'Error: ' "$RUN_LOG" 2>/dev/null | head -c 400 || true)
+    [ -n "$first_error" ] && echo "    first error: $first_error"
+    echo
     echo "==> Playwright failed — router logs:" >&2
     for log_name in $(docker ps -a --format '{{.Names}}' | grep "^$run_id-router-"); do
         echo "--- $log_name ---" >&2

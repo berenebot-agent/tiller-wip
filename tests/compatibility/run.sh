@@ -1,11 +1,18 @@
-#!/bin/sh
+#!/bin/bash
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 password=compatibility-test-password
 run_id=tiller-compat-$$
-sdk_data_dir=$(mktemp -d)
-hermes_data_dir=$(mktemp -d)
+mkdir -p tests/logs/compat
+sdk_data_dir="$(pwd)/tests/logs/compat/sdk-$run_id"
+hermes_data_dir="$(pwd)/tests/logs/compat/hermes-$run_id"
+mkdir -p "$sdk_data_dir" "$hermes_data_dir"
+
+# Log capture: always write full output to a per-run log file.
+LOG_FILE="tests/logs/compat/$(date -u +%Y%m%dT%H%M%S)-compat.log"
+ts=$(date +%s)
+exec > >(tee "$LOG_FILE") 2>&1
 
 probe_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'; }
 sdk_router_port=${TILLER_COMPAT_ROUTER_PORT:-$(probe_port)}
@@ -75,7 +82,7 @@ docker run --rm --network host \
     -e TILLER_COMPAT_MOCK_BASE_URL="http://127.0.0.1:$sdk_mock_port/v1" \
     -e TILLER_COMPAT_ADMIN_PASSWORD="$password" \
     tiller-router-sdk-probes:dev &
-sdk_status=$!
+sdk_pid=$!
 
 # Preserve the existing restart coverage for the Hermes environment.
 docker stop "$run_id-router-hermes" >/dev/null
@@ -85,6 +92,20 @@ docker run --rm --network host \
     -e TILLER_COMPAT_MOCK_BASE_URL="http://127.0.0.1:$hermes_mock_port/v1" \
     -e TILLER_COMPAT_ADMIN_PASSWORD="$password" \
     tiller-router-hermes-probe:dev &
-hermes_status=$!
-wait "$sdk_status"
-wait "$hermes_status"
+hermes_pid=$!
+sdk_status=0
+hermes_status=0
+wait "$sdk_pid" || sdk_status=$?
+wait "$hermes_pid" || hermes_status=$?
+
+te=$(date +%s)
+echo
+echo "==> compatibility suite summary"
+echo "    rc:      sdk=$sdk_status hermes=$hermes_status"
+echo "    elapsed: $((te - ts))s"
+echo "    log:     $LOG_FILE"
+if [ "$sdk_status" -ne 0 ] || [ "$hermes_status" -ne 0 ]; then
+    first_error=$(grep -m1 -E 'ERROR|FAIL|Error:' "$LOG_FILE" 2>/dev/null | head -c 400 || true)
+    [ -n "$first_error" ] && echo "    first error: $first_error"
+    exit 1
+fi

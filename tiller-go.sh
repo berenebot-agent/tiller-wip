@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # tiller-go.sh — run Go commands inside Docker (build/test/vet/tidy) with a
 # persistent cache so repeated runs are fast and low-RAM, and the container is
 # memory-capped to avoid OOM-killing this 4.4GiB box.
@@ -46,7 +46,15 @@ if [ -n "${TILLER_NOTIFY_EXAMPLES:-}" ]; then
     ENV_FLAGS="$ENV_FLAGS -e TILLER_NOTIFY_EXAMPLES=$TILLER_NOTIFY_EXAMPLES"
 fi
 
-exec docker run $TTY_FLAG --rm \
+# Log capture: always write full output to a repo-local log file under
+# tests/logs/ (gitignored, persistent across runs). The summary printed at
+# the end shows the path; on failure the first FAIL line is also inlined.
+LOG_DIR="tests/logs/tiller-go"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/$(date -u +%Y%m%dT%H%M%S)-go-$(echo "$*" | tr ' /' '__').log"
+ts=$(date +%s)
+
+docker run $TTY_FLAG --rm \
     --memory="$MEM_LIMIT" \
     --memory-swap="$MEM_LIMIT" \
     $ENV_FLAGS \
@@ -55,4 +63,13 @@ exec docker run $TTY_FLAG --rm \
     -v "$REPO_ROOT:/src" \
     -w /src \
     "$GO_IMAGE" \
-    go "$@"
+    go "$@" 2>&1 | tee "$LOG_FILE"
+rc=${PIPESTATUS[0]}
+te=$(date +%s)
+
+echo "==> tiller-go.sh: rc=$rc, $((te - ts))s elapsed, log: $LOG_FILE" >&2
+if [ "$rc" -ne 0 ]; then
+    first_fail=$(grep -m1 -E '^--- FAIL|^FAIL\b' "$LOG_FILE" 2>/dev/null | head -c 400 || true)
+    [ -n "$first_fail" ] && echo "    first failure: $first_fail" >&2
+fi
+exit "$rc"

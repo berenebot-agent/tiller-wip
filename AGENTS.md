@@ -112,3 +112,28 @@ Run the **minimum** tier that matches the change. Do **not** default to the full
 - **Run the full suite only when instructed, or for a significant feature/release.** Otherwise pick the smallest tier that would catch a regression in what you changed.
 
 When a change is purely frontend (`internal/web/assets/**`), the browser suite is the gate; run `./tiller-go.sh test ./...` for sanity but the UI tests are the ones that matter.
+
+### Test log convention (X = summary, Y = detail)
+
+All test runners follow a two-tier logging convention so agents (or humans)
+can diagnose failures without re-running:
+
+- **X (Summary)** — always printed to stdout, regardless of pass/fail.
+  Includes exit code, elapsed time, and the path to the detailed log. On
+  failure, also prints the first error message inline.
+- **Y (Detail)** — always written to a per-run log file containing the full
+  stdout+stderr. Default location is repo-local and gitignored
+  (`tests/logs/`):
+
+| Runner | Y (detail) path |
+|---|---|
+| `./tiller-go.sh ...` | `tests/logs/tiller-go/<UTC-ts>-go-*.log` |
+| `./tests/browser/run.sh` | `tests/logs/<run-id>/run.log`; Playwright traces/screenshots in `tests/logs/<run-id>/playwright-results/` (preserved on failure, auto-removed on success) |
+| `./tests/compatibility/run.sh` | `tests/logs/compat/<UTC-ts>-compat.log` |
+
+To inspect a failed browser run's full output and Playwright artifacts
+without re-running: read `tests/logs/<run-id>/run.log` and open the matching
+`playwright-results/` directory (each Playwright shard writes
+`trace.zip` + `error-context.md` per failed test). Each `run_id` is unique
+(`tiller-browser-<pid>`), so preserving a run indefinitely is just a matter
+of renaming `tests/logs/<run-id>/` aside before the next invocation.
