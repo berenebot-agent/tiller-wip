@@ -50,7 +50,11 @@ stop_containers
 export DOCKER_BUILDKIT=1
 . "$repo_dir/tests/scripts/build-router.sh"
 docker build --pull=false -t tiller-router-sdk-probes:dev "$repo_dir/tests/compatibility"
-docker build --pull=false -f "$repo_dir/tests/compatibility/hermes.Dockerfile" -t tiller-router-hermes-probe:dev "$repo_dir/tests/compatibility"
+if ! docker image inspect tiller-router-hermes-probe:dev >/dev/null 2>&1; then
+    docker build --pull=false -f "$repo_dir/tests/compatibility/hermes.Dockerfile" -t tiller-router-hermes-probe:dev "$repo_dir/tests/compatibility"
+else
+    echo "==> tiller-router-hermes-probe:dev (cached)"
+fi
 
 start_mock() {
     docker run --rm -d --name "$1" --network host \
