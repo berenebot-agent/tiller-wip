@@ -290,4 +290,13 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 			t.Errorf("%s: upstream saw path %q, want %q", upstreamID, gotPath, wantPath)
 		}
 	}
+	status, payload, _ = api.request("GET", "/api/admin/client-keys/"+clientID+"/activity?limit=50", nil)
+	if status != 200 {
+		t.Fatalf("activity: %d %v", status, payload)
+	}
+	for _, raw := range payload["data"].([]any) {
+		if raw.(map[string]any)["streaming"] == true {
+			t.Fatal("translated JSON response was marked streaming")
+		}
+	}
 }

@@ -183,6 +183,29 @@ func TestLiveBroadcastFanout(t *testing.T) {
 	}
 }
 
+func TestLiveOutcomeIsDroppedWithoutSubscribers(t *testing.T) {
+	h := &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer)}
+	h.emitOutcome(map[string]lastOutcome{"pm": {IsSuccess: true}})
+
+	select {
+	case <-h.outcomeCh:
+		t.Fatal("outcome was queued without a live subscriber")
+	default:
+	}
+
+	ch := h.subscribe()
+	defer h.unsubscribe(ch)
+	h.emitOutcome(map[string]lastOutcome{"pm": {IsSuccess: true}})
+	select {
+	case msg := <-ch:
+		if !strings.Contains(string(msg), "event: outcome") {
+			t.Fatalf("outcome message missing event: %s", msg)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("outcome was not queued with a live subscriber")
+	}
+}
+
 // TestLiveContextCancelUnsubscribes asserts a subscriber whose request context
 // is cancelled is removed from the hub.
 func TestLiveContextCancelUnsubscribes(t *testing.T) {

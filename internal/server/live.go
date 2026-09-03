@@ -61,6 +61,21 @@ func (h *liveHub) emitActivity(delta inflightDelta) {
 	}
 }
 
+// emitOutcome publishes only while a live subscriber exists. The subscriber
+// check and channel send share the hub lock so an outcome cannot be queued
+// after the last subscriber leaves.
+func (h *liveHub) emitOutcome(delta map[string]lastOutcome) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.subs) == 0 {
+		return
+	}
+	select {
+	case h.outcomeCh <- delta:
+	default:
+	}
+}
+
 // liveSnapshot is the full envelope pushed on the "snapshot" event. It is the
 // same data the /api/admin/usage endpoint returns, so the two can never drift.
 type liveSnapshot struct {

@@ -127,10 +127,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	// buffer drops the delta, which the next snapshot self-heals. Never blocks
 	// the inference path.
 	if len(delta) > 0 && s.liveHub != nil {
-		select {
-		case s.liveHub.outcomeCh <- delta:
-		default:
-		}
+		s.liveHub.emitOutcome(delta)
 	}
 }
 

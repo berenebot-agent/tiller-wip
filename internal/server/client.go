@@ -508,9 +508,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	reader := &idleReader{reader: resp.Body, timer: idle}
 	usage := &usageCapture{}
 	if translated {
-		streamed = true
-		if route.Virtual {
-			s.inflight.streaming(route.RouteModelID)
+		if isStreamingResponse(resp) {
+			streamed = true
+			row.streaming = true
+			if route.Virtual {
+				s.inflight.streaming(route.RouteModelID)
+			}
 		}
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
@@ -521,8 +524,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 		return
 	}
-	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if isStreamingResponse(resp) {
 		streamed = true
+		row.streaming = true
 		if route.Virtual {
 			s.inflight.streaming(route.RouteModelID)
 		}
@@ -554,6 +558,10 @@ type bufferedReadCloser struct {
 	closer io.Closer
 }
 
+func isStreamingResponse(resp *http.Response) bool {
+	return strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+}
+
 func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 
 // preflightResponseLimit ensures a successful upstream response has produced
@@ -561,7 +569,7 @@ func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 // no-splice rule while allowing a different virtual target after a pre-output
 // failure.
 func preflightResponseLimit(resp *http.Response, limit int64) error {
-	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if isStreamingResponse(resp) {
 		first := make([]byte, 1)
 		n, err := resp.Body.Read(first)
 		if n == 0 && err != nil {
