@@ -123,6 +123,14 @@ func seedMigrationFixture(t *testing.T, raw *sql.DB, checkpoint int) {
 			t.Fatalf("seed request log at checkpoint %d: %v", checkpoint, err)
 		}
 	}
+	if checkpoint == 18 {
+		if _, err := raw.Exec(`UPDATE request_logs SET error_text='upstream_error',error_message='PROVIDER-ERROR-SECRET-MARKER' WHERE id='log1'`); err != nil {
+			t.Fatalf("seed legacy request error at checkpoint %d: %v", checkpoint, err)
+		}
+		if _, err := raw.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,latency_ms,created_at) VALUES('attempt1','log1',1,'provider-a','model-a','failed',502,'http_502','PROVIDER-ERROR-SECRET-MARKER',8,?)`, now); err != nil {
+			t.Fatalf("seed legacy attempt error at checkpoint %d: %v", checkpoint, err)
+		}
+	}
 }
 
 func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
@@ -201,6 +209,30 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 					}
 				} else if routeKind.Valid || routeModel.Valid {
 					t.Fatalf("post-backfill request should retain null attribution, got %q/%q", routeKind.String, routeModel.String)
+				}
+				if checkpoint == 18 {
+					var errorText string
+					var errorMessage sql.NullString
+					if err := db.SQL.QueryRow(`SELECT error_text,error_message FROM request_logs WHERE id='log1'`).Scan(&errorText, &errorMessage); err != nil {
+						t.Fatal(err)
+					}
+					if errorText != "upstream_error" || errorMessage.Valid {
+						t.Fatalf("request failure metadata changed: error_text=%q error_message=%q", errorText, errorMessage.String)
+					}
+					var failureClass string
+					if err := db.SQL.QueryRow(`SELECT failure_class FROM request_attempts WHERE id='attempt1'`).Scan(&failureClass); err != nil {
+						t.Fatal(err)
+					}
+					if failureClass != "http_502" {
+						t.Fatalf("attempt failure class = %q, want http_502", failureClass)
+					}
+					var attemptMessage sql.NullString
+					if err := db.SQL.QueryRow(`SELECT error_message FROM request_attempts WHERE id='attempt1'`).Scan(&attemptMessage); err != nil {
+						t.Fatal(err)
+					}
+					if attemptMessage.Valid {
+						t.Fatalf("attempt error_message survived migration: %q", attemptMessage.String)
+					}
 				}
 			}
 		})

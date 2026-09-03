@@ -439,9 +439,17 @@ func TestProviderErrorMessageAndBodyAreNotExposedOrLogged(t *testing.T) {
 	if status != http.StatusOK || strings.Contains(string(mustJSON(t, activity)), marker) {
 		t.Fatalf("provider error was persisted in activity: status=%d payload=%v", status, activity)
 	}
+	activityRow := activity["data"].([]any)[0].(map[string]any)
+	if activityRow["error_text"] != "upstream_error" || activityRow["error_message"] != nil {
+		t.Fatalf("provider error metadata = %v", activityRow)
+	}
 	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
 	if status != http.StatusOK || strings.Contains(string(mustJSON(t, attempts)), marker) {
 		t.Fatalf("provider error was persisted in attempts: status=%d payload=%v", status, attempts)
+	}
+	attemptRow := attempts["data"].([]any)[0].(map[string]any)
+	if attemptRow["failure_class"] != "http_502" || attemptRow["error_message"] != nil {
+		t.Fatalf("provider attempt metadata = %v", attemptRow)
 	}
 }
 
