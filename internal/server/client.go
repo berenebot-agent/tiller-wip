@@ -277,7 +277,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			s.inflight.clientEnd(row.clientKeyID, streamed)
 		}
 		if activeTargetID != "" {
-			s.inflight.targetEnd(activeTargetID)
+			s.inflight.targetEnd(route.RouteModelID, activeTargetID)
 		}
 		s.writeLog(context.Background(), row)
 	}()
@@ -386,12 +386,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
 		}
 		if route.Virtual {
-			s.inflight.targetStart(targetID)
+			s.inflight.targetStart(route.RouteModelID, targetID)
 		}
 		response, e := s.providers.Registry().HTTPClient().Do(req)
 		if e != nil {
 			if route.Virtual {
-				s.inflight.targetEnd(targetID)
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 			}
 			attemptCancel()
 			class := "upstream_unreachable"
@@ -424,7 +424,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
 			if route.Virtual {
-				s.inflight.targetEnd(targetID)
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 			}
 			class := fmt.Sprintf("http_%d", response.StatusCode)
 			response.Body.Close()
@@ -446,7 +446,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
 			if route.Virtual {
-				s.inflight.targetEnd(targetID)
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 			}
 			response.Body.Close()
 			attemptCancel()

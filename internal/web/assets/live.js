@@ -7,7 +7,7 @@
 //   - "outcome": a micro-delta of per-target last request outcomes (drives the
 //     resolution icons instantly, no DB cost).
 //   - "activity": transient in-flight request deltas keyed by virtual model,
-//     client key, or provider model ID.
+//     client key, or virtual-model/provider-model pair.
 //   - "snapshot": the full usage/health envelope (drives token/cache counters
 //     and reconciles any dropped delta).
 export class LiveStream {

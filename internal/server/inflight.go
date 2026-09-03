@@ -19,7 +19,7 @@ type inflightTracker struct {
 	mu           sync.Mutex
 	states       map[string]inflightState // keyed by virtual model id
 	clientStates map[string]inflightState // keyed by client key id
-	targetStates map[string]inflightState // keyed by provider model id
+	targetStates map[string]inflightState // keyed by virtual model/provider model pair
 	emit         func(inflightDelta)
 }
 
@@ -127,38 +127,40 @@ func (t *inflightTracker) clientSnapshot() map[string]inflightState {
 	return out
 }
 
-func (t *inflightTracker) targetStart(id string) {
+func (t *inflightTracker) targetStart(virtualID, targetID string) {
+	key := virtualID + "\x00" + targetID
 	t.mu.Lock()
-	state := t.targetStates[id]
+	state := t.targetStates[key]
 	state.Active++
-	t.targetStates[id] = state
+	t.targetStates[key] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{TargetID: id, Active: 1})
+	t.emit(inflightDelta{ID: virtualID, TargetID: targetID, Active: 1})
 }
 
-func (t *inflightTracker) targetEnd(id string) {
+func (t *inflightTracker) targetEnd(virtualID, targetID string) {
+	key := virtualID + "\x00" + targetID
 	t.mu.Lock()
-	state := t.targetStates[id]
+	state := t.targetStates[key]
 	if state.Active > 1 {
 		state.Active--
 	} else {
 		state.Active = 0
 	}
 	if state.Active == 0 {
-		delete(t.targetStates, id)
+		delete(t.targetStates, key)
 	} else {
-		t.targetStates[id] = state
+		t.targetStates[key] = state
 	}
 	t.mu.Unlock()
-	t.emit(inflightDelta{TargetID: id, Active: -1})
+	t.emit(inflightDelta{ID: virtualID, TargetID: targetID, Active: -1})
 }
 
 func (t *inflightTracker) targetSnapshot() map[string]inflightState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make(map[string]inflightState, len(t.targetStates))
-	for id, state := range t.targetStates {
-		out[id] = state
+	for key, state := range t.targetStates {
+		out[key] = state
 	}
 	return out
 }

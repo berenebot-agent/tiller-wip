@@ -197,6 +197,9 @@ function resolutionIndicator(target) {
   const status = resolutionStatus(target);
   return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[1]}" title="${status[1]}">${RESOLUTION_ICONS[status[0]]}<span class="resolution-indicator-spin" aria-hidden="true"></span></span>`;
 }
+function targetActivityKey(virtualID, targetID) {
+  return `${virtualID}\u0000${targetID}`;
+}
 function renderVirtual() {
   const searching = ($('#virtual-search').value || '').trim().length > 0;
   const byGroup = new Map(); state.virtualModels.forEach(model => { const key = model.group_name || '—'; if (!byGroup.has(key)) byGroup.set(key, []); byGroup.get(key).push(model); });
@@ -992,7 +995,8 @@ function patchResolution(line, target) {
   const indicator = $('.resolution-indicator', line);
   if (!indicator) return;
   const cls = `resolution-${status}`;
-  const key = line.dataset.targetKey;
+  const row = line.closest('tr[data-virtual-id]');
+  const key = targetActivityKey(row?.dataset.virtualId || '', line.dataset.targetKey);
   const active = state.inflightTargets[key]?.active > 0;
   const needsSwap = !indicator.classList.contains(cls) || !$('.resolution-indicator-spin', indicator);
   if (needsSwap) {
@@ -1102,17 +1106,17 @@ live.on('activity', delta => {
     }
   }
   if (delta.target_id) {
-    const current = state.inflightTargets[delta.target_id] || { active: 0 };
+    const key = targetActivityKey(delta.id || '', delta.target_id);
+    const current = state.inflightTargets[key] || { active: 0 };
     current.active += delta.active || 0;
-    if (current.active <= 0) delete state.inflightTargets[delta.target_id];
-    else state.inflightTargets[delta.target_id] = current;
+    if (current.active <= 0) delete state.inflightTargets[key];
+    else state.inflightTargets[key] = current;
     if (liveViewActive('virtual') && !liveDialogOpen()) {
-      $$(`[data-target-key="${CSS.escape(delta.target_id)}"]`, $('#virtual-body')).forEach(line => {
-        const row = line.closest('tr[data-virtual-id]');
-        const model = row && state.virtualModels.find(item => item.id === row.dataset.virtualId);
-        const target = model && (model.targets || []).find(item => (item.provider_model_id || `${item.provider_name}/${item.upstream_model_id}`) === delta.target_id);
-        if (target) patchResolution(line, target);
-      });
+      const row = $(`tr[data-virtual-id="${CSS.escape(delta.id || '')}"]`, $('#virtual-body'));
+      const line = row && $(`[data-target-key="${CSS.escape(delta.target_id)}"]`, row);
+      const model = row && state.virtualModels.find(item => item.id === row.dataset.virtualId);
+      const target = model && (model.targets || []).find(item => (item.provider_model_id || `${item.provider_name}/${item.upstream_model_id}`) === delta.target_id);
+      if (line && target) patchResolution(line, target);
     }
   }
 });

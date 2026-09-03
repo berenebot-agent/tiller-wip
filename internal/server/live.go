@@ -18,7 +18,7 @@ import (
 //     outcomes, emitted the instant a routed request records one. This is what
 //     makes the resolution icons feel live with zero DB cost.
 //   - "activity": transient in-flight request deltas keyed by virtual model,
-//     client key, or provider model ID.
+//     client key, or virtual-model/provider-model pair.
 //   - "snapshot": the full usage/health envelope (last outcomes, 1h/24h health,
 //     token + cache windows). Sent on connect and then on a server-side cadence
 //     so token counters track traffic and any dropped delta self-heals.
