@@ -34,7 +34,7 @@ func loggingTestHarness(t *testing.T, upstream http.HandlerFunc) (*testAPI, *dat
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
-	api := &testAPI{t: t, base: router.URL, client: &http.Client{Jar: jar}}
+	api := &testAPI{t: t, base: router.URL, client: &http.Client{Jar: jar}, server: app}
 	status, payload, _ := api.request("POST", "/api/admin/session", map[string]any{"username": "admin", "password": "correct horse"})
 	if status != 200 {
 		t.Fatalf("login: %d %v", status, payload)

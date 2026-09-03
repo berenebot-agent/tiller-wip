@@ -177,7 +177,7 @@ while read -r i router_port mock_port; do
         -e PLAYWRIGHT_WORKERS=1 \
         -e TILLER_BROWSER_ADMIN_USERNAME=admin \
         -e TILLER_BROWSER_ADMIN_PASSWORD="$password" \
-        tiller-router-browser-tests:dev npx playwright test admin.spec.js --shard="$((i + 1))/$workers" &
+        tiller-router-browser-tests:dev npx playwright test admin.spec.js live.spec.js --shard="$((i + 1))/$workers" &
     echo "$i $!" >> "$pids_file"
 done < "$ports_file"
 

@@ -27,6 +27,7 @@ type testAPI struct {
 	base   string
 	client *http.Client
 	csrf   string
+	server *Server
 }
 
 func (a *testAPI) request(method, path string, body any) (int, map[string]any, http.Header) {

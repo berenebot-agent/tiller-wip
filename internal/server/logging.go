@@ -100,11 +100,11 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		return
 	}
 	s.lastOutcomeMu.Lock()
-	defer s.lastOutcomeMu.Unlock()
 	if s.lastOutcome == nil {
 		s.lastOutcome = map[string]lastOutcome{}
 	}
 	recordedAt := database.Now()
+	delta := make(map[string]lastOutcome, len(row.attempts))
 	for _, attempt := range row.attempts {
 		if attempt.providerModelID == "" {
 			continue
@@ -112,10 +112,22 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		switch attempt.result {
 		case "success":
 			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
+			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
 		case "failed":
 			// Preserve zero: a network failure has no HTTP response, even if a
 			// later fallback succeeds and sets the logical row status to 2xx.
 			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+		}
+	}
+	s.lastOutcomeMu.Unlock()
+	// Push the changed outcomes to live subscribers. Non-blocking: a full
+	// buffer drops the delta, which the next snapshot self-heals. Never blocks
+	// the inference path.
+	if len(delta) > 0 && s.liveHub != nil {
+		select {
+		case s.liveHub.outcomeCh <- delta:
+		default:
 		}
 	}
 }

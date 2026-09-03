@@ -187,6 +187,8 @@ Requires Docker and Docker Compose.
 
    Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy.
 
+> **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall. The stream is in-process and single-instance by design — it does not span multiple Tiller containers.
+
 > The repository's `docker-compose.yml` additionally runs the container read-only, drops all Linux capabilities, mounts a scratch `tmpfs`, and defines a container healthcheck — prefer it (or copy those settings) for internet-exposed deployments.
 
 ### Option 2 — Build from source

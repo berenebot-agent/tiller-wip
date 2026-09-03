@@ -1,3 +1,4 @@
+import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null };
@@ -7,13 +8,13 @@ const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
-const tok = (tokens, pct) => {
-  if (!tokens && pct == null) return '—';
+const tok = (tokens, pct, window) => {
+  if (!tokens && pct == null) return `<span class="tok" data-window="${window}">—</span>`;
   const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
   const cache = (pct != null && !isNaN(pct))
     ? `<span class="cache-hit"><b>${Math.round(pct)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
-  return `<span class="tok">${num}${cache}</span>`;
+  return `<span class="tok" data-window="${window}">${num}${cache}</span>`;
 };
 const rowCache = (row) => {
   const inp = row.input_tokens;
@@ -44,8 +45,8 @@ async function api(path, options = {}) {
   return payload;
 }
 
-function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/clients'); }
-function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; navigate(state.view); }
+function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/clients'); liveStop(); }
+function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; liveStart(); navigate(state.view); }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
 
@@ -163,8 +164,8 @@ function toggleGroup(event) {
   };
   revealBatch();
 }
-const groupRows = (rows, key, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}">${row}</tr>`).join('')}`;
-function renderModels() { const shown = state.models.filter(item => $('#show-retired').checked || item.available); $('#models-empty').hidden = shown.length > 0; const byProvider = new Map(); shown.forEach(model => { if (!byProvider.has(model.provider_name)) byProvider.set(model.provider_name, []); byProvider.get(model.provider_name).push(model); }); const html = [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([provider, models]) => { const available = models.filter(m => m.available).length; const retired = models.length - available; const collapsed = collapsedModels.has(provider); const note = retired ? `${retired} retired` : 'provider'; const actions = `<button class="btn btn-small btn-secondary" data-refresh-models="${h(models[0].provider_id)}">Refresh models</button>`; return groupBanner('models', provider, provider, note, `${available} available`, actions) + groupRows(models.map(model => `<td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td>`), provider, collapsed); }).join(''); $('#models-body').innerHTML = html; $$('.group-toggle', $('#models-body')).forEach(header => header.onclick = toggleGroup); $$('[data-refresh-models]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); refreshModels(button.dataset.refreshModels); }); $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'); }); $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); }); }
+const groupRows = (rows, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}"${row.attr || ''}>${row.html}</tr>`).join('')}`;
+function renderModels() { const shown = state.models.filter(item => $('#show-retired').checked || item.available); $('#models-empty').hidden = shown.length > 0; const byProvider = new Map(); shown.forEach(model => { if (!byProvider.has(model.provider_name)) byProvider.set(model.provider_name, []); byProvider.get(model.provider_name).push(model); }); const html = [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([provider, models]) => { const available = models.filter(m => m.available).length; const retired = models.length - available; const collapsed = collapsedModels.has(provider); const note = retired ? `${retired} retired` : 'provider'; const actions = `<button class="btn btn-small btn-secondary" data-refresh-models="${h(models[0].provider_id)}">Refresh models</button>`;     return groupBanner('models', provider, provider, note, `${available} available`, actions) + groupRows(models.map(model => ({ html: `<td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td>` })), collapsed); }).join(''); $('#models-body').innerHTML = html; $$('.group-toggle', $('#models-body')).forEach(header => header.onclick = toggleGroup); $$('[data-refresh-models]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); refreshModels(button.dataset.refreshModels); }); $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'); }); $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); }); }
 
 async function loadVirtual(search = $('#virtual-search').value) {
   const [groups, virtualModels, providersResult, modelsResult, usage] = await Promise.all([
@@ -179,28 +180,23 @@ const RESOLUTION_ICONS = {
   warn: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h6"/></svg>',
   neutral: '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="2.4" fill="currentColor"/></svg>'
 };
-function resolutionIndicator(target) {
+function resolutionStatus(target) {
   const key = target.provider_model_id || target.target_model_id;
   const legacyKey = `${target.provider_name}/${target.upstream_model_id}`;
   const last = state.usage?.target_last_outcome?.[key];
-  const status = last
-    ? !last.at
-      ? ['neutral', 'No activity recorded']
-      : (Date.now() - new Date(last.at).getTime()) > RESOLUTION_STALE_MS
-        ? ['neutral', 'No activity in 24h']
-        : last.is_success
-          ? ['good', 'Resolving successfully']
-          : ['bad', 'Last request failed']
-    : (() => {
-      const health = state.usage?.target_health?.[legacyKey];
-      return health === undefined
-        ? ['neutral', 'No activity recorded']
-        : !health.success_24h
-          ? ['bad', 'No successful resolution in the last 24 hours']
-          : health.failure_1h
-            ? ['warn', 'Failures recorded in the last hour']
-            : ['good', 'Resolving successfully'];
-      })();
+  if (last) {
+    if (!last.at) return ['neutral', 'No activity recorded'];
+    if ((Date.now() - new Date(last.at).getTime()) > RESOLUTION_STALE_MS) return ['neutral', 'No activity in 24h'];
+    return last.is_success ? ['good', 'Resolving successfully'] : ['bad', 'Last request failed'];
+  }
+  const health = state.usage?.target_health?.[legacyKey];
+  if (health === undefined) return ['neutral', 'No activity recorded'];
+  if (!health.success_24h) return ['bad', 'No successful resolution in the last 24 hours'];
+  if (health.failure_1h) return ['warn', 'Failures recorded in the last hour'];
+  return ['good', 'Resolving successfully'];
+}
+function resolutionIndicator(target) {
+  const status = resolutionStatus(target);
   return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[1]}" title="${status[1]}">${RESOLUTION_ICONS[status[0]]}</span>`;
 }
 function renderVirtual() {
@@ -215,7 +211,7 @@ function renderVirtual() {
     const broken = models.filter(m => !m.available).length;
     const note = broken ? `${broken} broken target` : (models.length ? 'group' : 'empty group');
     const actions = grp ? `<button class="btn btn-small btn-secondary" data-group-edit="${h(grp.id)}">Edit</button><button class="btn btn-small btn-danger" data-group-delete="${h(grp.id)}">Delete</button>` : '';
-    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return `<td><code class="model-id">${h(model.canonical_model_id)}</code><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${badge(model.available, model.available ? 'Routable' : 'Broken target', model.available ? 'good' : 'bad')}${model.warning ? `<span class="error-text">${h(model.warning)}</span>` : ''}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>`; }), name, collapsed);
+    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><code class="model-id">${h(model.canonical_model_id)}</code><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${badge(model.available, model.available ? 'Routable' : 'Broken target', model.available ? 'good' : 'bad')}${model.warning ? `<span class="error-text">${h(model.warning)}</span>` : ''}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
   }).join('');
   $('#virtual-body').innerHTML = html;
   $$('.group-toggle', $('#virtual-body')).forEach(header => header.onclick = toggleGroup);
@@ -533,7 +529,7 @@ function clientCard(client) {
       ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
       <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
       ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
-      <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</div></div>
+      <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
         <button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button>
@@ -547,7 +543,7 @@ function clientRow(client) {
   const routeCell = client.type === 'single'
     ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
     : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-  return `<td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>`;
+  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
@@ -559,7 +555,7 @@ function renderClients() {
     const catalogues = clients.length - singles;
     const note = singles && catalogues ? `${catalogues} catalogue · ${singles} single` : singles ? `${singles} single` : `${catalogues} catalogue`;
     const collapsed = collapsedClients.has(group);
-    return groupBanner('clients', group, group, note, `${clients.length}`, '') + groupRows(clients.map(clientRow), group, collapsed);
+    return groupBanner('clients', group, group, note, `${clients.length}`, '') + groupRows(clients.map(clientRow), collapsed);
   }).join('');
   $$('.group-toggle', $('#clients-body')).forEach(header => header.onclick = toggleGroup);
   $$('[data-inline-route]').forEach(box => mountInlineRoutePicker(box.closest('.client-route-picker'), state.clients.find(item => item.id === box.closest('.client-route-picker').dataset.clientId)));
@@ -842,5 +838,142 @@ $('#copy-secret').onclick = async () => { const text = $('#secret-value').textCo
 $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#secret-dialog').close(); };
 
 document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); const input = $(`#view-${state.view} input[type="search"]`); input?.focus(); } });
+
+// === LIVE REFRESH ===
+// A single session-lifetime SSE connection pushes outcome deltas (resolution
+// icons) and usage snapshots (token/cache counters). DOM writes are suppressed
+// while a dialog is open and while the active view does not render the touched
+// cells; state is always kept current so a reconcile paint on close/nav is
+// instant.
+const live = new LiveStream('/api/admin/live');
+let livePendingReconcile = false;
+const liveDialogOpen = () => document.querySelector('dialog[open]') !== null;
+const liveViewActive = (...views) => views.includes(state.view);
+
+function markChanged(el) {
+  if (!el || el.classList.contains('is-flip')) return;
+  el.classList.add('is-flip');
+  el.addEventListener('animationend', () => el.classList.remove('is-flip'), { once: true });
+}
+
+// Patch a single token cell (Mtok + Cache) from the current state. Flips only
+// the tile whose rendered text actually changed. When the cell is currently a
+// bare dash (no number/cache elements), rebuild it so a value can appear.
+function patchTokenCell(cell, tokens, pct) {
+  const num = tokens ? `${(tokens / 1e6).toFixed(2)}` : '';
+  const cache = (pct != null && !isNaN(pct)) ? `${Math.round(pct)}%` : '';
+  const numEl = $('b', cell);
+  const cacheEl = $('.cache-hit b', cell);
+  const cacheWrap = $('.cache-hit', cell);
+  if (!numEl && !cacheEl) {
+    cell.innerHTML = tok(tokens, pct, cell.dataset.window);
+    return;
+  }
+  if (numEl && numEl.textContent !== num) {
+    numEl.textContent = num;
+    markChanged(numEl);
+  }
+  if (cacheEl && cacheEl.textContent !== cache) {
+    cacheEl.textContent = cache;
+    markChanged(cacheEl);
+    if (cacheWrap) {
+      cacheWrap.classList.remove('is-up', 'is-down');
+      if (cache !== '') cacheWrap.classList.add(pct >= 50 ? 'is-up' : 'is-down');
+    }
+  }
+}
+
+// Patch the resolution icon for one target line from the current state.
+function patchResolution(line, target) {
+  const [status, label] = resolutionStatus(target);
+  const indicator = $('.resolution-indicator', line);
+  if (!indicator) return;
+  const cls = `resolution-${status}`;
+  if (!indicator.classList.contains(cls)) {
+    indicator.className = `resolution-indicator ${cls}`;
+    indicator.innerHTML = RESOLUTION_ICONS[status];
+    indicator.setAttribute('aria-label', label);
+    indicator.setAttribute('title', label);
+  }
+}
+
+// Reconcile paint: apply the current state to every live cell in the active
+// view. Called on snapshot, on dialog close, and on view navigation.
+function reconcileLive() {
+  if (liveDialogOpen()) { livePendingReconcile = true; return; }
+  livePendingReconcile = false;
+  if (liveViewActive('virtual')) {
+    state.virtualModels.forEach(model => {
+      const row = $(`tr[data-virtual-id="${CSS.escape(model.id)}"]`);
+      if (!row) return;
+      (model.targets || []).forEach(target => {
+        const key = target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`;
+        const line = $(`[data-target-key="${CSS.escape(key)}"]`, row);
+        if (line) patchResolution(line, target);
+      });
+      const canonical = model.canonical_model_id;
+      ['1h', '24h', '7d'].forEach(window => {
+        const cell = $(`.tok[data-window="${window}"]`, row);
+        if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window]);
+      });
+    });
+  }
+  if (liveViewActive('clients')) {
+    state.clients.forEach(client => {
+      const row = $(`tr[data-client-id="${CSS.escape(client.id)}"]`);
+      if (row) {
+        ['1h', '24h', '7d'].forEach(window => {
+          const cell = $(`.tok[data-window="${window}"]`, row);
+          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
+        });
+      }
+      const card = $(`article.client-card[data-client-id="${CSS.escape(client.id)}"]`);
+      if (card) {
+        ['1h', '24h', '7d'].forEach(window => {
+          const cell = $(`.tok[data-window="${window}"]`, card);
+          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
+        });
+      }
+    });
+  }
+}
+
+live.on('outcome', payload => {
+  if (!state.usage) state.usage = {};
+  if (!state.usage.target_last_outcome) state.usage.target_last_outcome = {};
+  Object.assign(state.usage.target_last_outcome, payload);
+  if (liveViewActive('virtual') && !liveDialogOpen()) {
+    state.virtualModels.forEach(model => (model.targets || []).forEach(target => {
+      const key = target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`;
+      if (!(key in payload)) return;
+      const row = $(`tr[data-virtual-id="${CSS.escape(model.id)}"]`);
+      const line = row && $(`[data-target-key="${CSS.escape(key)}"]`, row);
+      if (line) patchResolution(line, target);
+    }));
+  }
+});
+
+live.on('snapshot', payload => {
+  if (!state.usage) state.usage = {};
+  ['target_last_outcome', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
+    if (payload[key] !== undefined) state.usage[key] = payload[key];
+  });
+  reconcileLive();
+});
+
+// Reconcile once when the last dialog closes.
+$$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
+  if (!liveDialogOpen() && livePendingReconcile) reconcileLive();
+}));
+
+// Reconcile on view navigation so a freshly-rendered view reflects current state.
+const liveNavigate = navigate;
+navigate = function (view) {
+  liveNavigate(view);
+  if (liveViewActive('virtual', 'clients')) reconcileLive();
+};
+
+function liveStart() { live.open(); }
+function liveStop() { live.close(); }
 
 (async function initialise() { state.view = viewFromHash(); try { const session = await api('/api/admin/session'); showApp(session); } catch { showLogin(); } })();
