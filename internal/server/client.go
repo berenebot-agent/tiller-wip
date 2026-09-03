@@ -265,11 +265,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	originalBody := append([]byte(nil), body...)
 	start := time.Now()
 	streamed := false
+	clientTracked := false
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
 		if route.Virtual {
 			s.inflight.end(route.RouteModelID, streamed)
+		}
+		if clientTracked {
+			s.inflight.clientEnd(row.clientKeyID, streamed)
 		}
 		s.writeLog(context.Background(), row)
 	}()
@@ -294,6 +298,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
+	s.inflight.clientStart(row.clientKeyID)
+	clientTracked = true
 	if route.Virtual {
 		s.inflight.start(route.RouteModelID)
 	}
@@ -510,6 +516,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if route.Virtual {
 				s.inflight.streaming(route.RouteModelID)
 			}
+			s.inflight.clientStreaming(row.clientKeyID)
 		}
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
@@ -526,6 +533,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if route.Virtual {
 			s.inflight.streaming(route.RouteModelID)
 		}
+		s.inflight.clientStreaming(row.clientKeyID)
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
 		rewriteSSE(w, reader, route.UpstreamModelID, route.RequestedModel, usage)

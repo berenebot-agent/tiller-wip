@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {} };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {}, inflightClients: {} };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
@@ -250,6 +250,52 @@ function patchVirtualSpinner(row, activity) {
   const label = streaming ? 'Streaming response' : active ? 'Waiting for upstream response' : 'Routable';
   roundel.setAttribute('aria-label', label);
   roundel.title = label;
+}
+
+function clientRoundelLabel(client, activity) {
+  if (!client.enabled) return 'Disabled';
+  const active = activity?.active > 0;
+  const streaming = active && activity?.streaming > 0;
+  return streaming ? 'Streaming response' : active ? 'Waiting for upstream response' : 'Enabled';
+}
+
+function applyClientRoundel(roundel, client, activity) {
+  if (!roundel) return;
+  if (!client.enabled) {
+    roundel.classList.remove('status-roundel-active');
+    roundel.classList.add('status-roundel-broken');
+  } else {
+    roundel.classList.remove('status-roundel-broken');
+    roundel.classList.toggle('status-roundel-active', activity?.active > 0);
+  }
+  const label = clientRoundelLabel(client, activity);
+  roundel.setAttribute('aria-label', label);
+  roundel.title = label;
+}
+
+function patchClientActivityRows() {
+  $$('tr[data-client-id]', $('#clients-body')).forEach(row => {
+    const client = state.clients.find(item => item.id === row.dataset.clientId);
+    if (!client) return;
+    const roundel = $('.status-roundel', row);
+    if (!roundel) return;
+    roundel.classList.toggle('status-roundel-broken', !client.enabled);
+    applyClientRoundel(roundel, client, state.inflightClients[client.id]);
+  });
+  $$('.client-card[data-client-id]', $('#clients-cards')).forEach(card => {
+    const client = state.clients.find(item => item.id === card.dataset.clientId);
+    if (!client) return;
+    const roundel = $('.status-roundel', card);
+    if (!roundel) return;
+    roundel.classList.toggle('status-roundel-broken', !client.enabled);
+    applyClientRoundel(roundel, client, state.inflightClients[client.id]);
+  });
+}
+
+function patchClientRoundelRow(row) {
+  const client = state.clients.find(item => item.id === row.dataset.clientId);
+  if (!client) return;
+  applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
 }
 
 const capabilityNumber = value => value ? new Intl.NumberFormat().format(value) : 'Not reported';
@@ -535,7 +581,7 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('scroll', repositionOpenLists);
 }
 function clientCard(client) {
-  const statusDot = `<span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span>`;
+  const statusDot = `<span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span>`;
   const routeAction = client.type === 'single'
     ? `<button class="btn btn-small btn-secondary" data-client-route="${h(client.id)}">Change route</button>`
     : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Catalogue permissions</button>`;
@@ -573,7 +619,7 @@ function clientRow(client) {
   const routeCell = client.type === 'single'
     ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
     : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-dot ${client.enabled ? 'status-dot-enabled' : 'status-dot-disabled'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
+  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
@@ -587,6 +633,7 @@ function renderClients() {
     const collapsed = collapsedClients.has(group);
     return groupBanner('clients', group, group, note, `${clients.length}`, '') + groupRows(clients.map(clientRow), collapsed);
   }).join('');
+  patchClientActivityRows();
   $$('.group-toggle', $('#clients-body')).forEach(header => header.onclick = toggleGroup);
   $$('[data-inline-route]').forEach(box => mountInlineRoutePicker(box.closest('.client-route-picker'), state.clients.find(item => item.id === box.closest('.client-route-picker').dataset.clientId)));
   $$('[data-client-models]').forEach(button => button.onclick = () => openPermissions(state.clients.find(item => item.id === button.dataset.clientModels)));
@@ -984,6 +1031,7 @@ function reconcileLive() {
           const cell = $(`.tok[data-window="${window}"]`, row);
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
+        applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
       }
       const card = $(`article.client-card[data-client-id="${CSS.escape(client.id)}"]`);
       if (card) {
@@ -991,6 +1039,7 @@ function reconcileLive() {
           const cell = $(`.tok[data-window="${window}"]`, card);
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
+        applyClientRoundel($('.status-roundel', card), client, state.inflightClients[client.id]);
       }
     });
   }
@@ -1017,18 +1066,37 @@ live.on('snapshot', payload => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
   if (payload.modules?.inflight !== undefined) state.inflight = payload.modules.inflight || {};
+  if (payload.modules?.inflight_clients !== undefined) state.inflightClients = payload.modules.inflight_clients || {};
   reconcileLive();
 });
 
 live.on('activity', delta => {
-  const current = state.inflight[delta.id] || { active: 0, streaming: 0 };
-  current.active += delta.active || 0;
-  current.streaming += delta.streaming || 0;
-  if (current.active <= 0 && current.streaming <= 0) delete state.inflight[delta.id];
-  else state.inflight[delta.id] = current;
-  if (liveViewActive('virtual') && !liveDialogOpen()) {
-    const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
-    if (row) patchVirtualSpinner(row, state.inflight[delta.id]);
+  if (delta.id) {
+    const current = state.inflight[delta.id] || { active: 0, streaming: 0 };
+    current.active += delta.active || 0;
+    current.streaming += delta.streaming || 0;
+    if (current.active <= 0 && current.streaming <= 0) delete state.inflight[delta.id];
+    else state.inflight[delta.id] = current;
+    if (liveViewActive('virtual') && !liveDialogOpen()) {
+      const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
+      if (row) patchVirtualSpinner(row, state.inflight[delta.id]);
+    }
+  }
+  if (delta.client_id) {
+    const current = state.inflightClients[delta.client_id] || { active: 0, streaming: 0 };
+    current.active += delta.active || 0;
+    current.streaming += delta.streaming || 0;
+    if (current.active <= 0 && current.streaming <= 0) delete state.inflightClients[delta.client_id];
+    else state.inflightClients[delta.client_id] = current;
+    if (liveViewActive('clients') && !liveDialogOpen()) {
+      const row = $(`tr[data-client-id="${CSS.escape(delta.client_id)}"]`);
+      if (row) patchClientRoundelRow(row);
+      const card = $(`article.client-card[data-client-id="${CSS.escape(delta.client_id)}"]`);
+      if (card) {
+        const client = state.clients.find(item => item.id === delta.client_id);
+        if (client) applyClientRoundel($('.status-roundel', card), client, state.inflightClients[delta.client_id]);
+      }
+    }
   }
 });
 

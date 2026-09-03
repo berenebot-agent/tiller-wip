@@ -86,10 +86,11 @@ func TestLiveStreamsOutcomeAndSnapshot(t *testing.T) {
 	// Drive a real request so recordLastOutcome emits a delta.
 	clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hi"}}})
 
-	// Expect an outcome delta for the attempted target.
+	// In-flight activity deltas (client + virtual) may arrive before the outcome
+	// delta, so skip them and wait for the first outcome event.
 	event, data = readSSE(t, reader)
-	if event != "outcome" {
-		t.Fatalf("expected outcome event, got %q", event)
+	for event != "outcome" {
+		event, data = readSSE(t, reader)
 	}
 	var delta map[string]lastOutcome
 	if err := json.Unmarshal([]byte(data), &delta); err != nil {

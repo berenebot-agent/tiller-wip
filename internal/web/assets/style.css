@@ -29,13 +29,12 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .key-info-cell small{display:block;color:var(--muted);margin-top:2px;font-size:11px}
 .client-name-line{display:flex;align-items:center;gap:8px}
 .client-name-line strong{display:inline}
-.status-dot{display:inline-block;flex:none;width:14px;height:14px;border-radius:50%;position:relative;transition:background .15s,box-shadow .15s}
-.status-dot-enabled{background:var(--green);box-shadow:0 0 0 3px var(--green-bg)}
-.status-dot-disabled{background:var(--red);box-shadow:0 0 0 3px var(--red-bg)}
-.status-roundel{display:inline-block;flex:none;width:14px;height:14px;border-radius:50%;position:relative;background:var(--green);box-shadow:0 0 0 3px var(--green-bg);transition:background .15s,box-shadow .15s}
+.status-roundel{display:inline-block;flex:none;width:18px;height:18px;border-radius:50%;position:relative;background:var(--green);box-shadow:0 0 0 3px var(--green-bg);transition:background .15s,box-shadow .15s}
 .status-roundel.status-roundel-broken{background:var(--red);box-shadow:0 0 0 3px var(--red-bg)}
-.status-roundel.status-roundel-active{background:transparent;box-shadow:none}
-.status-roundel .status-roundel-spin{position:absolute;inset:0;display:none;border-radius:50%;border:2.4px solid #c9d8e2;border-top-color:var(--blue);animation:status-roundel-spin 0.85s linear infinite}
+.status-roundel.status-roundel-active{background:transparent;box-shadow:0 0 0 1px var(--blue-pale)}
+.status-roundel .status-roundel-spin{position:absolute;inset:1px;display:none;border-radius:50%;border:1.2px solid var(--blue)}
+.status-roundel .status-roundel-spin:before{content:"";position:absolute;inset:-1.6px;border-radius:50%;border:1.6px solid transparent;border-top-color:var(--blue);border-right-color:var(--blue);animation:status-roundel-spin 1.05s linear infinite}
+.status-roundel .status-roundel-spin:after{content:"";position:absolute;left:50%;top:50%;width:5px;height:5px;margin:-2.5px 0 0 -2.5px;border-radius:50%;background:var(--blue)}
 .status-roundel.status-roundel-active .status-roundel-spin{display:block}
 @keyframes status-roundel-spin{to{transform:rotate(360deg)}}
 .target-summary{margin-top:2px;line-height:1.45}
@@ -67,7 +66,7 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .client-card{border:1px solid var(--line);background:var(--paper);box-shadow:var(--shadow);border-radius:4px;margin-bottom:12px;overflow:hidden}
 .client-card-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"dot name chevron" "dot desc chevron" "dot fp chevron";gap:2px 10px;align-items:center;width:100%;padding:14px;border:0;background:transparent;text-align:left;cursor:pointer}
 .client-card-head:hover{background:#f8fbfd}
-.client-card-head .status-dot{grid-area:dot}
+.client-card-head .status-roundel{grid-area:dot}
 .client-card-name{grid-area:name;color:var(--navy);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .client-card-desc{grid-area:desc;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .client-card-head .secret-fingerprint{grid-area:fp;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
