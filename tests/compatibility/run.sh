@@ -36,6 +36,8 @@ stop_containers() {
 
 cleanup() {
     stop_containers
+    docker run --rm -v "$sdk_data_dir:/d" --user root alpine chown -R 1000:1000 /d >/dev/null 2>&1 || true
+    docker run --rm -v "$hermes_data_dir:/d" --user root alpine chown -R 1000:1000 /d >/dev/null 2>&1 || true
     rm -rf "$sdk_data_dir" "$hermes_data_dir" || true
     # Always print where the log lives, even on early failure (e.g. when the
     # build stage aborts before sdk/hermes statuses are assigned). Lets the
