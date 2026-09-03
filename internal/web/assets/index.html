@@ -96,6 +96,8 @@
 
   <dialog id="export-dialog" class="export-dialog"><section><header><div><p class="eyebrow">EXPORT ACTIVITY</p><h2>Export CSV</h2></div><button class="dialog-close" id="close-export" aria-label="Close">×</button></header><div class="export-options"><button class="btn" data-export-period="24h">Last 24 hours</button><button class="btn" data-export-period="7d">Last 7 days</button><button class="btn" data-export-period="30d">Last 30 days</button><button class="btn btn-primary" data-export-period="all">All time</button></div></section></dialog>
 
+  <dialog id="error-dialog" class="error-dialog"><section><header><div><p class="eyebrow">ERROR DETAIL</p><h2 id="error-title">Error</h2></div><button class="dialog-close" id="close-error" aria-label="Close">×</button></header><div class="error-content"><pre><code id="error-body"></code></pre></div><p class="copy-state" id="error-copy-state" aria-live="polite"></p><footer><button class="btn btn-secondary" id="copy-error">Copy</button><button class="btn btn-primary" id="done-error">Done</button></footer></section></dialog>
+
   <dialog id="capabilities-dialog" class="capabilities-dialog"><section><header><div><p class="eyebrow">UPSTREAM CAPABILITIES</p><h2 id="capabilities-title">Capabilities</h2></div><button class="dialog-close" id="close-capabilities" aria-label="Close">×</button></header><div id="capabilities-content" class="capabilities-content"></div><footer><button class="btn btn-secondary" id="refresh-capabilities">Refresh catalogue</button><button class="btn btn-primary" id="done-capabilities">Done</button></footer></section></dialog>
 
   <script type="module" src="/app.js"></script>
