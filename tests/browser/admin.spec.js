@@ -1261,3 +1261,122 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
   const title = await requestCell.getAttribute('title');
   expect(title?.length || 0).toBeGreaterThan(8);
 });
+
+test('virtual-model target combobox: exact upstream_model_id match auto-accepts without an explicit pick', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-exact-match';
+  const provider = await createProvider(page, csrf, providerName);
+
+  // Add a second upstream model so we can prove exact-match resolves to it,
+  // not whatever the combobox pre-selects.
+  await mockAddModel(page, 'extra-upstream');
+  await refreshProviderApi(page, csrf, provider.id);
+
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const allModels = (await modelsRes.json()).data;
+  const extra = allModels.find(m => m.provider_name === providerName && m.upstream_model_id === 'extra-upstream');
+  expect(extra).toBeTruthy();
+  const mock = allModels.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
+  expect(mock).toBeTruthy();
+
+  // Seed a virtual group so the create dialog has a group to pick.
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-exact-match-vg' } });
+  expect(groupRes.status()).toBe(201);
+
+  await page.getByRole('link', { name: 'Virtual Models' }).click();
+  await page.getByRole('button', { name: '+ Virtual model' }).click();
+  await expect(page.getByRole('heading', { name: 'Create virtual model' })).toBeVisible();
+
+  const fixedInput = page.locator('[data-fixed-target] input[type="text"]');
+  const fixedHidden = page.locator('[data-fixed-target] input[type="hidden"]');
+  await expect(fixedInput).toBeVisible();
+
+  // The dialog pre-selects the first option in the list. Capture it so we
+  // can later prove the exact-match resolution landed on a different one.
+  const preSelectedId = await fixedHidden.inputValue();
+  expect(preSelectedId).toBeTruthy();
+  expect(preSelectedId).not.toBe(extra.id);
+
+  // Clear the visible field, then type the exact upstream_model_id of the
+  // second model. The hidden provider_model_id should auto-resolve to it
+  // without an explicit dropdown pick.
+  await fixedInput.click();
+  await fixedInput.press('Control+A');
+  await fixedInput.press('Delete');
+  await expect(fixedHidden).toHaveValue('');
+  await fixedInput.fill('extra-upstream');
+  await expect(fixedHidden).toHaveValue(extra.id);
+  await expect(fixedHidden).not.toHaveValue(preSelectedId);
+
+  // Submitting the create form should succeed; the new virtual model routes
+  // to the second model, not the pre-selected first option.
+  await page.locator('#entity-form').getByLabel('Virtual model name').fill('exact-match-route');
+  await page.locator('#entity-form').getByLabel('Virtual group').selectOption({ label: 'vm-exact-match-vg' });
+  // Sanity: the hidden target_model field must still be populated right up
+  // until we click Create; the exact-match reconciliation set it on input.
+  await expect(fixedHidden).toHaveValue(extra.id);
+  await page.getByRole('button', { name: 'Create route' }).click();
+  // If the dialog stays open, surface the server error so the failure is
+  // self-explanatory in the log.
+  await page.locator('#form-dialog').waitFor({ state: 'hidden', timeout: 8000 }).catch(async () => {
+    const err = (await page.locator('#dialog-error').textContent()) || '<no error>';
+    const hidden = await fixedHidden.inputValue();
+    throw new Error(`Create dialog did not close; server error: ${err}; hidden=${hidden}`);
+  });
+
+  const listRes = await page.request.get('/api/admin/virtual-models?search=exact-match-route');
+  expect(listRes.ok()).toBeTruthy();
+  const found = (await listRes.json()).data.find(m => m.canonical_model_id === 'vm-exact-match-vg/exact-match-route');
+  expect(found).toBeTruthy();
+  expect(found.targets[0].provider_model_id).toBe(extra.id);
+
+  // Cleanup: remove the virtual model and group, plus the extra upstream model.
+  await page.request.delete(`/api/admin/virtual-models/${found.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-exact-match-vg')).json();
+  const group = groupList.data.find(g => g.name === 'vm-exact-match-vg');
+  if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await mockRemoveModel(page, 'extra-upstream');
+  await refreshProviderApi(page, csrf, provider.id);
+});
+
+test('virtual-model target combobox: non-matching text still blocks submission', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-nomatch';
+  const provider = await createProvider(page, csrf, providerName);
+
+  // Seed a virtual group so the create dialog has a group to pick.
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-nomatch-vg' } });
+  expect(groupRes.status()).toBe(201);
+
+  await page.getByRole('link', { name: 'Virtual Models' }).click();
+  await page.getByRole('button', { name: '+ Virtual model' }).click();
+  await expect(page.getByRole('heading', { name: 'Create virtual model' })).toBeVisible();
+
+  const fixedInput = page.locator('[data-fixed-target] input[type="text"]');
+  const fixedHidden = page.locator('[data-fixed-target] input[type="hidden"]');
+  await expect(fixedInput).toBeVisible();
+
+  // Clear the field, then type a string that doesn't match any upstream
+  // model. Hidden value must stay empty and submit must error.
+  await fixedInput.click();
+  await fixedInput.press('Control+A');
+  await fixedInput.press('Delete');
+  await expect(fixedHidden).toHaveValue('');
+  await fixedInput.fill('not-a-real-model-xyz');
+  await expect(fixedHidden).toHaveValue('');
+
+  await page.locator('#entity-form').getByLabel('Virtual model name').fill('no-match-route');
+  await page.getByRole('button', { name: 'Create route' }).click();
+  await expect(page.locator('#dialog-error')).toContainText('Choose a target model.');
+  await expect(page.locator('#form-dialog')).toBeVisible();
+
+  // Cancel and clean up the group so we leave the suite tidy.
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-nomatch-vg')).json();
+  const group = groupList.data.find(g => g.name === 'vm-nomatch-vg');
+  if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+});
