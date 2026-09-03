@@ -182,23 +182,16 @@ const RESOLUTION_STALE_MS = 24 * 3600 * 1000;
 const RESOLUTION_ICONS = {
   good: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 6.5l2.5 2.5 4.5-5.5"/></svg>',
   bad: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3.4 3.4l5.2 5.2M8.6 3.4l-5.2 5.2"/></svg>',
-  warn: '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h6"/></svg>',
   neutral: '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="2.4" fill="currentColor"/></svg>'
 };
 function resolutionStatus(target) {
   const key = target.provider_model_id || target.target_model_id;
   const legacyKey = `${target.provider_name}/${target.upstream_model_id}`;
-  const last = state.usage?.target_last_outcome?.[key];
-  if (last) {
-    if (!last.at) return ['neutral', 'No activity recorded'];
-    if ((Date.now() - new Date(last.at).getTime()) > RESOLUTION_STALE_MS) return ['neutral', 'No activity in 24h'];
-    return last.is_success ? ['good', 'Resolving successfully'] : ['bad', 'Last request failed'];
-  }
-  const health = state.usage?.target_health?.[legacyKey];
-  if (health === undefined) return ['neutral', 'No activity recorded'];
-  if (!health.success_24h) return ['bad', 'No successful resolution in the last 24 hours'];
-  if (health.failure_1h) return ['warn', 'Failures recorded in the last hour'];
-  return ['good', 'Resolving successfully'];
+  const last = state.usage?.target_last_outcome?.[key]
+            || state.usage?.target_last_outcome?.[legacyKey];
+  if (!last || !last.at) return ['neutral', 'No activity recorded'];
+  if ((Date.now() - new Date(last.at).getTime()) > RESOLUTION_STALE_MS) return ['neutral', 'No activity in 24h'];
+  return last.is_success ? ['good', 'Resolving successfully'] : ['bad', 'Last request failed'];
 }
 function resolutionIndicator(target) {
   const status = resolutionStatus(target);
