@@ -144,19 +144,7 @@ Requires Docker and Docker Compose.
    mkdir tiller-router && cd tiller-router
    ```
 
-2. **Create the data directory** (usually just an empty dir):
-
-   ```bash
-   mkdir -p ./data
-   ```
-
-   No `sudo chown` or manual ownership step is needed. The container starts as
-   root at boot, hands `./data` to the runtime user (default `65532:65532`),
-   and then drops privileges before serving — so a fresh root-owned bind mount
-   is self-healing. To run the data directory under your own uid:gid instead,
-   set `TILLER_RUN_UID`/`TILLER_RUN_GID` to your `id -u`/`id -g` (see below).
-
-3. **Create a `docker-compose.yml`:**
+2. **Create a `docker-compose.yml`:**
 
    ```yaml
    services:
@@ -173,7 +161,9 @@ Requires Docker and Docker Compose.
        restart: unless-stopped
    ```
 
-4. **Start Tiller:**
+   That's the whole setup — there is no data-directory step. Docker creates `./data` automatically on first `up`, and the container fixes its ownership itself at boot (starts as root, hands `./data` to the runtime user, drops privileges before serving — default `65532:65532`, or your own uid:gid via `TILLER_RUN_UID`/`TILLER_RUN_GID`, see below).
+
+3. **Start Tiller:**
 
    ```bash
    docker compose up -d
@@ -182,8 +172,6 @@ Requires Docker and Docker Compose.
    Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy.
 
 > **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall. The stream is in-process and single-instance by design — it does not span multiple Tiller containers.
-
-> **Hardening is opt-in.** The repository's `docker-compose.yml` ships the adoption-first posture: the container starts as root at boot, self-fixes `./data` ownership, drops to the runtime user, and serves. It includes a container healthcheck. For internet-exposed deployments you can add a read-only rootfs, drop all Linux capabilities, mount a scratch `tmpfs`, and force a strict non-root user — the file's comments show the exact flags (the image supports them without a shell entrypoint).
 
 ### Option 2 — Build from source
 
@@ -290,6 +278,8 @@ Tiller stores its state under the configured data directory, normally `./data`. 
 Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records are metadata-only and should not contain prompt or response bodies.
 
 For anything other than local-only use: use HTTPS, put Tiller behind a trusted reverse proxy, use a strong admin password, protect the data directory and exported backups, and do not expose the control panel casually to the public internet. See [SECURITY.md](SECURITY.md).
+
+**Container posture — hardening is opt-in.** Out of the box the container already runs with a read-only rootfs, a scratch `/tmp` tmpfs, and `no-new-privileges`: it starts as root at boot, self-fixes `./data` ownership, drops to the runtime user, and serves. For internet-exposed deployments you can go further by adding `cap_drop: [ALL]` and forcing a strict non-root `user:` — the repository's `docker-compose.yml` shows the exact commented block. Two rules: `cap_drop ALL` removes the capabilities the boot-time ownership fix needs, so it requires `user:` alongside it; and with `user:` set, the ownership fix is skipped, so `./data` must already exist owned by that user (otherwise startup fails with a logged remediation telling you the expected owner).
 
 ---
 
