@@ -318,13 +318,17 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 
 	for _, key := range []string{"temperature", "top_p", "stream", "metadata", "tool_choice"} {
 		if v, ok := chat[key]; ok {
-			// Convert tool_choice to Responses format
+			// Convert tool_choice to Responses format. The OpenCode
+			// relay's /v1/responses accepts only the string "auto";
+			// every other value must be omitted, not converted.
 			if key == "tool_choice" {
 				choice, err := convertToolChoice(v)
 				if err != nil {
 					return nil, err
 				}
-				out[key] = choice
+				if choice != nil {
+					out[key] = choice
+				}
 			} else {
 				out[key] = v
 			}
@@ -832,27 +836,14 @@ func chatContentToResponsesParts(value any) ([]any, error) {
 }
 
 func convertToolChoice(value any) (any, error) {
-	switch v := value.(type) {
-	case string:
-		switch v {
-		case "none", "auto", "required":
-			return v, nil
-		default:
-			return nil, unsupportedFeature{"tool_choice " + v}
-		}
-	case map[string]any:
-		if v["type"] != "function" {
-			return nil, unsupportedFeature{"tool_choice"}
-		}
-		fn, _ := v["function"].(map[string]any)
-		name, nameOK := fn["name"].(string)
-		if nameOK && name != "" {
-			return map[string]any{"type": "function", "name": name}, nil
-		}
-		return nil, unsupportedFeature{"named tool_choice"}
-	default:
-		return nil, unsupportedFeature{"tool_choice"}
+	// The Responses wire shape used by chat-completions translation only
+	// supports tool_choice as the string "auto". Every other value
+	// ("none", "required", named function choices, objects) is rejected by
+	// the upstream relay, so return nil and the caller omits the field.
+	if v, ok := value.(string); ok && v == "auto" {
+		return v, nil
 	}
+	return nil, nil
 }
 
 func chatContentToAnthropic(value any) []any {
