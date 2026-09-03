@@ -3,14 +3,12 @@ const { defineConfig } = require('@playwright/test');
 module.exports = defineConfig({
   testDir: '.',
   timeout: 30_000,
-  // NB: retries intentionally 0. These tests create providers/clients under
-  // FIXED names against ONE shared router for the whole run. A retry re-runs
-  // on the same DB where the first (failed) attempt already created those
-  // names, so it fails deterministically with a 409 name_conflict and never
-  // succeeds. Isolation comes from a fresh router per run (see run.sh), not
-  // from per-test retries.
+  // NB: retries intentionally 0. A retry re-runs on the same worker router
+  // where the first attempt may already have created fixed-name fixtures.
+  // Isolation between shards comes from a fresh router per shard (see run.sh).
   retries: 0,
-  workers: 1,
+  workers: Number(process.env.PLAYWRIGHT_WORKERS || 1),
+  fullyParallel: true,
   use: {
     baseURL: process.env.TILLER_BROWSER_BASE_URL || 'http://127.0.0.1:18080',
     trace: 'retain-on-failure',

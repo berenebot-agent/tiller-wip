@@ -8,6 +8,7 @@ import urllib.request
 
 
 BASE = os.environ.get("TILLER_COMPAT_BASE_URL", "http://127.0.0.1:18080")
+MOCK_BASE = os.environ.get("TILLER_COMPAT_MOCK_BASE_URL", "http://127.0.0.1:18081/v1")
 ADMIN_PASSWORD = os.environ["TILLER_COMPAT_ADMIN_PASSWORD"]
 
 jar = http.cookiejar.CookieJar()
@@ -28,7 +29,7 @@ def admin(method, path, body=None, csrf=None):
 
 _, session = admin("POST", "/api/admin/session", {"username": "admin", "password": ADMIN_PASSWORD})
 csrf = session["csrf_token"]
-_, provider = admin("POST", "/api/admin/providers", {"name": "hermes", "type": "generic-openai", "base_url": "http://127.0.0.1:18081/v1", "protocols": ["chat", "responses", "messages"]}, csrf)
+_, provider = admin("POST", "/api/admin/providers", {"name": "hermes", "type": "generic-openai", "base_url": MOCK_BASE, "protocols": ["chat", "responses", "messages"]}, csrf)
 _, models = admin("GET", f"/api/admin/providers/{provider['id']}/models")
 _, group = admin("POST", "/api/admin/virtual-groups", {"name": "hermes-virtual"}, csrf)
 _, virtual = admin("POST", "/api/admin/virtual-models", {"group_id": group["id"], "name": "coding", "target_provider_id": provider["id"], "target_model_id": models["data"][0]["id"]}, csrf)

@@ -6,6 +6,17 @@ const MOCK_BASE = process.env.TILLER_BROWSER_MOCK_BASE_URL || 'http://127.0.0.1:
 // Control origin used to simulate upstream catalogue growth/shrink.
 const MOCK_CONTROL_BASE = MOCK_BASE.replace(/\/v1$/, '');
 
+async function clearActivity(page, csrf) {
+  const res = await page.request.get('/api/admin/client-keys?limit=200');
+  expect(res.ok()).toBeTruthy();
+  for (const client of (await res.json()).data) {
+    const clear = await page.request.delete(`/api/admin/client-keys/${client.id}/activity`, {
+      headers: { 'X-CSRF-Token': csrf }
+    });
+    expect(clear.ok()).toBeTruthy();
+  }
+}
+
 async function login(page) {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
@@ -877,6 +888,7 @@ test('global activity renders across clients, searches, and pages', async ({ pag
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
   const csrf = await adminCsrf(page);
+  await clearActivity(page, csrf);
 
   const providerName = 'browser-activity';
   const modelId = `${providerName}/mock-model`;
@@ -953,6 +965,7 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
   const csrf = await adminCsrf(page);
+  await clearActivity(page, csrf);
 
   const providerName = 'browser-boundary';
   const modelId = `${providerName}/mock-model`;

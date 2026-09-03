@@ -1,4 +1,5 @@
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Optional extra upstream models that can be added/removed at runtime to
@@ -168,4 +169,4 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
 
 
-ThreadingHTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("TILLER_MOCK_PORT", "18081"))), Handler).serve_forever()
