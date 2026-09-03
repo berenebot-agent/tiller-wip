@@ -50,7 +50,7 @@ trap cleanup EXIT INT TERM
 stop_containers
 
 export DOCKER_BUILDKIT=1
-docker build --pull=false -t tiller-router:dev "$repo_dir"
+. "$repo_dir/tests/scripts/build-router.sh"
 docker build --pull=false -t tiller-router-sdk-probes:dev "$repo_dir/tests/compatibility"
 docker build --pull=false -f "$repo_dir/tests/compatibility/hermes.Dockerfile" -t tiller-router-hermes-probe:dev "$repo_dir/tests/compatibility"
 

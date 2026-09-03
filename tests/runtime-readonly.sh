@@ -50,7 +50,7 @@ if ! chown 65532:65532 "$data_dir" 2>/dev/null &&
 fi
 
 echo "==> Building tiller-router:dev"
-docker build -t tiller-router:dev "$repo_dir"
+. "$repo_dir/tests/scripts/build-router.sh"
 
 echo "==> Starting container with deployment runtime settings"
 docker run --rm -d --name "$name" --network host \

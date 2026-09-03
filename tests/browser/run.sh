@@ -81,11 +81,7 @@ stop_containers
 # BuildKit is required for the RUN cache mounts in the test Dockerfiles.
 export DOCKER_BUILDKIT=1
 
-echo "==> Building tiller-router:dev (cached)"
-# --pull=false: never re-download the base image / layer blobs we already have;
-# --build-arg BUILDKIT_INLINE_CACHE is not needed — the docker driver keeps a
-# local build cache, so repeat builds reuse unchanged layers.
-docker build --pull=false -t tiller-router:dev "$repo_dir"
+. "$repo_dir/tests/scripts/build-router.sh"
 
 echo "==> Building tiller-router-browser-tests:dev (cached)"
 docker build --pull=false -t tiller-router-browser-tests:dev "$repo_dir/tests/browser"
