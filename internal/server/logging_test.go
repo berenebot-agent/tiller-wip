@@ -315,6 +315,104 @@ func TestWriteLogBestEffort(t *testing.T) {
 	}
 }
 
+// TestWriteLogTransactionPersistsLogAndAttempt verifies the single-transaction
+// Activity write: one routed request produces exactly one request_logs row and
+// one request_attempts row for its single attempt.
+func TestWriteLogTransactionPersistsLogAndAttempt(t *testing.T) {
+	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("request status %d", resp.StatusCode)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != 200 || len(payload["data"].([]any)) != 1 {
+		t.Fatalf("expected 1 request log, got status=%d payload=%v", status, payload)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != 200 {
+		t.Fatalf("attempts: %d %v", status, payload)
+	}
+	attempts := payload["data"].([]any)
+	if len(attempts) != 1 {
+		t.Fatalf("expected 1 attempt row, got %d: %v", len(attempts), payload)
+	}
+	row := attempts[0].(map[string]any)
+	if row["attempt_number"] != float64(1) || row["provider"] != "provider-a" || row["model"] != "model-a" || row["result"] != "success" {
+		t.Fatalf("attempt row wrong: %v", row)
+	}
+}
+
+// TestWriteLogTransactionPersistsAllFallbackAttempts verifies that an ordered
+// fallback request persists every recorded attempt (the failed first target and
+// the succeeding second one) alongside its single request log row.
+func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
+	api, secret, canonical := notificationTestHarness(t, failUpstream(t), okUpstream(t))
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("fallback request should succeed, got %d", resp.StatusCode)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+	status, payload, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != 200 {
+		t.Fatalf("attempts: %d %v", status, payload)
+	}
+	attempts := payload["data"].([]any)
+	if len(attempts) != 2 {
+		t.Fatalf("expected 2 attempt rows for the fallback, got %d: %v", len(attempts), payload)
+	}
+	first := attempts[0].(map[string]any)
+	if first["attempt_number"] != float64(1) || first["provider"] != "provider-a" || first["result"] != "failed" {
+		t.Fatalf("first (failed) attempt wrong: %v", first)
+	}
+	second := attempts[1].(map[string]any)
+	if second["attempt_number"] != float64(2) || second["provider"] != "provider-b" || second["result"] != "success" {
+		t.Fatalf("second (succeeding) attempt wrong: %v", second)
+	}
+}
+
+// TestWriteLogTransactionFailureLeavesNoPartialRow verifies the all-or-nothing
+// property of the single-transaction write: when the request_logs INSERT fails
+// (here a primary-key collision), the transaction rolls back and no
+// request_attempts row leaks for that request.
+func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
+	_, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('dup-req',?,'provider-a/model-a','chat',0,200,1,'dup-req',?)`, clientID, now); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{db: db}
+	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "dup-req", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: now, attempts: []requestAttempt{{providerModelID: "pm-a", provider: "provider-a", model: "model-a", result: "success", httpStatus: 200, latencyMs: 1}}})
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_attempts WHERE request_log_id='dup-req'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed transaction left attempt rows: count=%d err=%v", count, err)
+	}
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='dup-req'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("request_logs rows for dup-req = %d, want 1 (no duplicate): err=%v", count, err)
+	}
+}
+
+// TestInferenceUnaffectedWhenActivityPersistenceFails verifies the best-effort
+// contract under a real write failure: dropping the Activity tables makes the
+// deferred writeLog INSERT fail, but the inference request still returns 200
+// with a request id. writeLog never fails the request.
+func TestInferenceUnaffectedWhenActivityPersistenceFails(t *testing.T) {
+	api, db, _, secret := loggingTestHarness(t, mockUpstream(t))
+	if _, err := db.SQL.Exec(`DROP TABLE request_attempts`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`DROP TABLE request_logs`); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "still works"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("inference must be unaffected by Activity persistence failure, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-Tiller-Request-Id") == "" {
+		t.Fatal("no X-Tiller-Request-Id on response")
+	}
+}
+
 func TestActivitySearchAndClear(t *testing.T) {
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	for i := 0; i < 3; i++ {

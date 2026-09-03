@@ -69,15 +69,28 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 			s.logger.Warn("request logged as success without a resolved target", "client_request_id", row.clientRequestID, "requested_model", row.requestedModel, "http_status", row.httpStatus)
 		}
 	}
-	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
+	// One transaction per logical request: the request_logs row and all of its
+	// attempt rows commit together or not at all, so a single SQLite fsync (the
+	// implicit-transaction commit) covers the whole write instead of 1+N.
+	tx, err := s.db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
+		return
+	}
 	for i, attempt := range row.attempts {
 		attemptID, err := id.New()
 		if err != nil {
 			continue
 		}
-		_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt); err != nil {
+			return
+		}
 	}
+	_ = tx.Commit()
 }
 
 // recordLastOutcome updates operational target status from actual attempts.
