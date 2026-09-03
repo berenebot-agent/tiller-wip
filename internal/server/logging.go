@@ -36,6 +36,7 @@ type logRow struct {
 	providerRequestID        *string
 	clientRequestID          string
 	errorText                *string
+	errorMessage             *string
 	fallbackUsed             bool
 	fallbackReason           *string
 	attempts                 []requestAttempt
@@ -46,6 +47,7 @@ type requestAttempt struct {
 	providerModelID, provider, model, result, failureClass string
 	httpStatus                                             int
 	latencyMs                                              int64
+	errorMessage                                           *string
 }
 
 // writeLog persists a request log row. It is best-effort: a failed insert logs
@@ -77,8 +79,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		return
 	}
 	defer tx.Rollback() // no-op after a successful Commit
-	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
 		return
 	}
 	for i, attempt := range row.attempts {
@@ -86,7 +88,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		if err != nil {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.errorMessage, attempt.latencyMs, row.createdAt); err != nil {
 			return
 		}
 	}

@@ -64,6 +64,7 @@
 .attempt-route code { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .attempt-route small { display: block; color: var(--muted); font-size: 10px; }
 .attempt-status { font: 700 11px var(--mono); }
+.activity-attempt-message { display: block; color: var(--muted); font-size: 11px; line-height: 1.3; white-space: normal; }
 .attempt-latency { color: var(--muted); font: 10px var(--mono); }
 .attempt-failed .attempt-status { color: var(--red); }
 .attempt-success .attempt-status { color: var(--green); }

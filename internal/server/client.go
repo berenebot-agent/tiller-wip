@@ -375,7 +375,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
 				class = "upstream_timeout"
 			}
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 			if r.Context().Err() != nil {
 				if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 					class = "client_timeout"
@@ -391,6 +391,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual {
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 				inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
 				return
 			}
@@ -402,12 +403,17 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			class := fmt.Sprintf("http_%d", response.StatusCode)
 			var upstreamErrorBody []byte
 			var upstreamErrorReadErr error
-			if !route.Virtual {
-				upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
-			}
+			upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
 			response.Body.Close()
 			attemptCancel()
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			message := ""
+			if upstreamErrorReadErr == nil && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
+				message = extractProviderErrorMessage(upstreamErrorBody)
+			}
+			if message == "" {
+				message = fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
+			}
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(message), latencyMs: time.Since(attemptStart).Milliseconds()})
 			// An upstream HTTP response is an upstream failure regardless of
 			// status. Ordered virtual routes try their next target by default;
 			// router-side failures (for example translation errors) are handled
@@ -415,6 +421,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				row.errorMessage = strPtrIfNonEmpty(message)
 				if upstreamErrorReadErr == nil && !translated && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
 					copySafeResponseHeaders(w.Header(), response.Header)
 					upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
@@ -443,9 +450,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			terminalPreflightClass = class
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			if !route.Virtual || r.Context().Err() != nil {
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 				inferenceError(w, 502, "api_error", class, message, incoming == providers.ProtocolMessages)
 				return
 			}
@@ -475,6 +484,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			return
 		}
 		row.httpStatus = 503
+		for i := len(row.attempts) - 1; i >= 0; i-- {
+			if row.attempts[i].result == "failed" && row.attempts[i].errorMessage != nil {
+				row.errorMessage = row.attempts[i].errorMessage
+				break
+			}
+		}
 		if route.Virtual {
 			row.errorText = strPtr("virtual_model_unavailable")
 			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
@@ -497,6 +512,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		row.httpStatus = resp.StatusCode
 		row.errorText = strPtr(fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode))
+		row.errorMessage = strPtr(fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode))
 		inferenceError(w, resp.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode), incoming == providers.ProtocolMessages)
 		return
 	}
@@ -528,6 +544,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if err != nil {
 		row.httpStatus = 502
 		row.errorText = strPtr("upstream_read_error")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_read_error"))
 		return
 	}
 	extractUsage(body, usage)
