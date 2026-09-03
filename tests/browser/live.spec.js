@@ -17,7 +17,9 @@ test('live refresh: transient errors retain one reconnecting EventSource', async
       close() { this.closed = true; }
     };
   });
-  await page.goto('/');
+  // Load the module on its own so the app singleton does not create another
+  // connection before this lifecycle test starts.
+  await page.goto('/live.js');
 
   const result = await page.evaluate(async () => {
     const { LiveStream } = await import('/live.js');
@@ -27,13 +29,12 @@ test('live refresh: transient errors retain one reconnecting EventSource', async
     };
     const stream = new LiveStream('/api/admin/live');
     document.addEventListener = addEventListener;
-    const before = window.__liveEventSources.length;
     stream.open();
-    const source = window.__liveEventSources[before];
+    const source = stream.es;
     source.onerror();
     return {
       count: window.__liveEventSources.length,
-      owned: stream.es === source,
+      owned: Boolean(source) && stream.es === source && !source.closed,
     };
   });
   expect(result.count).toBe(1);
