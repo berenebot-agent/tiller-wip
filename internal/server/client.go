@@ -266,6 +266,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	start := time.Now()
 	streamed := false
 	clientTracked := false
+	activeTargetID := ""
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
@@ -274,6 +275,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		if clientTracked {
 			s.inflight.clientEnd(row.clientKeyID, streamed)
+		}
+		if activeTargetID != "" {
+			s.inflight.targetEnd(activeTargetID)
 		}
 		s.writeLog(context.Background(), row)
 	}()
@@ -377,8 +381,18 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
+		targetID := candidate.ProviderModelID
+		if targetID == "" {
+			targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
+		}
+		if route.Virtual {
+			s.inflight.targetStart(targetID)
+		}
 		response, e := s.providers.Registry().HTTPClient().Do(req)
 		if e != nil {
+			if route.Virtual {
+				s.inflight.targetEnd(targetID)
+			}
 			attemptCancel()
 			class := "upstream_unreachable"
 			if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
@@ -409,6 +423,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if route.Virtual {
+				s.inflight.targetEnd(targetID)
+			}
 			class := fmt.Sprintf("http_%d", response.StatusCode)
 			response.Body.Close()
 			attemptCancel()
@@ -428,6 +445,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			continue
 		}
 		if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
+			if route.Virtual {
+				s.inflight.targetEnd(targetID)
+			}
 			response.Body.Close()
 			attemptCancel()
 			class := "upstream_read_error"
@@ -451,6 +471,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			continue
 		}
 		route, resp, cancel = candidate, response, attemptCancel
+		if route.Virtual {
+			activeTargetID = targetID
+		}
 		row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 		break
 	}

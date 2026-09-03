@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {}, inflightClients: {} };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {}, inflightClients: {}, inflightTargets: {} };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
@@ -195,7 +195,7 @@ function resolutionStatus(target) {
 }
 function resolutionIndicator(target) {
   const status = resolutionStatus(target);
-  return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[1]}" title="${status[1]}">${RESOLUTION_ICONS[status[0]]}</span>`;
+  return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[1]}" title="${status[1]}">${RESOLUTION_ICONS[status[0]]}<span class="resolution-indicator-spin" aria-hidden="true"></span></span>`;
 }
 function renderVirtual() {
   const searching = ($('#virtual-search').value || '').trim().length > 0;
@@ -992,13 +992,15 @@ function patchResolution(line, target) {
   const indicator = $('.resolution-indicator', line);
   if (!indicator) return;
   const cls = `resolution-${status}`;
-  const needsSwap = !indicator.classList.contains(cls);
+  const key = line.dataset.targetKey;
+  const active = state.inflightTargets[key]?.active > 0;
+  const needsSwap = !indicator.classList.contains(cls) || !$('.resolution-indicator-spin', indicator);
   if (needsSwap) {
-    indicator.className = `resolution-indicator ${cls}`;
-    indicator.innerHTML = RESOLUTION_ICONS[status];
+    indicator.innerHTML = `${RESOLUTION_ICONS[status]}<span class="resolution-indicator-spin" aria-hidden="true"></span>`;
   }
-  indicator.setAttribute('aria-label', label);
-  indicator.setAttribute('title', label);
+  indicator.className = `resolution-indicator ${cls}${active ? ' resolution-active' : ''}`;
+  indicator.setAttribute('aria-label', active ? 'Target request in flight' : label);
+  indicator.setAttribute('title', active ? 'Target request in flight' : label);
 }
 
 // Reconcile paint: apply the current state to every live cell in the active
@@ -1067,6 +1069,7 @@ live.on('snapshot', payload => {
   });
   if (payload.modules?.inflight !== undefined) state.inflight = payload.modules.inflight || {};
   if (payload.modules?.inflight_clients !== undefined) state.inflightClients = payload.modules.inflight_clients || {};
+  if (payload.modules?.inflight_targets !== undefined) state.inflightTargets = payload.modules.inflight_targets || {};
   reconcileLive();
 });
 
@@ -1096,6 +1099,20 @@ live.on('activity', delta => {
         const client = state.clients.find(item => item.id === delta.client_id);
         if (client) applyClientRoundel($('.status-roundel', card), client, state.inflightClients[delta.client_id]);
       }
+    }
+  }
+  if (delta.target_id) {
+    const current = state.inflightTargets[delta.target_id] || { active: 0 };
+    current.active += delta.active || 0;
+    if (current.active <= 0) delete state.inflightTargets[delta.target_id];
+    else state.inflightTargets[delta.target_id] = current;
+    if (liveViewActive('virtual') && !liveDialogOpen()) {
+      $$(`[data-target-key="${CSS.escape(delta.target_id)}"]`, $('#virtual-body')).forEach(line => {
+        const row = line.closest('tr[data-virtual-id]');
+        const model = row && state.virtualModels.find(item => item.id === row.dataset.virtualId);
+        const target = model && (model.targets || []).find(item => (item.provider_model_id || `${item.provider_name}/${item.upstream_model_id}`) === delta.target_id);
+        if (target) patchResolution(line, target);
+      });
     }
   }
 });

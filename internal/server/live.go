@@ -17,7 +17,8 @@ import (
 //   - "outcome": a micro-delta of the in-memory per-target last request
 //     outcomes, emitted the instant a routed request records one. This is what
 //     makes the resolution icons feel live with zero DB cost.
-//   - "activity": a transient in-flight request delta keyed by virtual model ID.
+//   - "activity": transient in-flight request deltas keyed by virtual model,
+//     client key, or provider model ID.
 //   - "snapshot": the full usage/health envelope (last outcomes, 1h/24h health,
 //     token + cache windows). Sent on connect and then on a server-side cadence
 //     so token counters track traffic and any dropped delta self-heals.

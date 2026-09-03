@@ -10,6 +10,7 @@ type inflightState struct {
 type inflightDelta struct {
 	ID        string `json:"id,omitempty"`
 	ClientID  string `json:"client_id,omitempty"`
+	TargetID  string `json:"target_id,omitempty"`
 	Active    int    `json:"active"`
 	Streaming int    `json:"streaming"`
 }
@@ -18,6 +19,7 @@ type inflightTracker struct {
 	mu           sync.Mutex
 	states       map[string]inflightState // keyed by virtual model id
 	clientStates map[string]inflightState // keyed by client key id
+	targetStates map[string]inflightState // keyed by provider model id
 	emit         func(inflightDelta)
 }
 
@@ -120,6 +122,42 @@ func (t *inflightTracker) clientSnapshot() map[string]inflightState {
 	defer t.mu.Unlock()
 	out := make(map[string]inflightState, len(t.clientStates))
 	for id, state := range t.clientStates {
+		out[id] = state
+	}
+	return out
+}
+
+func (t *inflightTracker) targetStart(id string) {
+	t.mu.Lock()
+	state := t.targetStates[id]
+	state.Active++
+	t.targetStates[id] = state
+	t.mu.Unlock()
+	t.emit(inflightDelta{TargetID: id, Active: 1})
+}
+
+func (t *inflightTracker) targetEnd(id string) {
+	t.mu.Lock()
+	state := t.targetStates[id]
+	if state.Active > 1 {
+		state.Active--
+	} else {
+		state.Active = 0
+	}
+	if state.Active == 0 {
+		delete(t.targetStates, id)
+	} else {
+		t.targetStates[id] = state
+	}
+	t.mu.Unlock()
+	t.emit(inflightDelta{TargetID: id, Active: -1})
+}
+
+func (t *inflightTracker) targetSnapshot() map[string]inflightState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]inflightState, len(t.targetStates))
+	for id, state := range t.targetStates {
 		out[id] = state
 	}
 	return out

@@ -6,7 +6,8 @@
 // The server pushes three event types:
 //   - "outcome": a micro-delta of per-target last request outcomes (drives the
 //     resolution icons instantly, no DB cost).
-//   - "activity": a transient in-flight request delta keyed by virtual model ID.
+//   - "activity": transient in-flight request deltas keyed by virtual model,
+//     client key, or provider model ID.
 //   - "snapshot": the full usage/health envelope (drives token/cache counters
 //     and reconciles any dropped delta).
 export class LiveStream {
