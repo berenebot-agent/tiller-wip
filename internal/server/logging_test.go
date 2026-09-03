@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -369,6 +370,46 @@ func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
 	if second["attempt_number"] != float64(2) || second["provider"] != "provider-b" || second["result"] != "success" {
 		t.Fatalf("second (succeeding) attempt wrong: %v", second)
 	}
+}
+
+func TestProviderErrorMessageAndBodyAreNotExposedOrLogged(t *testing.T) {
+	const marker = "PROVIDER-ERROR-SECRET-MARKER"
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": marker}, "body": marker})
+	})
+	api, _, clientID, secret := loggingTestHarness(t, upstream)
+	resp, payload := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{}})
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	if strings.Contains(string(mustJSON(t, payload)), marker) {
+		t.Fatalf("provider error was exposed in response: %v", payload)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+
+	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK || strings.Contains(string(mustJSON(t, activity)), marker) {
+		t.Fatalf("provider error was persisted in activity: status=%d payload=%v", status, activity)
+	}
+	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != http.StatusOK || strings.Contains(string(mustJSON(t, attempts)), marker) {
+		t.Fatalf("provider error was persisted in attempts: status=%d payload=%v", status, attempts)
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 // TestWriteLogTransactionFailureLeavesNoPartialRow verifies the all-or-nothing
