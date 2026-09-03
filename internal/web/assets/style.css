@@ -27,7 +27,7 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .clients-table th:nth-child(3){min-width:300px}
 .key-info-cell .secret-fingerprint{display:block}
 .key-info-cell small{display:block;color:var(--muted);margin-top:2px;font-size:11px}
-.client-name-line{display:flex;align-items:center;gap:8px}
+.client-name-line{display:flex;align-items:center;gap:6px}
 .client-name-line strong{display:inline}
 .status-roundel{display:inline-block;flex:none;width:18px;height:18px;border-radius:50%;position:relative}
 .status-roundel:before{content:"";position:absolute;inset:4px;border-radius:50%;background:var(--green);box-shadow:0 0 0 2px var(--green-bg)}
