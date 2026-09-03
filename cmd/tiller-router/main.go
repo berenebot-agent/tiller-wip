@@ -61,31 +61,39 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		command = os.Args[1]
 	}
 	ctx := context.Background()
+	// Resolve the runtime identity up front so even the no-op (already
+	// non-root) path can log and remediate with the correct UID/GID.
+	runUID, runGID, err := privdrop.ResolvedIdentity()
+	if err != nil {
+		return err
+	}
 	// Started as root (e.g. `user: "0:0"` so a fresh bind-mounted data
 	// directory can be fixed up without host-side chown), hand the data
 	// directory to the runtime user and drop privileges before touching the
 	// database. Already non-root — the normal case — is a no-op. The
 	// healthcheck subcommand never opens the database, so skip the walk.
 	if command != "healthcheck" {
-		dropped, err := privdrop.DropToRuntimeUser(cfg.DataDir)
+		dropped, appliedUID, appliedGID, err := privdrop.DropToRuntimeUser(cfg.DataDir)
 		if err != nil {
 			return err
 		}
 		if dropped {
-			logger.Info("dropped privileges to runtime user", "uid", privdrop.DefaultUID, "gid", privdrop.DefaultGID)
+			logger.Info("dropped privileges to runtime user", "uid", appliedUID, "gid", appliedGID)
 		}
+		runUID, runGID = appliedUID, appliedGID
 	}
 	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"))
 	if err != nil {
 		if errors.Is(err, database.ErrDataDirUnwritable) {
 			logger.Error(
-				"data directory is not writable by the runtime user — the container runs as uid "+
-					"65532 by default, but the bind-mounted directory is owned by someone else (a fresh "+
-					"rootful-Docker bind mount is created as root). Fix ownership once, then up again.",
+				"data directory is not writable by the runtime user — the bind-mounted directory is "+
+					"owned by someone other than the runtime user (a fresh rootful-Docker bind mount "+
+					"is created as root). Fix ownership once, then up again.",
 				"dir", cfg.DataDir,
-				"uid", os.Getuid(),
-				"fix", "sudo chown -R 65532:65532 ./data",
-				"alt", "set TILLER_UID and TILLER_GID in .env to the uid:gid that owns ./data",
+				"uid", runUID,
+				"gid", runGID,
+				"fix", fmt.Sprintf("sudo chown -R %d:%d ./data", runUID, runGID),
+				"alt", "set TILLER_RUN_UID and TILLER_RUN_GID in .env to the uid:gid that owns ./data",
 				"see", "README 'Create the data directory'",
 			)
 		}

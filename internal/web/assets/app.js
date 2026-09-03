@@ -8,14 +8,19 @@ const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
-const tok = (tokens, pct, window) => {
-  if (!tokens && pct == null) return `<span class="tok" data-window="${window}">—</span>`;
+// renderTokInner returns the inner markup of a .tok cell (no <span class="tok">
+// wrapper). Both initial render (tok) and live patching (patchTokenCell) build
+// their DOM from this single source so the .tok element is never re-wrapped and
+// transitions between populated and empty states keep consistent structure.
+const renderTokInner = (tokens, pct) => {
+  if (!tokens && pct == null) return '—';
   const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
   const cache = (pct != null && !isNaN(pct))
     ? `<span class="cache-hit"><b>${Math.round(pct)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
-  return `<span class="tok" data-window="${window}">${num}${cache}</span>`;
+  return `${num}${cache}`;
 };
+const tok = (tokens, pct, window) => `<span class="tok" data-window="${window}">${renderTokInner(tokens, pct)}</span>`;
 const rowCache = (row) => {
   const inp = row.input_tokens;
   const output = row.output_tokens;
@@ -888,19 +893,30 @@ function markChanged(el) {
   el.addEventListener('animationend', () => el.classList.remove('is-flip'), { once: true });
 }
 
-// Patch a single token cell (Mtok + Cache) from the current state. Flips only
-// the tile whose rendered text actually changed. When the cell is currently a
-// bare dash (no number/cache elements), rebuild it so a value can appear.
+// Patch a single token cell (Mtok + Cache) from the current state. Mutates
+// the existing .tok element in place: rebuilds inner HTML when the
+// populated/empty structure changes, otherwise only flips the leaves whose
+// text or class actually moved. The cell itself is never replaced, so
+// repeated updates cannot nest .tok .tok and a token value reverting to
+// zero always clears stale Mtok/cache markup.
 function patchTokenCell(cell, tokens, pct) {
-  const num = tokens ? `${(tokens / 1e6).toFixed(2)}` : '';
-  const cache = (pct != null && !isNaN(pct)) ? `${Math.round(pct)}%` : '';
+  const populated = Boolean(tokens) || (pct != null && !isNaN(pct));
   const numEl = $('b', cell);
   const cacheEl = $('.cache-hit b', cell);
-  const cacheWrap = $('.cache-hit', cell);
-  if (!numEl && !cacheEl) {
-    cell.innerHTML = tok(tokens, pct, cell.dataset.window);
+  const hasStructured = Boolean(numEl) || Boolean(cacheEl);
+  if (populated !== hasStructured) {
+    cell.innerHTML = renderTokInner(tokens, pct);
+    const newNum = $('b', cell);
+    if (newNum) markChanged(newNum);
+    const newCache = $('.cache-hit b', cell);
+    if (newCache) markChanged(newCache);
+    const newWrap = $('.cache-hit', cell);
+    if (newWrap && pct != null && !isNaN(pct)) newWrap.classList.add(pct >= 50 ? 'is-up' : 'is-down');
     return;
   }
+  if (!populated) return;
+  const num = tokens ? `${(tokens / 1e6).toFixed(2)}` : '';
+  const cache = (pct != null && !isNaN(pct)) ? `${Math.round(pct)}%` : '';
   if (numEl && numEl.textContent !== num) {
     numEl.textContent = num;
     markChanged(numEl);
@@ -908,6 +924,7 @@ function patchTokenCell(cell, tokens, pct) {
   if (cacheEl && cacheEl.textContent !== cache) {
     cacheEl.textContent = cache;
     markChanged(cacheEl);
+    const cacheWrap = $('.cache-hit', cell);
     if (cacheWrap) {
       cacheWrap.classList.remove('is-up', 'is-down');
       if (cache !== '') cacheWrap.classList.add(pct >= 50 ? 'is-up' : 'is-down');
@@ -916,17 +933,22 @@ function patchTokenCell(cell, tokens, pct) {
 }
 
 // Patch the resolution icon for one target line from the current state.
+// Always refresh aria-label and title so the tooltip reflects the current
+// sub-state (e.g. "No activity recorded" vs "No activity in 24h" share
+// the same "neutral" class). SVG and class are only swapped when the
+// resolution status itself changes.
 function patchResolution(line, target) {
   const [status, label] = resolutionStatus(target);
   const indicator = $('.resolution-indicator', line);
   if (!indicator) return;
   const cls = `resolution-${status}`;
-  if (!indicator.classList.contains(cls)) {
+  const needsSwap = !indicator.classList.contains(cls);
+  if (needsSwap) {
     indicator.className = `resolution-indicator ${cls}`;
     indicator.innerHTML = RESOLUTION_ICONS[status];
-    indicator.setAttribute('aria-label', label);
-    indicator.setAttribute('title', label);
   }
+  indicator.setAttribute('aria-label', label);
+  indicator.setAttribute('title', label);
 }
 
 // Reconcile paint: apply the current state to every live cell in the active

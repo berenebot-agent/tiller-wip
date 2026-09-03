@@ -45,7 +45,10 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifica
 COPY --from=build /out/licenses /licenses
 COPY --from=build --chmod=1777 /out/tmp /tmp
 COPY --from=build --chown=${TILLER_UID}:${TILLER_GID} /out/data /data
-COPY --from=build --chown=${TILLER_UID}:${TILLER_GID} /out/tiller-router /tiller-router
+# The binary is exec-only: root-owned, world read+exec, not writable. This
+# still works for the root-at-boot drop because root can exec it; the
+# runtime user after the drop does not need to overwrite it.
+COPY --from=build --chown=0:0 --chmod=0555 /out/tiller-router /tiller-router
 EXPOSE 8080
 ENTRYPOINT ["/tiller-router"]
 CMD ["serve"]

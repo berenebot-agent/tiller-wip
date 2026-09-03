@@ -172,6 +172,30 @@ func TestChatToResponsesSupportsToolChoice(t *testing.T) {
 	}
 }
 
+func TestChatToResponsesRejectsNonFunctionTools(t *testing.T) {
+	// A Chat tool without the function wrapper, or with a non-function type,
+	// must surface as an unsupportedFeature error rather than be converted
+	// into a malformed Responses tool entry.
+	cases := []string{
+		// Non-function type.
+		`{"model":"virtual/coding","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"code_interpreter"}]}`,
+		// Function type with no nested function object.
+		`{"model":"virtual/coding","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","name":"lookup"}]}`,
+		// Function is not an object.
+		`{"model":"virtual/coding","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":"lookup"}]}`,
+	}
+	for i, body := range cases {
+		_, err := translateRequest([]byte(body), providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+		if err == nil {
+			t.Fatalf("case %d: expected error, got nil", i)
+		}
+		var ufe unsupportedFeature
+		if !errors.As(err, &ufe) {
+			t.Fatalf("case %d: expected unsupportedFeature, got %T: %v", i, err, err)
+		}
+	}
+}
+
 func TestChatToResponsesOmitsEmptyAssistantTextWithToolCalls(t *testing.T) {
 	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"look up the weather"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_123","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"assistant","content":"I found it.","tool_calls":[{"id":"call_456","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Perth\"}"}}]},{"role":"tool","tool_call_id":"call_123","content":"sunny"}]}`)
 	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")

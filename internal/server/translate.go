@@ -338,8 +338,14 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 	if tools := asSlice(chat["tools"]); tools != nil {
 		converted := []any{}
 		for _, raw := range tools {
-			tool, _ := raw.(map[string]any)
-			fn, _ := tool["function"].(map[string]any)
+			tool, ok := raw.(map[string]any)
+			if !ok || tool["type"] != "function" {
+				return nil, unsupportedFeature{"non-function tools"}
+			}
+			fn, fnOK := tool["function"].(map[string]any)
+			if !fnOK {
+				return nil, unsupportedFeature{"non-function tools"}
+			}
 			converted = append(converted, map[string]any{"type": "function", "name": fn["name"], "description": fn["description"], "parameters": fn["parameters"], "strict": fn["strict"]})
 		}
 		out["tools"] = converted

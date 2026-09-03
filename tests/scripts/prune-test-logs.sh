@@ -52,7 +52,7 @@ collect_evictions 'compat/*-compat.log' "$KEEP_COMPAT"
 collect_evictions 'tiller-go/*.log' "$KEEP_GO"
 
 if [ "${#evict[@]}" -eq 0 ]; then
-    exit 0
+	(return 0 2>/dev/null) || exit 0
 fi
 
 # Remove everything that is not owned by a fixed set of UIDs. The browser

@@ -28,6 +28,17 @@ services:
       TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
     volumes:
       - ./data:/data
+    # Default hardening (adoption-first posture). The image starts as root so
+    # internal/privdrop can chown a fresh root-owned ./data and shed to the
+    # runtime user before the database is opened. read_only + /tmp tmpfs +
+    # no-new-privileges are compatible with that flow: the only filesystem
+    # writes are under the bind-mounted ./data and under /tmp, and no setuid
+    # binaries are exec'd after the drop.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "/tiller-router", "healthcheck"]
       interval: 30s
@@ -37,14 +48,12 @@ services:
     ports:
       - 0.0.0.0:${TILLER_PORT:-8080}:8080
 
-  # Hardenable, not required: for an internet-exposed deployment you may add a
-  # read-only rootfs, drop all capabilities, mount a scratch tmpfs, and force a
-  # strict non-root user. The image supports these flags without a shell
-  # entrypoint (the privilege drop is pure Go and no-ops when already non-root):
+  # Hardenable, not required: for an internet-exposed deployment you may also
+  # drop all capabilities and force a strict non-root user. These two are
+  # opt-in because they conflict with the in-process root-then-drop: a strict
+  # `user: ...` skips the boot chown and a fresh rootful-Docker ./data would
+  # fail with ErrDataDirUnwritable, and `cap_drop: [ALL]` removes the
+  # setuid/setgid/chown capabilities the drop requires.
   #
-  #   read_only: true
-  #   tmpfs:
-  #     - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
   #   cap_drop: [ALL]
-  #   security_opt: [no-new-privileges:true]
   #   user: "${TILLER_RUN_UID:-65532}:${TILLER_RUN_GID:-65532}"
