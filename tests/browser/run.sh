@@ -109,6 +109,7 @@ for i in $(seq 0 $((workers - 1))); do
         -e TILLER_LISTEN_ADDR="127.0.0.1:$router_port" \
         -e TILLER_ADMIN_USERNAME=admin \
         -e TILLER_ADMIN_PASSWORD="$password" \
+        -e TILLER_LOG_LEVEL=warn \
         tiller-router:dev >/dev/null
 done
 
@@ -128,6 +129,7 @@ docker run --rm -d --name "$run_id-router-activity" --network host \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$activity_router_port" \
     -e TILLER_ADMIN_USERNAME=admin \
     -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_LOG_LEVEL=warn \
     tiller-router:dev >/dev/null
 note_phase "containers started"
 

@@ -21,21 +21,44 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(logger); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
+		// Config validation precedes logging setup, so render the error with
+		// a default-level handler rather than depending on the configured
+		// level (which may itself be what failed to load).
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Error("tiller-router stopped", "error", err.Error())
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
+	if err := run(cfg, logger); err != nil {
 		logger.Error("tiller-router stopped", "error", err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+// parseLogLevel maps a config load-level string to a slog.Level. The string
+// is validated in config.Load, so any value reaching here is one of
+// debug/info/warn/error; a bogus value still degrades to warn for safety.
+func parseLogLevel(s string) slog.Level {
+	switch s {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	case "info":
+		return slog.LevelInfo
+	default:
+		return slog.LevelWarn
+	}
+}
+
+func run(cfg config.Config, logger *slog.Logger) error {
 	command := "serve"
 	if len(os.Args) > 1 {
 		command = os.Args[1]
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return err
 	}
 	ctx := context.Background()
 	// Started as root (e.g. `user: "0:0"` so a fresh bind-mounted data
