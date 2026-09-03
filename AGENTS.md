@@ -28,6 +28,19 @@ Guardrails for any coding agent working in this repository. This file describes 
 
 - `AGENTS.md` / docs must not treat the strict non-root posture as a hard rule the default build violates. The default is deliberately relaxed for adoption; the advanced compose documents how to harden.
 
+## Rebuilding the main container
+
+When the user asks to "rebuild the main container" (or equivalently "rebuild the image" / "restart with the latest code"), the canonical command is:
+
+```bash
+cd /opt/tiller-router && docker compose down && docker compose up --build
+```
+
+- Always `down` before `up --build` so a stale container isn't left holding the old image's anonymous volumes / healthcheck state, and so the rebuild actually replaces the running process.
+- Run from `/opt/tiller-router/` (the deployed repo location), not from a dev checkout, unless the user says otherwise.
+- `--build` is required — without it, Compose reuses the existing image and the user's "rebuild" intent isn't honored.
+- Do not invent a `docker build` + manual `docker run` workflow unless the user explicitly asks for one. The Compose service is the supported path.
+
 ## Toolchain — Go runs in Docker, never on the host
 
 - Go is intentionally **not** installed on the host. `go` is not on PATH and `go: command not found` is expected, not an error. Do not install Go on the host and do not treat the missing host Go as a problem to fix.
