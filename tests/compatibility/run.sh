@@ -9,10 +9,14 @@ sdk_data_dir="$(pwd)/tests/logs/compat/sdk-$run_id"
 hermes_data_dir="$(pwd)/tests/logs/compat/hermes-$run_id"
 mkdir -p "$sdk_data_dir" "$hermes_data_dir"
 
-# Log capture: always write full output to a per-run log file.
+# Log capture: always write full output to a per-run log file. Every line is
+# prefixed with the elapsed time since the run started (via
+# tests/scripts/ts-filter.py) so a single log scan tells you exactly when
+# each step happened.
+export TS_START="$EPOCHREALTIME"
 LOG_FILE="tests/logs/compat/$(date -u +%Y%m%dT%H%M%S)-compat.log"
 ts=$(date +%s)
-exec > >(tee "$LOG_FILE") 2>&1
+exec > >(python3 -u tests/scripts/ts-filter.py | tee "$LOG_FILE") 2>&1
 
 probe_port() { python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'; }
 sdk_router_port=${TILLER_COMPAT_ROUTER_PORT:-$(probe_port)}

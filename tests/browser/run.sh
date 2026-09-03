@@ -23,7 +23,7 @@ run_id=tiller-browser-$$
 ports_file=$(mktemp)
 run_start=$(date +%s)
 note_phase() {
-    echo "==> $1 ($(( $(date +%s) - run_start ))s elapsed)"
+    echo "==> $1"
 }
 # Per-run scratch lives under tests/logs/ (gitignored). Holds the activity
 # router's host-mounted data dir, the extracted fixturectl binary, the run
@@ -33,9 +33,13 @@ mkdir -p tests/logs
 run_dir="$(pwd)/tests/logs/$run_id"
 mkdir -p "$run_dir/playwright-results" "$run_dir/activity-data"
 # Capture the full run output to a per-run log file. The summary block at the
-# end prints this path; on failure the first error is also inlined.
+# end prints this path; on failure the first error is also inlined. Every
+# line of the run is prefixed with the elapsed time since the run started
+# (via tests/scripts/ts-filter.py) so a single log scan tells you exactly
+# when each step happened.
+export TS_START="$EPOCHREALTIME"
 RUN_LOG="$run_dir/run.log"
-exec > >(tee "$RUN_LOG") 2>&1
+exec > >(python3 -u tests/scripts/ts-filter.py | tee "$RUN_LOG") 2>&1
 
 case "$workers" in
     ''|*[!0-9]*|0) echo "TILLER_BROWSER_WORKERS must be a positive integer" >&2; exit 2 ;;
