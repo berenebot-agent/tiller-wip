@@ -205,11 +205,11 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":      "resp",
-			"object":  "response",
-			"model":   "test",
-			"output":  []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok"}}}},
-			"usage":   map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+			"id":     "resp",
+			"object": "response",
+			"model":  "test",
+			"output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok"}}}},
+			"usage":  map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
 		})
 	}))
 	t.Cleanup(dedicated.Close)
@@ -217,10 +217,10 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	status, payload, _ := api.request("POST", "/api/admin/providers", map[string]any{
-		"name":       "opencode-free-muse",
-		"type":       "opencode-free",
-		"base_url":   dedicated.URL + "/v1",
-		"protocols":  []string{"chat", "responses"},
+		"name":      "opencode-free-muse",
+		"type":      "opencode-free",
+		"base_url":  dedicated.URL + "/v1",
+		"protocols": []string{"chat", "responses"},
 	})
 	if status != 201 {
 		t.Fatalf("create provider: %d %v", status, payload)
@@ -270,10 +270,10 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 		recordPath = ""
 		mu.Unlock()
 		chatBody, _ := json.Marshal(map[string]any{
-			"model":     "opencode-free-muse/" + upstreamID,
-			"messages":  []any{map[string]any{"role": "user", "content": "hi"}},
+			"model":      "opencode-free-muse/" + upstreamID,
+			"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
 			"max_tokens": 8,
-			"stream":    false,
+			"stream":     false,
 		})
 		req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(chatBody))
 		req.Header.Set("Content-Type", "application/json")

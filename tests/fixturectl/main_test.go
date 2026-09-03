@@ -99,10 +99,10 @@ func TestRunActivitySeedsDeterministicRows(t *testing.T) {
 }
 
 type status struct {
-	status          int
-	errorText       *string
+	status           int
+	errorText        *string
 	resolvedProvider *string
-	fallbackUsed    int
+	fallbackUsed     int
 }
 
 func TestRunActivityValidatesClient(t *testing.T) {

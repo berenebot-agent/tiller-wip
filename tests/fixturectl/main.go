@@ -109,13 +109,13 @@ func runActivity(args []string) error {
 		latency := int64(20 + (seq % 40))
 
 		var (
-			httpStatus    int
-			errorText     any
-			provider, m   *string
-			input, output *int64
-			fallbackUsed  bool
+			httpStatus     int
+			errorText      any
+			provider, m    *string
+			input, output  *int64
+			fallbackUsed   bool
 			fallbackReason any
-			attempts      []seedAttempt
+			attempts       []seedAttempt
 		)
 		p := func(s string) *string { return &s }
 		fallback := *fallbackEvery > 0 && i%*fallbackEvery == *fallbackEvery-1
