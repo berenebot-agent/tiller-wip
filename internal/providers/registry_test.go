@@ -53,15 +53,28 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 	if got := nativeProtocol("opencode-zen", "unknown-model"); got != ProtocolChat {
 		t.Fatalf("unknown Zen model protocol = %q, want %q", got, ProtocolChat)
 	}
-	for _, modelID := range []string{
-		"muse-spark-1.2-contributor-free",
-		"nemotron-3-ultra-free",
-		"deepseek-v4-flash-free",
-		"mimo-v2.5-free",
-		"unlisted-model-free",
+	freeModels := map[string]Protocol{
+		"muse-spark-1.2-contributor-free": ProtocolResponses,
+		"muse-spark-1.3-contributor-free": ProtocolResponses,
+		"nemotron-3-ultra-free":           ProtocolChat,
+		"deepseek-v4-flash-free":          ProtocolChat,
+		"mimo-v2.5-free":                  ProtocolChat,
+		"unlisted-model-free":             ProtocolChat,
+	}
+	for modelID, want := range freeModels {
+		if got := nativeProtocol("opencode-free", modelID); got != want {
+			t.Errorf("opencode-free model %q protocol = %q, want %q", modelID, got, want)
+		}
+	}
+	for modelID, want := range map[string]Protocol{
+		"muse-spark-1.2-contributor-free": ProtocolResponses,
+		"muse-spark-1.3-contributor-free": ProtocolResponses,
+		"nemotron-3-ultra-free":           ProtocolChat,
+		"deepseek-v4-flash-free":          ProtocolChat,
+		"mimo-v2.5-free":                  ProtocolChat,
 	} {
-		if got := nativeProtocol("opencode-free", modelID); got != ProtocolChat {
-			t.Errorf("opencode-free model %q protocol = %q, want %q", modelID, got, ProtocolChat)
+		if got := nativeProtocol("opencode-zen", modelID); got != want {
+			t.Errorf("opencode-zen model %q protocol = %q, want %q", modelID, got, want)
 		}
 	}
 }
@@ -75,7 +88,7 @@ func TestOpenCodeDescriptors(t *testing.T) {
 	}{
 		{"opencode-zen", "https://opencode.ai/zen/v1", true, 3},
 		{"opencode-go", "https://opencode.ai/zen/go/v1", true, 3},
-		{"opencode-free", "https://opencode.ai/zen/v1", false, 1},
+		{"opencode-free", "https://opencode.ai/zen/v1", false, 2},
 	} {
 		descriptor, ok := Lookup(test.providerType)
 		if !ok {

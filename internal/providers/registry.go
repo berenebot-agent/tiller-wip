@@ -61,7 +61,7 @@ var descriptors = []Descriptor{
 	{Type: "minimax", Label: "MiniMax", DefaultBaseURL: "https://api.minimax.io/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
-	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "opencode"},
+	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, Discovery: "opencode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "lm-studio", Label: "LM Studio", DefaultBaseURL: "http://host.docker.internal:1234/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -111,7 +111,7 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 	"gpt-5.2-codex": ProtocolResponses, "gpt-5.1": ProtocolResponses, "gpt-5.1-codex": ProtocolResponses,
 	"gpt-5.1-codex-max": ProtocolResponses, "gpt-5.1-codex-mini": ProtocolResponses, "gpt-5": ProtocolResponses,
 	"gpt-5-codex": ProtocolResponses, "gpt-5-nano": ProtocolResponses, "grok-4.6": ProtocolResponses,
-	"grok-4.5": ProtocolResponses, "grok-build-0.1": ProtocolResponses, "muse-spark-1.2": ProtocolResponses,
+	"grok-4.5": ProtocolResponses, "grok-build-0.1": ProtocolResponses, "muse-spark-1.2": ProtocolResponses, "muse-spark-1.2-contributor-free": ProtocolResponses, "muse-spark-1.3-contributor-free": ProtocolResponses,
 	"claude-fable-5": ProtocolMessages, "claude-opus-5": ProtocolMessages, "claude-opus-4.8": ProtocolMessages,
 	"claude-opus-4.7": ProtocolMessages, "claude-opus-4.6": ProtocolMessages, "claude-opus-4.5": ProtocolMessages,
 	"claude-sonnet-5": ProtocolMessages, "claude-sonnet-4.6": ProtocolMessages, "claude-sonnet-4.5": ProtocolMessages,
@@ -120,13 +120,18 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 }
 
 func nativeProtocol(providerType, modelID string) Protocol {
-	if (providerType == "opencode-zen" || providerType == "opencode-free") && strings.HasSuffix(modelID, "-free") {
-		return ProtocolChat
-	}
-	if providerType == "opencode-zen" {
+	if providerType == "opencode-zen" || providerType == "opencode-free" {
 		if protocol, ok := openCodeZenProtocolByModel[modelID]; ok {
 			return protocol
 		}
+	}
+	if providerType == "opencode-zen" {
+		if strings.HasSuffix(modelID, "-free") {
+			return ProtocolChat
+		}
+		return ProtocolChat
+	}
+	if providerType == "opencode-free" {
 		return ProtocolChat
 	}
 	if providerType == "opencode-go" {

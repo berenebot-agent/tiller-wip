@@ -2,9 +2,12 @@ package server
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/providers"
@@ -109,4 +112,116 @@ func FuzzProtocolRequestParser(f *testing.F) {
 		_, _ = translateRequest(body, providers.ProtocolChat, providers.ProtocolMessages, "target")
 		_, _ = translateRequest(body, providers.ProtocolResponses, providers.ProtocolChat, "target")
 	})
+}
+
+// TestOpenCodeFreeMuseSparkRoutesToResponsesAPI verifies that muse-spark-1.2 and
+// muse-spark-1.3 contributor-free models are routed to the Responses API
+// (/v1/responses with `input` field), not the Chat Completions API. The OpenCode
+// relay 500s when these models are called via /v1/chat/completions — only the
+// Responses endpoint serves them.
+func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
+	var mu sync.Mutex
+	recordPath := ""
+	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data": []any{
+					map[string]any{"id": "muse-spark-1.2-contributor-free", "object": "model"},
+					map[string]any{"id": "muse-spark-1.3-contributor-free", "object": "model"},
+					map[string]any{"id": "mimo-v2.5-free", "object": "model"},
+				},
+			})
+			return
+		}
+		mu.Lock()
+		recordPath = r.URL.Path
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "resp",
+			"object":  "response",
+			"model":   "test",
+			"output":  []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": "ok"}}}},
+			"usage":   map[string]any{"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+		})
+	}))
+	t.Cleanup(dedicated.Close)
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+
+	status, payload, _ := api.request("POST", "/api/admin/providers", map[string]any{
+		"name":       "opencode-free-muse",
+		"type":       "opencode-free",
+		"base_url":   dedicated.URL + "/v1",
+		"protocols":  []string{"chat", "responses"},
+	})
+	if status != 201 {
+		t.Fatalf("create provider: %d %v", status, payload)
+	}
+	providerID := payload["id"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/providers/"+providerID+"/refresh", nil)
+	if status != 200 && status != 204 {
+		t.Fatalf("refresh: %d %v", status, payload)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatalf("list models: %d %v", status, payload)
+	}
+	modelIDs := map[string]string{}
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if upID, ok := m["upstream_model_id"].(string); ok {
+			if id, ok := m["id"].(string); ok {
+				modelIDs[upID] = id
+			}
+		}
+	}
+
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "muse test", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+	clientSecret := payload["secret"].(string)
+
+	perms := []any{}
+	for _, modelID := range modelIDs {
+		perms = append(perms, map[string]any{"kind": "real", "model_id": modelID, "enabled": true})
+	}
+	status, _, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{"defaults": []any{}, "permissions": perms})
+	if status != 204 {
+		t.Fatalf("permissions: %d", status)
+	}
+
+	for upstreamID, wantPath := range map[string]string{
+		"muse-spark-1.2-contributor-free": "/v1/responses",
+		"muse-spark-1.3-contributor-free": "/v1/responses",
+		"mimo-v2.5-free":                  "/v1/chat/completions",
+	} {
+		mu.Lock()
+		recordPath = ""
+		mu.Unlock()
+		chatBody, _ := json.Marshal(map[string]any{
+			"model":     "opencode-free-muse/" + upstreamID,
+			"messages":  []any{map[string]any{"role": "user", "content": "hi"}},
+			"max_tokens": 8,
+			"stream":    false,
+		})
+		req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(chatBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+clientSecret)
+		resp, err := api.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		mu.Lock()
+		gotPath := recordPath
+		mu.Unlock()
+		if gotPath != wantPath {
+			t.Errorf("%s: upstream saw path %q, want %q", upstreamID, gotPath, wantPath)
+		}
+	}
 }
