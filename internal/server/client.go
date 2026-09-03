@@ -269,13 +269,18 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	}
 	originalBody := append([]byte(nil), body...)
 	start := time.Now()
+	streamed := false
+	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
+		if route.Virtual {
+			s.inflight.end(route.RouteModelID, streamed)
+		}
 		s.writeLog(context.Background(), row)
 	}()
 	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
 
-	route, err := s.resolveRoute(r.Context(), identity.ID, requested)
+	route, err = s.resolveRoute(r.Context(), identity.ID, requested)
 	if err == sql.ErrNoRows {
 		row.httpStatus = 404
 		row.errorText = strPtr("model_not_found")
@@ -294,6 +299,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
+	if route.Virtual {
+		s.inflight.start(route.RouteModelID)
+	}
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
 		candidates = route.Targets
@@ -522,6 +530,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	reader := &idleReader{reader: resp.Body, timer: idle}
 	usage := &usageCapture{}
 	if translated {
+		streamed = true
+		if route.Virtual {
+			s.inflight.streaming(route.RouteModelID)
+		}
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
 		if err := translateResponse(w, reader, incoming, target, route, usage); err != nil {
@@ -532,6 +544,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		return
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		streamed = true
+		if route.Virtual {
+			s.inflight.streaming(route.RouteModelID)
+		}
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
 		rewriteSSE(w, reader, route.UpstreamModelID, route.RequestedModel, usage)

@@ -10,11 +10,12 @@ import (
 
 // Live SSE refresh for the admin UI.
 //
-// A single admin-gated GET /api/admin/live stream pushes two event types:
+// A single admin-gated GET /api/admin/live stream pushes three event types:
 //
 //   - "outcome": a micro-delta of the in-memory per-target last request
 //     outcomes, emitted the instant a routed request records one. This is what
 //     makes the resolution icons feel live with zero DB cost.
+//   - "activity": a transient in-flight request delta keyed by virtual model ID.
 //   - "snapshot": the full usage/health envelope (last outcomes, 1h/24h health,
 //     token + cache windows). Sent on connect and then on a server-side cadence
 //     so token counters track traffic and any dropped delta self-heals.
@@ -25,7 +26,7 @@ import (
 // Fan-out shares one marshalled []byte per event across all subscribers.
 
 const (
-	liveOutcomeBuffer   = 64
+	liveOutcomeBuffer    = 64
 	liveDebounceInterval = 2 * time.Second
 	liveIdleInterval     = 5 * time.Second
 )
@@ -33,30 +34,43 @@ const (
 // liveHub holds the subscriber set and the outcome delta channel. The
 // dispatcher goroutine lifecycle is driven by subscribe/unsubscribe.
 type liveHub struct {
-	mu        sync.Mutex
-	subs      map[chan []byte]struct{}
-	outcomeCh chan map[string]lastOutcome
-	cancel    context.CancelFunc
+	mu         sync.Mutex
+	subs       map[chan []byte]struct{}
+	outcomeCh  chan map[string]lastOutcome
+	activityCh chan inflightDelta
+	cancel     context.CancelFunc
 	// snapshot recomputes the full usage/health envelope. It is bound to the
 	// owning Server so the dispatcher and the /api/admin/usage endpoint share
 	// one source of truth.
 	snapshot func(context.Context) (liveSnapshot, error)
 }
 
+func (h *liveHub) emitActivity(delta inflightDelta) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.subs) == 0 {
+		return
+	}
+	select {
+	case h.activityCh <- delta:
+	default:
+	}
+}
+
 // liveSnapshot is the full envelope pushed on the "snapshot" event. It is the
 // same data the /api/admin/usage endpoint returns, so the two can never drift.
 type liveSnapshot struct {
-	GeneratedAt       string                          `json:"generated_at"`
-	TargetLastOutcome map[string]lastOutcome          `json:"target_last_outcome"`
+	GeneratedAt       string                            `json:"generated_at"`
+	TargetLastOutcome map[string]lastOutcome            `json:"target_last_outcome"`
 	TargetHealth      map[string]targetResolutionHealth `json:"target_health"`
-	VirtualModels     map[string]usageWindows         `json:"virtual_models"`
-	ClientKeys        map[string]usageWindows         `json:"client_keys"`
-	RealModels        map[string]usageWindows         `json:"real_models"`
-	VirtualCache      map[string]cacheWindows         `json:"virtual_cache"`
-	ClientCache       map[string]cacheWindows         `json:"client_cache"`
-	RealCache         map[string]cacheWindows         `json:"real_cache"`
-	// Modules is a reserved seam for future push modules (e.g. in-flight
-	// request counts, catalogue-refresh spinners). Empty today.
+	VirtualModels     map[string]usageWindows           `json:"virtual_models"`
+	ClientKeys        map[string]usageWindows           `json:"client_keys"`
+	RealModels        map[string]usageWindows           `json:"real_models"`
+	VirtualCache      map[string]cacheWindows           `json:"virtual_cache"`
+	ClientCache       map[string]cacheWindows           `json:"client_cache"`
+	RealCache         map[string]cacheWindows           `json:"real_cache"`
+	// Modules carries current aggregate state for live UI modules, including
+	// in-flight virtual-model requests.
 	Modules map[string]any `json:"modules"`
 }
 
@@ -138,6 +152,8 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 				}
 			}
 			debounce.Reset(liveDebounceInterval)
+		case delta := <-h.activityCh:
+			h.broadcast("activity", delta)
 		case <-debounce.C:
 			if dirty {
 				h.broadcastSnapshot()

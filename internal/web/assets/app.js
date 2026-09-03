@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {} };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
@@ -214,6 +214,7 @@ function renderVirtual() {
     return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><code class="model-id">${h(model.canonical_model_id)}</code><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${badge(model.available, model.available ? 'Routable' : 'Broken target', model.available ? 'good' : 'bad')}${model.warning ? `<span class="error-text">${h(model.warning)}</span>` : ''}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
   }).join('');
   $('#virtual-body').innerHTML = html;
+  patchVirtualActivityRows();
   $$('.group-toggle', $('#virtual-body')).forEach(header => header.onclick = toggleGroup);
   $$('[data-model-activity]', $('#virtual-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.virtualModels.find(item => item.canonical_model_id === button.dataset.modelActivity), 'virtual'); });
   $$('[data-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.virtualEdit)));
@@ -222,6 +223,56 @@ function renderVirtual() {
   $$('[data-group-edit]').forEach(button => button.onclick = event => { event.stopPropagation(); openVirtualGroup(state.groups.find(item => item.id === button.dataset.groupEdit)); });
   $$('[data-group-delete]').forEach(button => button.onclick = event => { event.stopPropagation(); deleteVirtualGroup(button.dataset.groupDelete); });
 }
+
+function patchVirtualActivityRows() {
+  $$('tr[data-virtual-id]', $('#virtual-body')).forEach(row => {
+    const model = state.virtualModels.find(item => item.id === row.dataset.virtualId);
+    if (!model) return;
+    const nameCell = row.cells[0];
+    if (!$('.client-name-line', nameCell)) {
+      const name = $('.model-id', nameCell);
+      if (name) {
+        const line = document.createElement('div');
+        line.className = 'client-name-line';
+        const dot = document.createElement('span');
+        dot.className = `status-dot ${model.available ? 'status-dot-enabled' : 'status-dot-disabled'}`;
+        dot.setAttribute('role', 'img');
+        dot.setAttribute('aria-label', model.available ? 'Routable' : 'Broken target');
+        dot.title = model.available ? 'Routable' : 'Broken target';
+        const strong = document.createElement('strong');
+        strong.textContent = name.textContent;
+        line.append(dot, strong);
+        name.replaceWith(line);
+      }
+    }
+    const stateCell = row.cells[3];
+    $('.badge', stateCell)?.remove();
+    if (!$('.activity-spinner', stateCell)) {
+      const spinner = document.createElement('span');
+      spinner.className = 'activity-spinner';
+      spinner.hidden = true;
+      spinner.setAttribute('role', 'img');
+      stateCell.prepend(spinner);
+      for (let i = 0; i < 3; i += 1) spinner.append(document.createElement('i'));
+    }
+    patchVirtualSpinner(row, state.inflight[model.id]);
+  });
+}
+
+function patchVirtualSpinner(row, activity) {
+  const spinner = $('.activity-spinner', row);
+  if (!spinner) return;
+  const active = activity?.active > 0;
+  const streaming = active && activity?.streaming > 0;
+  const idle = !active;
+  spinner.hidden = false;
+  spinner.classList.toggle('activity-spinner-down', streaming);
+  spinner.classList.toggle('activity-spinner-idle', idle);
+  const label = streaming ? 'Streaming response' : active ? 'Waiting for upstream response' : 'Idle';
+  spinner.setAttribute('aria-label', label);
+  spinner.title = label;
+}
+
 const capabilityNumber = value => value ? new Intl.NumberFormat().format(value) : 'Not reported';
 const capFlag = value => value === true ? '✓' : value === false ? '✗' : '—';
 const capFlags = c => `<span class="capability-flag" title="Tool calling">T ${capFlag(c.supports_tools)}</span><span class="capability-flag" title="Vision (image input)">V ${capFlag(c.supports_vision)}</span><span class="capability-flag" title="Reasoning">R ${capFlag(c.supports_reasoning)}</span><span class="capability-flag" title="Structured output">S ${capFlag(c.supports_structured_output)}</span>`;
@@ -916,6 +967,7 @@ function reconcileLive() {
         const cell = $(`.tok[data-window="${window}"]`, row);
         if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window]);
       });
+      patchVirtualSpinner(row, state.inflight[model.id]);
     });
   }
   if (liveViewActive('clients')) {
@@ -958,7 +1010,20 @@ live.on('snapshot', payload => {
   ['target_last_outcome', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
+  if (payload.modules?.inflight !== undefined) state.inflight = payload.modules.inflight || {};
   reconcileLive();
+});
+
+live.on('activity', delta => {
+  const current = state.inflight[delta.id] || { active: 0, streaming: 0 };
+  current.active += delta.active || 0;
+  current.streaming += delta.streaming || 0;
+  if (current.active <= 0 && current.streaming <= 0) delete state.inflight[delta.id];
+  else state.inflight[delta.id] = current;
+  if (liveViewActive('virtual') && !liveDialogOpen()) {
+    const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
+    if (row) patchVirtualSpinner(row, state.inflight[delta.id]);
+  }
 });
 
 // Reconcile once when the last dialog closes.

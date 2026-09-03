@@ -3,9 +3,10 @@
 // lifecycle: opened after login, closed on logout/pagehide, and closed while
 // the tab is hidden so a background tab costs zero server queries.
 //
-// The server pushes two event types:
+// The server pushes three event types:
 //   - "outcome": a micro-delta of per-target last request outcomes (drives the
 //     resolution icons instantly, no DB cost).
+//   - "activity": a transient in-flight request delta keyed by virtual model ID.
 //   - "snapshot": the full usage/health envelope (drives token/cache counters
 //     and reconciles any dropped delta).
 export class LiveStream {
@@ -33,6 +34,7 @@ export class LiveStream {
     this.es = es;
     es.onmessage = (e) => this.dispatch('message', e.data);
     es.addEventListener('outcome', (e) => this.dispatch('outcome', e.data));
+    es.addEventListener('activity', (e) => this.dispatch('activity', e.data));
     es.addEventListener('snapshot', (e) => this.dispatch('snapshot', e.data));
     es.onerror = () => {
       // EventSource auto-reconnects; just drop the dead reference so a later
