@@ -219,10 +219,23 @@ activity_pid=$!
 
 playwright_status=0
 shard_rcs=()
+failing_shards=()
 while read -r i pid; do
-    if wait "$pid"; then shard_rcs+=(0); else shard_rcs+=("$?"); fi
+    if wait "$pid"; then
+        shard_rcs+=(0)
+    else
+        rc=$?
+        shard_rcs+=("$rc")
+        failing_shards+=("$i")
+    fi
 done < "$pids_file"
-if wait "$activity_pid"; then shard_rcs+=(0); else shard_rcs+=("$?"); fi
+if wait "$activity_pid"; then
+    shard_rcs+=(0)
+else
+    rc=$?
+    shard_rcs+=("$rc")
+    failing_shards+=("activity")
+fi
 for rc in "${shard_rcs[@]}"; do
     [ "$rc" -gt "$playwright_status" ] && playwright_status=$rc
 done
@@ -233,14 +246,42 @@ echo "    rc:         $playwright_status"
 echo "    run log:    $RUN_LOG"
 if [ "$playwright_status" -ne 0 ]; then
     echo "    artifacts:  $run_dir/playwright-results/  (Playwright traces, error-context.md, screenshots)"
+    # Playwright only writes per-test error-context.md / trace.zip for failing
+    # tests, so listing the directory enumerates exactly the failing tests
+    # without needing to grep run.log for the ✘ lines and correlate their
+    # slugs. One bullet per failing test, paths absolute so the agent can
+    # read them without joining.
+    err_contexts=()
+    while IFS= read -r ctx; do
+        err_contexts+=("$ctx")
+    done < <(find "$run_dir/playwright-results" -mindepth 2 -maxdepth 2 -name 'error-context.md' 2>/dev/null | sort)
+    if [ "${#err_contexts[@]}" -gt 0 ]; then
+        echo "    per-test error contexts (one per failing test):"
+        for ctx in "${err_contexts[@]}"; do
+            slug_dir="$(dirname "$ctx")"
+            trace="$slug_dir/trace.zip"
+            echo "      - $ctx"
+            echo "          trace: $trace"
+        done
+    fi
     first_error=$(grep -m1 -E 'Error: ' "$RUN_LOG" 2>/dev/null | head -c 400 || true)
     [ -n "$first_error" ] && echo "    first error: $first_error"
-    echo
-    echo "==> Playwright failed — router logs:" >&2
-    for log_name in $(docker ps -a --format '{{.Names}}' | grep "^$run_id-router-"); do
-        echo "--- $log_name ---" >&2
-        docker logs "$log_name" 2>&1 | tail -n 100 >&2 || true
-    done
+    if [ "${#failing_shards[@]}" -gt 0 ]; then
+        echo
+        echo "==> Playwright failed — router logs (failing shards only: ${failing_shards[*]}):" >&2
+        for idx in "${failing_shards[@]}"; do
+            if [ "$idx" = "activity" ]; then
+                log_name="$run_id-router-activity"
+            else
+                log_name="$run_id-router-$idx"
+            fi
+            echo "--- $log_name ---" >&2
+            docker logs "$log_name" 2>&1 | tail -n 100 >&2 || true
+        done
+    else
+        echo
+        echo "==> Playwright failed — no shard rc captured (router logs unavailable):" >&2
+    fi
     exit "$playwright_status"
 fi
 note_phase "browser suite complete"
