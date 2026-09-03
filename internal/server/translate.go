@@ -54,7 +54,11 @@ func translateRequest(body []byte, from, to providers.Protocol, model string) ([
 		return json.Marshal(chatToMessagesRequest(chat))
 	}
 	if to == providers.ProtocolResponses {
-		return json.Marshal(chatToResponsesRequest(chat))
+		translated, err := chatToResponsesRequest(chat)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(translated)
 	}
 	return nil, errors.New("unsupported protocol translation")
 }
@@ -232,68 +236,100 @@ func chatToMessagesRequest(chat map[string]any) map[string]any {
 	return out
 }
 
-func chatToResponsesRequest(chat map[string]any) map[string]any {
+func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 	out := map[string]any{"model": chat["model"]}
 
 	var instructions string
+	var instructionParts []any
+	arrayInstructions := false
 	var input []any
 
 	if messages := asSlice(chat["messages"]); messages != nil {
 		for _, raw := range messages {
-			msg, _ := raw.(map[string]any)
+			msg, ok := raw.(map[string]any)
+			if !ok {
+				return nil, unsupportedFeature{"message items"}
+			}
 			role, _ := msg["role"].(string)
 
 			switch role {
-			case "system":
-				if content, ok := msg["content"].(string); ok && content != "" {
+			case "system", "developer":
+				content, err := chatContentToResponsesParts(msg["content"])
+				if err != nil {
+					return nil, err
+				}
+				if _, ok := msg["content"].(string); ok && len(content) > 0 {
+					text, _ := content[0].(map[string]any)
 					if instructions != "" {
 						instructions += "\n\n"
 					}
-					instructions += content
+					instructions += fmt.Sprint(text["text"])
+				} else if len(content) > 0 {
+					arrayInstructions = true
+					instructionParts = append(instructionParts, content...)
 				}
 
 			case "user":
-				input = append(input, userMessageToResponsesItem(msg))
+				item, err := userMessageToResponsesItem(msg)
+				if err != nil {
+					return nil, err
+				}
+				input = append(input, item)
 
 			case "assistant":
 				if calls := asSlice(msg["tool_calls"]); calls != nil && len(calls) > 0 {
-					// Assistant with tool calls: emit message (empty content) + function_call items
-					input = append(input, map[string]any{
-						"type":    "message",
-						"role":    "assistant",
-						"content": []any{},
-					})
+					// Assistant tool calls remain separate typed Responses items.
+					item, err := assistantMessageToResponsesItem(msg)
+					if err != nil {
+						return nil, err
+					}
+					input = append(input, item)
 					for _, callRaw := range calls {
-						call, _ := callRaw.(map[string]any)
+						call, ok := callRaw.(map[string]any)
+						fn, fnOK := call["function"].(map[string]any)
+						if !ok || !fnOK || call["id"] == nil || fn["name"] == nil || fn["arguments"] == nil {
+							return nil, unsupportedFeature{"tool calls"}
+						}
 						id, _ := call["id"].(string)
-						fn, _ := call["function"].(map[string]any)
 						input = append(input, map[string]any{
-							"type":       "function_call",
-							"call_id":    id,
-							"name":       fn["name"],
-							"arguments":  fn["arguments"],
+							"type":      "function_call",
+							"call_id":   id,
+							"name":      fn["name"],
+							"arguments": fn["arguments"],
 						})
 					}
 				} else {
-					input = append(input, assistantMessageToResponsesItem(msg))
+					item, err := assistantMessageToResponsesItem(msg)
+					if err != nil {
+						return nil, err
+					}
+					input = append(input, item)
 				}
 
 			case "tool":
-				id, _ := msg["tool_call_id"].(string)
-				content := ""
-				if c, ok := msg["content"].(string); ok {
-					content = c
+				id, idOK := msg["tool_call_id"].(string)
+				content, contentOK := msg["content"].(string)
+				if !idOK || id == "" || !contentOK {
+					return nil, unsupportedFeature{"tool messages"}
 				}
 				input = append(input, map[string]any{
-					"type":     "function_call_output",
-					"call_id":  id,
-					"output":   content,
+					"type":    "function_call_output",
+					"call_id": id,
+					"output":  content,
 				})
+
+			default:
+				return nil, unsupportedFeature{"message role " + role}
 			}
 		}
 	}
 
-	if instructions != "" {
+	if arrayInstructions {
+		if instructions != "" {
+			instructionParts = append([]any{map[string]any{"type": "input_text", "text": instructions}}, instructionParts...)
+		}
+		out["instructions"] = instructionParts
+	} else if instructions != "" {
 		out["instructions"] = instructions
 	}
 	out["input"] = input
@@ -302,7 +338,11 @@ func chatToResponsesRequest(chat map[string]any) map[string]any {
 		if v, ok := chat[key]; ok {
 			// Convert tool_choice to Responses format
 			if key == "tool_choice" {
-				out[key] = convertToolChoice(v)
+				choice, err := convertToolChoice(v)
+				if err != nil {
+					return nil, err
+				}
+				out[key] = choice
 			} else {
 				out[key] = v
 			}
@@ -322,7 +362,7 @@ func chatToResponsesRequest(chat map[string]any) map[string]any {
 		}
 		out["tools"] = converted
 	}
-	return out
+	return out, nil
 }
 
 func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
@@ -727,64 +767,87 @@ func asSlice(value any) []any {
 	return nil
 }
 
-func userMessageToResponsesItem(msg map[string]any) map[string]any {
-	parts := chatContentToResponsesParts(msg["content"])
+func userMessageToResponsesItem(msg map[string]any) (map[string]any, error) {
+	parts, err := chatContentToResponsesParts(msg["content"])
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"type":    "message",
 		"role":    "user",
 		"content": parts,
-	}
+	}, nil
 }
 
-func assistantMessageToResponsesItem(msg map[string]any) map[string]any {
-	parts := chatContentToResponsesParts(msg["content"])
+func assistantMessageToResponsesItem(msg map[string]any) (map[string]any, error) {
+	parts, err := chatContentToResponsesParts(msg["content"])
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"type":    "message",
 		"role":    "assistant",
 		"content": parts,
-	}
+	}, nil
 }
 
-func chatContentToResponsesParts(value any) []any {
+func chatContentToResponsesParts(value any) ([]any, error) {
 	if str, ok := value.(string); ok {
-		return []any{map[string]any{"type": "input_text", "text": str}}
+		return []any{map[string]any{"type": "input_text", "text": str}}, nil
 	}
 	parts := []any{}
-	if list := asSlice(value); list != nil {
-		for _, raw := range list {
-			block, _ := raw.(map[string]any)
-			switch block["type"] {
-			case "text":
-				text, _ := block["text"].(string)
-				parts = append(parts, map[string]any{"type": "input_text", "text": text})
-			case "image_url":
-				if url, _ := block["image_url"].(map[string]any); url != nil {
-					parts = append(parts, map[string]any{
-						"type":      "input_image",
-						"image_url": url["url"],
-					})
-				}
-			}
-		}
+	list := asSlice(value)
+	if list == nil {
+		return nil, unsupportedFeature{"message content"}
 	}
-	return parts
+	for _, raw := range list {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			return nil, unsupportedFeature{"message content blocks"}
+		}
+		var part map[string]any
+		switch block["type"] {
+		case "text":
+			text, ok := block["text"].(string)
+			if !ok {
+				return nil, unsupportedFeature{"text content blocks"}
+			}
+			part = map[string]any{"type": "input_text", "text": text}
+		case "image_url":
+			url, ok := block["image_url"].(map[string]any)
+			value, valueOK := url["url"].(string)
+			if !ok || !valueOK || value == "" {
+				return nil, unsupportedFeature{"image content blocks"}
+			}
+			part = map[string]any{"type": "input_image", "image_url": value}
+		default:
+			return nil, unsupportedFeature{"content block " + fmt.Sprint(block["type"])}
+		}
+		parts = append(parts, part)
+	}
+	return parts, nil
 }
 
-func convertToolChoice(value any) any {
+func convertToolChoice(value any) (any, error) {
 	switch v := value.(type) {
 	case string:
-		if v == "required" {
-			return map[string]any{"type": "any"}
+		switch v {
+		case "none", "auto":
+			return map[string]any{"type": v}, nil
+		case "required":
+			return map[string]any{"type": "any"}, nil
+		default:
+			return nil, unsupportedFeature{"tool_choice " + v}
 		}
-		return map[string]any{"type": v}
 	case map[string]any:
 		fn, _ := v["function"].(map[string]any)
-		if fn != nil {
-			return map[string]any{"type": "function", "name": fn["name"]}
+		if fn != nil && fn["name"] != nil {
+			return map[string]any{"type": "function", "name": fn["name"]}, nil
 		}
-		return v
+		return nil, unsupportedFeature{"named tool_choice"}
+	default:
+		return nil, unsupportedFeature{"tool_choice"}
 	}
-	return value
 }
 
 func chatContentToAnthropic(value any) []any {

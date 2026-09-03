@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 
@@ -101,6 +102,71 @@ func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
 	for _, needle := range []string{`call_123`, `lookup`, `Perth`, `sunny`} {
 		if !bytes.Contains(chat, []byte(needle)) {
 			t.Fatalf("round trip lost %q: %s", needle, chat)
+		}
+	}
+}
+
+func TestChatToResponsesPreservesDeveloperAndInstructionContentArrays(t *testing.T) {
+	body := []byte(`{"model":"virtual/coding","messages":[{"role":"system","content":[{"type":"text","text":"system rule"}]},{"role":"developer","content":[{"type":"text","text":"developer rule"}]},{"role":"user","content":"hello"}]}`)
+	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(translated, &got); err != nil {
+		t.Fatal(err)
+	}
+	want := []any{
+		map[string]any{"type": "input_text", "text": "system rule"},
+		map[string]any{"type": "input_text", "text": "developer rule"},
+	}
+	if !reflect.DeepEqual(got["instructions"], want) {
+		t.Fatalf("instructions = %#v, want %#v", got["instructions"], want)
+	}
+	input := got["input"].([]any)
+	if len(input) != 1 || input[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("developer message leaked or user message missing: %#v", input)
+	}
+}
+
+func TestChatToResponsesSupportsToolChoice(t *testing.T) {
+	for _, tc := range []struct {
+		choice string
+		want   map[string]any
+	}{
+		{choice: "none", want: map[string]any{"type": "none"}},
+		{choice: "auto", want: map[string]any{"type": "auto"}},
+		{choice: "required", want: map[string]any{"type": "any"}},
+	} {
+		t.Run(tc.choice, func(t *testing.T) {
+			body, _ := json.Marshal(map[string]any{
+				"model":       "virtual/coding",
+				"messages":    []any{map[string]any{"role": "user", "content": "hello"}},
+				"tool_choice": tc.choice,
+			})
+			translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			_ = json.Unmarshal(translated, &got)
+			if !reflect.DeepEqual(got["tool_choice"], tc.want) {
+				t.Fatalf("tool_choice = %#v, want %#v", got["tool_choice"], tc.want)
+			}
+		})
+	}
+}
+
+func TestChatToResponsesRejectsUnsupportedRolesAndContentBlocks(t *testing.T) {
+	for _, body := range []string{
+		`{"model":"virtual/coding","messages":[{"role":"function","content":"unsupported"}]}`,
+		`{"model":"virtual/coding","messages":[{"role":"user","content":[{"type":"audio","data":"unsupported"}]}]}`,
+		`{"model":"virtual/coding","messages":[{"role":"user","content":42}]}`,
+	} {
+		_, err := translateRequest([]byte(body), providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+		var unsupported unsupportedFeature
+		if !errors.As(err, &unsupported) {
+			t.Fatalf("request was not rejected as unsupported: %v", err)
 		}
 	}
 }
