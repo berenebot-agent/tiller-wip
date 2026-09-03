@@ -37,7 +37,7 @@ cd /opt/tiller-router && docker compose down && docker compose up --build
 ```
 
 - Always `down` before `up --build` so a stale container isn't left holding the old image's anonymous volumes / healthcheck state, and so the rebuild actually replaces the running process.
-- Run from `/opt/tiller-router/` (the deployed repo location), not from a dev checkout, unless the user says otherwise.
+- Run from `/home/ben/projects/tiller-router/` (the deployed repo location — this is the dev branch, not a separate `/opt/tiller-router/` checkout), unless the user says otherwise.
 - `--build` is required — without it, Compose reuses the existing image and the user's "rebuild" intent isn't honored.
 - Do not invent a `docker build` + manual `docker run` workflow unless the user explicitly asks for one. The Compose service is the supported path.
 
