@@ -239,6 +239,60 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 	}
 }
 
+func TestMigration017UpgradesOpenCodeFreeProtocols(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.db")
+	openMigrationFixture(t, path, 16)
+	raw := openRawMigrationDB(t, path)
+	now := Now()
+	if _, err := raw.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('opencode-free','real','op-open')`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES('op-open','opencode-free','opencode-free','http://example.test/v1',NULL,1,'["chat"]',?,?)`, now, now); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	for i, modelID := range []string{"muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free"} {
+		if _, err := raw.Exec(`INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,native_protocol,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, fmt.Sprintf("op-model-%d", i), "op-open", modelID, modelID, "chat", 1, now, now, now, now); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var protocols string
+	if err := db.SQL.QueryRow(`SELECT protocols FROM providers WHERE id='op-open'`).Scan(&protocols); err != nil {
+		t.Fatal(err)
+	}
+	if protocols != `["chat","responses"]` {
+		t.Fatalf("opencode-free protocols = %q, want [\"chat\",\"responses\"]", protocols)
+	}
+	rows, err := db.SQL.Query(`SELECT native_protocol FROM provider_models WHERE provider_id='op-open' ORDER BY upstream_model_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var protocol string
+		if err := rows.Scan(&protocol); err != nil {
+			t.Fatal(err)
+		}
+		if protocol != "responses" {
+			t.Fatalf("Muse native protocol = %q, want responses", protocol)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrationFailureDoesNotAdvanceVersion(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "router.db")
 	// Make migration 002 fail deterministically by applying its schema change
