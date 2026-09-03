@@ -28,11 +28,11 @@ test('live refresh: transient errors retain one reconnecting EventSource', async
     source.onerror();
     return {
       count: window.__liveEventSources.length,
-      closed: source.closed,
+      owned: stream.es === source,
     };
   });
   expect(result.count).toBe(1);
-  expect(result.closed).toBeFalsy();
+  expect(result.owned).toBeTruthy();
 });
 
 // Live SSE refresh: the Virtual Models page's per-target resolution icons and
