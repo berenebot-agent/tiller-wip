@@ -8,16 +8,18 @@ services:
         TILLER_GID: ${TILLER_GID:-65532}
 
     restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
+
     environment:
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
+
+      # The app starts as root and drops to the runtime user at boot, chown'ing
+      # ./data to that user first — so a fresh ./data works with no `sudo chown`
+      # step. TILLER_RUN_UID/TILLER_RUN_GID select the user the app runs as
+      # (default 65532:65532, matching the image's build-time args). Leave unset
+      # unless you need the data directory run as your own uid:gid.
+      TILLER_RUN_UID: ${TILLER_RUN_UID:-65532}
+      TILLER_RUN_GID: ${TILLER_RUN_GID:-65532}
 
       # Behind a reverse proxy (Caddy / Nginx / Traefik / etc.) that sets
       # X-Forwarded-For and Forwarded, set TILLER_TRUSTED_PROXY in .env to the
@@ -34,3 +36,15 @@ services:
       start_period: 10s
     ports:
       - 0.0.0.0:${TILLER_PORT:-8080}:8080
+
+  # Hardenable, not required: for an internet-exposed deployment you may add a
+  # read-only rootfs, drop all capabilities, mount a scratch tmpfs, and force a
+  # strict non-root user. The image supports these flags without a shell
+  # entrypoint (the privilege drop is pure Go and no-ops when already non-root):
+  #
+  #   read_only: true
+  #   tmpfs:
+  #     - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+  #   cap_drop: [ALL]
+  #   security_opt: [no-new-privileges:true]
+  #   user: "${TILLER_RUN_UID:-65532}:${TILLER_RUN_GID:-65532}"

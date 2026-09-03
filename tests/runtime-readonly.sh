@@ -148,4 +148,44 @@ else
     exit 1
 fi
 
+echo "==> Default (adoption-first) posture: root-at-boot self-heals a fresh ./data"
+# The default image has no baked-in `user:` (root at boot) and this run omits
+# --user/--read-only/--cap-drop, mirroring docker-compose.yml. A fresh bind
+# mount created by rootful Docker is root-owned; the in-process Go privdrop
+# must chown it to 65532:65532, drop, and serve — with no host-side chown.
+default_dir=$(mktemp -d)
+dc=dropped-$$
+docker run --rm -d --name "$dc" --network host \
+    -v "$default_dir:/data" \
+    -e TILLER_ADMIN_USERNAME=admin \
+    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_LISTEN_ADDR="127.0.0.1:18082" \
+    -e TILLER_DATA_DIR=/data \
+    tiller-router:dev >/dev/null
+ready=0
+i=0
+while [ "$i" -lt 60 ]; do
+    if curl -fsS "http://127.0.0.1:18082/health/ready" >/dev/null 2>&1; then
+        ready=1
+        break
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+docker rm -f "$dc" >/dev/null 2>&1 || true
+if [ "$ready" -ne 1 ]; then
+    echo "FAIL: default posture never became ready" >&2
+    rm -rf "$default_dir" || true
+    exit 1
+fi
+owner=$(docker run --rm -v "$default_dir:/d:ro" --user root alpine stat -c '%u:%g' /d/tiller-router.db)
+echo "    fresh ./data -> $owner (owner of tiller-router.db)"
+[ "$owner" = "65532:65532" ] || {
+    echo "FAIL: default posture left ./data owned by $owner, want 65532:65532" >&2
+    rm -rf "$default_dir" || true
+    exit 1
+}
+docker run --rm -v "$default_dir:/d" --user root alpine chown -R "$host_uid:$host_gid" /d >/dev/null 2>&1 || true
+rm -rf "$default_dir" || true
+
 echo "PASS: all runtime read-only checks passed"

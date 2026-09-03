@@ -144,23 +144,17 @@ Requires Docker and Docker Compose.
    mkdir tiller-router && cd tiller-router
    ```
 
-2. **Create the data directory:**
-
-   The container runs as a non-root user (`65532`) and can only write to
-   `./data` if it *owns* it. On Docker Desktop and Podman rootless the
-   bind-mount uid mapping handles this automatically. On bare Linux with
-   rootful Docker, a fresh `./data` is created on the host as **root**, so run
-   the ownership fix alongside `mkdir` before the first `docker compose up`:
+2. **Create the data directory** (usually just an empty dir):
 
    ```bash
    mkdir -p ./data
-   sudo chown -R 65532:65532 ./data
    ```
 
-   If you skip this on plain Linux, startup fails with
-   `open database: chmod /data: operation not permitted`; the container now
-   logs the same owner fix at runtime. Alternative: set `TILLER_UID`/`TILLER_GID`
-   in `.env` to the uid:gid that actually owns `./data` (see below).
+   No `sudo chown` or manual ownership step is needed. The container starts as
+   root at boot, hands `./data` to the runtime user (default `65532:65532`),
+   and then drops privileges before serving — so a fresh root-owned bind mount
+   is self-healing. To run the data directory under your own uid:gid instead,
+   set `TILLER_RUN_UID`/`TILLER_RUN_GID` to your `id -u`/`id -g` (see below).
 
 3. **Create a `docker-compose.yml`:**
 
@@ -189,7 +183,7 @@ Requires Docker and Docker Compose.
 
 > **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall. The stream is in-process and single-instance by design — it does not span multiple Tiller containers.
 
-> The repository's `docker-compose.yml` additionally runs the container read-only, drops all Linux capabilities, mounts a scratch `tmpfs`, and defines a container healthcheck — prefer it (or copy those settings) for internet-exposed deployments.
+> **Hardening is opt-in.** The repository's `docker-compose.yml` ships the adoption-first posture: the container starts as root at boot, self-fixes `./data` ownership, drops to the runtime user, and serves. It includes a container healthcheck. For internet-exposed deployments you can add a read-only rootfs, drop all Linux capabilities, mount a scratch `tmpfs`, and force a strict non-root user — the file's comments show the exact flags (the image supports them without a shell entrypoint).
 
 ### Option 2 — Build from source
 
@@ -200,9 +194,9 @@ cp .env.example .env   # set TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD
 docker compose up -d --build
 ```
 
-The repository's `docker-compose.yml` builds locally instead of pulling an image; everything else (hardening, volumes, healthcheck) is identical to the prebuilt option above.
+The repository's `docker-compose.yml` builds locally instead of pulling an image; everything else (healthcheck, adoption-first posture, volumes) is identical to the prebuilt option above.
 
-The service runs read-only with all capabilities dropped, as a non-root user, persisting state in `./data`.
+The service starts as root to self-fix `./data` ownership, then drops to a non-root user before serving.
 
 ### Other compose / env options
 
@@ -212,8 +206,10 @@ The repo's `docker-compose.yml` plus `.env` cover the most common customisations
 TILLER_ADMIN_USERNAME=admin                          # admin login for the web UI
 TILLER_ADMIN_PASSWORD=replace-with-a-long-random-password   # admin password
 TILLER_PORT=8080                                     # host port (default 8080)
-TILLER_UID=1000                                      # run as your uid (avoids sudo chown)
-TILLER_GID=1000                                      # run as your gid
+TILLER_RUN_UID=1000                                  # runtime uid (default 65532)
+TILLER_RUN_GID=1000                                  # runtime gid (default 65532)
+TILLER_UID=1000                                      # build-time uid for baked-in files (default 65532)
+TILLER_GID=1000                                      # build-time gid for baked-in files (default 65532)
 TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy if using one
 TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
 TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
