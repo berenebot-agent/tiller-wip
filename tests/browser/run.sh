@@ -21,6 +21,10 @@ password=browser-test-password
 workers=${TILLER_BROWSER_WORKERS:-${PLAYWRIGHT_WORKERS:-3}}
 run_id=tiller-browser-$$
 ports_file=$(mktemp)
+run_start=$(date +%s)
+note_phase() {
+    echo "==> $1 ($(( $(date +%s) - run_start ))s elapsed)"
+}
 # Per-run scratch: holds the activity router's host-mounted data dir (so the
 # activity lane can seed rows directly via fixturectl) and the extracted
 # fixturectl binary. Cleaned up on exit (falling back to a root throwaway
@@ -71,6 +75,7 @@ docker cp "$fixture_cid:/fixturectl" "$run_dir/fixturectl"
 docker rm "$fixture_cid" >/dev/null
 chmod +x "$run_dir/fixturectl"
 mkdir "$run_dir/activity-data"
+note_phase "images built and fixturectl extracted"
 
 echo "==> Starting $workers isolated mock/router pairs"
 for i in $(seq 0 $((workers - 1))); do
@@ -107,36 +112,58 @@ docker run --rm -d --name "$run_id-router-activity" --network host \
     -e TILLER_ADMIN_USERNAME=admin \
     -e TILLER_ADMIN_PASSWORD="$password" \
     tiller-router:dev >/dev/null
+note_phase "containers started"
 
+# Wait for every mock/router to become ready CONCURRENTLY. All containers were
+# started above, so polling them one at a time only serializes a wait that can
+# run in parallel. wait_url polls a URL every 0.25s and records OK/FAIL to a
+# result file; the script then waits for all probes and reports any failure.
+wait_url() {
+    name=$1 url=$2 limit=$3 out=$4
+    tries=0
+    while [ "$tries" -lt "$((limit * 4))" ]; do
+        if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
+            echo "OK $name" > "$out"
+            return 0
+        fi
+        tries=$((tries + 1))
+        sleep 0.25
+    done
+    echo "FAIL $name" > "$out"
+    return 1
+}
+
+ready_dir=$(mktemp -d)
+ready_pids=""
+probe_endpoint() {
+    name=$1 url=$2 limit=$3
+    wait_url "$name" "$url" "$limit" "$ready_dir/$name" &
+    ready_pids="$ready_pids $!"
+}
+echo "==> Waiting for mock/router readiness (all endpoints in parallel)"
 while read -r i router_port mock_port; do
-    echo "==> Waiting for worker $i mock/router readiness"
-    mock_ready=0
-    for _ in $(seq 1 60); do
-        if curl -fsS "http://127.0.0.1:$mock_port/v1/models" >/dev/null 2>&1; then mock_ready=1; break; fi
-        sleep 1
-    done
-    if [ "$mock_ready" -ne 1 ]; then echo "FAIL: worker $i mock never became ready" >&2; exit 1; fi
-    ready=0
-    for _ in $(seq 1 40); do
-        if curl -fsS "http://127.0.0.1:$router_port/health/ready" >/dev/null 2>&1; then ready=1; break; fi
-        sleep 1
-    done
-    if [ "$ready" -ne 1 ]; then echo "FAIL: worker $i router never became ready" >&2; exit 1; fi
+    probe_endpoint "worker$i-mock" "http://127.0.0.1:$mock_port/v1/models" 60
+    probe_endpoint "worker$i-router" "http://127.0.0.1:$router_port/health/ready" 40
 done < "$ports_file"
-
-echo "==> Waiting for dedicated activity lane readiness"
-activity_mock_ready=0
-for _ in $(seq 1 60); do
-    if curl -fsS "http://127.0.0.1:$activity_mock_port/v1/models" >/dev/null 2>&1; then activity_mock_ready=1; break; fi
-    sleep 1
+probe_endpoint "activity-mock" "http://127.0.0.1:$activity_mock_port/v1/models" 60
+probe_endpoint "activity-router" "http://127.0.0.1:$activity_router_port/health/ready" 40
+for p in $ready_pids; do
+    wait "$p" || true
 done
-if [ "$activity_mock_ready" -ne 1 ]; then echo "FAIL: activity mock never became ready" >&2; exit 1; fi
-activity_router_ready=0
-for _ in $(seq 1 40); do
-    if curl -fsS "http://127.0.0.1:$activity_router_port/health/ready" >/dev/null 2>&1; then activity_router_ready=1; break; fi
-    sleep 1
+failed=""
+for f in "$ready_dir"/*; do
+    [ -f "$f" ] || continue
+    read -r status name < "$f"
+    if [ "$status" != "OK" ]; then
+        failed="$failed $name"
+    fi
 done
-if [ "$activity_router_ready" -ne 1 ]; then echo "FAIL: activity router never became ready" >&2; exit 1; fi
+rm -rf "$ready_dir"
+if [ -n "$failed" ]; then
+    echo "FAIL: never became ready:$failed" >&2
+    exit 1
+fi
+note_phase "all endpoints ready"
 
 echo "==> Running Playwright browser suite"
 # Run one Playwright shard per isolated router. Each process has a normal,
@@ -182,3 +209,4 @@ if [ "$playwright_status" -ne 0 ]; then
     done
     exit "$playwright_status"
 fi
+note_phase "browser suite complete"
