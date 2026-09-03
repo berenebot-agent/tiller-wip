@@ -4,6 +4,33 @@ const {
   mockFailModel, mockOkModel
 } = require('./helpers');
 
+test('live refresh: transient errors retain one reconnecting EventSource', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__liveEventSources = [];
+    window.EventSource = class {
+      constructor(url) {
+        this.url = url;
+        this.closed = false;
+        window.__liveEventSources.push(this);
+      }
+      addEventListener() {}
+      close() { this.closed = true; }
+    };
+  });
+  await login(page);
+
+  const result = await page.evaluate(() => {
+    const source = window.__liveEventSources[0];
+    source.onerror();
+    return {
+      count: window.__liveEventSources.length,
+      closed: source.closed,
+    };
+  });
+  expect(result.count).toBe(1);
+  expect(result.closed).toBeFalsy();
+});
+
 // Live SSE refresh: the Virtual Models page's per-target resolution icons and
 // token/cache counters update in place (no navigation) as the router serves
 // requests, and DOM writes pause while a dialog is open.
