@@ -214,11 +214,14 @@ docker run --rm --network host \
 activity_pid=$!
 
 playwright_status=0
+shard_rcs=()
 while read -r i pid; do
-    if wait "$pid"; then :; else playwright_status=$?; fi
+    if wait "$pid"; then shard_rcs+=(0); else shard_rcs+=("$?"); fi
 done < "$pids_file"
-
-if wait "$activity_pid"; then :; else playwright_status=$?; fi
+if wait "$activity_pid"; then shard_rcs+=(0); else shard_rcs+=("$?"); fi
+for rc in "${shard_rcs[@]}"; do
+    [ "$rc" -gt "$playwright_status" ] && playwright_status=$rc
+done
 rm -f "$pids_file"
 echo
 echo "==> browser suite summary"
