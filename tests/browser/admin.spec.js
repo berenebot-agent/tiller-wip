@@ -1166,3 +1166,49 @@ test('virtual-model target combobox: non-matching text still blocks submission',
   const group = groupList.data.find(g => g.name === 'vm-nomatch-vg');
   if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });
+
+test('mobile: ordered-fallback target dropdown spans the dialog width', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-mobile-list';
+  await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-mobile-list-vg' } });
+  expect(groupRes.status()).toBe(201);
+  const group = await groupRes.json();
+  const virtualRes = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'mobile-fb', routing_mode: 'ordered_fallback', targets: [{ provider_model_id: real.id, enabled: true }] } });
+  expect(virtualRes.status()).toBe(201);
+  const virtual = await virtualRes.json();
+
+  await page.goto('/#virtual');
+  await expect(page.locator('#view-virtual')).toBeVisible();
+  const row = page.locator('#virtual-body tr', { hasText: 'vm-mobile-list-vg/mobile-fb' });
+  await row.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Edit vm-mobile-list-vg/mobile-fb' })).toBeVisible();
+
+  const input = page.locator('[data-fallback-targets] .target-row .combobox input[type="text"]');
+  await input.click();
+  const list = page.locator('[data-fallback-targets] .combobox-list');
+  await expect(list).toBeVisible();
+
+  const m = await page.evaluate(() => {
+    const l = document.querySelector('[data-fallback-targets] .combobox-list').getBoundingClientRect();
+    const i = document.querySelector('[data-fallback-targets] .combobox input[type="text"]').getBoundingClientRect();
+    const d = document.querySelector('#form-dialog').getBoundingClientRect();
+    return { listW: l.width, listRight: l.right, inputW: i.width, dialogW: d.width, vw: window.innerWidth };
+  });
+  expect(m.dialogW).toBeGreaterThan(m.inputW + 40);
+  expect(m.listW).toBeGreaterThanOrEqual(m.dialogW - 2);
+  expect(m.listW).toBeGreaterThan(m.inputW + 40);
+  expect(m.listRight).toBeLessThanOrEqual(m.vw);
+
+  await input.click();
+  await expect(list).toBeHidden();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+});

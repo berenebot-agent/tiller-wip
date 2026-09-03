@@ -284,8 +284,18 @@ function positionComboboxList(list, input, minWidth) {
   const vvTop = vv ? vv.offsetTop : 0;
   const vvBottom = vv ? vvTop + vv.height : window.innerHeight;
   const vvWidth = vv ? vv.width : window.innerWidth;
-  const width = Math.max(box.width, minWidth || 0);
-  const left = Math.min(box.left, Math.max(8, vvWidth - width - 8));
+  let width = Math.min(Math.max(box.width, minWidth || 0), vvWidth - 16);
+  let left = Math.min(box.left, Math.max(8, vvWidth - width - 8));
+  // On phones, widen the fixed list to span its dialog so long
+  // provider/model labels aren't truncated to the input's grid column.
+  if (vvWidth <= 720) {
+    const host = input.closest('dialog');
+    if (host) {
+      const hb = host.getBoundingClientRect();
+      width = Math.min(Math.max(width, hb.width), vvWidth - 16);
+      left = Math.max(8, Math.min(hb.left, vvWidth - width - 8));
+    }
+  }
   const spaceBelow = vvBottom - box.bottom - 8;
   const spaceAbove = box.top - vvTop - 8;
   const openUp = spaceBelow < 80;
