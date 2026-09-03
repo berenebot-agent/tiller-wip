@@ -31,10 +31,10 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .client-name-line strong{display:inline}
 .status-roundel{display:inline-block;flex:none;width:18px;height:18px;border-radius:50%;position:relative;background:var(--green);box-shadow:0 0 0 3px var(--green-bg);transition:background .15s,box-shadow .15s}
 .status-roundel.status-roundel-broken{background:var(--red);box-shadow:0 0 0 3px var(--red-bg)}
-.status-roundel.status-roundel-active{background:transparent;box-shadow:0 0 0 1px var(--blue-pale)}
-.status-roundel .status-roundel-spin{position:absolute;inset:1px;display:none;border-radius:50%;border:1.2px solid var(--blue)}
-.status-roundel .status-roundel-spin:before{content:"";position:absolute;inset:-1.6px;border-radius:50%;border:1.6px solid transparent;border-top-color:var(--blue);border-right-color:var(--blue);animation:status-roundel-spin 1.05s linear infinite}
-.status-roundel .status-roundel-spin:after{content:"";position:absolute;left:50%;top:50%;width:5px;height:5px;margin:-2.5px 0 0 -2.5px;border-radius:50%;background:var(--blue)}
+.status-roundel.status-roundel-active{background:transparent;box-shadow:none}
+.status-roundel .status-roundel-spin{position:absolute;inset:0;display:none;border-radius:50%}
+.status-roundel .status-roundel-spin:before{content:"";position:absolute;inset:1px;border-radius:50%;border:2px solid transparent;border-top-color:var(--blue);border-right-color:var(--blue);animation:status-roundel-spin 1.05s linear infinite}
+.status-roundel .status-roundel-spin:after{content:"";position:absolute;inset:4px;border-radius:50%;background:var(--blue)}
 .status-roundel.status-roundel-active .status-roundel-spin{display:block}
 @keyframes status-roundel-spin{to{transform:rotate(360deg)}}
 .target-summary{margin-top:2px;line-height:1.45}
