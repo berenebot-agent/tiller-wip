@@ -29,6 +29,8 @@ note_phase() {
 # router's host-mounted data dir, the extracted fixturectl binary, the run
 # log, and the Playwright artifacts (preserved on failure, auto-removed on
 # success). The old /tmp mktemp path had external-permission issues.
+# Prune stale runs first so interrupted runs don't accumulate on disk.
+. "$repo_dir/tests/scripts/prune-test-logs.sh"
 mkdir -p tests/logs
 run_dir="$(pwd)/tests/logs/$run_id"
 mkdir -p "$run_dir/playwright-results" "$run_dir/activity-data"

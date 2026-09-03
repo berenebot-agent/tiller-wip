@@ -4,6 +4,7 @@ set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 password=compatibility-test-password
 run_id=tiller-compat-$$
+. "$repo_dir/tests/scripts/prune-test-logs.sh"
 mkdir -p tests/logs/compat
 sdk_data_dir="$(pwd)/tests/logs/compat/sdk-$run_id"
 hermes_data_dir="$(pwd)/tests/logs/compat/hermes-$run_id"
