@@ -75,7 +75,7 @@ start_router() {
         -e TILLER_ADMIN_USERNAME=admin \
         -e TILLER_ADMIN_PASSWORD="$password" \
         tiller-router:dev >/dev/null
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 10); do
         if curl -fsS "http://127.0.0.1:$port/health/ready" >/dev/null 2>&1; then return; fi
         sleep 1
     done
