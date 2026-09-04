@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -27,6 +28,7 @@ type TokenResponse struct {
 	Scope            string
 	AccountEmail     string
 	AccountPlan      string
+	ProviderData     map[string]any
 }
 
 type TokenRecord struct {
@@ -40,6 +42,7 @@ type TokenRecord struct {
 	Scope            string
 	AccountEmail     string
 	AccountPlan      string
+	ProviderData     map[string]any
 	AuthState        AuthState
 	LastRefreshAt    *time.Time
 	CreatedAt        time.Time
@@ -77,6 +80,9 @@ func MergeToken(old TokenRecord, response TokenResponse, now time.Time) (TokenRe
 	}
 	if response.AccountPlan != "" {
 		record.AccountPlan = response.AccountPlan
+	}
+	if response.ProviderData != nil {
+		record.ProviderData = response.ProviderData
 	}
 	record.AuthState = AuthConnected
 	record.LastRefreshAt = timePtr(now)
@@ -118,8 +124,9 @@ func (s *Store) Get(ctx context.Context, providerID string) (TokenRecord, error)
 	var r TokenRecord
 	var expiresAt, refreshExpiresAt, lastRefreshAt, createdAt, updatedAt sql.NullString
 	var authState string
-	err := s.db.QueryRowContext(ctx, `SELECT provider_id,access_token,coalesce(refresh_token,''),token_type,expires_at,refresh_expires_at,coalesce(id_token,''),coalesce(scope,''),coalesce(account_email,''),coalesce(account_plan,''),auth_state,last_refresh_at,created_at,updated_at FROM provider_oauth_tokens WHERE provider_id=?`, providerID).
-		Scan(&r.ProviderID, &r.AccessToken, &r.RefreshToken, &r.TokenType, &expiresAt, &refreshExpiresAt, &r.IDToken, &r.Scope, &r.AccountEmail, &r.AccountPlan, &authState, &lastRefreshAt, &createdAt, &updatedAt)
+	var providerData sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT provider_id,access_token,coalesce(refresh_token,''),token_type,expires_at,refresh_expires_at,coalesce(id_token,''),coalesce(scope,''),coalesce(account_email,''),coalesce(account_plan,''),auth_state,last_refresh_at,created_at,updated_at,provider_data FROM provider_oauth_tokens WHERE provider_id=?`, providerID).
+		Scan(&r.ProviderID, &r.AccessToken, &r.RefreshToken, &r.TokenType, &expiresAt, &refreshExpiresAt, &r.IDToken, &r.Scope, &r.AccountEmail, &r.AccountPlan, &authState, &lastRefreshAt, &createdAt, &updatedAt, &providerData)
 	if errors.Is(err, sql.ErrNoRows) {
 		return TokenRecord{}, ErrNoToken
 	}
@@ -127,6 +134,11 @@ func (s *Store) Get(ctx context.Context, providerID string) (TokenRecord, error)
 		return TokenRecord{}, err
 	}
 	r.AuthState = AuthState(authState)
+	if providerData.Valid && providerData.String != "" {
+		if err := json.Unmarshal([]byte(providerData.String), &r.ProviderData); err != nil {
+			return TokenRecord{}, errors.New("invalid OAuth provider metadata")
+		}
+	}
 	var parseErr error
 	if r.ExpiresAt, parseErr = parseTime(expiresAt); parseErr != nil {
 		return TokenRecord{}, parseErr
@@ -163,7 +175,7 @@ func (s *Store) Put(ctx context.Context, r TokenRecord) error {
 	if r.UpdatedAt.IsZero() {
 		r.UpdatedAt = r.CreatedAt
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO provider_oauth_tokens(provider_id,access_token,refresh_token,token_type,expires_at,refresh_expires_at,id_token,scope,account_email,account_plan,auth_state,last_refresh_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET access_token=excluded.access_token,refresh_token=excluded.refresh_token,token_type=excluded.token_type,expires_at=excluded.expires_at,refresh_expires_at=excluded.refresh_expires_at,id_token=excluded.id_token,scope=excluded.scope,account_email=excluded.account_email,account_plan=excluded.account_plan,auth_state=excluded.auth_state,last_refresh_at=excluded.last_refresh_at,updated_at=excluded.updated_at`, r.ProviderID, r.AccessToken, nullableString(r.RefreshToken), r.TokenType, nullableTime(r.ExpiresAt), nullableTime(r.RefreshExpiresAt), nullableString(r.IDToken), nullableString(r.Scope), nullableString(r.AccountEmail), nullableString(r.AccountPlan), r.AuthState, nullableTime(r.LastRefreshAt), r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO provider_oauth_tokens(provider_id,access_token,refresh_token,token_type,expires_at,refresh_expires_at,id_token,scope,account_email,account_plan,auth_state,last_refresh_at,created_at,updated_at,provider_data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET access_token=excluded.access_token,refresh_token=excluded.refresh_token,token_type=excluded.token_type,expires_at=excluded.expires_at,refresh_expires_at=excluded.refresh_expires_at,id_token=excluded.id_token,scope=excluded.scope,account_email=excluded.account_email,account_plan=excluded.account_plan,auth_state=excluded.auth_state,last_refresh_at=excluded.last_refresh_at,updated_at=excluded.updated_at,provider_data=excluded.provider_data`, r.ProviderID, r.AccessToken, nullableString(r.RefreshToken), r.TokenType, nullableTime(r.ExpiresAt), nullableTime(r.RefreshExpiresAt), nullableString(r.IDToken), nullableString(r.Scope), nullableString(r.AccountEmail), nullableString(r.AccountPlan), r.AuthState, nullableTime(r.LastRefreshAt), r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano), nullableJSON(r.ProviderData))
 	return err
 }
 
@@ -202,4 +214,15 @@ func nullableString(v string) any {
 		return nil
 	}
 	return v
+}
+
+func nullableJSON(v map[string]any) any {
+	if len(v) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return string(b)
 }

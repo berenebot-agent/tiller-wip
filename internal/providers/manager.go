@@ -15,6 +15,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
+	"github.com/tiller-router/tiller-router/internal/providers/claude"
+	"github.com/tiller-router/tiller-router/internal/providers/github"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
@@ -77,6 +79,14 @@ func (m *Manager) HydrateOAuth(ctx context.Context, p *Instance) {
 		token, err = m.oauth.Current(ctx, p.ID, func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
 			return codex.Refresh(refreshCtx, m.registry.HTTPClient(), current.RefreshToken)
 		})
+	} else if p.Type == "claude-subscription" {
+		token, err = m.oauth.Current(ctx, p.ID, func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return claude.Refresh(refreshCtx, m.registry.HTTPClient(), current.RefreshToken)
+		})
+	} else if p.Type == "github-copilot" {
+		token, err = m.oauth.Current(ctx, p.ID, func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return github.Refresh(refreshCtx, m.registry.HTTPClient(), current)
+		})
 	} else {
 		token, err = oauth.NewStore(m.db).Get(ctx, p.ID)
 	}
@@ -84,6 +94,7 @@ func (m *Manager) HydrateOAuth(ctx context.Context, p *Instance) {
 		return
 	}
 	p.Credential = token.AccessToken
+	p.OAuthProviderData = token.ProviderData
 	if p.Type == codexProviderType {
 		p.OAuthAccountID = codex.AccountInfo(token.IDToken).ID
 	}

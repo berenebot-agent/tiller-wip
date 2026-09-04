@@ -40,13 +40,16 @@ type Descriptor struct {
 	BaseURLRequired  bool       `json:"base_url_required"`
 	CredentialNeeded bool       `json:"credential_needed"`
 	AuthMode         AuthMode   `json:"auth_mode"`
+	AuthFlow         string     `json:"auth_flow,omitempty"`
 	Protocols        []Protocol `json:"protocols"`
 	Discovery        string     `json:"-"`
 }
 
 var descriptors = []Descriptor{
 	{Type: "openai", Label: "OpenAI", DefaultBaseURL: "https://api.openai.com/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses}, Discovery: "openai"},
-	{Type: codexProviderType, Label: "Codex Subscription", DefaultBaseURL: "https://chatgpt.com/backend-api/codex", AuthMode: AuthModeOAuth, Protocols: []Protocol{ProtocolResponses}, Discovery: "codex"},
+	{Type: codexProviderType, Label: "Codex Subscription", DefaultBaseURL: "https://chatgpt.com/backend-api/codex", AuthMode: AuthModeOAuth, AuthFlow: "authorization_code_pkce", Protocols: []Protocol{ProtocolResponses}, Discovery: "codex"},
+	{Type: "claude-subscription", Label: "Claude Code Subscription", DefaultBaseURL: "https://api.anthropic.com/v1", AuthMode: AuthModeOAuth, AuthFlow: "authorization_code_pkce", Protocols: []Protocol{ProtocolMessages}, Discovery: "claude"},
+	{Type: "github-copilot", Label: "GitHub Copilot", DefaultBaseURL: "https://api.githubcopilot.com", AuthMode: AuthModeOAuth, AuthFlow: "device_code", Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "github-copilot"},
 	{Type: "anthropic", Label: "Anthropic", DefaultBaseURL: "https://api.anthropic.com/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolMessages}, Discovery: "anthropic"},
 	{Type: "openrouter", Label: "OpenRouter", DefaultBaseURL: "https://openrouter.ai/api/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "ollama-local", Label: "Ollama Local", DefaultBaseURL: "http://host.docker.internal:11434", Protocols: []Protocol{ProtocolChat}, Discovery: "ollama"},
@@ -110,6 +113,7 @@ func ValidateBaseURL(raw string) error {
 type Instance struct {
 	ID, Name, Type, BaseURL, Credential string
 	OAuthAccountID                       string
+	OAuthProviderData                    map[string]any
 	Enabled                             bool
 	Protocols                           []Protocol
 }
@@ -209,6 +213,10 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	switch d.Discovery {
 	case "codex":
 		models = codexModels()
+	case "claude":
+		models = claudeModels()
+	case "github-copilot":
+		models = githubCopilotModels()
 	case "ollama":
 		models, err = r.discoverOllama(ctx, provider)
 	case "huggingface":
@@ -245,6 +253,24 @@ func codexModels() []Model {
 	ids := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
 	models := make([]Model, 0, len(ids))
 	for _, id := range ids { models = append(models, Model{ID: id, DisplayName: id, NativeProtocol: ProtocolResponses}) }
+	return models
+}
+
+func claudeModels() []Model {
+	ids := []string{"claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"}
+	models := make([]Model, 0, len(ids))
+	for _, modelID := range ids { models = append(models, Model{ID: modelID, DisplayName: modelID, NativeProtocol: ProtocolMessages}) }
+	return models
+}
+
+func githubCopilotModels() []Model {
+	entries := []struct { id string; protocol Protocol }{
+		{"gpt-5.2", ProtocolChat}, {"gpt-5.2-codex", ProtocolChat}, {"gpt-5.3-codex", ProtocolChat}, {"gpt-5.4", ProtocolChat}, {"gpt-5.4-mini", ProtocolChat},
+		{"claude-haiku-4.5", ProtocolMessages}, {"claude-opus-4.5", ProtocolMessages}, {"claude-sonnet-4.5", ProtocolMessages}, {"claude-sonnet-4.6", ProtocolMessages}, {"claude-opus-4.6", ProtocolMessages}, {"claude-opus-4.7", ProtocolMessages},
+		{"gemini-2.5-pro", ProtocolChat}, {"gemini-3-flash-preview", ProtocolChat}, {"gemini-3.1-pro-preview", ProtocolChat}, {"grok-code-fast-1", ProtocolChat},
+	}
+	models := make([]Model, 0, len(entries))
+	for _, entry := range entries { models = append(models, Model{ID: entry.id, DisplayName: entry.id, NativeProtocol: entry.protocol}) }
 	return models
 }
 
@@ -489,7 +515,25 @@ func ApplyRequestAuth(req *http.Request, provider Instance) {
 	if provider.Credential == "" {
 		return
 	}
-	if provider.Type == "anthropic" {
+	if provider.Type == "claude-subscription" {
+		req.Header.Set("Authorization", "Bearer "+provider.Credential)
+		req.Header.Set("anthropic-version", "2023-06-01")
+		req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
+		req.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
+		req.Header.Set("User-Agent", "claude-cli/2.1.251 (external, sdk-cli)")
+		req.Header.Set("X-App", "cli")
+	} else if provider.Type == "github-copilot" {
+		token := provider.Credential
+		if value, ok := provider.OAuthProviderData["copilot_token"].(string); ok && value != "" { token = value }
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("copilot-integration-id", "vscode-chat")
+		req.Header.Set("editor-version", "vscode/1.85.0")
+		req.Header.Set("editor-plugin-version", "copilot-chat/0.26.7")
+		req.Header.Set("user-agent", "GitHubCopilotChat/0.26.7")
+		req.Header.Set("openai-intent", "conversation-panel")
+		req.Header.Set("x-github-api-version", "2025-04-01")
+		req.Header.Set("X-Initiator", "user")
+	} else if provider.Type == "anthropic" {
 		req.Header.Set("x-api-key", provider.Credential)
 		req.Header.Set("anthropic-version", "2023-06-01")
 	} else if provider.Type == "azure-openai" {
@@ -506,6 +550,14 @@ func ApplyRequestAuth(req *http.Request, provider Instance) {
 
 func Endpoint(provider Instance, protocol Protocol) (string, error) {
 	var endpoint string
+	if provider.Type == "github-copilot" {
+		switch protocol {
+		case ProtocolMessages: endpoint = "v1/messages"
+		case ProtocolResponses: endpoint = "responses"
+		default: endpoint = "chat/completions"
+		}
+		return appendEndpoint(provider.BaseURL, endpoint)
+	}
 	switch protocol {
 	case ProtocolChat:
 		endpoint = "chat/completions"
