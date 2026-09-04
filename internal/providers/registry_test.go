@@ -23,7 +23,9 @@ func TestRegistryIncludesApprovedProviders(t *testing.T) {
 func TestDescriptorsDefaultToAPIKeyAuth(t *testing.T) {
 	for _, descriptor := range Descriptors() {
 		if descriptor.Type == "codex-subscription" || descriptor.Type == "claude-subscription" || descriptor.Type == "github-copilot" {
-			if descriptor.AuthMode != AuthModeOAuth { t.Errorf("Codex auth mode = %q, want %q", descriptor.AuthMode, AuthModeOAuth) }
+			if descriptor.AuthMode != AuthModeOAuth {
+				t.Errorf("Codex auth mode = %q, want %q", descriptor.AuthMode, AuthModeOAuth)
+			}
 			continue
 		}
 		if descriptor.AuthMode != AuthModeAPIKey {

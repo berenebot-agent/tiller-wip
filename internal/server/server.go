@@ -28,16 +28,16 @@ import (
 const sessionCookie = "tiller_admin_session"
 
 type Server struct {
-	config    config.Config
-	db        *database.DB
-	clients   *auth.ClientAuthenticator
-	sessions  *auth.SessionStore
-	providers *providers.Manager
-	oauthFlows *oauth.FlowStore
+	config        config.Config
+	db            *database.DB
+	clients       *auth.ClientAuthenticator
+	sessions      *auth.SessionStore
+	providers     *providers.Manager
+	oauthFlows    *oauth.FlowStore
 	oauthDeviceMu sync.Mutex
-	oauthDevices map[string]*oauthDeviceState
-	logger    *slog.Logger
-	assets    http.Handler
+	oauthDevices  map[string]*oauthDeviceState
+	logger        *slog.Logger
+	assets        http.Handler
 	// notifyClient is a dedicated HTTP client for best-effort outbound webhook
 	// notifications. It has a short timeout so a slow webhook can never
 	// materially delay an inference request.
@@ -133,9 +133,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.updateProvider)))
 	mux.Handle("DELETE /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.deleteProvider)))
 	mux.Handle("PUT /api/admin/providers/{id}/credential", s.requireAdmin(http.HandlerFunc(s.replaceProviderCredential)))
-	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireAdmin(http.HandlerFunc(s.startProviderOAuth)))
+ 	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireAdmin(http.HandlerFunc(s.startProviderOAuth)))
 	mux.Handle("POST /api/admin/providers/{id}/oauth/callback", s.requireAdmin(http.HandlerFunc(s.completeProviderOAuth)))
 	mux.Handle("GET /api/admin/providers/{id}/oauth/status", s.requireAdmin(http.HandlerFunc(s.providerOAuthStatus)))
+
 	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireAdmin(http.HandlerFunc(s.refreshProvider)))
 	mux.Handle("GET /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.listProviderModels)))
 	mux.Handle("GET /api/admin/models", s.requireAdmin(http.HandlerFunc(s.listAllModels)))

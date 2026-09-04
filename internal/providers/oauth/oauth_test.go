@@ -99,6 +99,90 @@ func TestPollDeviceCode(t *testing.T) {
 	}
 }
 
+func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(db.SQL)
+	expired := time.Now().Add(-time.Minute)
+	if err := store.Put(context.Background(), TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, time.Minute)
+
+	refreshReconnect := func(context.Context, TokenRecord) (TokenResponse, error) {
+		return TokenResponse{}, ErrReconnectRequired
+	}
+	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshReconnect)
+	if !errors.Is(err, ErrReconnectRequired) {
+		t.Fatalf("ForceRefresh error = %v, want ErrReconnectRequired", err)
+	}
+	record, err := store.Get(context.Background(), "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.AuthState != AuthReconnectRequired {
+		t.Fatalf("auth_state = %q, want reconnect_required", record.AuthState)
+	}
+
+	refreshUnavailable := func(context.Context, TokenRecord) (TokenResponse, error) {
+		return TokenResponse{}, ErrAuthUnavailable
+	}
+	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshUnavailable)
+	if !errors.Is(err, ErrAuthUnavailable) {
+		t.Fatalf("ForceRefresh error = %v, want ErrAuthUnavailable", err)
+	}
+	record, err = store.Get(context.Background(), "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.AuthState != AuthUnavailable {
+		t.Fatalf("auth_state = %q, want unavailable", record.AuthState)
+	}
+
+	refreshTransient := func(context.Context, TokenRecord) (TokenResponse, error) {
+		return TokenResponse{}, errors.New("network blip")
+	}
+	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshTransient)
+	if err == nil {
+		t.Fatal("ForceRefresh expected error, got nil")
+	}
+	record, err = store.Get(context.Background(), "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.AuthState != AuthUnavailable {
+		t.Fatalf("auth_state = %q, want unavailable (transient)", record.AuthState)
+	}
+
+	refreshOK := func(context.Context, TokenRecord) (TokenResponse, error) {
+		return TokenResponse{AccessToken: "new", RefreshToken: "rotated", ExpiresIn: 3600}, nil
+	}
+	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshOK)
+	if err != nil {
+		t.Fatalf("ForceRefresh success error = %v", err)
+	}
+	record, err = store.Get(context.Background(), "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.AuthState != AuthConnected {
+		t.Fatalf("auth_state = %q, want connected", record.AuthState)
+	}
+	if record.AccessToken != "new" {
+		t.Fatalf("access_token = %q, want new", record.AccessToken)
+	}
+}
+
 func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {

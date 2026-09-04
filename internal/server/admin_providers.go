@@ -13,6 +13,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 type providerView struct {
@@ -23,6 +24,7 @@ type providerView struct {
 	Enabled              bool                 `json:"enabled"`
 	Protocols            []providers.Protocol `json:"protocols"`
 	CredentialConfigured bool                 `json:"credential_configured"`
+	AuthState            string               `json:"auth_state"`
 	LastRefreshAt        *string              `json:"last_refresh_at"`
 	NextRefreshAt        *string              `json:"next_refresh_at"`
 	LastRefreshError     *string              `json:"last_refresh_error"`
@@ -39,7 +41,7 @@ func (s *Server) providerTypes(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT p.id,p.name,p.type,p.base_url,p.enabled,p.protocols,(p.credential_secret IS NOT NULL OR EXISTS(SELECT 1 FROM provider_oauth_tokens o WHERE o.provider_id=p.id)),p.last_refresh_at,p.next_refresh_at,p.last_refresh_error,p.created_at,p.updated_at,count(m.id),coalesce(sum(CASE WHEN m.available=1 THEN 1 ELSE 0 END),0) FROM providers p LEFT JOIN provider_models m ON m.provider_id=p.id WHERE p.name LIKE ? OR p.type LIKE ? GROUP BY p.id ORDER BY p.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT p.id,p.name,p.type,p.base_url,p.enabled,p.protocols,(p.credential_secret IS NOT NULL OR EXISTS(SELECT 1 FROM provider_oauth_tokens o WHERE o.provider_id=p.id)),coalesce(o.auth_state,''),p.last_refresh_at,p.next_refresh_at,p.last_refresh_error,p.created_at,p.updated_at,count(m.id),coalesce(sum(CASE WHEN m.available=1 THEN 1 ELSE 0 END),0) FROM providers p LEFT JOIN provider_models m ON m.provider_id=p.id LEFT JOIN provider_oauth_tokens o ON o.provider_id=p.id WHERE p.name LIKE ? OR p.type LIKE ? GROUP BY p.id ORDER BY p.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list providers.")
 		return
@@ -50,7 +52,7 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		var v providerView
 		var enabled, configured int
 		var raw string
-		if err := rows.Scan(&v.ID, &v.Name, &v.Type, &v.BaseURL, &enabled, &raw, &configured, &v.LastRefreshAt, &v.NextRefreshAt, &v.LastRefreshError, &v.CreatedAt, &v.UpdatedAt, &v.ModelCount, &v.AvailableModelCount); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Type, &v.BaseURL, &enabled, &raw, &configured, &v.AuthState, &v.LastRefreshAt, &v.NextRefreshAt, &v.LastRefreshError, &v.CreatedAt, &v.UpdatedAt, &v.ModelCount, &v.AvailableModelCount); err != nil {
 			adminError(w, 500, "database_error", "Could not list providers.")
 			return
 		}
@@ -312,6 +314,24 @@ func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("id")
+	var providerType string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT type FROM providers WHERE id=?`, providerID).Scan(&providerType); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	} else if err != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
+		return
+	}
+	// Delete absorbs disconnect: clean up OAuth material (token row +
+	// in-memory state) so a single delete fully removes an OAuth provider.
+	// Non-OAuth providers hit none of these branches and behave as before.
+	if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+		oauth.NewStore(s.db.SQL).Delete(r.Context(), providerID)
+		s.oauthDeviceMu.Lock()
+		delete(s.oauthDevices, providerID)
+		s.oauthDeviceMu.Unlock()
+		s.oauthFlows.Cancel(providerID)
+	}
 	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")

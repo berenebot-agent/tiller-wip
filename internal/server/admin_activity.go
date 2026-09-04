@@ -11,17 +11,17 @@ import (
 )
 
 type requestAttemptView struct {
-	AttemptNumber int     `json:"attempt_number"`
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	Result        string  `json:"result"`
-	HTTPStatus    *int    `json:"http_status"`
-	FailureClass  *string `json:"failure_class"`
-	ErrorMessage  *string `json:"error_message"`
-	ErrorBody     *string `json:"error_body"`
-	ErrorBodyTruncated bool `json:"error_body_truncated"`
-	LatencyMs     int64   `json:"latency_ms"`
-	CreatedAt     string  `json:"created_at"`
+	AttemptNumber      int     `json:"attempt_number"`
+	Provider           string  `json:"provider"`
+	Model              string  `json:"model"`
+	Result             string  `json:"result"`
+	HTTPStatus         *int    `json:"http_status"`
+	FailureClass       *string `json:"failure_class"`
+	ErrorMessage       *string `json:"error_message"`
+	ErrorBody          *string `json:"error_body"`
+	ErrorBodyTruncated bool    `json:"error_body_truncated"`
+	LatencyMs          int64   `json:"latency_ms"`
+	CreatedAt          string  `json:"created_at"`
 }
 
 func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
@@ -347,14 +347,14 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 			strconv.Itoa(row.AttemptCount),
 			strconv.FormatBool(row.FallbackUsed),
 			strPtrOrEmpty(row.FallbackReason),
-			neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
-			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)),
-			row.ClientRequestID,
-			strPtrOrEmpty(row.RouteKind),
+ 		neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
 			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)),
 			strconv.FormatBool(row.RequestBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)),
 			strconv.FormatBool(row.ErrorBodyTruncated),
+			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)),
+			row.ClientRequestID,
+			strPtrOrEmpty(row.RouteKind),
 		})
 	}
 	cw.Flush()

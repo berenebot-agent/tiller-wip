@@ -13,13 +13,13 @@ import (
 )
 
 const (
-	ClientID = "app_EMoamEEZ73f0CkXaXp7hrann"
-	AuthorizeURL = "https://auth.openai.com/oauth/authorize"
-	TokenURL = "https://auth.openai.com/oauth/token"
-	Scope = "openid profile email offline_access"
+	ClientID       = "app_EMoamEEZ73f0CkXaXp7hrann"
+	AuthorizeURL   = "https://auth.openai.com/oauth/authorize"
+	TokenURL       = "https://auth.openai.com/oauth/token"
+	Scope          = "openid profile email offline_access"
 	DefaultBaseURL = "https://chatgpt.com/backend-api/codex"
-	Originator = "codex_cli_rs"
-	UserAgent = "codex_cli_rs/0.136.0"
+	Originator     = "codex_cli_rs"
+	UserAgent      = "codex_cli_rs/0.136.0"
 )
 
 func AuthorizationURL(redirectURI, state, challenge string) (string, error) {
@@ -50,22 +50,49 @@ func Refresh(ctx context.Context, client *http.Client, refreshToken string) (oau
 }
 
 func tokenRequest(ctx context.Context, client *http.Client, form url.Values) (oauth.TokenResponse, error) {
-	if client == nil { client = http.DefaultClient }
+	if client == nil {
+		client = http.DefaultClient
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, TokenURL, strings.NewReader(form.Encode()))
-	if err != nil { return oauth.TokenResponse{}, err }
+	if err != nil {
+		return oauth.TokenResponse{}, err
+	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
-	if err != nil { return oauth.TokenResponse{}, err }
+	if err != nil {
+		return oauth.TokenResponse{}, err
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 { return oauth.TokenResponse{}, errors.New("codex OAuth token request failed") }
-	var result struct { AccessToken string `json:"access_token"`; RefreshToken string `json:"refresh_token"`; TokenType string `json:"token_type"`; ExpiresIn int64 `json:"expires_in"`; IDToken string `json:"id_token"`; Scope string `json:"scope"` }
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil { return oauth.TokenResponse{}, errors.New("invalid codex OAuth token response") }
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Parse the error response to detect a dead refresh token (OAuth 2.0
+		// invalid_grant). This lets the routing layer transition the saved
+		// token into reconnect_required instead of retrying forever.
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Error == "invalid_grant" {
+			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+		}
+		return oauth.TokenResponse{}, errors.New("codex OAuth token request failed")
+	}
+	var result struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int64  `json:"expires_in"`
+		IDToken      string `json:"id_token"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return oauth.TokenResponse{}, errors.New("invalid codex OAuth token response")
+	}
 	account := AccountInfo(result.IDToken)
 	return oauth.TokenResponse{AccessToken: result.AccessToken, RefreshToken: result.RefreshToken, TokenType: result.TokenType, ExpiresIn: result.ExpiresIn, IDToken: result.IDToken, Scope: result.Scope, AccountEmail: account.Email, AccountPlan: account.Plan}, nil
 }
 
-type Account struct { Email, ID, Plan string }
+type Account struct{ Email, ID, Plan string }
 
 func AccountInfo(idToken string) Account {
 	payload := jwtPayload(idToken)
@@ -75,13 +102,26 @@ func AccountInfo(idToken string) Account {
 
 func jwtPayload(token string) map[string]any {
 	parts := strings.Split(token, ".")
-	if len(parts) != 3 { return map[string]any{} }
+	if len(parts) != 3 {
+		return map[string]any{}
+	}
 	b, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil { return map[string]any{} }
+	if err != nil {
+		return map[string]any{}
+	}
 	var payload map[string]any
-	if json.Unmarshal(b, &payload) != nil { return map[string]any{} }
+	if json.Unmarshal(b, &payload) != nil {
+		return map[string]any{}
+	}
 	return payload
 }
 
 func stringValue(value any) string { result, _ := value.(string); return result }
-func firstString(values ...any) string { for _, value := range values { if result := stringValue(value); result != "" { return result } }; return "" }
+func firstString(values ...any) string {
+	for _, value := range values {
+		if result := stringValue(value); result != "" {
+			return result
+		}
+	}
+	return ""
+}

@@ -7,15 +7,20 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/tiller-router/tiller-router/internal/providers/codex"
 	"github.com/tiller-router/tiller-router/internal/providers/claude"
+	"github.com/tiller-router/tiller-router/internal/providers/codex"
 	"github.com/tiller-router/tiller-router/internal/providers/github"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 const codexRedirectURI = "http://localhost:1455/auth/callback"
 
-type oauthDeviceState struct { Status string; Device github.DeviceCode; Token oauth.TokenRecord; Err string }
+type oauthDeviceState struct {
+	Status string
+	Device github.DeviceCode
+	Token  oauth.TokenRecord
+	Err    string
+}
 
 func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
@@ -30,7 +35,10 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	if providerType == "github-copilot" {
 		device, startErr := s.startGitHubDeviceFlow(r.Context(), id)
-		if startErr != nil { adminError(w, 502, "oauth_start_failed", "Could not start GitHub OAuth."); return }
+		if startErr != nil {
+			adminError(w, 502, "oauth_start_failed", "Could not start GitHub OAuth.")
+			return
+		}
 		writeJSON(w, 200, map[string]any{"flow": "device_code", "verification_uri": device.VerificationURI, "verification_uri_complete": device.VerificationURIComplete, "user_code": device.UserCode, "expires_in": device.ExpiresIn, "interval": int(device.Interval / time.Second)})
 		return
 	}
@@ -75,7 +83,9 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
-	var input struct{ RedirectedURL string `json:"redirected_url"` }
+	var input struct {
+		RedirectedURL string `json:"redirected_url"`
+	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
 		return
@@ -128,34 +138,99 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.D
 	s.oauthDevices[id] = &oauthDeviceState{Status: "pending"}
 	s.oauthDeviceMu.Unlock()
 	device, err := github.RequestDeviceCode(ctx, s.providers.Registry().HTTPClient())
-	if err != nil { s.finishDevice(id, "failed", err); return github.DeviceCode{}, err }
-	s.oauthDeviceMu.Lock(); if state := s.oauthDevices[id]; state != nil { state.Device = device }; s.oauthDeviceMu.Unlock()
+	if err != nil {
+		s.finishDevice(id, "failed", err)
+		return github.DeviceCode{}, err
+	}
+	s.oauthDeviceMu.Lock()
+	if state := s.oauthDevices[id]; state != nil {
+		state.Device = device
+	}
+	s.oauthDeviceMu.Unlock()
 	go func() {
 		tokens, err := github.PollToken(context.Background(), s.providers.Registry().HTTPClient(), device)
-		if err != nil { s.finishDevice(id, "failed", err); return }
+		if err != nil {
+			s.finishDevice(id, "failed", err)
+			return
+		}
 		user, _ := github.FetchUser(context.Background(), s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		copilot, err := github.FetchCopilotToken(context.Background(), s.providers.Registry().HTTPClient(), tokens.AccessToken)
-		if err != nil { s.finishDevice(id, "failed", err); return }
-		for key, value := range copilot.ProviderData { if tokens.ProviderData == nil { tokens.ProviderData = map[string]any{} }; tokens.ProviderData[key] = value }
+		if err != nil {
+			s.finishDevice(id, "failed", err)
+			return
+		}
+		for key, value := range copilot.ProviderData {
+			if tokens.ProviderData == nil {
+				tokens.ProviderData = map[string]any{}
+			}
+			tokens.ProviderData[key] = value
+		}
 		tokens.ExpiresIn = copilot.ExpiresIn
 		tokens.AccountEmail, tokens.AccountPlan = user.Email, user.Login
 		record, err := oauth.MergeToken(oauth.TokenRecord{ProviderID: id}, tokens, time.Now().UTC())
-		if err != nil { s.finishDevice(id, "failed", err); return }
-		if err := oauth.NewStore(s.db.SQL).Put(context.Background(), record); err != nil { s.finishDevice(id, "failed", err); return }
-		s.oauthDeviceMu.Lock(); if state := s.oauthDevices[id]; state != nil { state.Status, state.Token = "connected", record }; s.oauthDeviceMu.Unlock()
+		if err != nil {
+			s.finishDevice(id, "failed", err)
+			return
+		}
+		if err := oauth.NewStore(s.db.SQL).Put(context.Background(), record); err != nil {
+			s.finishDevice(id, "failed", err)
+			return
+		}
+		s.oauthDeviceMu.Lock()
+		if state := s.oauthDevices[id]; state != nil {
+			state.Status, state.Token = "connected", record
+		}
+		s.oauthDeviceMu.Unlock()
 	}()
 	return device, nil
 }
 
-func (s *Server) finishDevice(id, status string, err error) { s.oauthDeviceMu.Lock(); defer s.oauthDeviceMu.Unlock(); if state := s.oauthDevices[id]; state != nil { state.Status = status; if err != nil { state.Err = "GitHub OAuth connection failed." } } }
+func (s *Server) finishDevice(id, status string, err error) {
+	s.oauthDeviceMu.Lock()
+	defer s.oauthDeviceMu.Unlock()
+	if state := s.oauthDevices[id]; state != nil {
+		state.Status = status
+		if err != nil {
+			state.Err = "GitHub OAuth connection failed."
+		}
+	}
+}
 
 func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	s.oauthDeviceMu.Lock(); state := s.oauthDevices[id]; s.oauthDeviceMu.Unlock()
-	if state == nil { writeJSON(w, 200, map[string]any{"status": "none"}); return }
-	result := map[string]any{"status": state.Status}
-	if state.Device.VerificationURI != "" { result["verification_uri"] = state.Device.VerificationURI; result["verification_uri_complete"] = state.Device.VerificationURIComplete; result["user_code"] = state.Device.UserCode; result["expires_in"] = state.Device.ExpiresIn }
-	if state.Err != "" { result["error"] = state.Err }
+	s.oauthDeviceMu.Lock()
+	state := s.oauthDevices[id]
+	s.oauthDeviceMu.Unlock()
+	if state != nil {
+		result := map[string]any{"status": state.Status}
+		if state.Device.VerificationURI != "" {
+			result["verification_uri"] = state.Device.VerificationURI
+			result["verification_uri_complete"] = state.Device.VerificationURIComplete
+			result["user_code"] = state.Device.UserCode
+			result["expires_in"] = state.Device.ExpiresIn
+		}
+		if state.Err != "" {
+			result["error"] = state.Err
+		}
+		writeJSON(w, 200, result)
+		return
+	}
+	record, err := oauth.NewStore(s.db.SQL).Get(r.Context(), id)
+	if err == oauth.ErrNoToken {
+		writeJSON(w, 200, map[string]any{"status": "none"})
+		return
+	}
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load OAuth status.")
+		return
+	}
+	result := map[string]any{"status": string(oauth.Classify(record, time.Now().UTC()))}
+	if record.AccountEmail != "" {
+		result["account_email"] = record.AccountEmail
+	}
+	if record.AccountPlan != "" {
+		result["account_plan"] = record.AccountPlan
+	}
 	writeJSON(w, 200, result)
 }
 

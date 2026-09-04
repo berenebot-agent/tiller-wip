@@ -112,8 +112,9 @@ func ValidateBaseURL(raw string) error {
 
 type Instance struct {
 	ID, Name, Type, BaseURL, Credential string
-	OAuthAccountID                       string
-	OAuthProviderData                    map[string]any
+	OAuthAccountID                      string
+	OAuthProviderData                   map[string]any
+	OAuthState                          string
 	Enabled                             bool
 	Protocols                           []Protocol
 }
@@ -203,6 +204,10 @@ func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 
 func (r *Registry) HTTPClient() *http.Client { return r.client }
 
+// SetHTTPClient replaces the registry's HTTP client. Intended for tests that
+// need to route OAuth and upstream requests to mock servers.
+func (r *Registry) SetHTTPClient(client *http.Client) { r.client = client }
+
 func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, error) {
 	d, ok := Lookup(provider.Type)
 	if !ok {
@@ -252,25 +257,34 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 func codexModels() []Model {
 	ids := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
 	models := make([]Model, 0, len(ids))
-	for _, id := range ids { models = append(models, Model{ID: id, DisplayName: id, NativeProtocol: ProtocolResponses}) }
+	for _, id := range ids {
+		models = append(models, Model{ID: id, DisplayName: id, NativeProtocol: ProtocolResponses})
+	}
 	return models
 }
 
 func claudeModels() []Model {
 	ids := []string{"claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"}
 	models := make([]Model, 0, len(ids))
-	for _, modelID := range ids { models = append(models, Model{ID: modelID, DisplayName: modelID, NativeProtocol: ProtocolMessages}) }
+	for _, modelID := range ids {
+		models = append(models, Model{ID: modelID, DisplayName: modelID, NativeProtocol: ProtocolMessages})
+	}
 	return models
 }
 
 func githubCopilotModels() []Model {
-	entries := []struct { id string; protocol Protocol }{
+	entries := []struct {
+		id       string
+		protocol Protocol
+	}{
 		{"gpt-5.2", ProtocolChat}, {"gpt-5.2-codex", ProtocolChat}, {"gpt-5.3-codex", ProtocolChat}, {"gpt-5.4", ProtocolChat}, {"gpt-5.4-mini", ProtocolChat},
 		{"claude-haiku-4.5", ProtocolMessages}, {"claude-opus-4.5", ProtocolMessages}, {"claude-sonnet-4.5", ProtocolMessages}, {"claude-sonnet-4.6", ProtocolMessages}, {"claude-opus-4.6", ProtocolMessages}, {"claude-opus-4.7", ProtocolMessages},
 		{"gemini-2.5-pro", ProtocolChat}, {"gemini-3-flash-preview", ProtocolChat}, {"gemini-3.1-pro-preview", ProtocolChat}, {"grok-code-fast-1", ProtocolChat},
 	}
 	models := make([]Model, 0, len(entries))
-	for _, entry := range entries { models = append(models, Model{ID: entry.id, DisplayName: entry.id, NativeProtocol: entry.protocol}) }
+	for _, entry := range entries {
+		models = append(models, Model{ID: entry.id, DisplayName: entry.id, NativeProtocol: entry.protocol})
+	}
 	return models
 }
 
@@ -524,7 +538,9 @@ func ApplyRequestAuth(req *http.Request, provider Instance) {
 		req.Header.Set("X-App", "cli")
 	} else if provider.Type == "github-copilot" {
 		token := provider.Credential
-		if value, ok := provider.OAuthProviderData["copilot_token"].(string); ok && value != "" { token = value }
+		if value, ok := provider.OAuthProviderData["copilot_token"].(string); ok && value != "" {
+			token = value
+		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("copilot-integration-id", "vscode-chat")
 		req.Header.Set("editor-version", "vscode/1.85.0")
@@ -544,7 +560,9 @@ func ApplyRequestAuth(req *http.Request, provider Instance) {
 	if provider.Type == codexProviderType {
 		req.Header.Set("originator", "codex_cli_rs")
 		req.Header.Set("User-Agent", "codex_cli_rs/0.136.0")
-		if provider.OAuthAccountID != "" { req.Header.Set("ChatGPT-Account-ID", provider.OAuthAccountID) }
+		if provider.OAuthAccountID != "" {
+			req.Header.Set("ChatGPT-Account-ID", provider.OAuthAccountID)
+		}
 	}
 }
 
@@ -552,9 +570,12 @@ func Endpoint(provider Instance, protocol Protocol) (string, error) {
 	var endpoint string
 	if provider.Type == "github-copilot" {
 		switch protocol {
-		case ProtocolMessages: endpoint = "v1/messages"
-		case ProtocolResponses: endpoint = "responses"
-		default: endpoint = "chat/completions"
+		case ProtocolMessages:
+			endpoint = "v1/messages"
+		case ProtocolResponses:
+			endpoint = "responses"
+		default:
+			endpoint = "chat/completions"
 		}
 		return appendEndpoint(provider.BaseURL, endpoint)
 	}

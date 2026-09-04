@@ -12,12 +12,12 @@ import (
 )
 
 const (
-	ClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-	AuthorizeURL = "https://claude.ai/oauth/authorize"
-	TokenURL = "https://api.anthropic.com/v1/oauth/token"
+	ClientID       = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+	AuthorizeURL   = "https://claude.ai/oauth/authorize"
+	TokenURL       = "https://api.anthropic.com/v1/oauth/token"
 	DefaultBaseURL = "https://api.anthropic.com/v1"
-	UserAgent = "claude-cli/2.1.251 (external, sdk-cli)"
-	BetaHeader = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
+	UserAgent      = "claude-cli/2.1.251 (external, sdk-cli)"
+	BetaHeader     = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
 )
 
 var Scopes = []string{"org:create_api_key", "user:profile", "user:inference"}
@@ -53,7 +53,9 @@ func ParseCallback(raw string) (oauth.Callback, error) {
 		return oauth.Callback{}, oauth.ErrCallback
 	}
 	if hash := strings.IndexByte(code, '#'); hash >= 0 {
-		if state == "" { state = strings.TrimSpace(code[hash+1:]) }
+		if state == "" {
+			state = strings.TrimSpace(code[hash+1:])
+		}
 		code = code[:hash]
 	}
 	return oauth.Callback{Code: code, State: state}, nil
@@ -72,18 +74,36 @@ func Refresh(ctx context.Context, client *http.Client, refreshToken string) (oau
 }
 
 func tokenRequest(ctx context.Context, client *http.Client, method, endpoint, contentType string, payload map[string]string) (oauth.TokenResponse, error) {
-	if client == nil { client = http.DefaultClient }
+	if client == nil {
+		client = http.DefaultClient
+	}
 	b, err := json.Marshal(payload)
-	if err != nil { return oauth.TokenResponse{}, err }
+	if err != nil {
+		return oauth.TokenResponse{}, err
+	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, strings.NewReader(string(b)))
-	if err != nil { return oauth.TokenResponse{}, err }
+	if err != nil {
+		return oauth.TokenResponse{}, err
+	}
 	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "application/json")
 	resp, err := client.Do(req)
-	if err != nil { return oauth.TokenResponse{}, err }
+	if err != nil {
+		return oauth.TokenResponse{}, err
+	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 { return oauth.TokenResponse{}, errors.New("claude OAuth token request failed") }
-	var token struct { AccessToken string `json:"access_token"`; RefreshToken string `json:"refresh_token"`; TokenType string `json:"token_type"`; ExpiresIn int64 `json:"expires_in"`; Scope string `json:"scope"` }
-	if json.NewDecoder(resp.Body).Decode(&token) != nil { return oauth.TokenResponse{}, errors.New("invalid claude OAuth token response") }
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return oauth.TokenResponse{}, errors.New("claude OAuth token request failed")
+	}
+	var token struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		TokenType    string `json:"token_type"`
+		ExpiresIn    int64  `json:"expires_in"`
+		Scope        string `json:"scope"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&token) != nil {
+		return oauth.TokenResponse{}, errors.New("invalid claude OAuth token response")
+	}
 	return oauth.TokenResponse{AccessToken: token.AccessToken, RefreshToken: token.RefreshToken, TokenType: token.TokenType, ExpiresIn: token.ExpiresIn, Scope: token.Scope}, nil
 }

@@ -55,7 +55,17 @@ func (m *Manager) Current(ctx context.Context, providerID string, refresh Refres
 }
 
 func (m *Manager) ForceRefresh(ctx context.Context, providerID string, refresh RefreshFunc) (TokenRecord, error) {
-	return m.refresh(ctx, providerID, refresh)
+	record, err := m.refresh(ctx, providerID, refresh)
+	now := time.Now()
+	switch {
+	case errors.Is(err, ErrReconnectRequired):
+		_ = m.store.SetState(ctx, providerID, AuthReconnectRequired, now)
+	case errors.Is(err, ErrAuthUnavailable):
+		_ = m.store.SetState(ctx, providerID, AuthUnavailable, now)
+	case err != nil && !errors.Is(err, ErrNoToken):
+		_ = m.store.SetState(ctx, providerID, AuthUnavailable, now)
+	}
+	return record, err
 }
 
 func (m *Manager) refresh(ctx context.Context, providerID string, refresh RefreshFunc) (TokenRecord, error) {

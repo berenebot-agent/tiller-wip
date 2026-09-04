@@ -568,6 +568,84 @@ func TestActivityCSVExportNeutralizesFormulaModel(t *testing.T) {
 	}
 }
 
+func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	if _, err := db.SQL.Exec(`UPDATE client_keys SET name=? WHERE id=?`, "align-client", clientID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_message,request_body,request_body_truncated,error_body,error_body_truncated,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"row-align", clientID, "main", "main", "virtual", "vm-1", "vm-1/main", "prov-a", "model-a", "chat", 1, 200, 10, int64Ptr(5), int64Ptr(3), int64Ptr(1), int64Ptr(2), "upstream-align", "req-align", "boom", "the request body", 1, "the error body", 1, "2026-01-01T00:00:01Z"); err != nil {
+		t.Fatal(err)
+	}
+
+	status, body := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("expected header + 1 row, got %d records", len(records))
+	}
+	header := records[0]
+	if len(header) != 27 {
+		t.Fatalf("expected 27 columns, got %d", len(header))
+	}
+	row := records[1]
+
+	// Every value must land under its own header. Build a header->index map and
+	// assert each value at that index matches the expected source.
+	indexOf := func(name string) int {
+		for i, h := range header {
+			if h == name {
+				return i
+			}
+		}
+		t.Fatalf("header %q not found", name)
+		return -1
+	}
+
+	checks := []struct {
+		header string
+		value  string
+	}{
+		{"timestamp", "2026-01-01T00:00:01Z"},
+		{"client_key", "align-client"},
+		{"client_requested_model", "main"},
+		{"client_exposed_model", "main"},
+		{"virtual_model", "vm-1/main"},
+		{"bound_target", "vm-1/main"},
+		{"final_provider", "prov-a"},
+		{"final_model", "model-a"},
+		{"protocol", "chat"},
+		{"streaming", "true"},
+		{"http_status", "200"},
+		{"latency_ms", "10"},
+		{"input_tokens", "5"},
+		{"output_tokens", "3"},
+		{"cached_input_tokens", "1"},
+		{"cache_creation_input_tokens", "2"},
+		{"attempt_count", "1"},
+		{"fallback_used", "false"},
+		{"fallback_reason", ""},
+		{"error_message", "boom"},
+		{"request_body", "the request body"},
+		{"request_body_truncated", "true"},
+		{"error_body", "the error body"},
+		{"error_body_truncated", "true"},
+		{"provider_request_id", "upstream-align"},
+		{"client_request_id", "req-align"},
+		{"route_kind", "virtual"},
+	}
+	for _, c := range checks {
+		if got := row[indexOf(c.header)]; got != c.value {
+			t.Errorf("column %q: want %q, got %q", c.header, c.value, got)
+		}
+	}
+}
+
 func TestActivityExposesCacheCreationTokensAndEmptyExport(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	insertLogRow(t, db, "row-cache-creation", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(10), int64Ptr(2), "upstream-cache", "req-cache", nil, "2026-01-01T00:00:01Z")

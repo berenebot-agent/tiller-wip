@@ -330,7 +330,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var cancel context.CancelFunc
 	protocolUnavailable := false
 	terminalPreflightClass := ""
-	for _, candidate := range candidates {
+ 	oauthRefreshed := make(map[string]bool)
+	for i := 0; i < len(candidates); i++ {
+		candidate := candidates[i]
 		if ctxErr := r.Context().Err(); ctxErr != nil {
 			class := "client_cancelled"
 			if errors.Is(ctxErr, context.DeadlineExceeded) {
@@ -404,7 +406,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
 		if candidate.Provider.Type == "codex-subscription" {
-			req.Header.Set("session_id", row.clientRequestID)
+			req.Header.Set("session-id", row.clientRequestID)
 		}
 		targetID := candidate.ProviderModelID
 		if targetID == "" {
@@ -466,7 +468,22 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 				attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
 			}
-			row.attempts = append(row.attempts, attempt)
+ 			row.attempts = append(row.attempts, attempt)
+			// Stale-auth recovery: on 401/403 from an OAuth provider, force a
+			// token refresh once per request and retry the same target before
+			// falling through to normal virtual fallback. ForceOAuthRefresh
+			// transitions auth_state on failure, so a dead refresh token surfaces
+			// as reconnect_required without further handling here.
+ 			if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
+				if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+					if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
+						oauthRefreshed[candidate.Provider.ID] = true
+						candidates[i].Provider = candidate.Provider
+						i--
+						continue
+					}
+				}
+			}
 			// An upstream HTTP response is an upstream failure regardless of
 			// status. Ordered virtual routes try their next target by default;
 			// router-side failures (for example translation errors) are handled
