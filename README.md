@@ -84,7 +84,7 @@ Each attempt is visible in Activity, including the fallback — the client gets 
 - **Providers & models** — multiple named instances; credentials entered once; automatic catalogue discovery; manual/periodic refresh; retired models preserved rather than silently remapped; context/capability metadata.
 - **Routing** — fixed virtual routes; ordered fallback; configurable fallback timeout; no silent fallback on direct real-model calls; no response-stream splicing after output begins; client cancellation propagates upstream.
 - **Client API** — `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, covering the common OpenAI and Anthropic surfaces with safe protocol translation.
-- **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks). Failed request and provider error bodies are never retained by default; an installation-global opt-in enables bounded body capture for clients whose logging is enabled. Retention controlled per client key.
+- **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks). Client request bodies and provider error responses are never retained unless you turn on detailed error logging. Retention controlled per client key.
 - **Notifications** — optional best-effort webhooks for fallback, all-targets-failed, key created/deleted, admin login. Metadata-only, never blocks inference.
 - **Operations** — persistent admin sessions; key rotation; SQLite backup export; health endpoints; single Docker container; embedded UI; read-only rootfs; non-root runtime user.
 
@@ -245,7 +245,7 @@ With a Single key, `main` can be redirected from the control panel without chang
 
 ## Architecture
 
-Tiller is intentionally small: a Go HTTP server (client API, provider adapters, protocol translation, route/fallback resolver, admin API, embedded control-panel assets) over SQLite (providers, model catalogue, virtual routes, client keys, sessions, settings, metadata-only Activity).
+Tiller is intentionally small: a Go HTTP server (client API, provider adapters, protocol translation, route/fallback resolver, admin API, embedded control-panel assets) over SQLite (providers, model catalogue, virtual routes, client keys, sessions, settings, Activity).
 
 No Redis. No Postgres. No separate frontend service. No message broker. No vector database. The normal deployment is one container with one bind-mounted data directory.
 
