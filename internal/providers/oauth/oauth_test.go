@@ -240,3 +240,46 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 		t.Fatalf("stored refresh token = %q", record.RefreshToken)
 	}
 }
+
+// TestForceRefreshTransientOnContextCancellation verifies that a context
+// cancellation during refresh does NOT transition auth_state — the failure
+// must stay retryable.
+func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(db.SQL)
+	expired := time.Now().Add(-time.Minute)
+	if err := store.Put(context.Background(), TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store, time.Minute)
+
+	// Refresh that fails with context cancellation.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	refreshCanceled := func(context.Context, TokenRecord) (TokenResponse, error) {
+		return TokenResponse{}, ctx.Err()
+	}
+	_, err = manager.ForceRefresh(ctx, "provider-1", refreshCanceled)
+	if err == nil {
+		t.Fatal("expected error from canceled context")
+	}
+	record, err := store.Get(context.Background(), "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Auth state must remain connected — cancellation is transient.
+	if record.AuthState != AuthConnected {
+		t.Fatalf("auth_state = %q after cancellation, want connected", record.AuthState)
+	}
+}

@@ -97,26 +97,28 @@ func FetchUser(ctx context.Context, client *http.Client, accessToken string) (Us
 	return user, nil
 }
 
-func FetchCopilotToken(ctx context.Context, client *http.Client, accessToken string) (oauth.TokenResponse, error) {
+func FetchCopilotToken(ctx context.Context, client *http.Client, accessToken string) (oauth.TokenResponse, int, error) {
 	var response struct {
 		Token     string `json:"token"`
 		ExpiresAt int64  `json:"expires_at"`
 	}
-	if err := requestJSON(ctx, client, http.MethodGet, CopilotTokenURL, nil, map[string]string{"Authorization": "Bearer " + accessToken, "Accept": "application/json", "X-GitHub-Api-Version": "2025-04-01", "User-Agent": UserAgent, "Editor-Version": "vscode/1.85.0", "Editor-Plugin-Version": "copilot-chat/0.26.7"}, &response); err != nil {
-		return oauth.TokenResponse{}, err
+	status, err := requestJSONStatus(ctx, client, http.MethodGet, CopilotTokenURL, nil, &response, map[string]string{"Authorization": "Bearer " + accessToken, "Accept": "application/json", "X-GitHub-Api-Version": "2025-04-01", "User-Agent": UserAgent, "Editor-Version": "vscode/1.85.0", "Editor-Plugin-Version": "copilot-chat/0.26.7"})
+	if err != nil {
+		return oauth.TokenResponse{}, status, err
 	}
 	if response.Token == "" {
-		return oauth.TokenResponse{}, errors.New("GitHub Copilot token was empty")
+		return oauth.TokenResponse{}, status, errors.New("GitHub Copilot token was empty")
 	}
 	result := oauth.TokenResponse{ProviderData: map[string]any{"copilot_token": response.Token, "copilot_token_expires_at": response.ExpiresAt}}
 	if response.ExpiresAt > 0 {
 		result.ExpiresIn = max(1, response.ExpiresAt-time.Now().Unix())
 	}
-	return result, nil
+	return result, status, nil
 }
 
 func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord) (oauth.TokenResponse, error) {
-	if token, err := FetchCopilotToken(ctx, client, current.AccessToken); err == nil {
+	token, status, err := FetchCopilotToken(ctx, client, current.AccessToken)
+	if err == nil {
 		token.AccessToken = current.AccessToken
 		token.RefreshToken = current.RefreshToken
 		token.TokenType = current.TokenType
@@ -126,8 +128,15 @@ func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord
 		token.AccountPlan = current.AccountPlan
 		return token, nil
 	}
-	if current.RefreshToken == "" {
+	// A 401/403 from the Copilot token endpoint means the access token is
+	// dead and the user must reconnect. Any other failure (network blip,
+	// 429, 5xx, timeout) is transient — do not infer a dead credential,
+	// and do not blame the absence of a GitHub refresh token.
+	if status == 401 || status == 403 {
 		return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+	}
+	if current.RefreshToken == "" {
+		return oauth.TokenResponse{}, err
 	}
 	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {current.RefreshToken}, "client_id": {ClientID}}
 	var githubToken struct {
@@ -137,18 +146,14 @@ func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord
 		ExpiresIn    int64  `json:"expires_in"`
 		Scope        string `json:"scope"`
 	}
-	status, err := requestJSONStatus(ctx, client, http.MethodPost, TokenURL, form, &githubToken, nil)
+	status, err = requestJSONStatus(ctx, client, http.MethodPost, TokenURL, form, &githubToken, nil)
 	if err != nil {
-		// A 401/403 from GitHub means the refresh token is dead — the user
-		// must reconnect. Anything else (network blip, 5xx, timeout) is
-		// transient and must stay retryable; never mark the provider
-		// unavailable for a recoverable error.
 		if status == 401 || status == 403 {
 			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
 		}
 		return oauth.TokenResponse{}, err
 	}
-	copilot, err := FetchCopilotToken(ctx, client, githubToken.AccessToken)
+	copilot, _, err := FetchCopilotToken(ctx, client, githubToken.AccessToken)
 	if err != nil {
 		return oauth.TokenResponse{}, err
 	}

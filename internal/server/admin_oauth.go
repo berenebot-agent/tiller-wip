@@ -155,7 +155,7 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.D
 			return
 		}
 		user, _ := github.FetchUser(context.Background(), s.providers.Registry().HTTPClient(), tokens.AccessToken)
-		copilot, err := github.FetchCopilotToken(context.Background(), s.providers.Registry().HTTPClient(), tokens.AccessToken)
+		copilot, _, err := github.FetchCopilotToken(context.Background(), s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		if err != nil {
 			s.finishDevice(id, "failed", err)
 			return

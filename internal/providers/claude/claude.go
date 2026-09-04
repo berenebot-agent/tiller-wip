@@ -93,6 +93,16 @@ func tokenRequest(ctx context.Context, client *http.Client, method, endpoint, co
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Parse the error response to detect a dead refresh token (OAuth 2.0
+		// invalid_grant). This lets the routing layer transition the saved
+		// token into reconnect_required instead of retrying forever.
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&errResp)
+		if errResp.Error == "invalid_grant" || resp.StatusCode == 401 || resp.StatusCode == 403 {
+			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+		}
 		return oauth.TokenResponse{}, errors.New("claude OAuth token request failed")
 	}
 	var token struct {
