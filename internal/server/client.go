@@ -199,6 +199,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			}
 			target.Provider.Enabled = scanBool(enabled)
 			target.Provider.Protocols = providers.DecodeProtocols(protocols)
+			s.providers.HydrateOAuth(ctx, &target.Provider)
 			if nativeProtocol.Valid {
 				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
 			}
@@ -229,6 +230,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	}
 	route.Provider.Enabled = scanBool(enabled)
 	route.Provider.Protocols = providers.DecodeProtocols(protocols)
+	s.providers.HydrateOAuth(ctx, &route.Provider)
 	if nativeProtocol.Valid {
 		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
 	}
@@ -368,6 +370,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
 			attemptBody, _ = json.Marshal(attemptRaw)
 		}
+		if candidate.Provider.Type == "codex-subscription" {
+			attemptBody, err = normalizeCodexRequest(attemptBody)
+			if err != nil {
+				row.httpStatus = 400
+				row.errorText = strPtr("invalid_request")
+				inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
+				return
+			}
+		}
 		endpoint, e := providers.Endpoint(candidate.Provider, target)
 		if e != nil {
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
@@ -388,6 +399,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
+		if candidate.Provider.Type == "codex-subscription" {
+			req.Header.Set("session_id", row.clientRequestID)
+		}
 		targetID := candidate.ProviderModelID
 		if targetID == "" {
 			targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID

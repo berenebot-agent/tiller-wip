@@ -18,12 +18,19 @@ import (
 	"time"
 )
 
+// Codex uses the Responses API over a subscription-backed OAuth credential.
+const codexProviderType = "codex-subscription"
+
 type Protocol string
+
+type AuthMode string
 
 const (
 	ProtocolChat      Protocol = "chat"
 	ProtocolResponses Protocol = "responses"
 	ProtocolMessages  Protocol = "messages"
+	AuthModeAPIKey    AuthMode = "api_key"
+	AuthModeOAuth     AuthMode = "oauth"
 )
 
 type Descriptor struct {
@@ -32,12 +39,14 @@ type Descriptor struct {
 	DefaultBaseURL   string     `json:"default_base_url,omitempty"`
 	BaseURLRequired  bool       `json:"base_url_required"`
 	CredentialNeeded bool       `json:"credential_needed"`
+	AuthMode         AuthMode   `json:"auth_mode"`
 	Protocols        []Protocol `json:"protocols"`
 	Discovery        string     `json:"-"`
 }
 
 var descriptors = []Descriptor{
 	{Type: "openai", Label: "OpenAI", DefaultBaseURL: "https://api.openai.com/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses}, Discovery: "openai"},
+	{Type: codexProviderType, Label: "Codex Subscription", DefaultBaseURL: "https://chatgpt.com/backend-api/codex", AuthMode: AuthModeOAuth, Protocols: []Protocol{ProtocolResponses}, Discovery: "codex"},
 	{Type: "anthropic", Label: "Anthropic", DefaultBaseURL: "https://api.anthropic.com/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolMessages}, Discovery: "anthropic"},
 	{Type: "openrouter", Label: "OpenRouter", DefaultBaseURL: "https://openrouter.ai/api/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "ollama-local", Label: "Ollama Local", DefaultBaseURL: "http://host.docker.internal:11434", Protocols: []Protocol{ProtocolChat}, Discovery: "ollama"},
@@ -68,11 +77,22 @@ var descriptors = []Descriptor{
 	{Type: "llama-cpp", Label: "llama.cpp", DefaultBaseURL: "http://host.docker.internal:8080/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 }
 
-func Descriptors() []Descriptor { return append([]Descriptor(nil), descriptors...) }
+func Descriptors() []Descriptor {
+	out := append([]Descriptor(nil), descriptors...)
+	for i := range out {
+		if out[i].AuthMode == "" {
+			out[i].AuthMode = AuthModeAPIKey
+		}
+	}
+	return out
+}
 
 func Lookup(providerType string) (Descriptor, bool) {
 	for _, descriptor := range descriptors {
 		if descriptor.Type == providerType {
+			if descriptor.AuthMode == "" {
+				descriptor.AuthMode = AuthModeAPIKey
+			}
 			return descriptor, true
 		}
 	}
@@ -89,6 +109,7 @@ func ValidateBaseURL(raw string) error {
 
 type Instance struct {
 	ID, Name, Type, BaseURL, Credential string
+	OAuthAccountID                       string
 	Enabled                             bool
 	Protocols                           []Protocol
 }
@@ -186,6 +207,8 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	var models []Model
 	var err error
 	switch d.Discovery {
+	case "codex":
+		models = codexModels()
 	case "ollama":
 		models, err = r.discoverOllama(ctx, provider)
 	case "huggingface":
@@ -216,6 +239,13 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	// provider does not report capabilities still surface useful metadata. The
 	// merged slice flows into Manager.applyCatalogue and is stored in the DB.
 	return r.enrich(models, provider.Type), nil
+}
+
+func codexModels() []Model {
+	ids := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
+	models := make([]Model, 0, len(ids))
+	for _, id := range ids { models = append(models, Model{ID: id, DisplayName: id, NativeProtocol: ProtocolResponses}) }
+	return models
 }
 
 func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthropic bool) ([]Model, error) {
@@ -466,6 +496,11 @@ func ApplyRequestAuth(req *http.Request, provider Instance) {
 		req.Header.Set("api-key", provider.Credential)
 	} else {
 		req.Header.Set("Authorization", "Bearer "+provider.Credential)
+	}
+	if provider.Type == codexProviderType {
+		req.Header.Set("originator", "codex_cli_rs")
+		req.Header.Set("User-Agent", "codex_cli_rs/0.136.0")
+		if provider.OAuthAccountID != "" { req.Header.Set("ChatGPT-Account-ID", provider.OAuthAccountID) }
 	}
 }
 

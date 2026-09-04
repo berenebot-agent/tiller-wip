@@ -14,17 +14,20 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
+	"github.com/tiller-router/tiller-router/internal/providers/codex"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 type Manager struct {
 	db       *sql.DB
 	registry *Registry
+	oauth   *oauth.Manager
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
 }
 
 func NewManager(db *sql.DB, registry *Registry) *Manager {
-	return &Manager{db: db, registry: registry, locks: make(map[string]*sync.Mutex)}
+	return &Manager{db: db, registry: registry, oauth: oauth.NewManager(oauth.NewStore(db), 5*time.Minute), locks: make(map[string]*sync.Mutex)}
 }
 
 func (m *Manager) Registry() *Registry { return m.registry }
@@ -57,7 +60,33 @@ func (m *Manager) loadProvider(ctx context.Context, providerID string) (Instance
 	err := m.db.QueryRowContext(ctx, `SELECT id,name,type,base_url,coalesce(credential_secret,''),enabled,protocols FROM providers WHERE id=?`, providerID).
 		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.Credential, &p.Enabled, &protocols)
 	p.Protocols = DecodeProtocols(protocols)
+	m.HydrateOAuth(ctx, &p)
 	return p, err
+}
+
+// HydrateOAuth loads the current access token only for OAuth descriptors. It
+// deliberately leaves API-key credentials untouched.
+func (m *Manager) HydrateOAuth(ctx context.Context, p *Instance) {
+	descriptor, ok := Lookup(p.Type)
+	if !ok || descriptor.AuthMode != AuthModeOAuth {
+		return
+	}
+	var token oauth.TokenRecord
+	var err error
+	if p.Type == codexProviderType {
+		token, err = m.oauth.Current(ctx, p.ID, func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return codex.Refresh(refreshCtx, m.registry.HTTPClient(), current.RefreshToken)
+		})
+	} else {
+		token, err = oauth.NewStore(m.db).Get(ctx, p.ID)
+	}
+	if err != nil {
+		return
+	}
+	p.Credential = token.AccessToken
+	if p.Type == codexProviderType {
+		p.OAuthAccountID = codex.AccountInfo(token.IDToken).ID
+	}
 }
 
 func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models []Model) error {
