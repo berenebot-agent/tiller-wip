@@ -52,6 +52,10 @@ type Server struct {
 	// admin usage endpoint to drive the per-target resolution dots.
 	lastOutcomeMu sync.RWMutex
 	lastOutcome   map[string]lastOutcome
+	// live is the SSE hub that pushes outcome deltas and usage snapshots to
+	// connected admin tabs. Lazily started on first subscriber, stopped at zero.
+	liveHub  *liveHub
+	inflight *inflightTracker
 }
 
 // lastOutcome is the most recent request result for a single real model.
@@ -84,9 +88,11 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), lastOutcome: map[string]lastOutcome{}}, nil
+	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer)}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}}
+	s.inflight.emit = s.liveHub.emitActivity
+	s.liveHub.snapshot = s.buildUsageSnapshot
+	return s, nil
 }
-
 func (s *Server) StartBackground(ctx context.Context) {
 	s.providers.StartScheduler(ctx)
 	if s.config.ModelsDevEnabled {
@@ -111,7 +117,7 @@ func (s *Server) startLogPruner(ctx context.Context) {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health/live", s.live)
+	mux.HandleFunc("GET /health/live", s.liveHealth)
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.HandleFunc("GET /health/version", s.versionHealth)
 	mux.HandleFunc("POST /api/admin/session", s.login)
@@ -152,6 +158,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.updateSettings)))
 	mux.Handle("POST /api/admin/notifications/test", s.requireAdmin(http.HandlerFunc(s.sendTestNotification)))
 	mux.Handle("GET /api/admin/usage", s.requireAdmin(http.HandlerFunc(s.usage)))
+	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
 	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
@@ -164,7 +171,7 @@ func (s *Server) Handler() http.Handler {
 	return s.securityHeaders(s.requestLog(mux))
 }
 
-func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) liveHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "live"})
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {

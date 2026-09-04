@@ -22,11 +22,24 @@ Guardrails for any coding agent working in this repository. This file describes 
 - Don't add anything that requires a host-published port when a reverse-proxy Docker network is in use.
 - Don't require Docker socket access or privileged mode.
 
-**Out-of-box posture (default, adoption-first):** the default compose runs via a **root-then-drop entrypoint** (container starts as root, `entrypoint.sh` `chown -R` the data bind mount, then `su-exec` drops to a non-root user). This is what makes `docker compose up` work with a fresh `./data` dir — no manual `chmod`/ownership step needed. So out of the box the container is root at boot for the ownership fix, then non-root for the app.
+**Out-of-box posture (default, adoption-first):** the default compose runs via an **in-process root-then-drop** (image has no baked-in `USER`, so the container starts as root; `internal/privdrop`, wired into `cmd/tiller-router`, `chown -R`s the data bind mount to `TILLER_RUN_UID`/`TILLER_RUN_GID` and then sheds privileges before the database is opened — pure Go, no shell entrypoint, no `su-exec`, works on the `scratch` image). This is what makes `docker compose up` work with a fresh `./data` dir — no manual `chmod`/ownership step needed. So out of the box the container is root at boot for the ownership fix, then non-root for the app. The default compose also ships `read_only` + `/tmp` tmpfs + `no-new-privileges`, which are compatible with the drop (only `./data` and `/tmp` are written, no setuid binaries are exec'd).
 
-**Hardenable, not required:** the stricter posture (read-only rootfs, `cap_drop: ALL`, no-new-privileges, fully non-root with no root entrypoint) is available and documented in the **advanced/hardened compose** example, for users who want it. The out-of-box image works fine with those flags baked in if a user chooses to harden — the entrypoint is designed not to *require* root at the app level, only for the boot ownership fix. This is an explicit product decision (Ben, 2026-09-02): **adoption first**, hardening opt-in.
+**Hardenable, not required:** the stricter posture adds `cap_drop: ALL` plus a strict non-root `user:` (commented block in `docker-compose.yml`). Those two are opt-in because they conflict with the drop: `cap_drop ALL` removes the chown/setuid capabilities the boot fix needs, and a strict `user:` skips the boot chown entirely (fresh root-owned `./data` then fails loud with `ErrDataDirUnwritable` + remediation). The image supports the strict flags — the drop cleanly no-ops when already non-root. This is an explicit product decision (Ben, 2026-09-02): **adoption first**, hardening opt-in.
 
 - `AGENTS.md` / docs must not treat the strict non-root posture as a hard rule the default build violates. The default is deliberately relaxed for adoption; the advanced compose documents how to harden.
+
+## Rebuilding the main container
+
+When the user asks to "rebuild the main container" (or equivalently "rebuild the image" / "restart with the latest code"), the canonical command is:
+
+```bash
+cd /opt/tiller-router && docker compose down && docker compose up --build
+```
+
+- Always `down` before `up --build` so a stale container isn't left holding the old image's anonymous volumes / healthcheck state, and so the rebuild actually replaces the running process.
+- Run from `/home/ben/projects/tiller-router/` (the deployed repo location — this is the dev branch, not a separate `/opt/tiller-router/` checkout), unless the user says otherwise.
+- `--build` is required — without it, Compose reuses the existing image and the user's "rebuild" intent isn't honored.
+- Do not invent a `docker build` + manual `docker run` workflow unless the user explicitly asks for one. The Compose service is the supported path.
 
 ## Toolchain — Go runs in Docker, never on the host
 
@@ -99,3 +112,28 @@ Run the **minimum** tier that matches the change. Do **not** default to the full
 - **Run the full suite only when instructed, or for a significant feature/release.** Otherwise pick the smallest tier that would catch a regression in what you changed.
 
 When a change is purely frontend (`internal/web/assets/**`), the browser suite is the gate; run `./tiller-go.sh test ./...` for sanity but the UI tests are the ones that matter.
+
+### Test log convention (X = summary, Y = detail)
+
+All test runners follow a two-tier logging convention so agents (or humans)
+can diagnose failures without re-running:
+
+- **X (Summary)** — always printed to stdout, regardless of pass/fail.
+  Includes exit code, elapsed time, and the path to the detailed log. On
+  failure, also prints the first error message inline.
+- **Y (Detail)** — always written to a per-run log file containing the full
+  stdout+stderr. Default location is repo-local and gitignored
+  (`tests/logs/`):
+
+| Runner | Y (detail) path |
+|---|---|
+| `./tiller-go.sh ...` | `tests/logs/tiller-go/<UTC-ts>-go-*.log` |
+| `./tests/browser/run.sh` | `tests/logs/<run-id>/run.log`; Playwright traces/screenshots in `tests/logs/<run-id>/playwright-results/` (preserved on failure, auto-removed on success) |
+| `./tests/compatibility/run.sh` | `tests/logs/compat/<UTC-ts>-compat.log` |
+
+To inspect a failed browser run's full output and Playwright artifacts
+without re-running: read `tests/logs/<run-id>/run.log` and open the matching
+`playwright-results/` directory (each Playwright shard writes
+`trace.zip` + `error-context.md` per failed test). Each `run_id` is unique
+(`tiller-browser-<pid>`), so preserving a run indefinitely is just a matter
+of renaming `tests/logs/<run-id>/` aside before the next invocation.

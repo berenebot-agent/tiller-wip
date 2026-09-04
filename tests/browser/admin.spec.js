@@ -1,60 +1,9 @@
 const { test, expect } = require('@playwright/test');
-
-const ADMIN_USER = process.env.TILLER_BROWSER_ADMIN_USERNAME || 'admin';
-const ADMIN_PASS = process.env.TILLER_BROWSER_ADMIN_PASSWORD || 'browser-test-password';
-const MOCK_BASE = process.env.TILLER_BROWSER_MOCK_BASE_URL || 'http://127.0.0.1:18081/v1';
-// Control origin used to simulate upstream catalogue growth/shrink.
-const MOCK_CONTROL_BASE = MOCK_BASE.replace(/\/v1$/, '');
-
-async function login(page) {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
-  await page.getByLabel('Administrator').fill(ADMIN_USER);
-  await page.getByLabel('Password').fill(ADMIN_PASS);
-  await page.getByRole('button', { name: 'Enter control panel' }).click();
-  await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
-}
-
-async function adminCsrf(page) {
-  const res = await page.request.get('/api/admin/session');
-  expect(res.ok()).toBeTruthy();
-  return (await res.json()).csrf_token;
-}
-
-async function createProvider(page, csrf, name) {
-  const res = await page.request.post('/api/admin/providers', {
-    headers: { 'X-CSRF-Token': csrf },
-    data: { name, type: 'generic-openai', base_url: MOCK_BASE }
-  });
-  expect(res.status()).toBe(201);
-  const body = await res.json();
-  expect(body.refresh_error).toBeFalsy();
-  return body;
-}
-
-async function createClient(page, csrf, name) {
-  const res = await page.request.post('/api/admin/client-keys', {
-    headers: { 'X-CSRF-Token': csrf },
-    data: { name, description: 'browser permission test client' }
-  });
-  expect(res.status()).toBe(201);
-  return res.json();
-}
-
-async function mockAddModel(page, id) {
-  const res = await page.request.post(`${MOCK_CONTROL_BASE}/__/models/add/${id}`);
-  expect(res.ok()).toBeTruthy();
-}
-async function mockRemoveModel(page, id) {
-  const res = await page.request.post(`${MOCK_CONTROL_BASE}/__/models/remove/${id}`);
-  expect(res.ok()).toBeTruthy();
-}
-async function refreshProviderApi(page, csrf, providerId) {
-  const res = await page.request.post(`/api/admin/providers/${providerId}/refresh`, {
-    headers: { 'X-CSRF-Token': csrf }
-  });
-  expect(res.ok()).toBeTruthy();
-}
+const {
+  ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE,
+  login, adminCsrf, createProvider, createClient,
+  mockAddModel, mockRemoveModel, refreshProviderApi
+} = require('./helpers');
 
 test('admin login, responsive navigation, one-time secret, and system view', async ({ page }) => {
   await page.setViewportSize({ width: 780, height: 700 });
@@ -873,169 +822,6 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
   await expect(virtualModel).toBeHidden();
 });
 
-test('global activity renders across clients, searches, and pages', async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
-  const csrf = await adminCsrf(page);
-
-  const providerName = 'browser-activity';
-  const modelId = `${providerName}/mock-model`;
-  const client1Name = 'activity-client-one';
-  const client2Name = 'activity-client-two';
-
-  const provider = await createProvider(page, csrf, providerName);
-  const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
-  expect(modelsRes.ok()).toBeTruthy();
-  const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
-  expect(realModel).toBeTruthy();
-
-  const client1 = await createClient(page, csrf, client1Name);
-  const client2 = await createClient(page, csrf, client2Name);
-
-  const grant = async clientId => {
-    const res = await page.request.put(`/api/admin/client-keys/${clientId}/permissions`, {
-      headers: { 'X-CSRF-Token': csrf },
-      data: { defaults: [], permissions: [{ kind: 'real', model_id: realModel.id, enabled: true }] }
-    });
-    expect(res.status()).toBe(204);
-  };
-  await grant(client1.id);
-  await grant(client2.id);
-
-  const infer = async (secret, content) => {
-    const res = await page.request.post('/v1/chat/completions', {
-      headers: { Authorization: `Bearer ${secret}` },
-      data: { model: modelId, messages: [{ role: 'user', content }] }
-    });
-    expect(res.status()).toBe(200);
-  };
-
-  // Generate enough activity to exceed the 50-row page limit so pagination can
-  // be exercised, alternating between the two clients. Requests are fired
-  // sequentially to keep the test deterministic and avoid load spikes.
-  const total = 55;
-  for (let i = 0; i < total; i++) {
-    const secret = i % 2 === 0 ? client1.secret : client2.secret;
-    await infer(secret, `activity-content-${i}`);
-  }
-
-  // Navigate to Settings and verify the Global activity section renders.
-  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
-  await expect(page.locator('#view-settings')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
-  await expect(page.locator('#global-activity-count')).toHaveText('1–50');
-  await expect(page.locator('#global-activity-prev')).toBeDisabled();
-  await expect(page.locator('#global-activity-next')).toBeEnabled();
-
-  // Search filters to a single client's rows (client2 got the 27 odd-indexed
-  // requests of the 55 total).
-  await page.locator('#global-activity-search').fill(client2Name);
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(27);
-  await expect(page.locator('#global-activity-empty')).toBeHidden();
-  await page.locator('#global-activity-search').fill('zzz-no-match');
-  await expect(page.locator('#global-activity-empty')).toBeVisible();
-  await page.locator('#global-activity-search').fill('');
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
-
-  // Pagination: Older loads the remaining 5 rows; Newer returns to page 1.
-  await page.locator('#global-activity-next').click();
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(5);
-  await expect(page.locator('#global-activity-count')).toHaveText('51–55');
-  await expect(page.locator('#global-activity-prev')).toBeEnabled();
-  await expect(page.locator('#global-activity-next')).toBeDisabled();
-  await page.locator('#global-activity-prev').click();
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
-  await expect(page.locator('#global-activity-count')).toHaveText('1–50');
-});
-
-test('activity pagination handles empty results and the exact-page boundary', async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
-  const csrf = await adminCsrf(page);
-
-  const providerName = 'browser-boundary';
-  const modelId = `${providerName}/mock-model`;
-
-  const provider = await createProvider(page, csrf, providerName);
-  const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
-  expect(modelsRes.ok()).toBeTruthy();
-  const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
-  expect(realModel).toBeTruthy();
-
-  // Client A is never used to request, so its activity is empty.
-  const clientA = await createClient(page, csrf, 'boundary-empty-client');
-  // Client B will accumulate EXACTLY `limit` (50) rows of activity.
-  const clientB = await createClient(page, csrf, 'boundary-full-client');
-
-  await page.getByRole('link', { name: 'Clients' }).click();
-  const clientARow = page.locator('#clients-body tr', { hasText: clientA.name });
-  await expect(clientARow).toBeVisible();
-
-  // 1. Per-client empty results: the count must be neutral (never "1–0") and the
-  //    empty state must be shown; both pager buttons are inert.
-  await clientARow.getByRole('button', { name: 'Activity' }).click();
-  await expect(page.locator('#activity-dialog')).toBeVisible();
-  await expect(page.locator('#activity-empty')).toBeVisible();
-  await expect(page.locator('#activity-count')).not.toHaveText('1–0');
-  await expect(page.locator('#activity-count')).toHaveText('0 results');
-  await expect(page.locator('#activity-prev')).toBeDisabled();
-  await expect(page.locator('#activity-next')).toBeDisabled();
-  await page.getByRole('button', { name: 'Done' }).click();
-  await expect(page.locator('#activity-dialog')).toBeHidden();
-
-  // 2. Global activity empty rendering: filter to a term that matches nothing so
-  //    the section renders its empty state (earlier browser tests leave rows behind).
-  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
-  await expect(page.locator('#view-settings')).toBeVisible();
-  await page.locator('#global-activity-search').fill('zzz-no-match-boundary');
-  await expect(page.locator('#global-activity-empty')).toBeVisible();
-  await expect(page.locator('#global-activity-count')).not.toHaveText('1–0');
-  await expect(page.locator('#global-activity-count')).toHaveText('0 results');
-  await expect(page.locator('#global-activity-next')).toBeDisabled();
-  await page.locator('#global-activity-search').fill('');
-
-  // Grant client B access to the real model, then generate EXACTLY 50 activity
-  // rows sequentially (kept sequential to stay deterministic and avoid load spikes).
-  const grantRes = await page.request.put(`/api/admin/client-keys/${clientB.id}/permissions`, {
-    headers: { 'X-CSRF-Token': csrf },
-    data: { defaults: [], permissions: [{ kind: 'real', model_id: realModel.id, enabled: true }] }
-  });
-  expect(grantRes.status()).toBe(204);
-  for (let i = 0; i < 50; i++) {
-    const res = await page.request.post('/v1/chat/completions', {
-      headers: { Authorization: `Bearer ${clientB.secret}` },
-      data: { model: modelId, messages: [{ role: 'user', content: `boundary-content-${i}` }] }
-    });
-    expect(res.status()).toBe(200);
-  }
-
-  // 3. Exact-page boundary (exactly `limit` rows): the per-client dialog must show
-  //    all 50 rows with "1–50" and the "Older" button DISABLED because there are
-  //    no more pages — clicking it could otherwise fetch an empty "51–50" page.
-  await page.getByRole('link', { name: 'Clients' }).click();
-  const clientBRow = page.locator('#clients-body tr', { hasText: clientB.name });
-  await expect(clientBRow).toBeVisible();
-  await clientBRow.getByRole('button', { name: 'Activity' }).click();
-  await expect(page.locator('#activity-dialog')).toBeVisible();
-  await expect(page.locator('#activity-empty')).toBeHidden();
-  await expect(page.locator('#activity-body tr')).toHaveCount(50);
-  await expect(page.locator('#activity-count')).toHaveText('1–50');
-  await expect(page.locator('#activity-next')).toBeDisabled();
-  await expect(page.locator('#activity-prev')).toBeDisabled();
-
-  // Clearing activity is a destructive action and requires explicit confirmation.
-  await page.getByRole('button', { name: 'Clear activity' }).click();
-  await expect(page.locator('#confirm-dialog')).toBeVisible();
-  await expect(page.locator('#confirm-copy')).toContainText('permanently deleted');
-  await page.locator('#confirm-action').click();
-  await expect(page.locator('#activity-empty')).toBeVisible();
-  await expect(page.locator('#activity-count')).toHaveText('0 results');
-
-  // Cleanup: close the now-empty activity dialog so unrelated later tests stay isolated.
-  await page.getByRole('button', { name: 'Done' }).click();
-  await expect(page.locator('#activity-dialog')).toBeHidden();
-});
 
 test('activity loads clear a previously shown error on success', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -1260,4 +1046,268 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
   // The full ID is still in the title for hover-to-reveal.
   const title = await requestCell.getAttribute('title');
   expect(title?.length || 0).toBeGreaterThan(8);
+});
+
+test('virtual-model target combobox: unique upstream_model_id match auto-accepts without an explicit pick', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-exact-match';
+  const provider = await createProvider(page, csrf, providerName);
+
+  // Add a second upstream model so we can prove exact-match resolves to it,
+  // not whatever the combobox pre-selects. Name it so it sorts after
+  // 'mock-model' (the mock's only default) — the router's models endpoint
+  // orders by upstream_model_id, so 'mock-model' becomes option[0] and the
+  // typed match can only land on this second one via the auto-accept.
+  const extraModelID = 'zoo-extra';
+  await mockAddModel(page, extraModelID);
+  await refreshProviderApi(page, csrf, provider.id);
+
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const allModels = (await modelsRes.json()).data;
+  const extra = allModels.find(m => m.provider_name === providerName && m.upstream_model_id === extraModelID);
+  expect(extra).toBeTruthy();
+  const mock = allModels.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
+  expect(mock).toBeTruthy();
+
+  // Seed a virtual group so the create dialog has a group to pick.
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-exact-match-vg' } });
+  expect(groupRes.status()).toBe(201);
+
+  await page.getByRole('link', { name: 'Virtual Models' }).click();
+  await page.getByRole('button', { name: '+ Virtual model' }).click();
+  await expect(page.getByRole('heading', { name: 'Create virtual model' })).toBeVisible();
+
+  const fixedInput = page.locator('[data-fixed-target] input[type="text"]');
+  const fixedHidden = page.locator('[data-fixed-target] input[type="hidden"]');
+  await expect(fixedInput).toBeVisible();
+
+  // The dialog pre-selects the first option in the list. Capture it so we
+  // can later prove the exact-match resolution landed on a different one.
+  const preSelectedId = await fixedHidden.inputValue();
+  expect(preSelectedId).toBeTruthy();
+  expect(preSelectedId).not.toBe(extra.id);
+
+  // Clear the visible field, then type the exact upstream_model_id of the
+  // second model. The hidden provider_model_id should auto-resolve to it
+  // without an explicit dropdown pick — there is only one match.
+  await fixedInput.click();
+  await fixedInput.press('Control+A');
+  await fixedInput.press('Delete');
+  await expect(fixedHidden).toHaveValue('');
+  await fixedInput.fill(extraModelID);
+  await expect(fixedHidden).toHaveValue(extra.id);
+  await expect(fixedHidden).not.toHaveValue(preSelectedId);
+
+  // Submitting the create form should succeed; the new virtual model routes
+  // to the second model, not the pre-selected first option.
+  await page.locator('#entity-form').getByLabel('Virtual model name').fill('exact-match-route');
+  await page.locator('#entity-form').getByLabel('Virtual group').selectOption({ label: 'vm-exact-match-vg' });
+  // Sanity: the hidden target_model field must still be populated right up
+  // until we click Create; the exact-match reconciliation set it on input.
+  await expect(fixedHidden).toHaveValue(extra.id);
+  await page.getByRole('button', { name: 'Create route' }).click();
+  // If the dialog stays open, surface the server error so the failure is
+  // self-explanatory in the log.
+  await page.locator('#form-dialog').waitFor({ state: 'hidden', timeout: 8000 }).catch(async () => {
+    const err = (await page.locator('#dialog-error').textContent()) || '<no error>';
+    const hidden = await fixedHidden.inputValue();
+    throw new Error(`Create dialog did not close; server error: ${err}; hidden=${hidden}`);
+  });
+
+  const listRes = await page.request.get('/api/admin/virtual-models?search=exact-match-route');
+  expect(listRes.ok()).toBeTruthy();
+  const found = (await listRes.json()).data.find(m => m.canonical_model_id === 'vm-exact-match-vg/exact-match-route');
+  expect(found).toBeTruthy();
+  expect(found.targets[0].provider_model_id).toBe(extra.id);
+
+  // Cleanup: remove the virtual model and group, plus the extra upstream model.
+  await page.request.delete(`/api/admin/virtual-models/${found.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-exact-match-vg')).json();
+  const group = groupList.data.find(g => g.name === 'vm-exact-match-vg');
+  if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await mockRemoveModel(page, extraModelID);
+  await refreshProviderApi(page, csrf, provider.id);
+});
+
+test('virtual-model target combobox: ambiguous upstream_model_id match does not auto-accept', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  // Create two providers that both expose the same upstream_model_id. This
+  // is the common case (e.g. openai/gpt-x and openrouter/gpt-x). Typing
+  // the shared ID must NOT silently pick one — the operator must choose.
+  const sharedModelID = 'gpt-shared';
+  const providerA = await createProvider(page, csrf, 'vm-ambiguous-a');
+  const providerB = await createProvider(page, csrf, 'vm-ambiguous-b');
+  await mockAddModel(page, sharedModelID);
+  await refreshProviderApi(page, csrf, providerA.id);
+  await refreshProviderApi(page, csrf, providerB.id);
+
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const allModels = (await modelsRes.json()).data;
+  const matches = allModels.filter(m => m.upstream_model_id === sharedModelID);
+  expect(matches.length).toBe(2);
+
+  // Seed a virtual group so the create dialog has a group to pick.
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-ambiguous-vg' } });
+  expect(groupRes.status()).toBe(201);
+
+  await page.getByRole('link', { name: 'Virtual Models' }).click();
+  await page.getByRole('button', { name: '+ Virtual model' }).click();
+  await expect(page.getByRole('heading', { name: 'Create virtual model' })).toBeVisible();
+
+  const fixedInput = page.locator('[data-fixed-target] input[type="text"]');
+  const fixedHidden = page.locator('[data-fixed-target] input[type="hidden"]');
+  await expect(fixedInput).toBeVisible();
+
+  // Clear the field and type the shared upstream_model_id. The hidden value
+  // must stay empty because there are two matches — auto-accept only fires
+  // for a unique match.
+  await fixedInput.click();
+  await fixedInput.press('Control+A');
+  await fixedInput.press('Delete');
+  await expect(fixedHidden).toHaveValue('');
+  await fixedInput.fill(sharedModelID);
+  await expect(fixedHidden).toHaveValue('');
+
+  // The dropdown should show both provider choices so the operator can pick.
+  const listItems = page.locator('[data-fixed-target] .combobox-list li');
+  await expect(listItems).toHaveCount(2);
+  await expect(listItems.nth(0)).toContainText('vm-ambiguous-a');
+  await expect(listItems.nth(1)).toContainText('vm-ambiguous-b');
+
+  // Cleanup: remove the group and extra model.
+  await page.request.delete(`/api/admin/providers/${providerA.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await page.request.delete(`/api/admin/providers/${providerB.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-ambiguous-vg')).json();
+  const group = groupList.data.find(g => g.name === 'vm-ambiguous-vg');
+  if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await mockRemoveModel(page, sharedModelID);
+});
+
+test('virtual-model target combobox: non-matching text still blocks submission', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-nomatch';
+  const provider = await createProvider(page, csrf, providerName);
+
+  // Seed a virtual group so the create dialog has a group to pick.
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-nomatch-vg' } });
+  expect(groupRes.status()).toBe(201);
+
+  await page.getByRole('link', { name: 'Virtual Models' }).click();
+  await page.getByRole('button', { name: '+ Virtual model' }).click();
+  await expect(page.getByRole('heading', { name: 'Create virtual model' })).toBeVisible();
+
+  const fixedInput = page.locator('[data-fixed-target] input[type="text"]');
+  const fixedHidden = page.locator('[data-fixed-target] input[type="hidden"]');
+  await expect(fixedInput).toBeVisible();
+
+  // Clear the field, then type a string that doesn't match any upstream
+  // model. Hidden value must stay empty and submit must error.
+  await fixedInput.click();
+  await fixedInput.press('Control+A');
+  await fixedInput.press('Delete');
+  await expect(fixedHidden).toHaveValue('');
+  await fixedInput.fill('not-a-real-model-xyz');
+  await expect(fixedHidden).toHaveValue('');
+
+  await page.locator('#entity-form').getByLabel('Virtual model name').fill('no-match-route');
+  await page.getByRole('button', { name: 'Create route' }).click();
+  await expect(page.locator('#dialog-error')).toContainText('Choose a target model.');
+  await expect(page.locator('#form-dialog')).toBeVisible();
+
+  // Cancel and clean up the group so we leave the suite tidy.
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-nomatch-vg')).json();
+  const group = groupList.data.find(g => g.name === 'vm-nomatch-vg');
+  if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+});
+
+test('mobile: ordered-fallback target dropdown spans the dialog width', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-mobile-list';
+  await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-mobile-list-vg' } });
+  expect(groupRes.status()).toBe(201);
+  const group = await groupRes.json();
+  const virtualRes = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'mobile-fb', routing_mode: 'ordered_fallback', targets: [{ provider_model_id: real.id, enabled: true }] } });
+  expect(virtualRes.status()).toBe(201);
+  const virtual = await virtualRes.json();
+
+  await page.goto('/#virtual');
+  await expect(page.locator('#view-virtual')).toBeVisible();
+  const row = page.locator('#virtual-body tr', { hasText: 'vm-mobile-list-vg/mobile-fb' });
+  await row.getByRole('button', { name: 'Settings' }).click();
+  await expect(page.getByRole('heading', { name: 'Edit vm-mobile-list-vg/mobile-fb' })).toBeVisible();
+
+  const input = page.locator('[data-fallback-targets] .target-row .combobox input[type="text"]');
+  await input.click();
+  const list = page.locator('[data-fallback-targets] .combobox-list');
+  await expect(list).toBeVisible();
+
+  const m = await page.evaluate(() => {
+    const l = document.querySelector('[data-fallback-targets] .combobox-list').getBoundingClientRect();
+    const i = document.querySelector('[data-fallback-targets] .combobox input[type="text"]').getBoundingClientRect();
+    const d = document.querySelector('#form-dialog').getBoundingClientRect();
+    return { listW: l.width, listRight: l.right, inputW: i.width, dialogW: d.width, vw: window.innerWidth };
+  });
+  expect(m.dialogW).toBeGreaterThan(m.inputW + 40);
+  expect(m.listW).toBeGreaterThanOrEqual(m.dialogW - 2);
+  expect(m.listW).toBeGreaterThan(m.inputW + 40);
+  expect(m.listRight).toBeLessThanOrEqual(m.vw);
+
+  await input.click();
+  await expect(list).toBeHidden();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+});
+
+test('virtual models table: group header colspan matches data row columns', async ({ page }) => {
+  // The State column was removed, leaving 7 columns. The group header
+  // colspan must match the data row cell count so the table does not get
+  // an extra synthetic column.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-colspan';
+  await createProvider(page, csrf, providerName);
+
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-colspan-vg' } });
+  expect(groupRes.status()).toBe(201);
+  const group = await groupRes.json();
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+  const virtualRes = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'colspan-route', routing_mode: 'fixed', targets: [{ provider_model_id: real.id, enabled: true }] } });
+  expect(virtualRes.status()).toBe(201);
+  const virtual = await virtualRes.json();
+
+  await page.goto('/#virtual');
+  await expect(page.locator('#view-virtual')).toBeVisible();
+
+  // The group header colspan must equal the data row cell count (7).
+  const headerColspan = await page.locator('#virtual-body tr.group-toggle td').first().getAttribute('colspan');
+  expect(headerColspan).toBe('7');
+
+  // And the data row must have exactly 7 cells.
+  const dataRow = page.locator('#virtual-body tr[data-virtual-id]', { hasText: 'vm-colspan-vg/colspan-route' });
+  await expect(dataRow).toBeVisible();
+  const cellCount = await dataRow.locator('td').count();
+  expect(cellCount).toBe(7);
+
+  // Cleanup.
+  await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });

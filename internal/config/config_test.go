@@ -49,6 +49,50 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 	}
 }
 
+func TestLogLevel(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+
+	// Default when unset.
+	t.Setenv("TILLER_LOG_LEVEL", "")
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogLevel != "info" {
+		t.Errorf("LogLevel = %q, want default info", c.LogLevel)
+	}
+
+	// Explicit value is preserved.
+	t.Setenv("TILLER_LOG_LEVEL", "warn")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogLevel != "warn" {
+		t.Errorf("LogLevel = %q, want warn", c.LogLevel)
+	}
+
+	// Case-insensitive.
+	t.Setenv("TILLER_LOG_LEVEL", "WARN")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogLevel != "warn" {
+		t.Errorf("LogLevel = %q, want warn (case-insensitive)", c.LogLevel)
+	}
+
+	// Invalid value is a hard configuration error.
+	t.Setenv("TILLER_LOG_LEVEL", "banana")
+	if _, err := Load(); err == nil {
+		t.Error("TILLER_LOG_LEVEL=banana should fail to load")
+	}
+}
+
 func TestTrustedProxy(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")

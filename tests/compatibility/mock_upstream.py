@@ -1,10 +1,16 @@
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Optional extra upstream models that can be added/removed at runtime to
 # simulate catalogue discovery changes. The default catalogue is unaffected
 # until a browser/compatibility test adds a model.
 _extra_models = []
+
+# Model ids that should return HTTP 500 for chat completions (added/removed via
+# the /__/models/fail and /__/models/ok controls). Lets tests exercise upstream
+# failure + ordered fallback without a second mock upstream.
+_failing_models = []
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -50,6 +56,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "not found"}, 404)
             return
         model = request.get("model", "mock-model")
+        if model in _failing_models:
+            self.send_json({"error": {"message": "injected upstream failure", "type": "server_error"}}, 500)
+            return
         if request.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -75,7 +84,8 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def handle_model_control(self):
-        # /__/models/add/{id} and /__/models/remove/{id}
+        # /__/models/add/{id}, /__/models/remove/{id}, /__/models/fail/{id},
+        # /__/models/ok/{id}
         parts = self.path.split("/")
         if len(parts) < 5:
             self.send_json({"error": "missing model id"}, 400)
@@ -92,6 +102,15 @@ class Handler(BaseHTTPRequestHandler):
         if action == "remove":
             _extra_models[:] = [m for m in _extra_models if m != model_id]
             self.send_json({"status": "removed", "id": model_id})
+            return
+        if action == "fail":
+            if model_id not in _failing_models:
+                _failing_models.append(model_id)
+            self.send_json({"status": "failing", "id": model_id})
+            return
+        if action == "ok":
+            _failing_models[:] = [m for m in _failing_models if m != model_id]
+            self.send_json({"status": "ok", "id": model_id})
             return
         self.send_json({"error": "unknown action"}, 400)
 
@@ -168,4 +187,4 @@ class Handler(BaseHTTPRequestHandler):
         self.close_connection = True
 
 
-ThreadingHTTPServer(("127.0.0.1", 18081), Handler).serve_forever()
+ThreadingHTTPServer(("127.0.0.1", int(os.environ.get("TILLER_MOCK_PORT", "18081"))), Handler).serve_forever()

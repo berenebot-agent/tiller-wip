@@ -92,6 +92,41 @@ func TestOrderedFallbackCoversUpstreamHTTPFailures(t *testing.T) {
 	}
 }
 
+func TestOrderedFallbackDoesNotWaitForStalledErrorBody(t *testing.T) {
+	first := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	second := okUpstream(t)
+	api, secret, canonical := notificationTestHarness(t, first, second)
+
+	body, _ := json.Marshal(map[string]any{"model": canonical, "messages": []any{}})
+	req, _ := http.NewRequest(http.MethodPost, api.base+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan *http.Response, 1)
+	go func() {
+		resp, err := api.client.Do(req)
+		if err == nil {
+			done <- resp
+		}
+	}()
+	select {
+	case resp := <-done:
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("stalled error body prevented fallback: status=%d", resp.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback waited for stalled provider error body")
+	}
+}
+
 func TestOrderedFallbackCoversNetworkAndTLSFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

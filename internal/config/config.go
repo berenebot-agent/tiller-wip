@@ -19,6 +19,7 @@ type Config struct {
 	ListenAddr       string
 	TrustedProxy     netip.Prefix
 	ModelsDevEnabled bool
+	LogLevel         string
 }
 
 func Load() (Config, error) {
@@ -29,6 +30,12 @@ func Load() (Config, error) {
 		DataDir:          envDefault("TILLER_DATA_DIR", "/data"),
 		ListenAddr:       envDefault("TILLER_LISTEN_ADDR", ":8080"),
 		ModelsDevEnabled: true,
+		LogLevel:         envDefault("TILLER_LOG_LEVEL", "info"),
+	}
+	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {
+	case "debug", "info", "warn", "error":
+	default:
+		return Config{}, fmt.Errorf("TILLER_LOG_LEVEL must be debug, info, warn, or error, got %q", c.LogLevel)
 	}
 	if raw := os.Getenv("TILLER_ADMIN_SESSION_TTL"); raw != "" {
 		v, err := time.ParseDuration(raw)

@@ -123,6 +123,14 @@ func seedMigrationFixture(t *testing.T, raw *sql.DB, checkpoint int) {
 			t.Fatalf("seed request log at checkpoint %d: %v", checkpoint, err)
 		}
 	}
+	if checkpoint == 18 {
+		if _, err := raw.Exec(`UPDATE request_logs SET error_text='upstream_error',error_message='PROVIDER-ERROR-SECRET-MARKER' WHERE id='log1'`); err != nil {
+			t.Fatalf("seed legacy request error at checkpoint %d: %v", checkpoint, err)
+		}
+		if _, err := raw.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,latency_ms,created_at) VALUES('attempt1','log1',1,'provider-a','model-a','failed',502,'http_502','PROVIDER-ERROR-SECRET-MARKER',8,?)`, now); err != nil {
+			t.Fatalf("seed legacy attempt error at checkpoint %d: %v", checkpoint, err)
+		}
+	}
 }
 
 func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
@@ -202,8 +210,86 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				} else if routeKind.Valid || routeModel.Valid {
 					t.Fatalf("post-backfill request should retain null attribution, got %q/%q", routeKind.String, routeModel.String)
 				}
+				if checkpoint == 18 {
+					var errorText string
+					var errorMessage sql.NullString
+					if err := db.SQL.QueryRow(`SELECT error_text,error_message FROM request_logs WHERE id='log1'`).Scan(&errorText, &errorMessage); err != nil {
+						t.Fatal(err)
+					}
+					if errorText != "upstream_error" || errorMessage.Valid {
+						t.Fatalf("request failure metadata changed: error_text=%q error_message=%q", errorText, errorMessage.String)
+					}
+					var failureClass string
+					if err := db.SQL.QueryRow(`SELECT failure_class FROM request_attempts WHERE id='attempt1'`).Scan(&failureClass); err != nil {
+						t.Fatal(err)
+					}
+					if failureClass != "http_502" {
+						t.Fatalf("attempt failure class = %q, want http_502", failureClass)
+					}
+					var attemptMessage sql.NullString
+					if err := db.SQL.QueryRow(`SELECT error_message FROM request_attempts WHERE id='attempt1'`).Scan(&attemptMessage); err != nil {
+						t.Fatal(err)
+					}
+					if attemptMessage.Valid {
+						t.Fatalf("attempt error_message survived migration: %q", attemptMessage.String)
+					}
+				}
 			}
 		})
+	}
+}
+
+func TestMigration017UpgradesOpenCodeFreeProtocols(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.db")
+	openMigrationFixture(t, path, 16)
+	raw := openRawMigrationDB(t, path)
+	now := Now()
+	if _, err := raw.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('opencode-free','real','op-open')`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES('op-open','opencode-free','opencode-free','http://example.test/v1',NULL,1,'["chat"]',?,?)`, now, now); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	for i, modelID := range []string{"muse-spark-1.2-contributor-free", "muse-spark-1.3-contributor-free"} {
+		if _, err := raw.Exec(`INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,native_protocol,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, fmt.Sprintf("op-model-%d", i), "op-open", modelID, modelID, "chat", 1, now, now, now, now); err != nil {
+			raw.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var protocols string
+	if err := db.SQL.QueryRow(`SELECT protocols FROM providers WHERE id='op-open'`).Scan(&protocols); err != nil {
+		t.Fatal(err)
+	}
+	if protocols != `["chat","responses"]` {
+		t.Fatalf("opencode-free protocols = %q, want [\"chat\",\"responses\"]", protocols)
+	}
+	rows, err := db.SQL.Query(`SELECT native_protocol FROM provider_models WHERE provider_id='op-open' ORDER BY upstream_model_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var protocol string
+		if err := rows.Scan(&protocol); err != nil {
+			t.Fatal(err)
+		}
+		if protocol != "responses" {
+			t.Fatalf("Muse native protocol = %q, want responses", protocol)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 

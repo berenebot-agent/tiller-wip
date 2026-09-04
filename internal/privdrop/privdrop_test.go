@@ -12,7 +12,7 @@ func TestDropToRuntimeUserNoopWhenNonRoot(t *testing.T) {
 		t.Skip("test asserts no-op behaviour, which only holds for a non-root process")
 	}
 	dir := t.TempDir()
-	dropped, err := DropToRuntimeUser(dir)
+	dropped, uid, gid, err := DropToRuntimeUser(dir)
 	if err != nil {
 		t.Fatalf("DropToRuntimeUser: %v", err)
 	}
@@ -22,6 +22,15 @@ func TestDropToRuntimeUserNoopWhenNonRoot(t *testing.T) {
 	if os.Getuid() == 0 || os.Geteuid() == 0 {
 		t.Fatal("non-root process unexpectedly became root")
 	}
+	// Even on the no-op path the resolved UID/GID is reported so callers
+	// can log the runtime identity without re-reading the environment.
+	wantUID, wantGID, err := ResolvedIdentity()
+	if err != nil {
+		t.Fatalf("ResolvedIdentity: %v", err)
+	}
+	if uid != wantUID || gid != wantGID {
+		t.Fatalf("DropToRuntimeUser reported uid/gid = %d/%d, want %d/%d", uid, gid, wantUID, wantGID)
+	}
 }
 
 func TestDropToRuntimeUserAsRoot(t *testing.T) {
@@ -29,6 +38,41 @@ func TestDropToRuntimeUserAsRoot(t *testing.T) {
 		t.Skip("test re-runs itself as root via docker; skipped on a non-root host")
 	}
 	_ = t
+}
+
+func TestResolvedIdentityHonoursEnv(t *testing.T) {
+	t.Setenv("TILLER_RUN_UID", "4242")
+	t.Setenv("TILLER_RUN_GID", "4343")
+	uid, gid, err := ResolvedIdentity()
+	if err != nil {
+		t.Fatalf("ResolvedIdentity: %v", err)
+	}
+	if uid != 4242 || gid != 4343 {
+		t.Fatalf("ResolvedIdentity = %d/%d, want 4242/4343", uid, gid)
+	}
+}
+
+func TestResolvedIdentityFallsBackToDefaults(t *testing.T) {
+	t.Setenv("TILLER_RUN_UID", "")
+	t.Setenv("TILLER_RUN_GID", "")
+	uid, gid, err := ResolvedIdentity()
+	if err != nil {
+		t.Fatalf("ResolvedIdentity: %v", err)
+	}
+	if uid != DefaultUID || gid != DefaultGID {
+		t.Fatalf("ResolvedIdentity = %d/%d, want %d/%d", uid, gid, DefaultUID, DefaultGID)
+	}
+}
+
+func TestResolvedIdentityRejectsNonPositive(t *testing.T) {
+	t.Setenv("TILLER_RUN_UID", "0")
+	if _, _, err := ResolvedIdentity(); err == nil {
+		t.Fatal("expected an error for TILLER_RUN_UID=0")
+	}
+	t.Setenv("TILLER_RUN_UID", "not-a-number")
+	if _, _, err := ResolvedIdentity(); err == nil {
+		t.Fatal("expected an error for non-numeric TILLER_RUN_UID")
+	}
 }
 
 // TestRootDropIntegration is the entry point used by the container test:
@@ -55,15 +99,15 @@ func TestRootDropIntegration(t *testing.T) {
 		t.Fatalf("chmod seed: %v", err)
 	}
 
-	dropped, err := DropToRuntimeUser(dataDir)
+	dropped, appliedUID, appliedGID, err := DropToRuntimeUser(dataDir)
 	if err != nil {
 		t.Fatalf("DropToRuntimeUser: %v", err)
 	}
 	if !dropped {
 		t.Fatal("expected a privilege drop when started as root")
 	}
-	if os.Getuid() != DefaultUID || os.Getgid() != DefaultGID {
-		t.Fatalf("process uid/gid = %d/%d, want %d/%d", os.Getuid(), os.Getgid(), DefaultUID, DefaultGID)
+	if os.Getuid() != appliedUID || os.Getgid() != appliedGID {
+		t.Fatalf("process uid/gid = %d/%d, DropToRuntimeUser reported %d/%d", os.Getuid(), os.Getgid(), appliedUID, appliedGID)
 	}
 	if got := os.Getenv("TILLER_RUN_UID"); got != "" {
 		if v, convErr := strconv.Atoi(got); convErr == nil && v != DefaultUID {

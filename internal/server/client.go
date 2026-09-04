@@ -19,6 +19,12 @@ import (
 )
 
 const maxUpstreamNonStreamBytes int64 = 64 << 20
+
+// maxUpstreamErrorBytes bounds how much of an upstream error response body we
+// read in order to pass it through verbatim to the originating client. The
+// body is only ever written directly to the client — it is never stored in
+// the activity log (privacy guardrail). Virtual fallback paths never read
+// the body at all: they close it immediately and move on.
 const maxUpstreamErrorBytes int64 = 1 << 20
 
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
@@ -263,19 +269,28 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
-	var stream bool
-	if json.Unmarshal(raw["stream"], &stream) == nil {
-		row.streaming = stream
-	}
 	originalBody := append([]byte(nil), body...)
 	start := time.Now()
+	streamed := false
+	clientTracked := false
+	activeTargetID := ""
+	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
+		if route.Virtual {
+			s.inflight.end(route.RouteModelID, streamed)
+		}
+		if clientTracked {
+			s.inflight.clientEnd(row.clientKeyID, streamed)
+		}
+		if activeTargetID != "" {
+			s.inflight.targetEnd(route.RouteModelID, activeTargetID)
+		}
 		s.writeLog(context.Background(), row)
 	}()
 	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
 
-	route, err := s.resolveRoute(r.Context(), identity.ID, requested)
+	route, err = s.resolveRoute(r.Context(), identity.ID, requested)
 	if err == sql.ErrNoRows {
 		row.httpStatus = 404
 		row.errorText = strPtr("model_not_found")
@@ -294,6 +309,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
+	s.inflight.clientStart(row.clientKeyID)
+	clientTracked = true
+	if route.Virtual {
+		s.inflight.start(route.RouteModelID)
+	}
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
 		candidates = route.Targets
@@ -368,14 +388,24 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
+		targetID := candidate.ProviderModelID
+		if targetID == "" {
+			targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
+		}
+		if route.Virtual {
+			s.inflight.targetStart(route.RouteModelID, targetID)
+		}
 		response, e := s.providers.Registry().HTTPClient().Do(req)
 		if e != nil {
+			if route.Virtual {
+				s.inflight.targetEnd(route.RouteModelID, targetID)
+			}
 			attemptCancel()
 			class := "upstream_unreachable"
 			if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
 				class = "upstream_timeout"
 			}
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 			if r.Context().Err() != nil {
 				if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 					class = "client_timeout"
@@ -391,6 +421,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual {
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 				inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
 				return
 			}
@@ -399,10 +430,18 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
+			if route.Virtual {
+				s.inflight.targetEnd(route.RouteModelID, targetID)
+			}
 			class := fmt.Sprintf("http_%d", response.StatusCode)
 			var upstreamErrorBody []byte
 			var upstreamErrorReadErr error
 			if !route.Virtual {
+				// Read the upstream error body for bounded passthrough to the
+				// originating client. The body is written directly to the
+				// client and never stored in the activity log. Virtual
+				// fallback paths never read the body: they close it below
+				// and move on to the next target.
 				upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
 			}
 			response.Body.Close()
@@ -415,6 +454,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				// Direct (non-virtual, non-translated) routes pass through
+				// the provider's structured error body verbatim so the
+				// client sees the provider's error shape. The body is
+				// bounded and never persisted.
 				if upstreamErrorReadErr == nil && !translated && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
 					copySafeResponseHeaders(w.Header(), response.Header)
 					upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
@@ -433,6 +476,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			continue
 		}
 		if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
+			if route.Virtual {
+				s.inflight.targetEnd(route.RouteModelID, targetID)
+			}
 			response.Body.Close()
 			attemptCancel()
 			class := "upstream_read_error"
@@ -443,9 +489,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			terminalPreflightClass = class
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			if !route.Virtual || r.Context().Err() != nil {
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 				inferenceError(w, 502, "api_error", class, message, incoming == providers.ProtocolMessages)
 				return
 			}
@@ -454,6 +502,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			continue
 		}
 		route, resp, cancel = candidate, response, attemptCancel
+		if route.Virtual {
+			activeTargetID = targetID
+		}
 		row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 		break
 	}
@@ -475,6 +526,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			return
 		}
 		row.httpStatus = 503
+		for i := len(row.attempts) - 1; i >= 0; i-- {
+			if row.attempts[i].result == "failed" && row.attempts[i].errorMessage != nil {
+				row.errorMessage = row.attempts[i].errorMessage
+				break
+			}
+		}
 		if route.Virtual {
 			row.errorText = strPtr("virtual_model_unavailable")
 			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
@@ -497,6 +554,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		row.httpStatus = resp.StatusCode
 		row.errorText = strPtr(fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode))
+		row.errorMessage = strPtr(fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode))
 		inferenceError(w, resp.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode), incoming == providers.ProtocolMessages)
 		return
 	}
@@ -506,6 +564,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	reader := &idleReader{reader: resp.Body, timer: idle}
 	usage := &usageCapture{}
 	if translated {
+		if isStreamingResponse(resp) {
+			streamed = true
+			row.streaming = true
+			if route.Virtual {
+				s.inflight.streaming(route.RouteModelID)
+			}
+			s.inflight.clientStreaming(row.clientKeyID)
+		}
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
 		if err := translateResponse(w, reader, incoming, target, route, usage); err != nil {
@@ -515,7 +581,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 		return
 	}
-	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if isStreamingResponse(resp) {
+		streamed = true
+		row.streaming = true
+		if route.Virtual {
+			s.inflight.streaming(route.RouteModelID)
+		}
+		s.inflight.clientStreaming(row.clientKeyID)
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
 		rewriteSSE(w, reader, route.UpstreamModelID, route.RequestedModel, usage)
@@ -528,6 +600,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if err != nil {
 		row.httpStatus = 502
 		row.errorText = strPtr("upstream_read_error")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_read_error"))
 		return
 	}
 	extractUsage(body, usage)
@@ -543,6 +616,10 @@ type bufferedReadCloser struct {
 	closer io.Closer
 }
 
+func isStreamingResponse(resp *http.Response) bool {
+	return strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+}
+
 func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 
 // preflightResponseLimit ensures a successful upstream response has produced
@@ -550,7 +627,7 @@ func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 // no-splice rule while allowing a different virtual target after a pre-output
 // failure.
 func preflightResponseLimit(resp *http.Response, limit int64) error {
-	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+	if isStreamingResponse(resp) {
 		first := make([]byte, 1)
 		n, err := resp.Body.Read(first)
 		if n == 0 && err != nil {

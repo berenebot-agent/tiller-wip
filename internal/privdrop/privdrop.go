@@ -1,12 +1,13 @@
 // Package privdrop covers the deployment case where Tiller is started as
-// root — for example `user: "0:0"` in Compose so a Docker-created bind-mount
+// root — for example the default image (no Dockerfile USER, so the container
+// boots as root) or `user: "0:0"` in Compose — so a Docker-created bind-mount
 // data directory can be fixed up without host-side chown commands. It hands
 // the data directory to the image's non-root runtime user and then drops
 // privileges before the database is opened or any request is served.
 //
-// When the process is already non-root — the normal case for the published
-// image (USER 65532) and every hardened deployment — it is a no-op, so the
-// read-only / caps-dropped compose never needs setuid or chown capabilities.
+// When the process is already non-root — the opt-in hardened posture with a
+// strict `user:` in compose — it is a no-op, so the read-only / caps-dropped
+// compose never needs setuid or chown capabilities.
 package privdrop
 
 import (
@@ -26,34 +27,52 @@ const (
 
 // DropToRuntimeUser chowns dataDir (recursively) to the runtime UID/GID and
 // switches the running process to that user. It reports whether a drop
-// actually happened. Once dropped, privileges cannot be regained.
-func DropToRuntimeUser(dataDir string) (bool, error) {
+// actually happened and the UID/GID that was applied (whether dropped or
+// no-op, so callers can log the runtime identity without re-reading the
+// environment). Once dropped, privileges cannot be regained.
+func DropToRuntimeUser(dataDir string) (dropped bool, uid int, gid int, err error) {
+	uid, err = envID("TILLER_RUN_UID", DefaultUID)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	gid, err = envID("TILLER_RUN_GID", DefaultGID)
+	if err != nil {
+		return false, 0, 0, err
+	}
 	if os.Getuid() != 0 {
-		return false, nil
-	}
-	uid, err := envID("TILLER_RUN_UID", DefaultUID)
-	if err != nil {
-		return false, err
-	}
-	gid, err := envID("TILLER_RUN_GID", DefaultGID)
-	if err != nil {
-		return false, err
+		return false, uid, gid, nil
 	}
 	if err := chownRecursive(dataDir, uid, gid); err != nil {
-		return false, fmt.Errorf("chown data directory: %w", err)
+		return false, uid, gid, fmt.Errorf("chown data directory: %w", err)
 	}
 	// Supplementary groups, then group, then user: each call permanently
 	// sheds the privileges the next one depends on, so the order matters.
 	if err := syscall.Setgroups([]int{gid}); err != nil {
-		return false, fmt.Errorf("setgroups: %w", err)
+		return false, uid, gid, fmt.Errorf("setgroups: %w", err)
 	}
 	if err := syscall.Setgid(gid); err != nil {
-		return false, fmt.Errorf("setgid %d: %w", gid, err)
+		return false, uid, gid, fmt.Errorf("setgid %d: %w", gid, err)
 	}
 	if err := syscall.Setuid(uid); err != nil {
-		return false, fmt.Errorf("setuid %d: %w", uid, err)
+		return false, uid, gid, fmt.Errorf("setuid %d: %w", uid, err)
 	}
-	return true, nil
+	return true, uid, gid, nil
+}
+
+// ResolvedIdentity returns the UID and GID the running process would be
+// configured with if DropToRuntimeUser were invoked now. It honours
+// TILLER_RUN_UID / TILLER_RUN_GID and falls back to DefaultUID/DefaultGID.
+// It does not perform any privilege change.
+func ResolvedIdentity() (uid, gid int, err error) {
+	uid, err = envID("TILLER_RUN_UID", DefaultUID)
+	if err != nil {
+		return 0, 0, err
+	}
+	gid, err = envID("TILLER_RUN_GID", DefaultGID)
+	if err != nil {
+		return 0, 0, err
+	}
+	return uid, gid, nil
 }
 
 func envID(name string, fallback int) (int, error) {

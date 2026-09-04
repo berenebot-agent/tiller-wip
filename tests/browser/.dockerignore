@@ -1,0 +1,6 @@
+# Host-only artifacts. node_modules is 13M and is NOT used by the image (the
+# Dockerfile runs `npm install` with a BuildKit cache mount), so excluding it
+# keeps every cached build from uploading the whole directory as context.
+node_modules/
+test-results/
+playwright-report/

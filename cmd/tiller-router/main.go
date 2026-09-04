@@ -21,58 +21,68 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(logger); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
+		// Config validation precedes logging setup, so render the error with
+		// a default-level handler rather than depending on the configured
+		// level (which may itself be what failed to load).
+		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Error("tiller-router stopped", "error", err.Error())
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
+	if err := run(cfg, logger); err != nil {
 		logger.Error("tiller-router stopped", "error", err.Error())
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+// parseLogLevel maps a config load-level string to a slog.Level. The string
+// is validated in config.Load, so any value reaching here is one of
+// debug/info/warn/error; a bogus value still degrades to warn for safety.
+func parseLogLevel(s string) slog.Level {
+	switch s {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	case "info":
+		return slog.LevelInfo
+	default:
+		return slog.LevelWarn
+	}
+}
+
+func run(cfg config.Config, logger *slog.Logger) error {
 	command := "serve"
 	if len(os.Args) > 1 {
 		command = os.Args[1]
 	}
-	cfg, err := config.Load()
+	ctx := context.Background()
+	// Resolve the runtime identity up front so even the no-op (already
+	// non-root) path can log and remediate with the correct UID/GID.
+	runUID, runGID, err := privdrop.ResolvedIdentity()
 	if err != nil {
 		return err
 	}
-	ctx := context.Background()
 	// Started as root (e.g. `user: "0:0"` so a fresh bind-mounted data
 	// directory can be fixed up without host-side chown), hand the data
 	// directory to the runtime user and drop privileges before touching the
 	// database. Already non-root — the normal case — is a no-op. The
 	// healthcheck subcommand never opens the database, so skip the walk.
 	if command != "healthcheck" {
-		dropped, err := privdrop.DropToRuntimeUser(cfg.DataDir)
+		dropped, appliedUID, appliedGID, err := privdrop.DropToRuntimeUser(cfg.DataDir)
 		if err != nil {
 			return err
 		}
 		if dropped {
-			logger.Info("dropped privileges to runtime user", "uid", privdrop.DefaultUID, "gid", privdrop.DefaultGID)
+			logger.Info("dropped privileges to runtime user", "uid", appliedUID, "gid", appliedGID)
 		}
+		runUID, runGID = appliedUID, appliedGID
 	}
-	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"))
-	if err != nil {
-		if errors.Is(err, database.ErrDataDirUnwritable) {
-			logger.Error(
-				"data directory is not writable by the runtime user — the container runs as uid "+
-					"65532 by default, but the bind-mounted directory is owned by someone else (a fresh "+
-					"rootful-Docker bind mount is created as root). Fix ownership once, then up again.",
-				"dir", cfg.DataDir,
-				"uid", os.Getuid(),
-				"fix", "sudo chown -R 65532:65532 ./data",
-				"alt", "set TILLER_UID and TILLER_GID in .env to the uid:gid that owns ./data",
-				"see", "README 'Create the data directory'",
-			)
-		}
-		return fmt.Errorf("open database: %w", err)
-	}
-	defer db.Close()
-	switch command {
-	case "migrate":
-		return nil
-	case "healthcheck":
+	if command == "healthcheck" {
 		_, port, splitErr := net.SplitHostPort(cfg.ListenAddr)
 		if splitErr != nil || port == "" {
 			return fmt.Errorf("invalid listen address %q", cfg.ListenAddr)
@@ -86,6 +96,28 @@ func run(logger *slog.Logger) error {
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("readiness returned %d", resp.StatusCode)
 		}
+		return nil
+	}
+	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"))
+	if err != nil {
+		if errors.Is(err, database.ErrDataDirUnwritable) {
+			logger.Error(
+				"data directory is not writable by the runtime user — the bind-mounted directory is "+
+					"owned by someone other than the runtime user (a fresh rootful-Docker bind mount "+
+					"is created as root). Fix ownership once, then up again.",
+				"dir", cfg.DataDir,
+				"uid", runUID,
+				"gid", runGID,
+				"fix", fmt.Sprintf("sudo chown -R %d:%d ./data", runUID, runGID),
+				"alt", "set TILLER_RUN_UID and TILLER_RUN_GID in .env to the uid:gid that owns ./data",
+				"see", "README 'Create the data directory'",
+			)
+		}
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer db.Close()
+	switch command {
+	case "migrate":
 		return nil
 	case "serve":
 	default:

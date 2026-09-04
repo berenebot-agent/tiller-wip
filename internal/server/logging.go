@@ -36,6 +36,7 @@ type logRow struct {
 	providerRequestID        *string
 	clientRequestID          string
 	errorText                *string
+	errorMessage             *string
 	fallbackUsed             bool
 	fallbackReason           *string
 	attempts                 []requestAttempt
@@ -46,6 +47,7 @@ type requestAttempt struct {
 	providerModelID, provider, model, result, failureClass string
 	httpStatus                                             int
 	latencyMs                                              int64
+	errorMessage                                           *string
 }
 
 // writeLog persists a request log row. It is best-effort: a failed insert logs
@@ -69,15 +71,28 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 			s.logger.Warn("request logged as success without a resolved target", "client_request_id", row.clientRequestID, "requested_model", row.requestedModel, "http_status", row.httpStatus)
 		}
 	}
-	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
+	// One transaction per logical request: the request_logs row and all of its
+	// attempt rows commit together or not at all, so a single SQLite fsync (the
+	// implicit-transaction commit) covers the whole write instead of 1+N.
+	tx, err := s.db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
+		return
+	}
 	for i, attempt := range row.attempts {
 		attemptID, err := id.New()
 		if err != nil {
 			continue
 		}
-		_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.errorMessage, attempt.latencyMs, row.createdAt); err != nil {
+			return
+		}
 	}
+	_ = tx.Commit()
 }
 
 // recordLastOutcome updates operational target status from actual attempts.
@@ -87,11 +102,11 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		return
 	}
 	s.lastOutcomeMu.Lock()
-	defer s.lastOutcomeMu.Unlock()
 	if s.lastOutcome == nil {
 		s.lastOutcome = map[string]lastOutcome{}
 	}
 	recordedAt := database.Now()
+	delta := make(map[string]lastOutcome, len(row.attempts))
 	for _, attempt := range row.attempts {
 		if attempt.providerModelID == "" {
 			continue
@@ -99,11 +114,20 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		switch attempt.result {
 		case "success":
 			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
+			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
 		case "failed":
 			// Preserve zero: a network failure has no HTTP response, even if a
 			// later fallback succeeds and sets the logical row status to 2xx.
 			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
 		}
+	}
+	s.lastOutcomeMu.Unlock()
+	// Push the changed outcomes to live subscribers. Non-blocking: a full
+	// buffer drops the delta, which the next snapshot self-heals. Never blocks
+	// the inference path.
+	if len(delta) > 0 && s.liveHub != nil {
+		s.liveHub.emitOutcome(delta)
 	}
 }
 

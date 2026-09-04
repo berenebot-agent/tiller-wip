@@ -8,16 +8,18 @@ services:
         TILLER_GID: ${TILLER_GID:-65532}
 
     restart: unless-stopped
-    read_only: true
-    tmpfs:
-      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
+
     environment:
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
+
+      # The app starts as root and drops to the runtime user at boot, chown'ing
+      # ./data to that user first — so a fresh ./data works with no `sudo chown`
+      # step. TILLER_RUN_UID/TILLER_RUN_GID select the user the app runs as
+      # (default 65532:65532, matching the image's build-time args). Leave unset
+      # unless you need the data directory run as your own uid:gid.
+      TILLER_RUN_UID: ${TILLER_RUN_UID:-65532}
+      TILLER_RUN_GID: ${TILLER_RUN_GID:-65532}
 
       # Behind a reverse proxy (Caddy / Nginx / Traefik / etc.) that sets
       # X-Forwarded-For and Forwarded, set TILLER_TRUSTED_PROXY in .env to the
@@ -26,6 +28,17 @@ services:
       TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
     volumes:
       - ./data:/data
+    # Default hardening (adoption-first posture). The image starts as root so
+    # internal/privdrop can chown a fresh root-owned ./data and shed to the
+    # runtime user before the database is opened. read_only + /tmp tmpfs +
+    # no-new-privileges are compatible with that flow: the only filesystem
+    # writes are under the bind-mounted ./data and under /tmp, and no setuid
+    # binaries are exec'd after the drop.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD", "/tiller-router", "healthcheck"]
       interval: 30s
@@ -34,3 +47,13 @@ services:
       start_period: 10s
     ports:
       - 0.0.0.0:${TILLER_PORT:-8080}:8080
+
+  # Hardenable, not required: for an internet-exposed deployment you may also
+  # drop all capabilities and force a strict non-root user. These two are
+  # opt-in because they conflict with the in-process root-then-drop: a strict
+  # `user: ...` skips the boot chown and a fresh rootful-Docker ./data would
+  # fail with ErrDataDirUnwritable, and `cap_drop: [ALL]` removes the
+  # setuid/setgid/chown capabilities the drop requires.
+  #
+  #   cap_drop: [ALL]
+  #   user: "${TILLER_RUN_UID:-65532}:${TILLER_RUN_GID:-65532}"

@@ -11,6 +11,7 @@ from openai import OpenAI
 
 
 BASE = os.environ.get("TILLER_COMPAT_BASE_URL", "http://127.0.0.1:18080")
+MOCK_BASE = os.environ.get("TILLER_COMPAT_MOCK_BASE_URL", "http://127.0.0.1:18081/v1")
 ADMIN_USER = os.environ.get("TILLER_COMPAT_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ["TILLER_COMPAT_ADMIN_PASSWORD"]
 
@@ -32,7 +33,7 @@ def admin(method, path, body=None, csrf=None):
 
 _, session = admin("POST", "/api/admin/session", {"username": ADMIN_USER, "password": ADMIN_PASSWORD})
 csrf = session["csrf_token"]
-_, provider = admin("POST", "/api/admin/providers", {"name": "compat", "type": "generic-openai", "base_url": "http://127.0.0.1:18081/v1", "protocols": ["chat", "responses", "messages"]}, csrf)
+_, provider = admin("POST", "/api/admin/providers", {"name": "compat", "type": "generic-openai", "base_url": MOCK_BASE, "protocols": ["chat", "responses", "messages"]}, csrf)
 provider_id = provider["id"]
 _, model_page = admin("GET", f"/api/admin/providers/{provider_id}/models")
 model_id = model_page["data"][0]["id"]
