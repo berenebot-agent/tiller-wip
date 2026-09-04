@@ -446,7 +446,7 @@ function virtualModelFields(model) {
 }
 function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
-  const options = state.models.map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, muted:!item.available, match:item.upstream_model_id }));
+  const options = state.models.filter(item => item.available).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id }));
   const targets = model?.targets?.length ? model.targets : [{provider_model_id:model?.target_model_id,enabled:true}];
   const makePicker = (target, row = null) => { const box = document.createElement('div'); box.className='combobox'; box.innerHTML='<input type="text" placeholder="Type a provider or model name…"><input type="hidden" name="target_model" required>'; const picker=combobox({ input:$('input[type="text"]',box), hidden:$('input[type="hidden"]',box), options, placeholder:'Type a provider or model name…' }); picker.setOptions(options); const found=options.find(item=>item.value===target?.provider_model_id)||options[0]; if(found) picker.select(options.indexOf(found)); return box; };
   const updateControls = () => { const rows=$$('.target-row',fallback); rows.forEach((row,index)=>{ $('.target-index',row).textContent=String(index+1).padStart(2,'0'); $('[data-target-up]',row).disabled=index===0; $('[data-target-down]',row).disabled=index===rows.length-1; $('[data-target-remove]',row).disabled=rows.length===1; }); };
@@ -473,8 +473,8 @@ function renderClientGroupFilter() {
 function singleTargetOptions(client = null) {
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = [
-    ...state.virtualModels.map(item => ({ value:`virtual:${item.id}`, kind:'virtual', id:item.id, label:`Virtual · ${item.canonical_model_id}`, canonical:item.canonical_model_id, disabled:!item.available })),
-    ...state.models.map(item => ({ value:`real:${item.id}`, kind:'real', id:item.id, label:`Real · ${item.canonical_model_id}`, canonical:item.canonical_model_id, disabled:!item.available || providerEnabled.get(item.provider_id) === false }))
+    ...state.virtualModels.filter(item => item.available).map(item => ({ value:`virtual:${item.id}`, kind:'virtual', id:item.id, label:`Virtual · ${item.canonical_model_id}`, canonical:item.canonical_model_id })),
+    ...state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:`real:${item.id}`, kind:'real', id:item.id, label:`Real · ${item.canonical_model_id}`, canonical:item.canonical_model_id }))
   ];
   if (client?.single_target_id && !options.some(item => item.kind === client.single_target_type && item.id === client.single_target_id)) options.unshift({ value:`${client.single_target_type}:${client.single_target_id}`, kind:client.single_target_type, id:client.single_target_id, label:`${client.single_target_type === 'virtual' ? 'Virtual' : 'Real'} · ${client.single_target_canonical || 'Unavailable target'}`, canonical:client.single_target_canonical || 'Unavailable target', disabled:true });
   return options.sort((a,b) => a.label.localeCompare(b.label));
