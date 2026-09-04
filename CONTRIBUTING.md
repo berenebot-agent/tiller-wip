@@ -10,6 +10,8 @@ Compose project. Small, focused changes are easiest to review.
    implications directly in the change description.
 2. Do not include provider credentials, client keys, session cookies, prompts,
    response bodies, or private deployment data in commits, tests, or logs.
+   The opt-in detailed error logging feature is the sole runtime exception and
+   must remain disabled by default in tests.
 
 ## Development and tests
 

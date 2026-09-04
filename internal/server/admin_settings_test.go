@@ -37,3 +37,19 @@ func TestFallbackTimeoutSetting(t *testing.T) {
 		t.Fatalf("fallback timeout 3601 should be rejected, got %d", status)
 	}
 }
+
+func TestDetailedErrorLoggingSetting(t *testing.T) {
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	status, payload, _ := api.request("GET", "/api/admin/settings", nil)
+	if status != 200 || payload["log_error_bodies"] != false {
+		t.Fatalf("log_error_bodies default = %v, want false", payload["log_error_bodies"])
+	}
+	status, _, _ = api.request("PUT", "/api/admin/settings", map[string]any{"log_error_bodies": true})
+	if status != 204 {
+		t.Fatalf("enable detailed error logging: %d", status)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/settings", nil)
+	if status != 200 || payload["log_error_bodies"] != true {
+		t.Fatalf("log_error_bodies after update = %v, want true", payload["log_error_bodies"])
+	}
+}

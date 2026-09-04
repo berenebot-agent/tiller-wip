@@ -457,6 +457,38 @@ func TestProviderErrorMessageAndBodyArePassedThroughToClientButNotLogged(t *test
 	}
 }
 
+func TestDetailedErrorLoggingCapturesBodies(t *testing.T) {
+	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
+	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
+	})
+	api, db, clientID, secret := loggingTestHarness(t, upstream)
+	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{"log_error_bodies": true})
+	if status != 204 {
+		t.Fatalf("enable detailed error logging: %d", status)
+	}
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": requestMarker}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var requestBody, errorBody string
+	var requestTruncated, errorTruncated int
+	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=?`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(requestBody, requestMarker) || !strings.Contains(errorBody, errorMarker) || requestTruncated != 0 || errorTruncated != 0 {
+		t.Fatalf("captured bodies wrong: request=%q error=%q truncated=%d/%d", requestBody, errorBody, requestTruncated, errorTruncated)
+	}
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := json.Marshal(value)

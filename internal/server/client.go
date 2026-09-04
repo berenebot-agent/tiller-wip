@@ -271,6 +271,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
+	logErrorBodies, _ := s.db.GetLogErrorBodies(r.Context())
 	originalBody := append([]byte(nil), body...)
 	start := time.Now()
 	streamed := false
@@ -279,6 +280,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
+		if logErrorBodies && row.httpStatus >= 400 {
+			row.requestBody, row.requestBodyTruncated = loggedBody(originalBody)
+		}
 		if route.Virtual {
 			s.inflight.end(route.RouteModelID, streamed)
 		}
@@ -450,17 +454,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			class := fmt.Sprintf("http_%d", response.StatusCode)
 			var upstreamErrorBody []byte
 			var upstreamErrorReadErr error
-			if !route.Virtual {
+			if !route.Virtual || logErrorBodies {
 				// Read the upstream error body for bounded passthrough to the
-				// originating client. The body is written directly to the
-				// client and never stored in the activity log. Virtual
-				// fallback paths never read the body: they close it below
-				// and move on to the next target.
+				// originating client. When sensitive body logging is enabled,
+				// retain the bounded body on the failed attempt as well.
 				upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
 			}
 			response.Body.Close()
 			attemptCancel()
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()}
+			if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+				attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
+			}
+			row.attempts = append(row.attempts, attempt)
 			// An upstream HTTP response is an upstream failure regardless of
 			// status. Ordered virtual routes try their next target by default;
 			// router-side failures (for example translation errors) are handled
@@ -468,6 +474,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+					row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
+				}
 				// Direct (non-virtual, non-translated) routes pass through
 				// the provider's structured error body verbatim so the
 				// client sees the provider's error shape. The body is

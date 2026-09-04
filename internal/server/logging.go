@@ -14,8 +14,8 @@ import (
 
 // logRow is the metadata captured for a single routed request. It is built up
 // as the request progresses and written once, synchronously, before the
-// handler returns. Only metadata is ever stored — never prompt/response bodies,
-// tool arguments, reasoning content, or credentials.
+// handler returns. Bodies are only stored for failed requests when the
+// installation-global sensitive logging setting is enabled.
 type logRow struct {
 	clientKeyID              string
 	requestedModel           string
@@ -40,6 +40,10 @@ type logRow struct {
 	fallbackUsed             bool
 	fallbackReason           *string
 	attempts                 []requestAttempt
+	requestBody              *string
+	requestBodyTruncated     bool
+	errorBody                *string
+	errorBodyTruncated       bool
 	createdAt                string
 }
 
@@ -48,6 +52,19 @@ type requestAttempt struct {
 	httpStatus                                             int
 	latencyMs                                              int64
 	errorMessage                                           *string
+	errorBody                                              *string
+	errorBodyTruncated                                     bool
+}
+
+const maxLoggedBodyBytes = 1 << 20
+
+func loggedBody(body []byte) (*string, bool) {
+	truncated := len(body) > maxLoggedBodyBytes
+	if truncated {
+		body = body[:maxLoggedBodyBytes]
+	}
+	value := string(body)
+	return &value, truncated
 }
 
 // writeLog persists a request log row. It is best-effort: a failed insert logs
@@ -79,8 +96,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		return
 	}
 	defer tx.Rollback() // no-op after a successful Commit
-	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, row.requestBody, boolInt(row.requestBodyTruncated), row.errorBody, boolInt(row.errorBodyTruncated), max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
 		return
 	}
 	for i, attempt := range row.attempts {
@@ -88,7 +105,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		if err != nil {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.errorMessage, attempt.latencyMs, row.createdAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.errorMessage, attempt.errorBody, boolInt(attempt.errorBodyTruncated), attempt.latencyMs, row.createdAt); err != nil {
 			return
 		}
 	}
