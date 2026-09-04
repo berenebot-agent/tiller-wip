@@ -132,10 +132,11 @@ func TestChatToResponsesPreservesTypedMessageRolesAndOrder(t *testing.T) {
 }
 
 func TestChatToResponsesSupportsToolChoice(t *testing.T) {
-	// The OpenCode /v1/responses relay accepts only the string "auto" for
-	// tool_choice; every other value is rejected with 400. convertToolChoice
-	// therefore returns "auto" for that exact string and nil otherwise, and the
-	// caller omits the field. See commit 0e4dd59.
+	// The Responses relay accepts only the string "auto" for tool_choice.
+	// "none" (do not call tools) is represented safely by omitting tools
+	// entirely — returning tool_choice while tools are still present would
+	// allow a call and silently weaken the contract. "required" and named
+	// function choices have no relay equivalent and are rejected.
 	t.Run("auto", func(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{
 			"model":       "virtual/coding",
@@ -153,24 +154,43 @@ func TestChatToResponsesSupportsToolChoice(t *testing.T) {
 		}
 	})
 
+	t.Run("none-suppresses-tools", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]any{
+			"model":       "virtual/coding",
+			"messages":    []any{map[string]any{"role": "user", "content": "hello"}},
+			"tool_choice": "none",
+			"tools":       []any{map[string]any{"type": "function", "function": map[string]any{"name": "lookup"}}},
+		})
+		translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(translated, &got); err != nil {
+			t.Fatal(err)
+		}
+		if _, present := got["tool_choice"]; present {
+			t.Fatalf("tool_choice present = %#v, want omitted for none", got["tool_choice"])
+		}
+		if _, present := got["tools"]; present {
+			t.Fatalf("tools present = %#v, want suppressed for none", got["tools"])
+		}
+	})
+
 	for _, tc := range []struct {
 		name, body string
 	}{
-		{"none", `{"model":"virtual/coding","messages":[{"role":"user","content":"hello"}],"tool_choice":"none"}`},
 		{"required", `{"model":"virtual/coding","messages":[{"role":"user","content":"hello"}],"tool_choice":"required"}`},
 		{"named-function", `{"model":"virtual/coding","messages":[{"role":"user","content":"hello"}],"tool_choice":{"type":"function","function":{"name":"lookup"}}}`},
 	} {
-		t.Run("omits-"+tc.name, func(t *testing.T) {
-			translated, err := translateRequest([]byte(tc.body), providers.ProtocolChat, providers.ProtocolResponses, "real-model")
-			if err != nil {
-				t.Fatal(err)
+		t.Run("rejects-"+tc.name, func(t *testing.T) {
+			_, err := translateRequest([]byte(tc.body), providers.ProtocolChat, providers.ProtocolResponses, "real-model")
+			if err == nil {
+				t.Fatalf("expected unsupportedFeature error for %s", tc.name)
 			}
-			var got map[string]any
-			if err := json.Unmarshal(translated, &got); err != nil {
-				t.Fatal(err)
-			}
-			if _, present := got["tool_choice"]; present {
-				t.Fatalf("tool_choice present = %#v, want omitted for %s", got["tool_choice"], tc.name)
+			var ufe unsupportedFeature
+			if !errors.As(err, &ufe) {
+				t.Fatalf("expected unsupportedFeature, got %T: %v", err, err)
 			}
 		})
 	}

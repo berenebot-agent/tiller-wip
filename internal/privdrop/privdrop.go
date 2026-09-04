@@ -1,12 +1,13 @@
 // Package privdrop covers the deployment case where Tiller is started as
-// root — for example `user: "0:0"` in Compose so a Docker-created bind-mount
+// root — for example the default image (no Dockerfile USER, so the container
+// boots as root) or `user: "0:0"` in Compose — so a Docker-created bind-mount
 // data directory can be fixed up without host-side chown commands. It hands
 // the data directory to the image's non-root runtime user and then drops
 // privileges before the database is opened or any request is served.
 //
-// When the process is already non-root — the normal case for the published
-// image (USER 65532) and every hardened deployment — it is a no-op, so the
-// read-only / caps-dropped compose never needs setuid or chown capabilities.
+// When the process is already non-root — the opt-in hardened posture with a
+// strict `user:` in compose — it is a no-op, so the read-only / caps-dropped
+// compose never needs setuid or chown capabilities.
 package privdrop
 
 import (

@@ -20,6 +20,13 @@ import (
 
 const maxUpstreamNonStreamBytes int64 = 64 << 20
 
+// maxUpstreamErrorBytes bounds how much of an upstream error response body we
+// read in order to pass it through verbatim to the originating client. The
+// body is only ever written directly to the client — it is never stored in
+// the activity log (privacy guardrail). Virtual fallback paths never read
+// the body at all: they close it immediately and move on.
+const maxUpstreamErrorBytes int64 = 1 << 20
+
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
@@ -427,6 +434,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				s.inflight.targetEnd(route.RouteModelID, targetID)
 			}
 			class := fmt.Sprintf("http_%d", response.StatusCode)
+			var upstreamErrorBody []byte
+			var upstreamErrorReadErr error
+			if !route.Virtual {
+				// Read the upstream error body for bounded passthrough to the
+				// originating client. The body is written directly to the
+				// client and never stored in the activity log. Virtual
+				// fallback paths never read the body: they close it below
+				// and move on to the next target.
+				upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
+			}
 			response.Body.Close()
 			attemptCancel()
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
@@ -437,6 +454,20 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				// Direct (non-virtual, non-translated) routes pass through
+				// the provider's structured error body verbatim so the
+				// client sees the provider's error shape. The body is
+				// bounded and never persisted.
+				if upstreamErrorReadErr == nil && !translated && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
+					copySafeResponseHeaders(w.Header(), response.Header)
+					upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
+					if route.UpstreamModelID != route.RequestedModel {
+						upstreamErrorBody = bytes.ReplaceAll(upstreamErrorBody, []byte(route.UpstreamModelID), []byte(route.RequestedModel))
+					}
+					w.WriteHeader(response.StatusCode)
+					_, _ = w.Write(upstreamErrorBody)
+					return
+				}
 				inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
 				return
 			}

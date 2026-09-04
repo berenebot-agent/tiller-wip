@@ -316,22 +316,27 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 
 	out["input"] = input
 
-	for _, key := range []string{"temperature", "top_p", "stream", "metadata", "tool_choice"} {
+	// Handle tool_choice before the main key loop. The Responses relay
+	// accepts only the string "auto" for tool_choice; every other Chat
+	// value must be either represented safely or rejected rather than
+	// silently weakened. "none" means "do not call tools" — the only
+	// safe relay representation is to omit tools entirely. "required"
+	// and named function choices have no equivalent and are rejected.
+	var suppressTools bool
+	if v, ok := chat["tool_choice"]; ok {
+		choice, err := convertToolChoice(v)
+		if err != nil {
+			return nil, err
+		}
+		if choice == suppressToolChoice {
+			suppressTools = true
+		} else if choice != "" {
+			out["tool_choice"] = choice
+		}
+	}
+	for _, key := range []string{"temperature", "top_p", "stream", "metadata"} {
 		if v, ok := chat[key]; ok {
-			// Convert tool_choice to Responses format. The OpenCode
-			// relay's /v1/responses accepts only the string "auto";
-			// every other value must be omitted, not converted.
-			if key == "tool_choice" {
-				choice, err := convertToolChoice(v)
-				if err != nil {
-					return nil, err
-				}
-				if choice != nil {
-					out[key] = choice
-				}
-			} else {
-				out[key] = v
-			}
+			out[key] = v
 		}
 	}
 	if max, ok := chat["max_completion_tokens"]; ok {
@@ -339,20 +344,22 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 	} else if max, ok := chat["max_tokens"]; ok {
 		out["max_output_tokens"] = max
 	}
-	if tools := asSlice(chat["tools"]); tools != nil {
-		converted := []any{}
-		for _, raw := range tools {
-			tool, ok := raw.(map[string]any)
-			if !ok || tool["type"] != "function" {
-				return nil, unsupportedFeature{"non-function tools"}
+	if !suppressTools {
+		if tools := asSlice(chat["tools"]); tools != nil {
+			converted := []any{}
+			for _, raw := range tools {
+				tool, ok := raw.(map[string]any)
+				if !ok || tool["type"] != "function" {
+					return nil, unsupportedFeature{"non-function tools"}
+				}
+				fn, fnOK := tool["function"].(map[string]any)
+				if !fnOK {
+					return nil, unsupportedFeature{"non-function tools"}
+				}
+				converted = append(converted, map[string]any{"type": "function", "name": fn["name"], "description": fn["description"], "parameters": fn["parameters"], "strict": fn["strict"]})
 			}
-			fn, fnOK := tool["function"].(map[string]any)
-			if !fnOK {
-				return nil, unsupportedFeature{"non-function tools"}
-			}
-			converted = append(converted, map[string]any{"type": "function", "name": fn["name"], "description": fn["description"], "parameters": fn["parameters"], "strict": fn["strict"]})
+			out["tools"] = converted
 		}
-		out["tools"] = converted
 	}
 	return out, nil
 }
@@ -835,15 +842,29 @@ func chatContentToResponsesParts(value any) ([]any, error) {
 	return parts, nil
 }
 
+// suppressToolChoice is a sentinel returned by convertToolChoice to signal
+// that the caller should omit both tool_choice and tools from the relay
+// request (the Chat "none" semantics: do not call tools).
+const suppressToolChoice = "__suppress_tools__"
+
 func convertToolChoice(value any) (any, error) {
 	// The Responses wire shape used by chat-completions translation only
-	// supports tool_choice as the string "auto". Every other value
-	// ("none", "required", named function choices, objects) is rejected by
-	// the upstream relay, so return nil and the caller omits the field.
-	if v, ok := value.(string); ok && v == "auto" {
-		return v, nil
+	// supports tool_choice as the string "auto". "none" means "do not
+	// call tools" — the only safe relay representation is to omit tools
+	// entirely. "required" and named function choices have no equivalent
+	// and are rejected as unsupported rather than silently weakened.
+	v, ok := value.(string)
+	if !ok {
+		return nil, unsupportedFeature{"tool_choice"}
 	}
-	return nil, nil
+	switch v {
+	case "auto":
+		return v, nil
+	case "none":
+		return suppressToolChoice, nil
+	default:
+		return nil, unsupportedFeature{"tool_choice " + v}
+	}
 }
 
 func chatContentToAnthropic(value any) []any {

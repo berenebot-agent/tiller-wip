@@ -82,6 +82,22 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		}
 		runUID, runGID = appliedUID, appliedGID
 	}
+	if command == "healthcheck" {
+		_, port, splitErr := net.SplitHostPort(cfg.ListenAddr)
+		if splitErr != nil || port == "" {
+			return fmt.Errorf("invalid listen address %q", cfg.ListenAddr)
+		}
+		client := http.Client{Timeout: 3 * time.Second}
+		resp, err := client.Get("http://127.0.0.1:" + port + "/health/ready")
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return fmt.Errorf("readiness returned %d", resp.StatusCode)
+		}
+		return nil
+	}
 	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"))
 	if err != nil {
 		if errors.Is(err, database.ErrDataDirUnwritable) {
@@ -102,21 +118,6 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	defer db.Close()
 	switch command {
 	case "migrate":
-		return nil
-	case "healthcheck":
-		_, port, splitErr := net.SplitHostPort(cfg.ListenAddr)
-		if splitErr != nil || port == "" {
-			return fmt.Errorf("invalid listen address %q", cfg.ListenAddr)
-		}
-		client := http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Get("http://127.0.0.1:" + port + "/health/ready")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("readiness returned %d", resp.StatusCode)
-		}
 		return nil
 	case "serve":
 	default:
