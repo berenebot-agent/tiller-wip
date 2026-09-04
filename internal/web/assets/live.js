@@ -10,17 +10,26 @@
 //     client key, or virtual-model/provider-model pair.
 //   - "snapshot": the full usage/health envelope (drives token/cache counters
 //     and reconciles any dropped delta).
+//
+// The connection is gated by an explicit enabled flag so that visibility
+// changes only reconnect while the session is active. showLogin()/logout
+// call stop() which disables the stream; showApp() calls start() which
+// re-enables it. This prevents unauthorised reconnects after explicit
+// logout and avoids stale UI after passive session expiry.
 export class LiveStream {
-  constructor(url) {
+  constructor(url, { onAuthFailure } = {}) {
     this.url = url;
     this.handlers = new Map();
     this.es = null;
     this.generation = 0;
+    this.enabled = false;
     this.visible = !document.hidden;
+    this.onAuthFailure = onAuthFailure;
+    this._authTimer = null;
     document.addEventListener('visibilitychange', () => {
       this.visible = !document.hidden;
-      if (this.visible) this.open();
-      else this.close();
+      if (this.visible && this.enabled) this.open();
+      else if (!this.visible) this.close();
     });
   }
 
@@ -31,7 +40,8 @@ export class LiveStream {
   }
 
   open() {
-    if (this.es || !this.visible) return;
+    if (this.es || !this.visible || !this.enabled) return;
+    if (this._authTimer) { clearTimeout(this._authTimer); this._authTimer = null; }
     const es = new EventSource(this.url);
     const generation = ++this.generation;
     this.es = es;
@@ -40,9 +50,18 @@ export class LiveStream {
     es.addEventListener('outcome', (e) => { if (current()) this.dispatch('outcome', e.data); });
     es.addEventListener('activity', (e) => { if (current()) this.dispatch('activity', e.data); });
     es.addEventListener('snapshot', (e) => { if (current()) this.dispatch('snapshot', e.data); });
-    // Keep ownership during transient failures so EventSource can reconnect.
-    // Explicit close() remains the only path that releases this connection.
-    es.onerror = () => {};
+    // On error, allow EventSource's built-in reconnect to recover from
+    // transient failures. If the connection stays down (e.g. server-side
+    // session expiry closes the stream), schedule an auth-failure callback
+    // so the UI can return to the login screen rather than showing stale
+    // data. The timer is cleared on the next successful open().
+    es.onerror = () => {
+      if (!current() || !this.enabled || this._authTimer) return;
+      this._authTimer = setTimeout(() => {
+        this._authTimer = null;
+        if (this.enabled && this.onAuthFailure) this.onAuthFailure();
+      }, 5000);
+    };
   }
 
   close() {
@@ -51,7 +70,26 @@ export class LiveStream {
       es.close();
       this.es = null;
     }
+    if (this._authTimer) { clearTimeout(this._authTimer); this._authTimer = null; }
     this.generation++;
+  }
+
+  // start() enables the stream and opens the connection. Called after
+  // successful login. Idempotent: calling start() on an already-enabled
+  // stream is a no-op.
+  start() {
+    if (this.enabled) return;
+    this.enabled = true;
+    this.open();
+  }
+
+  // stop() disables the stream and closes the connection. Called on
+  // logout. The visibility handler will not reconnect until start() is
+  // called again.
+  stop() {
+    if (!this.enabled) return;
+    this.enabled = false;
+    this.close();
   }
 
   dispatch(event, data) {

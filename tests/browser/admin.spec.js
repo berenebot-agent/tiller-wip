@@ -1048,7 +1048,7 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
   expect(title?.length || 0).toBeGreaterThan(8);
 });
 
-test('virtual-model target combobox: exact upstream_model_id match auto-accepts without an explicit pick', async ({ page }) => {
+test('virtual-model target combobox: unique upstream_model_id match auto-accepts without an explicit pick', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await login(page);
   const csrf = await adminCsrf(page);
@@ -1091,7 +1091,7 @@ test('virtual-model target combobox: exact upstream_model_id match auto-accepts 
 
   // Clear the visible field, then type the exact upstream_model_id of the
   // second model. The hidden provider_model_id should auto-resolve to it
-  // without an explicit dropdown pick.
+  // without an explicit dropdown pick — there is only one match.
   await fixedInput.click();
   await fixedInput.press('Control+A');
   await fixedInput.press('Delete');
@@ -1129,6 +1129,63 @@ test('virtual-model target combobox: exact upstream_model_id match auto-accepts 
   if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
   await mockRemoveModel(page, extraModelID);
   await refreshProviderApi(page, csrf, provider.id);
+});
+
+test('virtual-model target combobox: ambiguous upstream_model_id match does not auto-accept', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+
+  // Create two providers that both expose the same upstream_model_id. This
+  // is the common case (e.g. openai/gpt-x and openrouter/gpt-x). Typing
+  // the shared ID must NOT silently pick one — the operator must choose.
+  const sharedModelID = 'gpt-shared';
+  const providerA = await createProvider(page, csrf, 'vm-ambiguous-a');
+  const providerB = await createProvider(page, csrf, 'vm-ambiguous-b');
+  await mockAddModel(page, sharedModelID);
+  await refreshProviderApi(page, csrf, providerA.id);
+  await refreshProviderApi(page, csrf, providerB.id);
+
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const allModels = (await modelsRes.json()).data;
+  const matches = allModels.filter(m => m.upstream_model_id === sharedModelID);
+  expect(matches.length).toBe(2);
+
+  // Seed a virtual group so the create dialog has a group to pick.
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-ambiguous-vg' } });
+  expect(groupRes.status()).toBe(201);
+
+  await page.getByRole('link', { name: 'Virtual Models' }).click();
+  await page.getByRole('button', { name: '+ Virtual model' }).click();
+  await expect(page.getByRole('heading', { name: 'Create virtual model' })).toBeVisible();
+
+  const fixedInput = page.locator('[data-fixed-target] input[type="text"]');
+  const fixedHidden = page.locator('[data-fixed-target] input[type="hidden"]');
+  await expect(fixedInput).toBeVisible();
+
+  // Clear the field and type the shared upstream_model_id. The hidden value
+  // must stay empty because there are two matches — auto-accept only fires
+  // for a unique match.
+  await fixedInput.click();
+  await fixedInput.press('Control+A');
+  await fixedInput.press('Delete');
+  await expect(fixedHidden).toHaveValue('');
+  await fixedInput.fill(sharedModelID);
+  await expect(fixedHidden).toHaveValue('');
+
+  // The dropdown should show both provider choices so the operator can pick.
+  const listItems = page.locator('[data-fixed-target] .combobox-list li');
+  await expect(listItems).toHaveCount(2);
+  await expect(listItems.nth(0)).toContainText('vm-ambiguous-a');
+  await expect(listItems.nth(1)).toContainText('vm-ambiguous-b');
+
+  // Cleanup: remove the group and extra model.
+  await page.request.delete(`/api/admin/providers/${providerA.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await page.request.delete(`/api/admin/providers/${providerB.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-ambiguous-vg')).json();
+  const group = groupList.data.find(g => g.name === 'vm-ambiguous-vg');
+  if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await mockRemoveModel(page, sharedModelID);
 });
 
 test('virtual-model target combobox: non-matching text still blocks submission', async ({ page }) => {
@@ -1213,6 +1270,44 @@ test('mobile: ordered-fallback target dropdown spans the dialog width', async ({
   await input.click();
   await expect(list).toBeHidden();
   await page.getByRole('button', { name: 'Cancel' }).click();
+  await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+});
+
+test('virtual models table: group header colspan matches data row columns', async ({ page }) => {
+  // The State column was removed, leaving 7 columns. The group header
+  // colspan must match the data row cell count so the table does not get
+  // an extra synthetic column.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'vm-colspan';
+  await createProvider(page, csrf, providerName);
+
+  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-colspan-vg' } });
+  expect(groupRes.status()).toBe(201);
+  const group = await groupRes.json();
+  const modelsRes = await page.request.get('/api/admin/models?all=1');
+  const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
+  expect(real).toBeTruthy();
+  const virtualRes = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'colspan-route', routing_mode: 'fixed', targets: [{ provider_model_id: real.id, enabled: true }] } });
+  expect(virtualRes.status()).toBe(201);
+  const virtual = await virtualRes.json();
+
+  await page.goto('/#virtual');
+  await expect(page.locator('#view-virtual')).toBeVisible();
+
+  // The group header colspan must equal the data row cell count (7).
+  const headerColspan = await page.locator('#virtual-body tr.group-toggle td').first().getAttribute('colspan');
+  expect(headerColspan).toBe('7');
+
+  // And the data row must have exactly 7 cells.
+  const dataRow = page.locator('#virtual-body tr[data-virtual-id]', { hasText: 'vm-colspan-vg/colspan-route' });
+  await expect(dataRow).toBeVisible();
+  const cellCount = await dataRow.locator('td').count();
+  expect(cellCount).toBe(7);
+
+  // Cleanup.
   await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
   await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });

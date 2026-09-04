@@ -29,7 +29,7 @@ test('live refresh: transient errors retain one reconnecting EventSource', async
     };
     const stream = new LiveStream('/api/admin/live');
     document.addEventListener = addEventListener;
-    stream.open();
+    stream.start();
     const source = stream.es;
     source.onerror();
     return {

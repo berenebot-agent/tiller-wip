@@ -128,7 +128,7 @@ async function refreshModels(id) { const button = $(`[data-refresh-models="${CSS
 async function deleteProvider(id) { const provider = state.providers.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${provider.name}?`, copy: 'All discovered models and their client permissions will be removed. Deletion is blocked while a virtual model references this provider.', action: 'Delete provider', typeMatch: provider.name, typeLabel: 'provider name' })) return; try { await api(`/api/admin/providers/${id}`, { method: 'DELETE' }); flash('Provider deleted.'); await loadProviders(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function loadModels(search = $('#model-search').value) { const [result, usage] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage')]); state.models = result.data; state.usage = usage; renderModels(); }
-function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 8 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
+function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 7 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
 function toggleGroup(event) {
   const header = event.currentTarget;
   const pendingFrame = groupRevealFrames.get(header);
@@ -413,8 +413,9 @@ function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minW
     if (hidden.value && !options.some(o => o.value === hidden.value && o.label === input.value)) hidden.value = '';
     if (!hidden.value) {
       const typed = input.value;
-      const matchIndex = options.findIndex(o => !o.disabled && o.match && o.match === typed);
-      if (matchIndex >= 0) {
+      const matches = options.filter(o => !o.disabled && o.match && o.match === typed);
+      if (matches.length === 1) {
+        const matchIndex = options.indexOf(matches[0]);
         hidden.value = options[matchIndex].value;
         active = matchIndex;
         render();
@@ -935,7 +936,7 @@ document.addEventListener('keydown', event => { if (event.key === '/' && !['INPU
 // while a dialog is open and while the active view does not render the touched
 // cells; state is always kept current so a reconcile paint on close/nav is
 // instant.
-const live = new LiveStream('/api/admin/live');
+const live = new LiveStream('/api/admin/live', { onAuthFailure: () => showLogin() });
 let livePendingReconcile = false;
 const liveDialogOpen = () => document.querySelector('dialog[open]') !== null;
 const liveViewActive = (...views) => views.includes(state.view);
@@ -1133,7 +1134,7 @@ navigate = function (view) {
   if (liveViewActive('virtual', 'clients')) reconcileLive();
 };
 
-function liveStart() { live.open(); }
-function liveStop() { live.close(); }
+function liveStart() { live.start(); }
+function liveStop() { live.stop(); }
 
 (async function initialise() { state.view = viewFromHash(); try { const session = await api('/api/admin/session'); showApp(session); } catch { showLogin(); } })();
