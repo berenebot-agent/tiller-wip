@@ -50,16 +50,30 @@ export class LiveStream {
     es.addEventListener('outcome', (e) => { if (current()) this.dispatch('outcome', e.data); });
     es.addEventListener('activity', (e) => { if (current()) this.dispatch('activity', e.data); });
     es.addEventListener('snapshot', (e) => { if (current()) this.dispatch('snapshot', e.data); });
+    // On open (including after EventSource's built-in auto-reconnect),
+    // clear any pending auth-failure timer. A transient blip that recovers
+    // must not kick the admin back to login.
+    es.onopen = () => {
+      if (!current()) return;
+      if (this._authTimer) { clearTimeout(this._authTimer); this._authTimer = null; }
+    };
     // On error, allow EventSource's built-in reconnect to recover from
     // transient failures. If the connection stays down (e.g. server-side
-    // session expiry closes the stream), schedule an auth-failure callback
-    // so the UI can return to the login screen rather than showing stale
-    // data. The timer is cleared on the next successful open().
+    // session expiry closes the stream), probe the session endpoint after
+    // a delay before assuming auth failure. Only an explicit 401 triggers
+    // onAuthFailure(); a network failure or 200 leaves EventSource to keep
+    // reconnecting.
     es.onerror = () => {
       if (!current() || !this.enabled || this._authTimer) return;
-      this._authTimer = setTimeout(() => {
+      this._authTimer = setTimeout(async () => {
         this._authTimer = null;
-        if (this.enabled && this.onAuthFailure) this.onAuthFailure();
+        if (!this.enabled || !current()) return;
+        try {
+          const res = await fetch('/api/admin/session', { credentials: 'same-origin' });
+          if (res.status === 401 && this.enabled && this.onAuthFailure) this.onAuthFailure();
+        } catch {
+          // Network failure: do not assume auth failure. EventSource keeps retrying.
+        }
       }, 5000);
     };
   }

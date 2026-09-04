@@ -41,6 +41,155 @@ test('live refresh: transient errors retain one reconnecting EventSource', async
   expect(result.owned).toBeTruthy();
 });
 
+test('live refresh: transient error that recovers before timeout does not trigger auth failure', async ({ page }) => {
+  // A transient blip (network/proxy) must not kick the admin back to login
+  // if EventSource auto-reconnects successfully before the auth-failure
+  // timer fires. onopen must clear the pending timer.
+  await page.addInitScript(() => {
+    window.__liveEventSources = [];
+    window.__authFailureCalls = 0;
+    window.EventSource = class {
+      constructor(url) {
+        this.url = url;
+        this.closed = false;
+        this._onopen = null;
+        this._onerror = null;
+        window.__liveEventSources.push(this);
+      }
+      set onopen(fn) { this._onopen = fn; }
+      get onopen() { return this._onopen; }
+      set onerror(fn) { this._onerror = fn; }
+      get onerror() { return this._onerror; }
+      addEventListener(type, fn) {
+        if (type === 'open') this._onopen = fn;
+      }
+      close() { this.closed = true; }
+      __fireOpen() { if (this._onopen) this._onopen(); }
+      __fireError() { if (this._onerror) this._onerror(); }
+    };
+  });
+  await page.goto('/live.js');
+
+  const result = await page.evaluate(async () => {
+    const { LiveStream } = await import('/live.js');
+    const addEventListener = document.addEventListener;
+    document.addEventListener = (type, ...args) => {
+      if (type !== 'visibilitychange') addEventListener.call(document, type, ...args);
+    };
+    const stream = new LiveStream('/api/admin/live', { onAuthFailure: () => { window.__authFailureCalls++; } });
+    document.addEventListener = addEventListener;
+    stream.start();
+    const source = stream.es;
+    // Simulate a transient error, then a successful reconnect 1s later.
+    source.__fireError();
+    await new Promise(r => setTimeout(r, 1000));
+    source.__fireOpen();
+    // Wait past the original 5s timeout to confirm the timer was cleared.
+    await new Promise(r => setTimeout(r, 5000));
+    return { authFailureCalls: window.__authFailureCalls };
+  });
+  expect(result.authFailureCalls).toBe(0);
+});
+
+test('live refresh: sustained error with explicit 401 triggers auth failure', async ({ page }) => {
+  // If the connection stays down and the session endpoint returns 401,
+  // the auth-failure callback must fire so the UI returns to login.
+  await page.addInitScript(() => {
+    window.__liveEventSources = [];
+    window.__authFailureCalls = 0;
+    window.EventSource = class {
+      constructor(url) {
+        this.url = url;
+        this.closed = false;
+        this._onerror = null;
+        window.__liveEventSources.push(this);
+      }
+      set onerror(fn) { this._onerror = fn; }
+      get onerror() { return this._onerror; }
+      addEventListener() {}
+      close() { this.closed = true; }
+      __fireError() { if (this._onerror) this._onerror(); }
+    };
+    // Mock fetch to return 401 for the session probe.
+    window.fetch = async (url) => {
+      if (url.includes('/api/admin/session')) return { status: 401, ok: false };
+      return { status: 200, ok: true };
+    };
+    // Speed up the test: override setTimeout to fire immediately for the auth timer.
+    window.__realSetTimeout = window.setTimeout;
+    window.setTimeout = (fn, ms) => {
+      if (ms === 5000) return window.__realSetTimeout(fn, 10);
+      return window.__realSetTimeout(fn, ms);
+    };
+  });
+  await page.goto('/live.js');
+
+  const result = await page.evaluate(async () => {
+    const { LiveStream } = await import('/live.js');
+    const addEventListener = document.addEventListener;
+    document.addEventListener = (type, ...args) => {
+      if (type !== 'visibilitychange') addEventListener.call(document, type, ...args);
+    };
+    const stream = new LiveStream('/api/admin/live', { onAuthFailure: () => { window.__authFailureCalls++; } });
+    document.addEventListener = addEventListener;
+    stream.start();
+    const source = stream.es;
+    source.__fireError();
+    // Wait for the (accelerated) auth timer + fetch to complete.
+    await new Promise(r => window.__realSetTimeout(r, 500));
+    return { authFailureCalls: window.__authFailureCalls };
+  });
+  expect(result.authFailureCalls).toBe(1);
+});
+
+test('live refresh: sustained error with 200 session does not trigger auth failure', async ({ page }) => {
+  // If the connection blips but the session is still valid (200), the
+  // auth-failure callback must NOT fire — EventSource keeps reconnecting.
+  await page.addInitScript(() => {
+    window.__liveEventSources = [];
+    window.__authFailureCalls = 0;
+    window.EventSource = class {
+      constructor(url) {
+        this.url = url;
+        this.closed = false;
+        this._onerror = null;
+        window.__liveEventSources.push(this);
+      }
+      set onerror(fn) { this._onerror = fn; }
+      get onerror() { return this._onerror; }
+      addEventListener() {}
+      close() { this.closed = true; }
+      __fireError() { if (this._onerror) this._onerror(); }
+    };
+    window.fetch = async (url) => {
+      if (url.includes('/api/admin/session')) return { status: 200, ok: true };
+      return { status: 200, ok: true };
+    };
+    window.__realSetTimeout = window.setTimeout;
+    window.setTimeout = (fn, ms) => {
+      if (ms === 5000) return window.__realSetTimeout(fn, 10);
+      return window.__realSetTimeout(fn, ms);
+    };
+  });
+  await page.goto('/live.js');
+
+  const result = await page.evaluate(async () => {
+    const { LiveStream } = await import('/live.js');
+    const addEventListener = document.addEventListener;
+    document.addEventListener = (type, ...args) => {
+      if (type !== 'visibilitychange') addEventListener.call(document, type, ...args);
+    };
+    const stream = new LiveStream('/api/admin/live', { onAuthFailure: () => { window.__authFailureCalls++; } });
+    document.addEventListener = addEventListener;
+    stream.start();
+    const source = stream.es;
+    source.__fireError();
+    await new Promise(r => window.__realSetTimeout(r, 500));
+    return { authFailureCalls: window.__authFailureCalls };
+  });
+  expect(result.authFailureCalls).toBe(0);
+});
+
 // Live SSE refresh: patchTokenCell keeps a single .tok wrapper and updates
 // its contents in place across populated/empty transitions, never nesting
 // .tok .tok. Drive the live view end-to-end with a real virtual model.
