@@ -72,7 +72,7 @@ func tokenRequest(ctx context.Context, client *http.Client, form url.Values) (oa
 			Error string `json:"error"`
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.Error == "invalid_grant" {
+		if errResp.Error == "invalid_grant" || resp.StatusCode == 401 || resp.StatusCode == 403 {
 			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
 		}
 		return oauth.TokenResponse{}, errors.New("codex OAuth token request failed")

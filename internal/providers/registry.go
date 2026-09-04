@@ -277,7 +277,9 @@ func githubCopilotModels() []Model {
 		id       string
 		protocol Protocol
 	}{
-		{"gpt-5.2", ProtocolChat}, {"gpt-5.2-codex", ProtocolChat}, {"gpt-5.3-codex", ProtocolChat}, {"gpt-5.4", ProtocolChat}, {"gpt-5.4-mini", ProtocolChat},
+		// Codex variants route through Responses (matching the official Codex
+		// client); non-Codex GPT models stay on Chat Completions.
+		{"gpt-5.2", ProtocolChat}, {"gpt-5.2-codex", ProtocolResponses}, {"gpt-5.3-codex", ProtocolResponses}, {"gpt-5.4", ProtocolChat}, {"gpt-5.4-mini", ProtocolChat},
 		{"claude-haiku-4.5", ProtocolMessages}, {"claude-opus-4.5", ProtocolMessages}, {"claude-sonnet-4.5", ProtocolMessages}, {"claude-sonnet-4.6", ProtocolMessages}, {"claude-opus-4.6", ProtocolMessages}, {"claude-opus-4.7", ProtocolMessages},
 		{"gemini-2.5-pro", ProtocolChat}, {"gemini-3-flash-preview", ProtocolChat}, {"gemini-3.1-pro-preview", ProtocolChat}, {"grok-code-fast-1", ProtocolChat},
 	}

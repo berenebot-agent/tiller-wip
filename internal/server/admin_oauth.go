@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/claude"
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
 	"github.com/tiller-router/tiller-router/internal/providers/github"
@@ -238,4 +239,33 @@ func (s *Server) oauthProviderType(ctx context.Context, id string) (string, erro
 	var providerType string
 	err := s.db.SQL.QueryRowContext(ctx, `SELECT type FROM providers WHERE id=?`, id).Scan(&providerType)
 	return providerType, err
+}
+
+// disconnectProviderOAuth removes the OAuth token and in-memory state for a
+// provider while preserving the provider configuration, models, and routing.
+// It is idempotent: disconnecting an already-disconnected provider succeeds.
+func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	providerType, err := s.oauthProviderType(r.Context(), id)
+	if err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	}
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load provider.")
+		return
+	}
+	if descriptor, ok := providers.Lookup(providerType); !ok || descriptor.AuthMode != providers.AuthModeOAuth {
+		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
+		return
+	}
+	if err := oauth.NewStore(s.db.SQL).Delete(r.Context(), id); err != nil {
+		adminError(w, 500, "database_error", "Could not remove OAuth connection.")
+		return
+	}
+	s.oauthDeviceMu.Lock()
+	delete(s.oauthDevices, id)
+	s.oauthDeviceMu.Unlock()
+	s.oauthFlows.Cancel(id)
+	writeJSON(w, 200, map[string]any{"status": "disconnected"})
 }

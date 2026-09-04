@@ -115,7 +115,7 @@ func FetchCopilotToken(ctx context.Context, client *http.Client, accessToken str
 	return result, nil
 }
 
- func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord) (oauth.TokenResponse, error) {
 	if token, err := FetchCopilotToken(ctx, client, current.AccessToken); err == nil {
 		token.AccessToken = current.AccessToken
 		token.RefreshToken = current.RefreshToken
@@ -137,8 +137,16 @@ func FetchCopilotToken(ctx context.Context, client *http.Client, accessToken str
 		ExpiresIn    int64  `json:"expires_in"`
 		Scope        string `json:"scope"`
 	}
-	if err := requestJSON(ctx, client, http.MethodPost, TokenURL, form, nil, &githubToken); err != nil {
-		return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+	status, err := requestJSONStatus(ctx, client, http.MethodPost, TokenURL, form, &githubToken, nil)
+	if err != nil {
+		// A 401/403 from GitHub means the refresh token is dead — the user
+		// must reconnect. Anything else (network blip, 5xx, timeout) is
+		// transient and must stay retryable; never mark the provider
+		// unavailable for a recoverable error.
+		if status == 401 || status == 403 {
+			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+		}
+		return oauth.TokenResponse{}, err
 	}
 	copilot, err := FetchCopilotToken(ctx, client, githubToken.AccessToken)
 	if err != nil {

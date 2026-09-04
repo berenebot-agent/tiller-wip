@@ -347,7 +347,7 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 			strconv.Itoa(row.AttemptCount),
 			strconv.FormatBool(row.FallbackUsed),
 			strPtrOrEmpty(row.FallbackReason),
- 		neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
+			neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
 			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)),
 			strconv.FormatBool(row.RequestBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)),

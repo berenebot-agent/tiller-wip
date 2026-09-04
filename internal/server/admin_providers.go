@@ -13,7 +13,6 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
-	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 type providerView struct {
@@ -322,16 +321,6 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
 	}
-	// Delete absorbs disconnect: clean up OAuth material (token row +
-	// in-memory state) so a single delete fully removes an OAuth provider.
-	// Non-OAuth providers hit none of these branches and behave as before.
-	if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
-		oauth.NewStore(s.db.SQL).Delete(r.Context(), providerID)
-		s.oauthDeviceMu.Lock()
-		delete(s.oauthDevices, providerID)
-		s.oauthDeviceMu.Unlock()
-		s.oauthFlows.Cancel(providerID)
-	}
 	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
@@ -388,9 +377,24 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `DELETE FROM namespaces WHERE entity_id=? AND kind='real'`, providerID)
 	}
+	// Delete absorbs disconnect: clean up OAuth material (token row) inside
+	// the transaction, after all reference checks pass. A rejected delete
+	// (409) rolls back and leaves credentials untouched.
+	if err == nil {
+		if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+			_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_oauth_tokens WHERE provider_id=?`, providerID)
+		}
+	}
 	if err != nil || tx.Commit() != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
+	}
+	// Clean up in-memory OAuth state only after the transaction commits.
+	if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+		s.oauthDeviceMu.Lock()
+		delete(s.oauthDevices, providerID)
+		s.oauthDeviceMu.Unlock()
+		s.oauthFlows.Cancel(providerID)
 	}
 	w.WriteHeader(204)
 }

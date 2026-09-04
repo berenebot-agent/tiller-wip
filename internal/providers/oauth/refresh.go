@@ -56,13 +56,20 @@ func (m *Manager) Current(ctx context.Context, providerID string, refresh Refres
 
 func (m *Manager) ForceRefresh(ctx context.Context, providerID string, refresh RefreshFunc) (TokenRecord, error) {
 	record, err := m.refresh(ctx, providerID, refresh)
+	if err == nil {
+		return record, nil
+	}
+	// Only transition to a dead state on a definitive signal. Transient
+	// failures (network blips, timeouts, context cancellation) must remain
+	// retryable — they never permanently mark the provider unavailable.
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return record, err
+	}
 	now := time.Now()
 	switch {
 	case errors.Is(err, ErrReconnectRequired):
 		_ = m.store.SetState(ctx, providerID, AuthReconnectRequired, now)
 	case errors.Is(err, ErrAuthUnavailable):
-		_ = m.store.SetState(ctx, providerID, AuthUnavailable, now)
-	case err != nil && !errors.Is(err, ErrNoToken):
 		_ = m.store.SetState(ctx, providerID, AuthUnavailable, now)
 	}
 	return record, err

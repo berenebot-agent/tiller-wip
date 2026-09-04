@@ -133,9 +133,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.updateProvider)))
 	mux.Handle("DELETE /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.deleteProvider)))
 	mux.Handle("PUT /api/admin/providers/{id}/credential", s.requireAdmin(http.HandlerFunc(s.replaceProviderCredential)))
- 	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireAdmin(http.HandlerFunc(s.startProviderOAuth)))
+	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireAdmin(http.HandlerFunc(s.startProviderOAuth)))
 	mux.Handle("POST /api/admin/providers/{id}/oauth/callback", s.requireAdmin(http.HandlerFunc(s.completeProviderOAuth)))
 	mux.Handle("GET /api/admin/providers/{id}/oauth/status", s.requireAdmin(http.HandlerFunc(s.providerOAuthStatus)))
+	mux.Handle("DELETE /api/admin/providers/{id}/oauth", s.requireAdmin(http.HandlerFunc(s.disconnectProviderOAuth)))
 
 	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireAdmin(http.HandlerFunc(s.refreshProvider)))
 	mux.Handle("GET /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.listProviderModels)))
