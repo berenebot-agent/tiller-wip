@@ -25,7 +25,14 @@ func normalizeCodexRequest(body []byte) ([]byte, error) {
 		for _, raw := range input {
 			item, ok := raw.(map[string]any)
 			role, _ := item["role"].(string)
-			if !ok || (role != "system" && role != "developer") {
+			if !ok {
+				kept = append(kept, raw)
+				continue
+			}
+			if role == "assistant" {
+				normalizeCodexAssistantContent(item["content"])
+			}
+			if role != "system" && role != "developer" {
 				kept = append(kept, raw)
 				continue
 			}
@@ -51,6 +58,18 @@ func normalizeCodexRequest(body []byte) ([]byte, error) {
 		delete(request, key)
 	}
 	return json.Marshal(request)
+}
+
+func normalizeCodexAssistantContent(value any) {
+	for _, item := range asSlice(value) {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if block["type"] == "input_text" {
+			block["type"] = "output_text"
+		}
+	}
 }
 
 func codexInstructionText(value any) string {
