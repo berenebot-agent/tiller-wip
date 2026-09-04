@@ -286,9 +286,12 @@ test('Real Models expands large provider groups in cancellable batches', async (
   await expect.poll(groupState).toEqual({ expanded: 'false', visible: 0, hidden: totalRows });
 
   // A catalogue rerender keeps the provider collapsed and discards old work.
+  // Re-query the header after the DOM rebuild — renderModels() replaces the
+  // tbody contents, so the previously captured element is detached.
   await page.locator('#show-retired').uncheck();
-  await expect(header).toHaveAttribute('aria-expanded', 'false');
-  await expect(header.locator('xpath=following-sibling::tr[1]')).toHaveClass(/group-row-hidden/);
+  const rerenderedHeader = page.locator(`[data-group-toggle="models"][data-group-key="${providerName}"]`);
+  await expect(rerenderedHeader).toHaveAttribute('aria-expanded', 'false');
+  await expect(rerenderedHeader.locator('xpath=following-sibling::tr[1]')).toHaveClass(/group-row-hidden/);
 });
 
 test('permission edits survive filtering, and cancel/save semantics hold', async ({ page }) => {
