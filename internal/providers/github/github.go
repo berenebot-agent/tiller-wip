@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -129,15 +130,25 @@ func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord
 		return token, nil
 	}
 	// A 401/403 from the Copilot token endpoint means the access token is
-	// dead and the user must reconnect. Any other failure (network blip,
-	// 429, 5xx, timeout) is transient — do not infer a dead credential,
-	// and do not blame the absence of a GitHub refresh token.
+	// dead. If a GitHub refresh token exists, try to rotate the durable
+	// credential and fetch a fresh Copilot token. Only if no refresh token
+	// is available do we ask the user to reconnect.
 	if status == 401 || status == 403 {
-		return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+		if current.RefreshToken == "" {
+			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
+		}
+		return refreshGitHubToken(ctx, client, current)
 	}
-	if current.RefreshToken == "" {
-		return oauth.TokenResponse{}, err
-	}
+	// Any other failure (network blip, 429, 5xx, timeout) is transient.
+	// Do not rotate a perfectly good refresh token for a recoverable error.
+	return oauth.TokenResponse{}, err
+}
+
+// refreshGitHubToken rotates the durable GitHub access token using the stored
+// refresh token, then fetches a fresh Copilot token. It classifies the GitHub
+// refresh-token response: invalid_grant / 401 / 403 → reconnect_required;
+// anything else → transient.
+func refreshGitHubToken(ctx context.Context, client *http.Client, current oauth.TokenRecord) (oauth.TokenResponse, error) {
 	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {current.RefreshToken}, "client_id": {ClientID}}
 	var githubToken struct {
 		AccessToken  string `json:"access_token"`
@@ -146,12 +157,20 @@ func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord
 		ExpiresIn    int64  `json:"expires_in"`
 		Scope        string `json:"scope"`
 	}
-	status, err = requestJSONStatus(ctx, client, http.MethodPost, TokenURL, form, &githubToken, nil)
+	status, body, err := requestJSONStatusWithBody(ctx, client, http.MethodPost, TokenURL, form, nil)
 	if err != nil {
-		if status == 401 || status == 403 {
+		// Parse the OAuth error body to detect a dead refresh token.
+		var errResp struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(body, &errResp)
+		if errResp.Error == "invalid_grant" || status == 401 || status == 403 {
 			return oauth.TokenResponse{}, oauth.ErrReconnectRequired
 		}
 		return oauth.TokenResponse{}, err
+	}
+	if err := json.Unmarshal(body, &githubToken); err != nil {
+		return oauth.TokenResponse{}, errors.New("invalid GitHub refresh response")
 	}
 	copilot, _, err := FetchCopilotToken(ctx, client, githubToken.AccessToken)
 	if err != nil {
@@ -159,6 +178,44 @@ func Refresh(ctx context.Context, client *http.Client, current oauth.TokenRecord
 	}
 	copilot.AccessToken, copilot.RefreshToken, copilot.TokenType, copilot.ExpiresIn, copilot.Scope = githubToken.AccessToken, githubToken.RefreshToken, githubToken.TokenType, githubToken.ExpiresIn, githubToken.Scope
 	return copilot, nil
+}
+
+// requestJSONStatusWithBody is like requestJSONStatus but also returns the
+// raw response body so callers can parse OAuth error details (e.g.
+// invalid_grant) from non-2xx responses.
+func requestJSONStatusWithBody(ctx context.Context, client *http.Client, method, endpoint string, form url.Values, headers map[string]string) (int, []byte, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	var body strings.Reader
+	if form != nil {
+		body = *strings.NewReader(form.Encode())
+	} else {
+		body = *strings.NewReader("")
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, &body)
+	if err != nil {
+		return 0, nil, err
+	}
+	if form != nil {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
+	req.Header.Set("Accept", "application/json")
+	if headers != nil {
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return resp.StatusCode, raw, errors.New("GitHub API request failed")
+	}
+	return resp.StatusCode, raw, nil
 }
 
 func requestJSON(ctx context.Context, client *http.Client, method, endpoint string, form url.Values, headers map[string]string, target any) error {
