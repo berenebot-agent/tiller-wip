@@ -439,6 +439,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if err == sql.ErrNoRows {
 		row.httpStatus = 404
 		row.errorText = strPtr("model_not_found")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("model_not_found"))
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", incoming == providers.ProtocolMessages)
 		return
 	} else if err != nil {
@@ -447,6 +448,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		row.httpStatus = 500
 		row.errorText = strPtr("database_error")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("database_error"))
 		inferenceError(w, 500, "server_error", "database_error", "Could not resolve the model.", incoming == providers.ProtocolMessages)
 		return
 	}
@@ -480,6 +482,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			row.httpStatus = 502
 			row.errorText = strPtr(class)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			row.fallbackReason = strPtr(class)
 			inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 			return
@@ -507,6 +510,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				row.httpStatus = 400
 				row.errorText = strPtr(code)
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(code))
 				inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
 				return
 			}
@@ -525,6 +529,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if err != nil {
 				row.httpStatus = 400
 				row.errorText = strPtr("invalid_request")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
 				inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
 				return
 			}
@@ -608,7 +613,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			response.Body.Close()
 			attemptCancel()
-			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()}
+			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
 			row.attempts = append(row.attempts, attempt)
 			// Stale-auth recovery: on 401/403 from an OAuth provider, force a
 			// token refresh once per request and retry the same target before
@@ -632,6 +637,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
 				// Direct (non-virtual, non-translated) routes pass through
 				// the provider's structured error body verbatim so the
 				// client sees the provider's error shape. The body is
@@ -698,12 +704,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if terminalPreflightClass == "upstream_response_too_large" {
 			row.httpStatus = 502
 			row.errorText = strPtr(terminalPreflightClass)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(terminalPreflightClass))
 			inferenceError(w, 502, "api_error", terminalPreflightClass, "The upstream provider response exceeded Tiller's non-streaming response limit.", incoming == providers.ProtocolMessages)
 			return
 		}
 		if protocolUnavailable {
 			row.httpStatus = 400
 			row.errorText = strPtr("protocol_unavailable")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("protocol_unavailable"))
 			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
 			return
 		}
