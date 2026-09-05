@@ -126,6 +126,63 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
 
+// clientModel handles model-detail lookups. A Single key has one configured
+// route, so the requested path is intentionally ignored just like it is for
+// inference requests.
+func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
+	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
+	var keyType string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT key_type FROM client_keys WHERE id=?`, identity.ID).Scan(&keyType); err != nil {
+		inferenceError(w, 500, "server_error", "database_error", "Could not load the model metadata.", false)
+		return
+	}
+	if keyType != "single" {
+		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", false)
+		return
+	}
+	var modelName, realID, virtualID string
+	var real, virtual sql.NullString
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
+		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model binding.", false)
+		return
+	}
+	realID, virtualID = real.String, virtual.String
+	var contextLength, maxOutputTokens sql.NullInt64
+	var caps modelCapabilities
+	if real.Valid {
+		var reasoningRaw sql.NullString
+		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw); err != nil {
+			inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
+			return
+		}
+		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
+		if contextLength.Valid && contextLength.Int64 > 0 {
+			entry["context_length"] = contextLength.Int64
+		}
+		if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
+			entry["max_output_tokens"] = maxOutputTokens.Int64
+		}
+		caps.addTo(entry)
+		addReasoningToCatalogueEntry(entry, decodeReasoningCapabilities(reasoningRaw), isAnthropicRequest(r))
+		writeJSON(w, 200, entry)
+		return
+	}
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput); err != nil {
+		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
+		return
+	}
+	entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
+	if contextLength.Valid && contextLength.Int64 > 0 {
+		entry["context_length"] = contextLength.Int64
+	}
+	if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
+		entry["max_output_tokens"] = maxOutputTokens.Int64
+	}
+	caps.addTo(entry)
+	addReasoningToCatalogueEntry(entry, s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID), isAnthropicRequest(r))
+	writeJSON(w, 200, entry)
+}
+
 // isAnthropicRequest returns true when the request carries an Anthropic
 // version header, signalling that the client expects Anthropic capability
 // metadata in the Tiller catalogue.
@@ -286,9 +343,9 @@ type resolvedRoute struct {
 	RouteKind, RouteModelID, RouteModel string
 	// ReasoningCapabilities holds the normalized selector metadata for this
 	// real target. nil when unknown.
-		ReasoningCapabilities *providers.ReasoningCapabilities
-		MaxOutputTokens       sql.NullInt64
-	}
+	ReasoningCapabilities *providers.ReasoningCapabilities
+	MaxOutputTokens       sql.NullInt64
+}
 
 func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
 	tx, err := s.db.SQL.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
