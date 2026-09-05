@@ -2,7 +2,7 @@
 
 > **Scope:** Post-PR audit of `beta.1-reasoning` (8 commits, `c70d53c..HEAD`, +2517/-56 lines).
 > **Goal:** Fix confirmed bugs, fill critical/high test gaps, document deferred UI items.
-> **Status:** 4 bugs fixed & committed. 9 active items remain, 4 deferred.
+> **Status:** 5 bugs fixed & committed. 8 active items remain (all tests), 4 deferred.
 
 ---
 
@@ -14,61 +14,36 @@
 | **B2** | `stripMessagesOutputConfigEffort` was defined but never called — fully duplicated by `stripReasoningSelector`. | Deleted the dead function (`translate.go:408–422`). |
 | **B3** | `mergeReasoningCapabilities` had an unreachable branch that reassigned `""` to `""` — copy-paste artifact. | Deleted the dead branch (`virtual_capabilities.go:87–89`). |
 | **B4** | Anthropic catalogue code silently dropped `budget_tokens` — nobody knew if it was a bug or a feature. | Added a code comment documenting the intentional drop (`client.go:126–129`). |
+| **T7** | `enabled=false + effort=high` silently dropped BOTH — upstream defaulted to reasoning ENABLED, contradicting the client's explicit disable. | Restructured all three appliers (Chat/Responses/Messages): mode always applies, effort only applies when mode != "disabled". Contradictory combo emits a warning. |
 
 Verification: `vet` and `test ./internal/server/ ./internal/providers/` both pass.
 
 ---
 
-## All Remaining Items — ELI5 Summary
+## All Items — ELI5 Summary
 
-| Item | Severity | ELI5 Problem | ELI5 Solution |
-|---|---|---|---|
-| **T7** | High | If a client says "disable reasoning but also use high effort," BOTH are silently dropped. The upstream provider uses its default (often reasoning ENABLED), contradicting the client's explicit `enabled=false`. | Fix the logic so `enabled=false` is honored even when effort is also set. Add a test documenting the corrected behavior. |
-| **T1** | Critical | The `reasoning_selector_omitted` warning goes through proxy → DB → CSV/JSON export, but no test checks if it actually lands. A bug in any step silently breaks the only admin-visible signal. | Seed a DB row with a warning, then verify it appears in both CSV and JSON export. Now we trust the pipeline. |
-| **T2** | High | Virtual models aggregate reasoning from multiple targets. No test checks this — a merge bug could expose reasoning a target doesn't support (or hide reasoning all targets support). | Test with valid JSON, NULL, and invalid JSON targets; verify the merge produces the correct combined superset. |
-| **T3** | High | The code that writes `budget_tokens` into the upstream request body is never exercised. A bug here means budget silently never reaches the provider. | Test that a budget value appears in the output body when the target supports it, and triggers a warning when it doesn't. |
-| **T4** | High | The function combining two models' reasoning capabilities has ~12 code paths (nil handling, effort union, budget range, modes, etc.). Only ONE is tested. | Add tests for every branch: nil inputs, effort unions, toggle, budget ranges, parameter dedup, thinking-mode ordering. |
-| **T5** | High | `ExtractReasoningOptions` is the bridge between stored metadata and the mapping decision. If it's wrong, every downstream mapping is wrong. Zero direct tests. | Test each option type (effort, toggle, budget, adaptive) converts correctly, including edge cases like unrestricted effort. |
-| **T6** | Medium | When a client sends no reasoning at all, the body should pass through untouched. No test confirms this — a regression could inject reasoning where none was requested. | Send a body with no reasoning fields; verify it's unchanged and no warning fires. |
-| **T8** | Medium | If `reasoning_capabilities` contains bad JSON (migration gone wrong, manual edit), `decodeReasoningCapabilities` should return nil gracefully. No test verifies — could crash the admin UI. | Insert malformed JSON; verify the function returns nil without panicking. |
-| **T9** | Medium | The JSON marshaler for stored capabilities has no round-trip test. A serialization bug could corrupt data on disk silently. | Test marshal → unmarshal produces equal output; test nil → NULL → nil. Now we trust the storage layer. |
-| **F2** | Medium | The UI renders `<code class="warning-code">reasoning_selector_omitted</code>` but no CSS styles it. It looks like plain monospace text, and empty rows collapse the column width. | Add CSS (badge, color, padding) so warning codes stand out from rows with no warning. |
-| **F3** | Medium | Operators see `reasoning_selector_omitted` as raw text with no idea what it means or whether it matters. | Add a `title=` tooltip or click-to-detail dialog explaining "the requested reasoning level was dropped because the target doesn't support it." |
-| **F4** | Low | The backend sends the full reasoning shape (effort list, budget range, modes, etc.) but the admin UI reduces it to a single `R ✓/✗/—` pill. All the useful info is discarded. | Expand the Capabilities dialog to show the actual options (effort values, toggle, budget, modes) instead of one bit. |
-| **F5** | Low | If you open a Capabilities dialog, hit "Refresh," see an error, close it, then reopen for a *different* model, the old error text is still there until the next refresh. | Clear `#capabilities-refresh-error` at the top of `openCapabilities`/`openRealModelCapabilities` before populating. |
+| Item | Severity | ELI5 Problem | ELI5 Solution | Status |
+|---|---|---|---|---|
+| **T1** | Critical | The `reasoning_selector_omitted` warning goes through proxy → DB → CSV/JSON export, but no test checks if it actually lands. A bug in any step silently breaks the only admin-visible signal. | Seed a DB row with a warning, then verify it appears in both CSV and JSON export. Now we trust the pipeline. | **ACTIVE** |
+| **T2** | High | Virtual models aggregate reasoning from multiple targets. No test checks this — a merge bug could expose reasoning a target doesn't support (or hide reasoning all targets support). | Test with valid JSON, NULL, and invalid JSON targets; verify the merge produces the correct combined superset. | **ACTIVE** |
+| **T3** | High | The code that writes `budget_tokens` into the upstream request body is never exercised. A bug here means budget silently never reaches the provider. | Test that a budget value appears in the output body when the target supports it, and triggers a warning when it doesn't. | **ACTIVE** |
+| **T4** | High | The function combining two models' reasoning capabilities has ~12 code paths (nil handling, effort union, budget range, modes, etc.). Only ONE is tested. | Add tests for every branch: nil inputs, effort unions, toggle, budget ranges, parameter dedup, thinking-mode ordering. | **ACTIVE** |
+| **T5** | High | `ExtractReasoningOptions` is the bridge between stored metadata and the mapping decision. If it's wrong, every downstream mapping is wrong. Zero direct tests. | Test each option type (effort, toggle, budget, adaptive) converts correctly, including edge cases like unrestricted effort. | **ACTIVE** |
+| **T6** | Medium | When a client sends no reasoning at all, the body should pass through untouched. No test confirms this — a regression could inject reasoning where none was requested. | Send a body with no reasoning fields; verify it's unchanged and no warning fires. | **ACTIVE** |
+| **T8** | Medium | If `reasoning_capabilities` contains bad JSON (migration gone wrong, manual edit), `decodeReasoningCapabilities` should return nil gracefully. No test verifies — could crash the admin UI. | Insert malformed JSON; verify the function returns nil without panicking. | **ACTIVE** |
+| **T9** | Medium | The JSON marshaler for stored capabilities has no round-trip test. A serialization bug could corrupt data on disk silently. | Test marshal → unmarshal produces equal output; test nil → NULL → nil. Now we trust the storage layer. | **ACTIVE** |
+| **F2** | Medium | The UI renders `<code class="warning-code">reasoning_selector_omitted</code>` but no CSS styles it. It looks like plain monospace text, and empty rows collapse the column width. | Add CSS (badge, color, padding) so warning codes stand out from rows with no warning. | **DEFERRED** |
+| **F3** | Medium | Operators see `reasoning_selector_omitted` as raw text with no idea what it means or whether it matters. | Add a `title=` tooltip or click-to-detail dialog explaining "the requested reasoning level was dropped because the target doesn't support it." | **DEFERRED** |
+| **F4** | Low | The backend sends the full reasoning shape (effort list, budget range, modes, etc.) but the admin UI reduces it to a single `R ✓/✗/—` pill. All the useful info is discarded. | Expand the Capabilities dialog to show the actual options (effort values, toggle, budget, modes) instead of one bit. | **DEFERRED** |
+| **F5** | Low | If you open a Capabilities dialog, hit "Refresh," see an error, close it, then reopen for a *different* model, the old error text is still there until the next refresh. | Clear `#capabilities-refresh-error` at the top of `openCapabilities`/`openRealModelCapabilities` before populating. | **DEFERRED** |
 
-**Summary counts:** 9 active (1 bug fix + 8 tests), 4 deferred (frontend polish).
+**Summary counts:** 8 active (all tests), 4 deferred (frontend polish).
 
-**Suggested priority:** T7 → T1 → T2 → T3 → T4 → T5 → T6–T9. Defer F2–F5 until product decision on admin reasoning surface.
+**Suggested priority:** T1 → T2 → T3 → T4 → T5 → T6–T9. Defer F2–F5 until product decision on admin reasoning surface.
 
 ---
 
 ## Active Items — Detailed
-
-### T7 — `enabled=false + effort=high` silently drops both (BUG)
-
-**File:** `internal/server/translate.go:292–319` (Chat), `:333–355` (Responses), `:367–397` (Messages)
-**Severity:** High
-
-**The bug:** When a client sends `{"reasoning":{"enabled":false,"effort":"high"}}`, the selector is extracted as `{Present:true, Enabled:&false, Effort:"high"}`. In `applyChatReasoning`:
-- Line 292: `(mode=="disabled") && selector.Effort==""` → **FALSE** (effort is "high") → skip mode block
-- Line 313: `selector.Effort!="" && mode!="disabled"` → **FALSE** (mode is "disabled") → skip effort block
-- **Result: body unchanged, no warning** — upstream uses its default (often reasoning ENABLED), contradicting the client's explicit `enabled=false`.
-
-Same bug exists in `applyResponsesReasoning` and `applyMessagesReasoning` (when the provider supports effort but not the `disabled` type).
-
-**Approach:** Restructure the logic so the mode (enabled/disabled) and effort are handled independently:
-1. First apply the mode (enabled/disabled) if specified — this controls whether reasoning is on.
-2. Then apply the effort if specified AND mode is not "disabled" — this controls the level when reasoning is on.
-3. If mode is "disabled" AND effort is set, emit a warning (the combination is contradictory — the client should pick one).
-
-**Tests:** Add cases for:
-- `enabled=false, effort=high` → mode applied (disabled), effort dropped, warning emitted
-- `enabled=true, effort=high` → both applied
-- `enabled=false` (no effort) → mode applied, no warning
-- `effort=high` (no enabled) → effort applied, no warning
-
----
 
 ### T1 — `warning_code` end-to-end test
 
@@ -181,13 +156,12 @@ Gated on product decision about how much reasoning detail the admin UI should su
 
 | Step | Item | Est. risk |
 |---|---|---|
-| 1 | T7 (fix `enabled=false + effort=high` bug) | Medium — logic change across 3 functions |
-| 2 | T1 (warning_code e2e) | Medium — touches test helper + export assertions |
-| 3 | T2 (`aggregateVirtualReasoningCapabilities` tests) | Medium — needs DB seeding |
-| 4 | T3 (budget application tests) | Low — additive cases |
-| 5 | T4 (`mergeReasoningCapabilities` comprehensive) | Low — additive cases |
-| 6 | T5 (`ExtractReasoningOptions` unit tests) | Low — additive cases |
-| 7 | T6–T9 (medium test gaps) | Low — additive cases |
+| 1 | T1 (warning_code e2e) | Medium — touches test helper + export assertions |
+| 2 | T2 (`aggregateVirtualReasoningCapabilities` tests) | Medium — needs DB seeding |
+| 3 | T3 (budget application tests) | Low — additive cases |
+| 4 | T4 (`mergeReasoningCapabilities` comprehensive) | Low — additive cases |
+| 5 | T5 (`ExtractReasoningOptions` unit tests) | Low — additive cases |
+| 6 | T6–T9 (medium test gaps) | Low — additive cases |
 
 ---
 
@@ -205,8 +179,7 @@ After all fixes:
 
 | File | Change type |
 |---|---|
-| `internal/server/translate.go` | Fix T7 logic (Chat, Responses, Messages appliers) |
-| `internal/server/translate_reasoning_test.go` | Tests for T3, T4, T6, T7 |
+| `internal/server/translate_reasoning_test.go` | Tests for T3, T4, T6 |
 | `internal/server/admin_activity_export_test.go` | Tests for T1 |
 | `internal/server/client_test.go` (or new) | Tests for T2 |
 | `internal/providers/registry_test.go` | Tests for T5, T9 |
@@ -216,6 +189,5 @@ After all fixes:
 
 ## Open Questions for the Human
 
-1. **T7 fix direction:** Should `enabled=false + effort=high` (a) honor disabled and drop effort with a warning, or (b) honor effort and ignore disabled? Recommend (a) — explicit disable should win, and the contradictory combination deserves a warning.
-2. **T1 stretch goal:** Drive a real proxy request to trigger the warning, or just seed the DB row? Recommend seeding only; defer integration e2e to follow-up.
-3. **T2 location:** Add to existing `client_test.go` or create `virtual_capabilities_test.go`?
+1. **T1 stretch goal:** Drive a real proxy request to trigger the warning, or just seed the DB row? Recommend seeding only; defer integration e2e to follow-up.
+2. **T2 location:** Add to existing `client_test.go` or create `virtual_capabilities_test.go`?
