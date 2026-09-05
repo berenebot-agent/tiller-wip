@@ -444,16 +444,24 @@ func TestProviderErrorMessageAndBodyArePassedThroughToClientButNotLogged(t *test
 		t.Fatalf("provider error was persisted in activity: status=%d payload=%v", status, activity)
 	}
 	activityRow := activity["data"].([]any)[0].(map[string]any)
-	if activityRow["error_text"] != "upstream_error" || activityRow["error_message"] != nil {
+	if activityRow["error_text"] != "upstream_error" {
 		t.Fatalf("provider error metadata = %v", activityRow)
+	}
+	// error_message should be a human-readable translation, not nil.
+	if msg, ok := activityRow["error_message"].(string); !ok || msg == "" {
+		t.Fatalf("expected human-readable error_message, got %v", activityRow)
 	}
 	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
 	if status != http.StatusOK || strings.Contains(string(mustJSON(t, attempts)), marker) {
 		t.Fatalf("provider error was persisted in attempts: status=%d payload=%v", status, attempts)
 	}
 	attemptRow := attempts["data"].([]any)[0].(map[string]any)
-	if attemptRow["failure_class"] != "http_502" || attemptRow["error_message"] != nil {
+	if attemptRow["failure_class"] != "http_502" {
 		t.Fatalf("provider attempt metadata = %v", attemptRow)
+	}
+	// Attempt error_message should be a human-readable translation.
+	if msg, ok := attemptRow["error_message"].(string); !ok || msg == "" {
+		t.Fatalf("expected human-readable attempt error_message, got %v", attemptRow)
 	}
 }
 
