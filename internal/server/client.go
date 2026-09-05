@@ -109,16 +109,16 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // isAnthropicRequest returns true when the request carries an Anthropic
-// version header, signalling that the client expects an Anthropic-shaped
-// model-list envelope.
+// version header, signalling that the client expects Anthropic capability
+// metadata in the Tiller catalogue.
 func isAnthropicRequest(r *http.Request) bool {
 	return r.Header.Get("anthropic-version") != ""
 }
 
 // addReasoningToCatalogueEntry extends a client-facing catalogue entry with
-// reasoning-selector metadata. When anthropic is true, the entry is shaped as
-// an Anthropic capabilities envelope; otherwise it uses OpenAI-compatible
-// extension fields.
+// reasoning-selector metadata. When anthropic is true, the entry contains
+// Anthropic capability metadata; otherwise it uses OpenAI-compatible extension
+// fields.
 func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningCapabilities, anthropic bool) {
 	if rc == nil {
 		return

@@ -53,7 +53,7 @@ type modelsDevModel struct {
 	// reasoning_options is the raw options array from models.dev. Each entry
 	// is parsed individually; a malformed entry is skipped while valid siblings
 	// are retained.
-	ReasoningOptions []map[string]any `json:"reasoning_options"`
+	ReasoningOptions *[]map[string]any `json:"reasoning_options"`
 }
 
 type modelsDevModalities struct {
@@ -90,6 +90,14 @@ var modelsDevProviderKey = map[string]string{
 	"perplexity":    "perplexity",
 	"minimax":       "minimax",
 	"huggingface":   "huggingface",
+}
+
+// Gateway providers may expose a model through a compatibility layer whose
+// selector support does not necessarily match the upstream model metadata.
+var gatewayProviderTypes = map[string]bool{
+	"openrouter": true, "opencode-zen": true, "opencode-go": true,
+	"opencode-free": true, "azure-openai": true, "groq": true,
+	"fireworks": true, "nvidia-nim": true, "huggingface": true,
 }
 
 // ollamaLabInference maps a recognizable model-family root (the lowercased,
@@ -163,7 +171,7 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 	out := make([]Model, len(models))
 	if strings.HasPrefix(providerType, "ollama-") {
 		for i, model := range models {
-			out[i] = enrichModel(model, ollamaLookup(data, model.ID))
+			out[i] = enrichModel(model, ollamaLookup(data, model.ID), providerType)
 		}
 		return out
 	}
@@ -176,7 +184,7 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 		return models
 	}
 	for i, model := range models {
-		out[i] = enrichModel(model, provider.Models[model.ID])
+		out[i] = enrichModel(model, provider.Models[model.ID], providerType)
 	}
 	return out
 }
@@ -184,13 +192,12 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 // parseModelsDevReasoningOptions converts raw models.dev reasoning_options
 // entries into normalized ReasoningOption values. Each entry is parsed
 // independently: a malformed entry is skipped while valid siblings are kept.
-// Returns nil only when every entry is malformed or the list is empty AND no
-// options could be derived. A non-nil result may have an empty Options list
-// only if the source explicitly reported an empty list — but models.dev
-// always reports non-empty option lists, so nil is returned for no data.
+// Returns nil when every non-empty entry is malformed. A non-nil result with
+// an empty Options list means the source explicitly reported an empty list,
+// which models.dev defines as no caller-controlled selector.
 func parseModelsDevReasoningOptions(raw []map[string]any) *ReasoningCapabilities {
 	if len(raw) == 0 {
-		return nil
+		return &ReasoningCapabilities{Options: []ReasoningOption{}}
 	}
 	var options []ReasoningOption
 	for _, entry := range raw {
@@ -230,7 +237,7 @@ func parseModelsDevReasoningOptions(raw []map[string]any) *ReasoningCapabilities
 }
 
 // enrichModel fills the gaps in a single model from its models.dev entry.
-func enrichModel(model Model, md modelsDevModel) Model {
+func enrichModel(model Model, md modelsDevModel, providerType string) Model {
 	if model.ContextLength == 0 && md.Limit.Context > 0 {
 		model.ContextLength = md.Limit.Context
 	}
@@ -257,10 +264,49 @@ func enrichModel(model Model, md modelsDevModel) Model {
 	if len(model.OutputModalities) == 0 && len(md.Modalities.Output) > 0 {
 		model.OutputModalities = md.Modalities.Output
 	}
+	var mdReasoning *ReasoningCapabilities
+	if md.ReasoningOptions != nil {
+		mdReasoning = parseModelsDevReasoningOptions(*md.ReasoningOptions)
+	}
 	if model.ReasoningCapabilities == nil {
-		model.ReasoningCapabilities = parseModelsDevReasoningOptions(md.ReasoningOptions)
+		model.ReasoningCapabilities = mdReasoning
+	} else if mdReasoning != nil && !gatewayProviderTypes[providerType] && len(model.ReasoningCapabilities.Options) > 0 {
+		model.ReasoningCapabilities = mergeReasoningCapabilitiesFallback(model.ReasoningCapabilities, mdReasoning)
 	}
 	return model
+}
+
+// mergeReasoningCapabilitiesFallback fills missing selector mechanisms from
+// models.dev while keeping provider metadata authoritative for mechanisms it
+// already reported. An explicitly empty provider option list is left alone.
+func mergeReasoningCapabilitiesFallback(provider, fallback *ReasoningCapabilities) *ReasoningCapabilities {
+	result := *provider
+	result.Options = append([]ReasoningOption(nil), provider.Options...)
+	present := make(map[ReasoningOptionType]bool)
+	for _, option := range result.Options {
+		present[option.Type] = true
+	}
+	for _, option := range fallback.Options {
+		if !present[option.Type] {
+			result.Options = append(result.Options, option)
+		}
+	}
+	if len(result.ThinkingModes) == 0 {
+		result.ThinkingModes = append([]string(nil), fallback.ThinkingModes...)
+	}
+	if result.DefaultEffort == "" {
+		result.DefaultEffort = fallback.DefaultEffort
+	}
+	if result.Mandatory == nil {
+		result.Mandatory = fallback.Mandatory
+	}
+	if result.DefaultEnabled == nil {
+		result.DefaultEnabled = fallback.DefaultEnabled
+	}
+	if len(result.Parameters) == 0 {
+		result.Parameters = append([]string(nil), fallback.Parameters...)
+	}
+	return &result
 }
 
 // coerceInt64 converts a JSON number or string to int64 without going

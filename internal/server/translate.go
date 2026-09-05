@@ -372,7 +372,9 @@ func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string
 			warning = true
 		}
 	case "enabled":
-		if opts.SupportsEnabled || opts.SupportsToggle || unknownSupport {
+		if opts.SupportsAdaptive {
+			body = setMessagesThinkingType(body, "adaptive")
+		} else if opts.SupportsEnabled || opts.SupportsToggle || unknownSupport {
 			body = setMessagesThinkingType(body, "enabled")
 		} else if selector.Effort == "" {
 			warning = true

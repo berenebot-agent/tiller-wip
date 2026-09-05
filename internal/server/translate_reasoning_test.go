@@ -455,6 +455,22 @@ func TestApplyReasoningSelector_TranslateRequestThenMap(t *testing.T) {
 	}
 }
 
+func TestApplyReasoningSelector_TranslateEnabledToAdaptiveMessages(t *testing.T) {
+	chatBody := []byte(`{"model":"client-x","messages":[{"role":"user","content":"hi"}],"reasoning":{"enabled":true}}`)
+	translated, err := translateRequest(chatBody, providers.ProtocolChat, providers.ProtocolMessages, "claude-opus-5")
+	if err != nil {
+		t.Fatalf("translateRequest: %v", err)
+	}
+	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
+	result, warning := applyReasoningSelector(translated, extractReasoningSelector(chatBody, providers.ProtocolChat), providers.ProtocolMessages, caps, "anthropic")
+	if warning != "" {
+		t.Fatalf("unexpected warning: %q", warning)
+	}
+	if !containsString(result, `"type":"adaptive"`) {
+		t.Fatalf("expected adaptive thinking in Messages body, got %s", string(result))
+	}
+}
+
 func TestApplyReasoningSelector_MaterializesTranslatedControls(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -468,6 +484,14 @@ func TestApplyReasoningSelector_MaterializesTranslatedControls(t *testing.T) {
 		{
 			name:       "Messages adaptive to Messages",
 			selector:   reasoningSelector{Present: true, Mode: "adaptive"},
+			body:       []byte(`{"model":"x"}`),
+			target:     providers.ProtocolMessages,
+			caps:       &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}},
+			wantFields: []string{`"type":"adaptive"`},
+		},
+		{
+			name:       "enabled to adaptive-only Messages",
+			selector:   reasoningSelector{Present: true, Enabled: boolPtr(true)},
 			body:       []byte(`{"model":"x"}`),
 			target:     providers.ProtocolMessages,
 			caps:       &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}},

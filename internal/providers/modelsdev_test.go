@@ -455,9 +455,9 @@ func TestParseModelsDevReasoningOptions(t *testing.T) {
 			want: &ReasoningCapabilities{Options: []ReasoningOption{{Type: ReasoningOptionToggle}}},
 		},
 		{
-			name: "empty list returns nil",
+			name: "explicit empty list is known no-selector",
 			raw:  []map[string]any{},
-			want: nil,
+			want: &ReasoningCapabilities{Options: []ReasoningOption{}},
 		},
 		{
 			name: "budget_tokens without min/max is still valid (unknown limits)",
@@ -505,6 +505,35 @@ func TestParseModelsDevReasoningOptions(t *testing.T) {
 	}
 }
 
+func TestModelsDevReasoningOptionsPresence(t *testing.T) {
+	for name, raw := range map[string]string{
+		"absent": `{}`,
+		"empty":  `{"reasoning_options":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var model modelsDevModel
+			if err := json.Unmarshal([]byte(raw), &model); err != nil {
+				t.Fatal(err)
+			}
+			caps := func() *ReasoningCapabilities {
+				if model.ReasoningOptions == nil {
+					return nil
+				}
+				return parseModelsDevReasoningOptions(*model.ReasoningOptions)
+			}()
+			if name == "absent" && caps != nil {
+				t.Fatalf("absent reasoning_options should be unknown, got %+v", caps)
+			}
+			if name == "empty" && caps == nil {
+				t.Fatal("explicit empty reasoning_options should be known")
+			}
+			if name == "empty" && len(caps.Options) != 0 {
+				t.Fatalf("explicit empty reasoning_options = %+v", caps.Options)
+			}
+		})
+	}
+}
+
 func slicesEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
@@ -533,9 +562,12 @@ func TestEnrichMergesReasoningCapabilities(t *testing.T) {
 		"deepseek": {Models: map[string]modelsDevModel{
 			"deepseek-v4-flash": {
 				Reasoning: boolPtr(true),
-				ReasoningOptions: []map[string]any{
-					{"type": "effort", "values": []any{"low", "medium", "high"}},
-				},
+				ReasoningOptions: func() *[]map[string]any {
+					v := []map[string]any{
+						{"type": "effort", "values": []any{"low", "medium", "high"}},
+					}
+					return &v
+				}(),
 			},
 		}},
 	}
@@ -561,9 +593,12 @@ func TestEnrichDoesNotOverrideProviderReportedReasoning(t *testing.T) {
 		"deepseek": {Models: map[string]modelsDevModel{
 			"deepseek-v4-flash": {
 				Reasoning: boolPtr(true),
-				ReasoningOptions: []map[string]any{
-					{"type": "effort", "values": []any{"low", "medium", "high"}},
-				},
+				ReasoningOptions: func() *[]map[string]any {
+					v := []map[string]any{
+						{"type": "effort", "values": []any{"low", "medium", "high"}},
+					}
+					return &v
+				}(),
 			},
 		}},
 	}
@@ -571,7 +606,33 @@ func TestEnrichDoesNotOverrideProviderReportedReasoning(t *testing.T) {
 		{Type: ReasoningOptionEffort, Values: []string{"none", "low", "medium", "high", "xhigh", "max"}},
 	}}
 	got := r.enrich([]Model{{ID: "deepseek-v4-flash", ReasoningCapabilities: providerCaps}}, "deepseek")
-	if got[0].ReasoningCapabilities != providerCaps {
+	if len(got[0].ReasoningCapabilities.Options) != 1 || !slicesEqual(got[0].ReasoningCapabilities.Options[0].Values, providerCaps.Options[0].Values) {
 		t.Errorf("provider-reported reasoning capabilities overridden: got %+v, want %+v", got[0].ReasoningCapabilities, providerCaps)
+	}
+}
+
+func TestEnrichReasoningFillsMissingDirectMechanisms(t *testing.T) {
+	r := NewRegistry()
+	options := []map[string]any{{"type": "budget_tokens", "min": float64(1024), "max": float64(8192)}}
+	r.modelsDev = modelsDevDataset{"deepseek": {Models: map[string]modelsDevModel{
+		"deepseek-v4-flash": {ReasoningOptions: &options},
+	}}}
+	provider := &ReasoningCapabilities{Options: []ReasoningOption{{Type: ReasoningOptionEffort, Values: []string{"low"}}}}
+	got := r.enrich([]Model{{ID: "deepseek-v4-flash", ReasoningCapabilities: provider}}, "deepseek")[0].ReasoningCapabilities
+	if len(got.Options) != 2 || got.Options[0].Type != ReasoningOptionEffort || got.Options[1].Type != ReasoningOptionBudgetTokens {
+		t.Fatalf("expected provider effort plus models.dev budget, got %+v", got.Options)
+	}
+}
+
+func TestEnrichReasoningKeepsGatewayProviderMetadata(t *testing.T) {
+	r := NewRegistry()
+	options := []map[string]any{{"type": "budget_tokens"}}
+	r.modelsDev = modelsDevDataset{"openrouter": {Models: map[string]modelsDevModel{
+		"model": {ReasoningOptions: &options},
+	}}}
+	provider := &ReasoningCapabilities{Options: []ReasoningOption{{Type: ReasoningOptionEffort, Values: []string{"low"}}}}
+	got := r.enrich([]Model{{ID: "model", ReasoningCapabilities: provider}}, "openrouter")[0].ReasoningCapabilities
+	if len(got.Options) != 1 || got.Options[0].Type != ReasoningOptionEffort {
+		t.Fatalf("gateway metadata should remain provider-only, got %+v", got.Options)
 	}
 }
