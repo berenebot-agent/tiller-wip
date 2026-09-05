@@ -590,8 +590,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		t.Fatalf("expected header + 1 row, got %d records", len(records))
 	}
 	header := records[0]
-	if len(header) != 28 {
-		t.Fatalf("expected 28 columns, got %d", len(header))
+	if len(header) != 24 {
+		t.Fatalf("expected 24 columns, got %d", len(header))
 	}
 	row := records[1]
 
@@ -631,10 +631,6 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		{"fallback_used", "false"},
 		{"fallback_reason", ""},
 		{"error_message", "boom"},
-		{"request_body", "the request body"},
-		{"request_body_truncated", "true"},
-		{"error_body", "the error body"},
-		{"error_body_truncated", "true"},
 		{"provider_request_id", "upstream-align"},
 		{"client_request_id", "req-align"},
 		{"route_kind", "virtual"},

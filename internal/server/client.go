@@ -410,11 +410,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row := &logRow{
 		clientKeyID:     identity.ID,
 		requestedModel:  requested,
+		routeStatus:     "unresolved",
 		protocol:        string(incoming),
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
-	logErrorBodies, _ := s.db.GetLogErrorBodies(r.Context())
 	originalBody := append([]byte(nil), body...)
 	// Extract the canonical reasoning selector once from the original request.
 	// It is recomputed for each candidate against that target's capabilities.
@@ -426,9 +426,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
-		if logErrorBodies && row.httpStatus >= 400 {
-			row.requestBody, row.requestBodyTruncated = loggedBody(originalBody)
-		}
 		if route.Virtual {
 			s.inflight.end(route.RouteModelID, streamed)
 		}
@@ -458,6 +455,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		return
 	}
 	row.exposedModel = &route.RequestedModel
+	row.routeStatus = "routed"
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
@@ -606,7 +604,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			class := fmt.Sprintf("http_%d", response.StatusCode)
 			var upstreamErrorBody []byte
 			var upstreamErrorReadErr error
-			if !route.Virtual || logErrorBodies {
+			if !route.Virtual {
 				// Read the upstream error body for bounded passthrough to the
 				// originating client. When sensitive body logging is enabled,
 				// retain the bounded body on the failed attempt as well.
@@ -615,9 +613,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			response.Body.Close()
 			attemptCancel()
 			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()}
-			if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
-				attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
-			}
 			row.attempts = append(row.attempts, attempt)
 			// Stale-auth recovery: on 401/403 from an OAuth provider, force a
 			// token refresh once per request and retry the same target before
@@ -641,9 +636,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
-				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
-					row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
-				}
 				// Direct (non-virtual, non-translated) routes pass through
 				// the provider's structured error body verbatim so the
 				// client sees the provider's error shape. The body is

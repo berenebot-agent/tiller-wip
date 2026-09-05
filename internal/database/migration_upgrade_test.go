@@ -199,8 +199,18 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				t.Fatalf("fixture data changed: provider=%q model=%q virtual=%q permission=%q", providerName, model, virtualName, permission)
 			}
 			if checkpoint >= 3 {
-				var routeKind, routeModel sql.NullString
-				if err := db.SQL.QueryRow(`SELECT route_kind,route_model FROM request_logs WHERE id='log1'`).Scan(&routeKind, &routeModel); err != nil {
+				var routeKind, routeModel, routeStatus sql.NullString
+				query := `SELECT route_kind,route_model FROM request_logs WHERE id='log1'`
+				if checkpoint >= 24 {
+					query = `SELECT route_kind,route_model,route_status FROM request_logs WHERE id='log1'`
+				}
+				var err error
+				if checkpoint >= 24 {
+					err = db.SQL.QueryRow(query).Scan(&routeKind, &routeModel, &routeStatus)
+				} else {
+					err = db.SQL.QueryRow(query).Scan(&routeKind, &routeModel)
+				}
+				if err != nil {
 					t.Fatal(err)
 				}
 				if checkpoint < 14 {
@@ -209,6 +219,9 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 					}
 				} else if routeKind.Valid || routeModel.Valid {
 					t.Fatalf("post-backfill request should retain null attribution, got %q/%q", routeKind.String, routeModel.String)
+				}
+				if checkpoint >= 24 && routeStatus.String != "legacy" {
+					t.Fatalf("legacy request route_status = %q, want legacy", routeStatus.String)
 				}
 				if checkpoint == 18 {
 					var errorText string
