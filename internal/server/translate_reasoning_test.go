@@ -634,6 +634,228 @@ func TestMergeReasoningCapabilitiesPreservesModesAndUnrestrictedEffort(t *testin
 	}
 }
 
+func TestTranslateNonstreamReasoning_MessagesUpstream_ClientChat(t *testing.T) {
+	body := []byte(`{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-real",
+		"content": [
+			{"type": "thinking", "thinking": "let me think about this"},
+			{"type": "text", "text": "the answer is 42"}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 10, "output_tokens": 20}
+	}`)
+	translated, err := translateNonstreamResponse(body, providers.ProtocolChat, providers.ProtocolMessages, "client-x")
+	if err != nil {
+		t.Fatalf("translateNonstreamResponse: %v", err)
+	}
+	if !containsString(translated, `"reasoning_content":"let me think about this"`) {
+		t.Errorf("reasoning_content lost in Messages upstream->Chat client: %s", translated)
+	}
+	if !containsString(translated, `"text":"the answer is 42"`) {
+		t.Errorf("text content lost in Messages upstream->Chat client: %s", translated)
+	}
+}
+
+func TestTranslateNonstreamReasoning_MessagesUpstream_ClientResponses(t *testing.T) {
+	body := []byte(`{
+		"id": "msg_123",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-real",
+		"content": [
+			{"type": "thinking", "thinking": "let me think about this"},
+			{"type": "text", "text": "the answer is 42"}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 10, "output_tokens": 20}
+	}`)
+	translated, err := translateNonstreamResponse(body, providers.ProtocolResponses, providers.ProtocolMessages, "client-x")
+	if err != nil {
+		t.Fatalf("translateNonstreamResponse: %v", err)
+	}
+	if !containsString(translated, `"type":"reasoning"`) {
+		t.Errorf("reasoning output lost in Messages upstream->Responses client: %s", translated)
+	}
+	if !containsString(translated, `let me think about this`) {
+		t.Errorf("reasoning text lost in Messages upstream->Responses client: %s", translated)
+	}
+	if !containsString(translated, `"text":"the answer is 42"`) {
+		t.Errorf("text content lost in Messages upstream->Responses client: %s", translated)
+	}
+}
+
+func TestTranslateNonstreamReasoning_ResponsesUpstream_ClientChat(t *testing.T) {
+	body := []byte(`{
+		"id": "resp_123",
+		"object": "response",
+		"created_at": 1700000000,
+		"status": "completed",
+		"model": "gpt-real",
+		"output": [
+			{
+				"id": "msg_123",
+				"type": "message",
+				"role": "assistant",
+				"status": "completed",
+				"content": [
+					{"type": "output_text", "text": "the answer is 42", "annotations": []}
+				]
+			},
+			{
+				"id": "rs_123",
+				"type": "reasoning",
+				"summary": [{"type": "summary_text", "text": "let me think about this"}]
+			}
+		],
+		"usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+	}`)
+	translated, err := translateNonstreamResponse(body, providers.ProtocolChat, providers.ProtocolResponses, "client-x")
+	if err != nil {
+		t.Fatalf("translateNonstreamResponse: %v", err)
+	}
+	if !containsString(translated, `"reasoning_content":"let me think about this"`) {
+		t.Errorf("reasoning_content lost in Responses upstream->Chat client: %s", translated)
+	}
+	if !containsString(translated, `"text":"the answer is 42"`) {
+		t.Errorf("text content lost in Responses upstream->Chat client: %s", translated)
+	}
+}
+
+func TestTranslateNonstreamReasoning_ResponsesUpstream_ClientMessages(t *testing.T) {
+	body := []byte(`{
+		"id": "resp_123",
+		"object": "response",
+		"created_at": 1700000000,
+		"status": "completed",
+		"model": "gpt-real",
+		"output": [
+			{
+				"id": "msg_123",
+				"type": "message",
+				"role": "assistant",
+				"status": "completed",
+				"content": [
+					{"type": "output_text", "text": "the answer is 42", "annotations": []}
+				]
+			},
+			{
+				"id": "rs_123",
+				"type": "reasoning",
+				"summary": [{"type": "summary_text", "text": "let me think about this"}]
+			}
+		],
+		"usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30}
+	}`)
+	translated, err := translateNonstreamResponse(body, providers.ProtocolMessages, providers.ProtocolResponses, "client-x")
+	if err != nil {
+		t.Fatalf("translateNonstreamResponse: %v", err)
+	}
+	if !containsString(translated, `"type":"thinking"`) {
+		t.Errorf("thinking block lost in Responses upstream->Messages client: %s", translated)
+	}
+	if !containsString(translated, `let me think about this`) {
+		t.Errorf("reasoning text lost in Responses upstream->Messages client: %s", translated)
+	}
+	if !containsString(translated, `"text":"the answer is 42"`) {
+		t.Errorf("text content lost in Responses upstream->Messages client: %s", translated)
+	}
+}
+
+func TestTranslateNonstreamReasoning_ChatReasoningUpstream_ClientResponses(t *testing.T) {
+	body := []byte(`{
+		"id": "chat_123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-real",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "the answer is 42",
+				"reasoning_content": "let me think about this"
+			},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+	}`)
+	translated, err := translateNonstreamResponse(body, providers.ProtocolResponses, providers.ProtocolChat, "client-x")
+	if err != nil {
+		t.Fatalf("translateNonstreamResponse: %v", err)
+	}
+	if !containsString(translated, `"type":"reasoning"`) {
+		t.Errorf("reasoning output lost in Chat upstream->Responses client: %s", translated)
+	}
+	if !containsString(translated, `let me think about this`) {
+		t.Errorf("reasoning text lost in Chat upstream->Responses client: %s", translated)
+	}
+	if !containsString(translated, `"text":"the answer is 42"`) {
+		t.Errorf("text content lost in Chat upstream->Responses client: %s", translated)
+	}
+}
+
+func TestTranslateNonstreamReasoning_ChatReasoningUpstream_ClientMessages(t *testing.T) {
+	body := []byte(`{
+		"id": "chat_123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-real",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "the answer is 42",
+				"reasoning_content": "let me think about this"
+			},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+	}`)
+	translated, err := translateNonstreamResponse(body, providers.ProtocolMessages, providers.ProtocolChat, "client-x")
+	if err != nil {
+		t.Fatalf("translateNonstreamResponse: %v", err)
+	}
+	if !containsString(translated, `"type":"thinking"`) {
+		t.Errorf("thinking block lost in Chat upstream->Messages client: %s", translated)
+	}
+	if !containsString(translated, `let me think about this`) {
+		t.Errorf("reasoning text lost in Chat upstream->Messages client: %s", translated)
+	}
+	if !containsString(translated, `"text":"the answer is 42"`) {
+		t.Errorf("text content lost in Chat upstream->Messages client: %s", translated)
+	}
+}
+
+func TestTranslateNonstreamReasoning_NoReasoningPreservesText(t *testing.T) {
+	body := []byte(`{
+		"id": "chat_123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-real",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "the answer is 42"
+			},
+			"finish_reason": "stop"
+		}],
+		"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+	}`)
+	translated, err := translateNonstreamResponse(body, providers.ProtocolMessages, providers.ProtocolChat, "client-x")
+	if err != nil {
+		t.Fatalf("translateNonstreamResponse: %v", err)
+	}
+	if containsString(translated, "reasoning") || containsString(translated, "thinking") {
+		t.Errorf("spurious reasoning in Chat upstream->Messages client without reasoning: %s", translated)
+	}
+	if !containsString(translated, `"text":"the answer is 42"`) {
+		t.Errorf("text content lost: %s", translated)
+	}
+}
+
 func containsString(b []byte, s string) bool {
 	for i := 0; i+len(s) <= len(b); i++ {
 		if string(b[i:i+len(s)]) == s {

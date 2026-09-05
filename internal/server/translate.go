@@ -922,6 +922,7 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 	usage := source["usage"]
 	if target == providers.ProtocolMessages {
 		content := []any{}
+		var reasoningText string
 		for _, raw := range asSlice(source["content"]) {
 			block, _ := raw.(map[string]any)
 			switch block["type"] {
@@ -931,13 +932,16 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 				}
 			case "thinking":
 				if text, _ := block["thinking"].(string); text != "" {
-					message["reasoning_content"] = fmt.Sprint(message["reasoning_content"]) + text
+					reasoningText += text
 				}
 			case "tool_use":
 				calls, _ := message["tool_calls"].([]any)
 				calls = append(calls, map[string]any{"id": block["id"], "type": "function", "function": map[string]any{"name": block["name"], "arguments": jsonString(block["input"])}})
 				message["tool_calls"] = calls
 			}
+		}
+		if reasoningText != "" {
+			message["reasoning_content"] = reasoningText
 		}
 		message["content"] = content
 		if source["stop_reason"] == "tool_use" {
@@ -949,6 +953,7 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 	} else {
 		content := []any{}
 		calls := []any{}
+		var reasoningText string
 		for _, raw := range asSlice(source["output"]) {
 			item, _ := raw.(map[string]any)
 			switch item["type"] {
@@ -959,12 +964,21 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 					case "output_text":
 						content = append(content, map[string]any{"type": "text", "text": part["text"]})
 					case "reasoning":
-						message["reasoning_content"] = fmt.Sprint(message["reasoning_content"]) + fmt.Sprint(part["text"])
+						reasoningText += fmt.Sprint(part["text"])
+					}
+				}
+			case "reasoning":
+				for _, summaryRaw := range asSlice(item["summary"]) {
+					if summary, ok := summaryRaw.(map[string]any); ok {
+						reasoningText += fmt.Sprint(summary["text"])
 					}
 				}
 			case "function_call":
 				calls = append(calls, map[string]any{"id": item["call_id"], "type": "function", "function": map[string]any{"name": item["name"], "arguments": item["arguments"]}})
 			}
+		}
+		if reasoningText != "" {
+			message["reasoning_content"] = reasoningText
 		}
 		message["content"] = content
 		if len(calls) > 0 {
@@ -990,6 +1004,9 @@ func chatResponseToMessages(chat map[string]any, model string) map[string]any {
 		call, _ := raw.(map[string]any)
 		fn, _ := call["function"].(map[string]any)
 		content = append(content, map[string]any{"type": "tool_use", "id": call["id"], "name": fn["name"], "input": jsonValue(fn["arguments"])})
+	}
+	if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" {
+		content = append([]any{map[string]any{"type": "thinking", "thinking": reasoning}}, content...)
 	}
 	stop := "end_turn"
 	if choice["finish_reason"] == "tool_calls" {
@@ -1018,6 +1035,9 @@ func chatResponseToResponses(chat map[string]any, model string) map[string]any {
 		}
 	}
 	output = append(output, map[string]any{"id": "msg_" + fmt.Sprint(chat["id"]), "type": "message", "role": "assistant", "status": "completed", "content": parts})
+	if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" {
+		output = append(output, map[string]any{"id": "rs_" + fmt.Sprint(chat["id"]), "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": reasoning}}})
+	}
 	for _, raw := range asSlice(message["tool_calls"]) {
 		call, _ := raw.(map[string]any)
 		fn, _ := call["function"].(map[string]any)
