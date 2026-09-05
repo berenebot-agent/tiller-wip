@@ -36,7 +36,6 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
-	anthropic := isAnthropicRequest(r)
 	if keyType == "single" {
 		var modelName, realID, virtualID string
 		var real, virtual sql.NullString
@@ -51,14 +50,11 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		realID, virtualID = real.String, virtual.String
 		var contextLength, maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
-		var reasoningCaps *providers.ReasoningCapabilities
 		if real.Valid {
 			var reasoningRaw sql.NullString
 			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw)
-			reasoningCaps = decodeReasoningCapabilities(reasoningRaw)
 		} else {
 			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
-			reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID)
 		}
 		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
@@ -68,7 +64,6 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 			entry["max_output_tokens"] = maxOutputTokens.Int64
 		}
 		caps.addTo(entry)
-		addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
 		return
 	}
@@ -99,13 +94,6 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 				entry["max_output_tokens"] = maxOutputTokens.Int64
 			}
 			caps.addTo(entry)
-			reasoningCaps := decodeReasoningCapabilities(reasoningRaw)
-			// For virtual models, aggregate the superset across eligible targets
-			// (same as Single virtuals) rather than leaving it nil.
-			if virtualID.Valid && reasoningCaps == nil {
-				reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID.String)
-			}
-			addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
 			data = append(data, entry)
 		}
 	}
@@ -141,7 +129,7 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 			inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 			return
 		}
-		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
+ 	entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
 			entry["context_length"] = contextLength.Int64
 		}
@@ -149,7 +137,6 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 			entry["max_output_tokens"] = maxOutputTokens.Int64
 		}
 		caps.addTo(entry)
-		addReasoningToCatalogueEntry(entry, decodeReasoningCapabilities(reasoningRaw), isAnthropicRequest(r))
 		writeJSON(w, 200, entry)
 		return
 	}
@@ -165,7 +152,6 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 		entry["max_output_tokens"] = maxOutputTokens.Int64
 	}
 	caps.addTo(entry)
-	addReasoningToCatalogueEntry(entry, s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID), isAnthropicRequest(r))
 	writeJSON(w, 200, entry)
 }
 
@@ -174,112 +160,6 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 // metadata in the Tiller catalogue.
 func isAnthropicRequest(r *http.Request) bool {
 	return r.Header.Get("anthropic-version") != ""
-}
-
-// addReasoningToCatalogueEntry extends a client-facing catalogue entry with
-// reasoning-selector metadata. When anthropic is true, the entry contains
-// Anthropic capability metadata; otherwise it uses OpenAI-compatible extension
-// fields.
-func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningCapabilities, anthropic bool) {
-	if rc == nil {
-		return
-	}
-	if anthropic {
-		// Anthropic shape: capabilities.effort + capabilities.thinking.
-		// BudgetTokens is intentionally not surfaced here — Anthropic's
-		// client catalogue only exposes effort levels and thinking modes,
-		// not a numeric budget selector.
-		caps := map[string]any{}
-		var thinking map[string]any
-		for _, opt := range rc.Options {
-			switch opt.Type {
-			case providers.ReasoningOptionEffort:
-				effort := map[string]any{"supported": true}
-				for _, level := range providers.CanonicalEffortOrder() {
-					for _, v := range opt.Values {
-						if v == level {
-							effort[level] = map[string]any{"supported": true}
-							break
-						}
-					}
-				}
-				caps["effort"] = effort
-			case providers.ReasoningOptionToggle:
-				thinking = map[string]any{"supported": true}
-			}
-		}
-		if len(rc.ThinkingModes) > 0 {
-			if thinking == nil {
-				thinking = map[string]any{"supported": true}
-			}
-			types := map[string]any{}
-			for _, mode := range rc.ThinkingModes {
-				switch mode {
-				case "adaptive", "enabled":
-					types[mode] = map[string]any{"supported": true}
-				}
-			}
-			if len(types) > 0 {
-				thinking["types"] = types
-			}
-		}
-		if thinking != nil {
-			caps["thinking"] = thinking
-		}
-		if len(caps) > 0 {
-			entry["capabilities"] = caps
-		}
-		return
-	}
-	// OpenAI-compatible shape: reasoning_options + reasoning.supported_efforts.
-	var effortValues []string
-	var hasEffort bool
-	var reasoningOptions []map[string]any
-	for _, opt := range rc.Options {
-		switch opt.Type {
-		case providers.ReasoningOptionEffort:
-			hasEffort = true
-			effortValues = opt.Values
-			reasoningOptions = append(reasoningOptions, map[string]any{"type": "effort", "values": opt.Values})
-		case providers.ReasoningOptionToggle:
-			reasoningOptions = append(reasoningOptions, map[string]any{"type": "toggle"})
-		case providers.ReasoningOptionBudgetTokens:
-			budget := map[string]any{"type": "budget_tokens"}
-			if opt.Min != nil {
-				budget["min"] = *opt.Min
-			}
-			if opt.Max != nil {
-				budget["max"] = *opt.Max
-			}
-			reasoningOptions = append(reasoningOptions, budget)
-		}
-	}
-	if len(reasoningOptions) > 0 {
-		entry["reasoning_options"] = reasoningOptions
-	}
-	if hasEffort {
-		entry["reasoning"] = map[string]any{"supported_efforts": effortValues}
-	}
-}
-
-// aggregateVirtualReasoningCapabilities computes the router-supported superset
-// of reasoning capabilities for a virtual model by querying its eligible
-// targets' stored capabilities.
-func (s *Server) aggregateVirtualReasoningCapabilities(ctx context.Context, virtualModelID string) *providers.ReasoningCapabilities {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualModelID)
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var merged *providers.ReasoningCapabilities
-	for rows.Next() {
-		var raw sql.NullString
-		if rows.Scan(&raw) == nil {
-			rc := decodeReasoningCapabilities(raw)
-			merged = mergeReasoningCapabilities(merged, rc)
-		}
-	}
-	return merged
 }
 
 // modelCapabilities holds the tri-state capability flags for a model. A flag is

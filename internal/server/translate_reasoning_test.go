@@ -586,41 +586,6 @@ func TestStripReasoningSelectorMessagesRemovesEmptyObjects(t *testing.T) {
 	}
 }
 
-func TestReasoningCataloguePreservesAnthropicThinkingModes(t *testing.T) {
-	entry := map[string]any{}
-	addReasoningToCatalogueEntry(entry, &providers.ReasoningCapabilities{
-		ThinkingModes: []string{"adaptive", "enabled"},
-	}, true)
-	caps, ok := entry["capabilities"].(map[string]any)
-	if !ok {
-		t.Fatalf("capabilities missing: %#v", entry)
-	}
-	thinking, ok := caps["thinking"].(map[string]any)
-	if !ok {
-		t.Fatalf("thinking missing: %#v", caps)
-	}
-	types, ok := thinking["types"].(map[string]any)
-	if !ok || types["adaptive"] == nil || types["enabled"] == nil {
-		t.Fatalf("thinking types = %#v", thinking["types"])
-	}
-}
-
-func TestReasoningCataloguePreservesUnrestrictedEffort(t *testing.T) {
-	entry := map[string]any{}
-	addReasoningToCatalogueEntry(entry, &providers.ReasoningCapabilities{
-		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort}},
-	}, false)
-	reasoning, ok := entry["reasoning"].(map[string]any)
-	if !ok {
-		t.Fatalf("reasoning missing: %#v", entry)
-	}
-	values, exists := reasoning["supported_efforts"]
-	list, isList := values.([]string)
-	if !exists || !isList || list != nil {
-		t.Fatalf("supported_efforts = %#v, want null", values)
-	}
-}
-
 func TestMergeReasoningCapabilitiesPreservesModesAndUnrestrictedEffort(t *testing.T) {
 	merged := mergeReasoningCapabilities(
 		&providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low"}}}, ThinkingModes: []string{"enabled"}},
