@@ -1104,6 +1104,10 @@ type streamState struct {
 	started, contentStarted, done bool
 	outputIndex                   int
 	accumulated                   strings.Builder
+	inputTokens                   int64
+	outputTokens                  int64
+	hasInputTokens                bool
+	hasOutputTokens               bool
 }
 type canonicalDelta struct {
 	Kind, Text, CallID, Name, Arguments, Finish string
@@ -1143,6 +1147,9 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				if id, ok := message["id"].(string); ok {
 					state.id = id
 				}
+				if u, ok := message["usage"].(map[string]any); ok {
+					out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"input_tokens": u["input_tokens"]}})
+				}
 			}
 		case "content_block_start":
 			if block, ok := payload["content_block"].(map[string]any); ok && block["type"] == "tool_use" {
@@ -1158,6 +1165,9 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				}
 			}
 		case "message_delta":
+			if u, ok := payload["usage"].(map[string]any); ok {
+				out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"output_tokens": u["output_tokens"]}})
+			}
 			if delta, ok := payload["delta"].(map[string]any); ok {
 				out = append(out, canonicalDelta{Kind: "finish", Finish: fmt.Sprint(delta["stop_reason"])})
 			}
@@ -1183,6 +1193,14 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			out = append(out, canonicalDelta{Kind: "tool", CallID: fmt.Sprint(item["call_id"]), Name: fmt.Sprint(item["name"])})
 		}
 	case "response.completed":
+		if response, ok := payload["response"].(map[string]any); ok {
+			if u, ok := response["usage"].(map[string]any); ok {
+				out = append(out, canonicalDelta{Kind: "usage", Usage: u})
+			}
+		}
+		// Responses has no separate finish event. Emit one so translated
+		// Chat and Messages streams can close their assistant message cleanly.
+		out = append(out, canonicalDelta{Kind: "finish", Finish: "stop"})
 		return out, true
 	}
 	return out, false
@@ -1208,7 +1226,7 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		payload["choices"] = []any{choice}
 		if delta.Kind == "usage" {
 			payload["choices"] = []any{}
-			payload["usage"] = delta.Usage
+			payload["usage"] = chatUsage(delta.Usage)
 		}
 		writeSSE(w, "", payload)
 		return
@@ -1225,11 +1243,29 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 				state.contentStarted = true
 			}
 			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": delta.Text}})
+		case "usage":
+			if u, ok := delta.Usage.(map[string]any); ok {
+				if value, ok := coerceInt64(u["input_tokens"]); ok && !state.hasInputTokens {
+					state.inputTokens = value
+					state.hasInputTokens = true
+				}
+				if value, ok := coerceInt64(u["output_tokens"]); ok && !state.hasOutputTokens {
+					state.outputTokens = value
+					state.hasOutputTokens = true
+				}
+			}
 		case "finish":
 			if state.contentStarted {
 				writeSSE(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 			}
-			writeSSE(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": normalizeAnthropicFinish(delta.Finish), "stop_sequence": nil}, "usage": map[string]any{"output_tokens": 0}})
+			usage := map[string]any{"input_tokens": 0, "output_tokens": 0}
+			if state.hasInputTokens {
+				usage["input_tokens"] = state.inputTokens
+			}
+			if state.hasOutputTokens {
+				usage["output_tokens"] = state.outputTokens
+			}
+			writeSSE(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": normalizeAnthropicFinish(delta.Finish), "stop_sequence": nil}, "usage": usage})
 		}
 		return
 	}
@@ -1244,6 +1280,29 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		state.accumulated.WriteString(delta.Text)
 		writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": delta.Text})
 	}
+}
+
+func chatUsage(value any) any {
+	u, ok := value.(map[string]any)
+	if !ok {
+		return value
+	}
+	if _, hasPrompt := u["prompt_tokens"]; hasPrompt {
+		return u
+	}
+	converted := map[string]any{}
+	for key, value := range u {
+		converted[key] = value
+	}
+	if input, ok := converted["input_tokens"]; ok {
+		converted["prompt_tokens"] = input
+		delete(converted, "input_tokens")
+	}
+	if output, ok := converted["output_tokens"]; ok {
+		converted["completion_tokens"] = output
+		delete(converted, "output_tokens")
+	}
+	return converted
 }
 
 func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamState) {
