@@ -125,6 +125,9 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	}
 	if anthropic {
 		// Anthropic shape: capabilities.effort + capabilities.thinking.
+		// BudgetTokens is intentionally not surfaced here — Anthropic's
+		// client catalogue only exposes effort levels and thinking modes,
+		// not a numeric budget selector.
 		caps := map[string]any{}
 		var thinking map[string]any
 		for _, opt := range rc.Options {
