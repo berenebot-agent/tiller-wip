@@ -590,8 +590,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		t.Fatalf("expected header + 1 row, got %d records", len(records))
 	}
 	header := records[0]
-	if len(header) != 24 {
-		t.Fatalf("expected 24 columns, got %d", len(header))
+	if len(header) != 23 {
+		t.Fatalf("expected 23 columns, got %d", len(header))
 	}
 	row := records[1]
 

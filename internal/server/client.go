@@ -269,10 +269,6 @@ type resolvedRoute struct {
 	// ReasoningCapabilities holds the normalized selector metadata for this
 	// real target. nil when unknown.
 	ReasoningCapabilities *providers.ReasoningCapabilities
-	// warningCode holds the per-candidate warning computed during request
-	// preparation. Only the final successful candidate's warningCode is
-	// persisted to the Activity row.
-	warningCode string
 }
 
 func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
@@ -515,14 +511,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				return
 			}
 			// After translation, re-apply the canonical selector for the target.
-			attemptBody, candidate.warningCode = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
+			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
 		} else {
 			var attemptRaw map[string]json.RawMessage
 			_ = json.Unmarshal(attemptBody, &attemptRaw)
 			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
 			attemptBody, _ = json.Marshal(attemptRaw)
 			// Native protocol: apply capability-based omission if needed.
-			attemptBody, candidate.warningCode = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
+			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
 		}
 		if candidate.Provider.Type == "codex-subscription" {
 			attemptBody, err = normalizeCodexRequest(attemptBody)
@@ -691,8 +687,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if route.Virtual {
 			activeTargetID = targetID
 		}
-		// Assign the final successful candidate's warning code to the row.
-		row.warningCode = candidate.warningCode
 		row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 		break
 	}

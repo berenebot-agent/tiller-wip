@@ -29,10 +29,6 @@ type reasoningSelector struct {
 	BudgetTokens *int64
 }
 
-// warningCode is a metadata-only annotation indicating the final successful
-// route had to omit the requested reasoning selector.
-const warningReasoningSelectorOmitted = "reasoning_selector_omitted"
-
 // translateRequest translates a request body from one protocol to another.
 // When the target protocol differs, reasoning controls are extracted before
 // conversion and must be re-applied by the caller via applyReasoningSelector.
@@ -183,20 +179,18 @@ func coerceInt64(v any) (int64, bool) {
 
 // applyReasoningSelector maps a canonical selector onto a target request body
 // according to the target protocol and the target model's reasoning
-// capabilities. Returns the modified body and a warning code (empty when no
-// omission occurred).
+// capabilities. Unsupported selector parts are silently omitted.
 //
 // Mapping rules:
 //   - Exact effort values map directly when the target advertises them.
 //   - "none" maps to Messages disabled when supported.
 //   - "minimal" maps only when explicitly advertised.
 //   - Numeric budgets map when a numeric target control exists.
-//   - If the target is known not to support reasoning, the selector is omitted
-//     and a warning is returned.
+//   - If the target is known not to support reasoning, the selector is omitted.
 //   - If support is unknown, the selector is passed through.
-func applyReasoningSelector(body []byte, selector reasoningSelector, target providers.Protocol, caps *providers.ReasoningCapabilities, providerType string) ([]byte, string) {
+func applyReasoningSelector(body []byte, selector reasoningSelector, target providers.Protocol, caps *providers.ReasoningCapabilities, providerType string) []byte {
 	if !selector.Present {
-		return body, ""
+		return body
 	}
 	opts := providers.ExtractReasoningOptions(caps)
 	unknownSupport := caps == nil
@@ -208,12 +202,11 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 		body = stripReasoningSelector(body, target)
 	}
 
-	// If target explicitly doesn't support reasoning, omit and warn.
+	// If target explicitly doesn't support reasoning, omit the selector.
 	if !unknownSupport && !opts.SupportsEffort && !opts.SupportsBudget && !opts.SupportsToggle && !opts.SupportsAdaptive && !opts.SupportsEnabled {
-		return body, warningReasoningSelectorOmitted
+		return body
 	}
 
-	var warning bool
 	mode := selector.Mode
 	if selector.Enabled != nil {
 		if *selector.Enabled {
@@ -224,16 +217,13 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 	}
 	switch target {
 	case providers.ProtocolChat:
-		body, warning = applyChatReasoning(body, selector, mode, opts, caps, unknownSupport)
+		body = applyChatReasoning(body, selector, mode, opts, caps, unknownSupport)
 	case providers.ProtocolResponses:
-		body, warning = applyResponsesReasoning(body, selector, mode, opts, unknownSupport)
+		body = applyResponsesReasoning(body, selector, mode, opts, unknownSupport)
 	case providers.ProtocolMessages:
-		body, warning = applyMessagesReasoning(body, selector, mode, opts, unknownSupport, providerType)
+		body = applyMessagesReasoning(body, selector, mode, opts, unknownSupport, providerType)
 	}
-	if warning {
-		return body, warningReasoningSelectorOmitted
-	}
-	return body, ""
+	return body
 }
 
 // stripReasoningSelector removes recognized reasoning selector fields from a
@@ -287,137 +277,86 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 }
 
 // applyChatReasoning maps a selector onto a Chat Completions request.
-// Mode (enabled/disabled) is always applied. Effort is only applied when
-// mode is not "disabled" — a selector with both enabled=false and effort
-// set is contradictory: disable wins, effort is dropped with a warning.
-func applyChatReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, caps *providers.ReasoningCapabilities, unknownSupport bool) ([]byte, bool) {
-	var warning bool
-	if mode == "enabled" || mode == "disabled" {
+// Mode (enabled/disabled) is applied when representable. A representable
+// disable wins over all other selector parts; otherwise unsupported parts are
+// omitted independently and the provider's default is used for them.
+func applyChatReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, caps *providers.ReasoningCapabilities, unknownSupport bool) []byte {
+	disabled := mode == "disabled" || selector.Effort == "none"
+	if disabled && (opts.SupportsToggle || effortIsSupported("none", opts) || unknownSupport) {
 		if opts.SupportsToggle || unknownSupport {
-			body = setChatEnabled(body, mode == "enabled")
-		} else if mode == "disabled" && effortIsSupported("none", opts) {
-			body = setChatEffort(body, "none")
-		} else if mode == "enabled" && caps != nil && caps.DefaultEffort != "" && !(caps.Mandatory != nil && *caps.Mandatory && caps.DefaultEffort == "none") && effortIsSupported(caps.DefaultEffort, opts) {
+			return setChatEnabled(body, false)
+		}
+		return setChatEffort(body, "none")
+	}
+	if mode == "enabled" {
+		if opts.SupportsToggle || unknownSupport {
+			body = setChatEnabled(body, true)
+		} else if caps != nil && caps.DefaultEffort != "" && !(caps.Mandatory != nil && *caps.Mandatory && caps.DefaultEffort == "none") && effortIsSupported(caps.DefaultEffort, opts) {
 			body = setChatEffort(body, caps.DefaultEffort)
-		} else if mode == "enabled" && caps != nil && caps.Mandatory != nil && *caps.Mandatory && caps.DefaultEffort == "none" {
-			// Mandatory reasoning is already enabled by the provider; omitting
-			// an explicit "none" is the safe representation of enable=true.
-		} else {
-			warning = true
 		}
+	} else if mode == "adaptive" && unknownSupport {
+		body = setChatMode(body, "adaptive")
 	}
-	if mode == "adaptive" {
-		if unknownSupport {
-			body = setChatMode(body, "adaptive")
-		} else {
-			warning = true
-		}
+	if selector.Effort != "" && selector.Effort != "none" && (effortIsSupported(selector.Effort, opts) || unknownSupport) {
+		body = setChatEffort(body, selector.Effort)
 	}
-	if selector.Effort != "" {
-		if mode == "disabled" {
-			warning = true
-		} else if effortIsSupported(selector.Effort, opts) || unknownSupport {
-			body = setChatEffort(body, selector.Effort)
-		} else {
-			warning = true
-		}
+	if selector.BudgetTokens != nil && (budgetIsSupported(*selector.BudgetTokens, opts) || unknownSupport) {
+		body = setChatBudget(body, *selector.BudgetTokens)
 	}
-	if selector.BudgetTokens != nil {
-		if budgetIsSupported(*selector.BudgetTokens, opts) || unknownSupport {
-			body = setChatBudget(body, *selector.BudgetTokens)
-		} else {
-			warning = true
-		}
-	}
-	return body, warning
+	return body
 }
 
 // applyResponsesReasoning maps a selector onto a Responses request.
-// Mode (enabled/disabled) is always applied. Effort is only applied when
-// mode is not "disabled" — a selector with both enabled=false and effort
-// set is contradictory: disable wins, effort is dropped with a warning.
-func applyResponsesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) ([]byte, bool) {
-	var warning bool
-	if mode == "enabled" || mode == "disabled" {
+func applyResponsesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) []byte {
+	disabled := mode == "disabled" || selector.Effort == "none"
+	if disabled && (opts.SupportsToggle || effortIsSupported("none", opts) || unknownSupport) {
 		if opts.SupportsToggle || unknownSupport {
-			body = setResponsesEnabled(body, mode == "enabled")
-		} else if effortIsSupported("none", opts) && mode == "disabled" {
-			body = setResponsesEffort(body, "none")
-		} else {
-			warning = true
+			return setResponsesEnabled(body, false)
 		}
+		return setResponsesEffort(body, "none")
 	}
-	if mode == "adaptive" {
-		if unknownSupport {
-			body = setResponsesMode(body, "adaptive")
-		} else {
-			warning = true
-		}
+	if mode == "enabled" && (opts.SupportsToggle || unknownSupport) {
+		body = setResponsesEnabled(body, true)
+	} else if mode == "adaptive" && unknownSupport {
+		body = setResponsesMode(body, "adaptive")
 	}
-	if selector.Effort != "" {
-		if mode == "disabled" {
-			warning = true
-		} else if effortIsSupported(selector.Effort, opts) || unknownSupport {
-			body = setResponsesEffort(body, selector.Effort)
-		} else {
-			warning = true
-		}
+	if selector.Effort != "" && selector.Effort != "none" && (effortIsSupported(selector.Effort, opts) || unknownSupport) {
+		body = setResponsesEffort(body, selector.Effort)
 	}
 	// Responses has no verified numeric reasoning-budget field. Do not invent
 	// reasoning.max_tokens, even when the source protocol had a token budget.
-	if selector.BudgetTokens != nil {
-		warning = true
-	}
-	return body, warning
+	return body
 }
 
 // applyMessagesReasoning maps a selector onto a Messages request.
-// Mode (enabled/disabled/adaptive) is always applied. Effort is only applied
-// when mode is not "disabled" — a selector with both enabled=false and effort
-// set is contradictory: disable wins, effort is dropped with a warning.
-func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool, providerType string) ([]byte, bool) {
-	var warning bool
+// Mode (enabled/disabled/adaptive) is applied when representable. A
+// representable disable wins over all other selector parts.
+func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool, providerType string) []byte {
+	disabled := mode == "disabled" || selector.Effort == "none"
+	if disabled && (opts.SupportsDisable || unknownSupport) {
+		return setMessagesThinkingType(body, "disabled")
+	}
 	switch mode {
 	case "adaptive":
 		if opts.SupportsAdaptive || unknownSupport {
 			body = setMessagesThinkingType(body, "adaptive")
-		} else {
-			warning = true
 		}
 	case "enabled":
 		if opts.SupportsAdaptive {
 			body = setMessagesThinkingType(body, "adaptive")
 		} else if opts.SupportsEnabled || opts.SupportsToggle || unknownSupport {
 			body = setMessagesThinkingType(body, "enabled")
-		} else if selector.Effort == "" {
-			warning = true
-		}
-	case "disabled":
-		if opts.SupportsDisable || unknownSupport {
-			body = setMessagesThinkingType(body, "disabled")
-		} else if selector.Effort == "" {
-			warning = true
 		}
 	}
-	if selector.Effort != "" {
-		if mode == "disabled" {
-			warning = true
-		} else if selector.Effort == "none" && (opts.SupportsDisable || unknownSupport) {
-			body = setMessagesThinkingType(body, "disabled")
-		} else if effortIsSupported(selector.Effort, opts) || unknownSupport {
+	if selector.Effort != "" && selector.Effort != "none" {
+		if effortIsSupported(selector.Effort, opts) || unknownSupport {
 			body = setMessagesEffort(body, selector.Effort)
-		} else {
-			warning = true
 		}
 	}
-	if selector.BudgetTokens != nil {
-		if budgetIsSupported(*selector.BudgetTokens, opts) || unknownSupport {
-			body = setMessagesBudget(body, *selector.BudgetTokens)
-		} else {
-			warning = true
-		}
+	if selector.BudgetTokens != nil && (budgetIsSupported(*selector.BudgetTokens, opts) || unknownSupport) {
+		body = setMessagesBudget(body, *selector.BudgetTokens)
 	}
-	return body, warning
+	return body
 }
 
 // matchesEffort returns true when the target explicitly advertises the given

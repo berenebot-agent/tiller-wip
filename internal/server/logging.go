@@ -39,7 +39,6 @@ type logRow struct {
 	errorMessage             *string
 	fallbackUsed             bool
 	fallbackReason           *string
-	warningCode              string
 	attempts                 []requestAttempt
 	routeStatus              string
 	createdAt                string
@@ -85,8 +84,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		return
 	}
 	defer tx.Rollback() // no-op after a successful Commit
-	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,warning_code,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, routeStatus, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, nil, 0, nil, 0, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, nullString(row.warningCode), row.createdAt); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, routeStatus, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, nil, 0, nil, 0, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
 		return
 	}
 	for i, attempt := range row.attempts {
