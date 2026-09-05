@@ -270,7 +270,7 @@ func enrichModel(model Model, md modelsDevModel, providerType string) Model {
 	}
 	if model.ReasoningCapabilities == nil {
 		model.ReasoningCapabilities = mdReasoning
-	} else if mdReasoning != nil && !gatewayProviderTypes[providerType] && len(model.ReasoningCapabilities.Options) > 0 {
+	} else if mdReasoning != nil && !gatewayProviderTypes[providerType] && (model.ReasoningCapabilities.Options == nil || len(model.ReasoningCapabilities.Options) > 0) {
 		model.ReasoningCapabilities = mergeReasoningCapabilitiesFallback(model.ReasoningCapabilities, mdReasoning)
 	}
 	return model
