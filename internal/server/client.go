@@ -535,7 +535,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		endpoint, e := providers.Endpoint(candidate.Provider, target)
 		if e != nil {
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 408, failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
 			continue
 		}
 		upstreamCtx, attemptCancel := context.WithCancel(r.Context())
@@ -573,7 +573,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
 				class = "upstream_timeout"
 			}
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 408, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 			if r.Context().Err() != nil {
 				if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 					class = "client_timeout"
@@ -670,7 +670,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				message = "The upstream provider response exceeded Tiller's non-streaming response limit."
 			}
 			terminalPreflightClass = class
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			status := response.StatusCode
+			if status == 0 {
+				status = 408
+			}
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: status, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
 			row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			if !route.Virtual || r.Context().Err() != nil {
 				row.httpStatus = 502
