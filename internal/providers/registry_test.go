@@ -418,11 +418,11 @@ func TestParseReasoningCapabilitiesOpenRouter(t *testing.T) {
 		{
 			name: "full reasoning object",
 			raw: map[string]any{
-				"supported_efforts": []any{"low", "medium", "high"},
-				"default_effort":    "medium",
-				"mandatory":         true,
-				"default_enabled":   false,
-				"supports_max_tokens": true,
+				"supported_efforts":    []any{"low", "medium", "high"},
+				"default_effort":       "medium",
+				"mandatory":            true,
+				"default_enabled":      false,
+				"supports_max_tokens":  true,
 				"supported_parameters": []any{"reasoning", "reasoning_effort", "include_reasoning"},
 			},
 			want: &ReasoningCapabilities{

@@ -133,7 +133,7 @@ const (
 // (int64 pointers, never float) are populated for budget_tokens options.
 type ReasoningOption struct {
 	Type   ReasoningOptionType `json:"type"`
- Values []string            `json:"values,omitempty"`
+	Values []string            `json:"values,omitempty"`
 	Min    *int64              `json:"min,omitempty"`
 	Max    *int64              `json:"max,omitempty"`
 }
@@ -158,6 +158,8 @@ type ReasoningOptions struct {
 	SupportedEfforts []string
 	SupportsDisable  bool
 	SupportsBudget   bool
+	BudgetMin        *int64
+	BudgetMax        *int64
 	SupportsToggle   bool
 	SupportsAdaptive bool
 	SupportsEnabled  bool
@@ -182,6 +184,14 @@ func ExtractReasoningOptions(caps *ReasoningCapabilities) ReasoningOptions {
 			}
 		case ReasoningOptionBudgetTokens:
 			r.SupportsBudget = true
+			if opt.Min != nil && (r.BudgetMin == nil || *opt.Min < *r.BudgetMin) {
+				v := *opt.Min
+				r.BudgetMin = &v
+			}
+			if opt.Max != nil && (r.BudgetMax == nil || *opt.Max > *r.BudgetMax) {
+				v := *opt.Max
+				r.BudgetMax = &v
+			}
 		case ReasoningOptionToggle:
 			r.SupportsToggle = true
 		}
@@ -254,8 +264,8 @@ type Model struct {
 	SupportsTools, SupportsVision, SupportsReasoning, SupportsStructuredOutput *bool
 	// ReasoningCapabilities holds normalized selector metadata. nil means
 	// unknown; a non-nil struct describes the advertised selectors.
-	ReasoningCapabilities *ReasoningCapabilities
-	InputModalities, OutputModalities                                          []string
+	ReasoningCapabilities             *ReasoningCapabilities
+	InputModalities, OutputModalities []string
 }
 
 var openCodeZenProtocolByModel = map[string]Protocol{
@@ -603,7 +613,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 				TopProvider     struct {
 					MaxCompletionTokens int `json:"max_completion_tokens"`
 				} `json:"top_provider"`
-				SupportedParameters []string         `json:"supported_parameters"`
+				SupportedParameters []string `json:"supported_parameters"`
 				Architecture        struct {
 					InputModalities  []string `json:"input_modalities"`
 					OutputModalities []string `json:"output_modalities"`
@@ -641,16 +651,16 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			reasoningCaps := parseReasoningCapabilities(provider.Type, item.Reasoning, item.Capabilities, sp)
 			result = append(result, Model{
 				ID: modelID, DisplayName: display,
-				ContextLength:   firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens),
-				MaxOutputTokens: maxOutputTokens,
-				NativeProtocol:  nativeProtocol(provider.Type, modelID),
-				SupportsTools:    triBool(len(sp) > 0, slices.Contains(sp, "tools")),
-				SupportsVision:   triBool(len(arch.InputModalities) > 0, slices.Contains(arch.InputModalities, "image")),
-				SupportsReasoning:              triBool(len(sp) > 0, slices.Contains(sp, "reasoning")),
-				SupportsStructuredOutput:       triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")),
-				ReasoningCapabilities:          reasoningCaps,
-				InputModalities:                arch.InputModalities,
-				OutputModalities:               arch.OutputModalities,
+				ContextLength:            firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens),
+				MaxOutputTokens:          maxOutputTokens,
+				NativeProtocol:           nativeProtocol(provider.Type, modelID),
+				SupportsTools:            triBool(len(sp) > 0, slices.Contains(sp, "tools")),
+				SupportsVision:           triBool(len(arch.InputModalities) > 0, slices.Contains(arch.InputModalities, "image")),
+				SupportsReasoning:        triBool(len(sp) > 0, slices.Contains(sp, "reasoning")),
+				SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")),
+				ReasoningCapabilities:    reasoningCaps,
+				InputModalities:          arch.InputModalities,
+				OutputModalities:         arch.OutputModalities,
 			})
 		}
 		if !payload.HasMore && payload.Next == "" {

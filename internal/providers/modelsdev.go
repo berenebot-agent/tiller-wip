@@ -204,9 +204,9 @@ func parseModelsDevReasoningOptions(raw []map[string]any) *ReasoningCapabilities
 						efforts = append(efforts, s)
 					}
 				}
-			if len(efforts) > 0 {
-				options = append(options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
-			}
+				if len(efforts) > 0 {
+					options = append(options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
+				}
 			}
 		case "toggle":
 			// Retain the toggle mechanism without inventing defaults.

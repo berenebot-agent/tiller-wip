@@ -126,6 +126,7 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	if anthropic {
 		// Anthropic shape: capabilities.effort + capabilities.thinking.
 		caps := map[string]any{}
+		var thinking map[string]any
 		for _, opt := range rc.Options {
 			switch opt.Type {
 			case providers.ReasoningOptionEffort:
@@ -140,8 +141,26 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 				}
 				caps["effort"] = effort
 			case providers.ReasoningOptionToggle:
-				caps["thinking"] = map[string]any{"supported": true}
+				thinking = map[string]any{"supported": true}
 			}
+		}
+		if len(rc.ThinkingModes) > 0 {
+			if thinking == nil {
+				thinking = map[string]any{"supported": true}
+			}
+			types := map[string]any{}
+			for _, mode := range rc.ThinkingModes {
+				switch mode {
+				case "adaptive", "enabled":
+					types[mode] = map[string]any{"supported": true}
+				}
+			}
+			if len(types) > 0 {
+				thinking["types"] = types
+			}
+		}
+		if thinking != nil {
+			caps["thinking"] = thinking
 		}
 		if len(caps) > 0 {
 			entry["capabilities"] = caps
@@ -150,22 +169,31 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	}
 	// OpenAI-compatible shape: reasoning_options + reasoning.supported_efforts.
 	var effortValues []string
+	var hasEffort bool
 	var reasoningOptions []map[string]any
 	for _, opt := range rc.Options {
 		switch opt.Type {
 		case providers.ReasoningOptionEffort:
+			hasEffort = true
 			effortValues = opt.Values
 			reasoningOptions = append(reasoningOptions, map[string]any{"type": "effort", "values": opt.Values})
 		case providers.ReasoningOptionToggle:
 			reasoningOptions = append(reasoningOptions, map[string]any{"type": "toggle"})
 		case providers.ReasoningOptionBudgetTokens:
-			reasoningOptions = append(reasoningOptions, map[string]any{"type": "budget_tokens"})
+			budget := map[string]any{"type": "budget_tokens"}
+			if opt.Min != nil {
+				budget["min"] = *opt.Min
+			}
+			if opt.Max != nil {
+				budget["max"] = *opt.Max
+			}
+			reasoningOptions = append(reasoningOptions, budget)
 		}
 	}
 	if len(reasoningOptions) > 0 {
 		entry["reasoning_options"] = reasoningOptions
 	}
-	if len(effortValues) > 0 {
+	if hasEffort {
 		entry["reasoning"] = map[string]any{"supported_efforts": effortValues}
 	}
 }

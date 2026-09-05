@@ -87,23 +87,33 @@ func mergeReasoningCapabilities(a, b *providers.ReasoningCapabilities) *provider
 	if result.DefaultEffort == "" {
 		result.DefaultEffort = a.DefaultEffort
 	}
-	// Union effort values from all effort options.
+	// Union effort values from all effort options. An effort option with no
+	// values is OpenRouter's explicit unrestricted form and dominates any
+	// finite allowlist in the virtual superset.
 	seen := make(map[string]bool)
+	hasEffort, unrestrictedEffort := false, false
 	for _, opt := range append(a.Options, b.Options...) {
 		if opt.Type == providers.ReasoningOptionEffort {
+			hasEffort = true
+			if len(opt.Values) == 0 {
+				unrestrictedEffort = true
+			}
 			for _, v := range opt.Values {
 				seen[v] = true
 			}
 		}
 	}
-	if len(seen) > 0 {
+	if hasEffort {
 		var values []string
-		for v := range seen {
-			values = append(values, v)
+		if !unrestrictedEffort {
+			for v := range seen {
+				values = append(values, v)
+			}
+			values = providers.SortEfforts(values)
 		}
 		result.Options = append(result.Options, providers.ReasoningOption{
 			Type:   providers.ReasoningOptionEffort,
-			Values: providers.SortEfforts(values),
+			Values: values,
 		})
 	}
 	// Toggle if either reports it.
@@ -139,6 +149,25 @@ func mergeReasoningCapabilities(a, b *providers.ReasoningCapabilities) *provider
 			paramSeen[p] = true
 			result.Parameters = append(result.Parameters, p)
 		}
+	}
+	// Keep the Anthropic distinction between adaptive and legacy enabled
+	// thinking. The order is stable for deterministic catalogue JSON.
+	seenModes := make(map[string]bool)
+	for _, mode := range append(a.ThinkingModes, b.ThinkingModes...) {
+		if !seenModes[mode] {
+			seenModes[mode] = true
+			result.ThinkingModes = append(result.ThinkingModes, mode)
+		}
+	}
+	if len(result.ThinkingModes) > 1 {
+		ordered := []string{"adaptive", "enabled"}
+		modes := result.ThinkingModes[:0]
+		for _, mode := range ordered {
+			if seenModes[mode] {
+				modes = append(modes, mode)
+			}
+		}
+		result.ThinkingModes = modes
 	}
 	return result
 }

@@ -400,25 +400,25 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 type modelView struct {
-	ID                       string                            `json:"id"`
-	ProviderID               string                            `json:"provider_id"`
-	ProviderName             string                            `json:"provider_name"`
-	UpstreamModelID          string                            `json:"upstream_model_id"`
-	CanonicalModelID         string                            `json:"canonical_model_id"`
-	DisplayName              string                            `json:"display_name"`
-	ContextLength            *int64                            `json:"context_length"`
-	MaxOutputTokens          *int64                            `json:"max_output_tokens"`
-	NativeProtocol           providers.Protocol                `json:"native_protocol,omitempty"`
-	SupportsTools            *bool                             `json:"supports_tools"`
-	SupportsVision           *bool                             `json:"supports_vision"`
-	SupportsReasoning        *bool                             `json:"supports_reasoning"`
-	SupportsStructuredOutput *bool                             `json:"supports_structured_output"`
-	ReasoningCapabilities    *providers.ReasoningCapabilities  `json:"reasoning_capabilities,omitempty"`
-	InputModalities          []string                          `json:"input_modalities,omitempty"`
-	OutputModalities         []string                          `json:"output_modalities,omitempty"`
-	Available                bool                              `json:"available"`
-	FirstSeenAt              string                            `json:"first_seen_at"`
-	LastSeenAt               string                            `json:"last_seen_at"`
+	ID                       string                           `json:"id"`
+	ProviderID               string                           `json:"provider_id"`
+	ProviderName             string                           `json:"provider_name"`
+	UpstreamModelID          string                           `json:"upstream_model_id"`
+	CanonicalModelID         string                           `json:"canonical_model_id"`
+	DisplayName              string                           `json:"display_name"`
+	ContextLength            *int64                           `json:"context_length"`
+	MaxOutputTokens          *int64                           `json:"max_output_tokens"`
+	NativeProtocol           providers.Protocol               `json:"native_protocol,omitempty"`
+	SupportsTools            *bool                            `json:"supports_tools"`
+	SupportsVision           *bool                            `json:"supports_vision"`
+	SupportsReasoning        *bool                            `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool                            `json:"supports_structured_output"`
+	ReasoningCapabilities    *providers.ReasoningCapabilities `json:"reasoning_capabilities,omitempty"`
+	InputModalities          []string                         `json:"input_modalities,omitempty"`
+	OutputModalities         []string                         `json:"output_modalities,omitempty"`
+	Available                bool                             `json:"available"`
+	FirstSeenAt              string                           `json:"first_seen_at"`
+	LastSeenAt               string                           `json:"last_seen_at"`
 }
 
 func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request) {

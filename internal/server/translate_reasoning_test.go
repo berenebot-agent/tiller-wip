@@ -180,11 +180,11 @@ func TestExtractMessagesReasoning(t *testing.T) {
 
 func TestApplyReasoningSelector_ChatToResponses(t *testing.T) {
 	cases := []struct {
-		name     string
-		selector reasoningSelector
-		target   providers.Protocol
-		caps     *providers.ReasoningCapabilities
-		wantWarn bool
+		name       string
+		selector   reasoningSelector
+		target     providers.Protocol
+		caps       *providers.ReasoningCapabilities
+		wantWarn   bool
 		wantEffort string
 	}{
 		{
@@ -313,34 +313,35 @@ func TestApplyReasoningSelector_MessagesToChat(t *testing.T) {
 
 func TestApplyReasoningSelector_ToggleEnabledSemantics(t *testing.T) {
 	cases := []struct {
-		name      string
-		selector  reasoningSelector
-		caps      *providers.ReasoningCapabilities
-		wantWarn  bool
+		name       string
+		selector   reasoningSelector
+		caps       *providers.ReasoningCapabilities
+		wantWarn   bool
 		wantEffort string
 	}{
 		{
-			name:      "Enabled=false maps to none",
-			selector:  reasoningSelector{Present: true, Enabled: boolPtr(false)},
-			caps:      &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "medium"}}}},
+			name:       "Enabled=false maps to none",
+			selector:   reasoningSelector{Present: true, Enabled: boolPtr(false)},
+			caps:       &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "medium"}}}},
 			wantEffort: "none",
 		},
 		{
-			name:      "Mode=disabled maps to none",
-			selector:  reasoningSelector{Present: true, Mode: "disabled"},
-			caps:      &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "medium"}}}},
+			name:       "Mode=disabled maps to none",
+			selector:   reasoningSelector{Present: true, Mode: "disabled"},
+			caps:       &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "medium"}}}},
 			wantEffort: "none",
 		},
 		{
-			name:      "Enabled=true with default_effort uses default",
-			selector:  reasoningSelector{Present: true, Enabled: boolPtr(true)},
-			caps:      &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium"}}}, DefaultEffort: "medium"},
+			name:       "Enabled=true with default_effort uses default",
+			selector:   reasoningSelector{Present: true, Enabled: boolPtr(true)},
+			caps:       &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium"}}}, DefaultEffort: "medium"},
 			wantEffort: "medium",
 		},
 		{
-			name:      "Mode=adaptive passes through (unknown semantics)",
-			selector:  reasoningSelector{Present: true, Mode: "adaptive"},
-			caps:      &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium"}}}},
+			name:       "Mode=adaptive passes through (unknown semantics)",
+			selector:   reasoningSelector{Present: true, Mode: "adaptive"},
+			caps:       &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium"}}}},
+			wantWarn:   true,
 			wantEffort: "",
 		},
 	}
@@ -421,9 +422,9 @@ func TestApplyReasoningSelector_OpenRouterMandatoryNone(t *testing.T) {
 	// OpenRouter: mandatory=true + default_effort=none means reasoning is
 	// required; don't use "none" to force-enable when user explicitly enables.
 	caps := &providers.ReasoningCapabilities{
-		Options:        []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium", "high"}}},
-		DefaultEffort:  "none",
-		Mandatory:      boolPtr(true),
+		Options:       []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium", "high"}}},
+		DefaultEffort: "none",
+		Mandatory:     boolPtr(true),
 	}
 	selector := reasoningSelector{Present: true, Enabled: boolPtr(true)}
 	body := []byte(`{"model":"x","reasoning":{"enabled":true}}`)
@@ -451,6 +452,125 @@ func TestApplyReasoningSelector_TranslateRequestThenMap(t *testing.T) {
 	}
 	if !containsString(result, `"effort":"high"`) {
 		t.Errorf("expected effort=high in Messages body, got %s", string(result))
+	}
+}
+
+func TestApplyReasoningSelector_MaterializesTranslatedControls(t *testing.T) {
+	tests := []struct {
+		name       string
+		selector   reasoningSelector
+		body       []byte
+		target     providers.Protocol
+		caps       *providers.ReasoningCapabilities
+		wantFields []string
+		wantWarn   bool
+	}{
+		{
+			name:       "Messages adaptive to Messages",
+			selector:   reasoningSelector{Present: true, Mode: "adaptive"},
+			body:       []byte(`{"model":"x"}`),
+			target:     providers.ProtocolMessages,
+			caps:       &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}},
+			wantFields: []string{`"type":"adaptive"`},
+		},
+		{
+			name:       "enabled to toggle-only Chat",
+			selector:   reasoningSelector{Present: true, Enabled: boolPtr(true)},
+			body:       []byte(`{"model":"x"}`),
+			target:     providers.ProtocolChat,
+			caps:       &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}},
+			wantFields: []string{`"enabled":true`},
+		},
+		{
+			name:     "adaptive to Chat is omitted",
+			selector: reasoningSelector{Present: true, Mode: "adaptive"},
+			body:     []byte(`{"model":"x"}`),
+			target:   providers.ProtocolChat,
+			caps:     &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}},
+			wantWarn: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result, warning := applyReasoningSelector(tc.body, tc.selector, tc.target, tc.caps, "anthropic")
+			if tc.wantWarn && warning == "" {
+				t.Fatal("expected omission warning")
+			}
+			if !tc.wantWarn && warning != "" {
+				t.Fatalf("unexpected warning: %q", warning)
+			}
+			for _, field := range tc.wantFields {
+				if !containsString(result, field) {
+					t.Errorf("expected %s in %s", field, result)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyReasoningSelectorRejectsIncompatibleMechanism(t *testing.T) {
+	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}}
+	result, warning := applyReasoningSelector([]byte(`{"model":"x","reasoning_effort":"high"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolChat, caps, "openai")
+	if warning != warningReasoningSelectorOmitted {
+		t.Fatalf("warning = %q, want %q", warning, warningReasoningSelectorOmitted)
+	}
+	if containsString(result, "reasoning_effort") {
+		t.Fatalf("incompatible effort survived: %s", result)
+	}
+}
+
+func TestStripReasoningSelectorMessagesRemovesEmptyObjects(t *testing.T) {
+	result := stripReasoningSelector([]byte(`{"model":"x","output_config":{"effort":"high"},"thinking":{"type":"enabled"}}`), providers.ProtocolMessages)
+	if containsString(result, "output_config") || containsString(result, "thinking") {
+		t.Fatalf("empty selector objects survived: %s", result)
+	}
+}
+
+func TestReasoningCataloguePreservesAnthropicThinkingModes(t *testing.T) {
+	entry := map[string]any{}
+	addReasoningToCatalogueEntry(entry, &providers.ReasoningCapabilities{
+		ThinkingModes: []string{"adaptive", "enabled"},
+	}, true)
+	caps, ok := entry["capabilities"].(map[string]any)
+	if !ok {
+		t.Fatalf("capabilities missing: %#v", entry)
+	}
+	thinking, ok := caps["thinking"].(map[string]any)
+	if !ok {
+		t.Fatalf("thinking missing: %#v", caps)
+	}
+	types, ok := thinking["types"].(map[string]any)
+	if !ok || types["adaptive"] == nil || types["enabled"] == nil {
+		t.Fatalf("thinking types = %#v", thinking["types"])
+	}
+}
+
+func TestReasoningCataloguePreservesUnrestrictedEffort(t *testing.T) {
+	entry := map[string]any{}
+	addReasoningToCatalogueEntry(entry, &providers.ReasoningCapabilities{
+		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort}},
+	}, false)
+	reasoning, ok := entry["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning missing: %#v", entry)
+	}
+	values, exists := reasoning["supported_efforts"]
+	list, isList := values.([]string)
+	if !exists || !isList || list != nil {
+		t.Fatalf("supported_efforts = %#v, want null", values)
+	}
+}
+
+func TestMergeReasoningCapabilitiesPreservesModesAndUnrestrictedEffort(t *testing.T) {
+	merged := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low"}}}, ThinkingModes: []string{"enabled"}},
+		&providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort}}, ThinkingModes: []string{"adaptive"}},
+	)
+	if merged == nil || len(merged.Options) != 1 || len(merged.Options[0].Values) != 0 {
+		t.Fatalf("merged effort = %#v", merged)
+	}
+	if len(merged.ThinkingModes) != 2 || merged.ThinkingModes[0] != "adaptive" || merged.ThinkingModes[1] != "enabled" {
+		t.Fatalf("merged thinking modes = %v", merged.ThinkingModes)
 	}
 }
 
