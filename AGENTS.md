@@ -41,6 +41,18 @@ cd /opt/tiller-router && docker compose down && docker compose up --build
 - `--build` is required — without it, Compose reuses the existing image and the user's "rebuild" intent isn't honored.
 - Do not invent a `docker build` + manual `docker run` workflow unless the user explicitly asks for one. The Compose service is the supported path.
 
+## Looking at logs
+
+The router logs JSON (slog) to stdout, captured by Docker. To diagnose a running deployment, use:
+
+```bash
+./tests/scripts/tiller-logs.sh              # last 10 min, all logs
+./tests/scripts/tiller-logs.sh 30           # last N min, all logs
+./tests/scripts/tiller-logs.sh 10 errors    # last 10 min, ERROR/WARN only
+```
+
+The script resolves the container from `docker-compose.yml`, so it stays correct if the service name changes.
+
 ## Toolchain — Go runs in Docker, never on the host
 
 - Go is intentionally **not** installed on the host. `go` is not on PATH and `go: command not found` is expected, not an error. Do not install Go on the host and do not treat the missing host Go as a problem to fix.
