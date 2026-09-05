@@ -1,96 +1,72 @@
-# Reasoning/Thinking — TODO
+# Reasoning/Thinking — Closeout Plan
 
-> Post-PR audit of `beta.1-reasoning`. 5 bugs fixed & committed (B1–B4, T7).
+> Post-PR audit of `beta.1-reasoning`. The implementation direction is now
+> capability-aware pass-through with silent omission of selector parts that a
+> known target cannot represent.
 
----
+## Product and implementation decisions
 
-## Active (8 items)
+- Unsupported reasoning selector parts are omitted silently. There is no
+  `warning_code` activity signal, warning column, or warning UI to maintain.
+- Migration 023 is still unreleased: it adds only
+  `provider_models.reasoning_capabilities`; the `request_logs.warning_code`
+  addition is removed. A pre-release development database may retain that
+  unused column; it is harmless and does not need a cleanup migration.
+- The T7 production fix is in scope: explicit disable wins over a combined
+  effort selector, and regression coverage exercises Chat, Responses, and
+  Messages mappings. The no-selector early return and silent unsupported-part
+  behavior are covered too.
 
-### T1 — `warning_code` end-to-end test
-**Severity:** Critical | **Files:** `internal/server/admin_activity_export_test.go`, `insertLogRow` helper
+## Current scope
 
-The `reasoning_selector_omitted` warning flows proxy → DB → CSV/JSON export. No test verifies it lands.
+### Active — capability API and UI
 
-1. Extend `insertLogRow` to accept optional `warning_code`.
-2. Insert a row with `warning_code='reasoning_selector_omitted'`.
-3. Verify CSV: header has `"warning_code"`, row cell has value.
-4. Verify JSON: row object has `"warning_code": "reasoning_selector_omitted"`.
+Keep the normalized reasoning capability metadata available through the client
+catalogue and admin provider/virtual-model APIs. The admin UI exposes the
+capabilities entry points and dialog for real and virtual models, including
+eligible target aggregation. This surface remains active product work; do not
+reintroduce activity warnings as a substitute for capability visibility.
 
----
+### Completed coverage
 
-### T2 — `aggregateVirtualReasoningCapabilities` tests
-**Severity:** High | **File:** `internal/server/client.go:204–219`
+- **T2:** Virtual capability aggregation is covered through valid, NULL, and
+  malformed stored JSON, including admin API exposure and eligible-target
+  merging.
+- **T3:** Budget application covers supported in-range values and omission of
+  unsupported or out-of-range values.
+- **T5:** `ExtractReasoningOptions` covers effort, toggle, budget, combined,
+  unrestricted, and nil capabilities.
+- **T6:** A selector-absent request is verified to pass through byte-for-byte
+  without a warning.
+- **T7:** Production fix and cross-protocol regression tests are complete.
+- **T8:** Malformed stored capability JSON is verified to fail closed without
+  panicking.
+- **T9:** Capability storage marshaling covers round-trip equality and
+  nil-to-SQL-NULL behavior.
 
-Zero direct tests for the only path populating reasoning for virtual models. Test valid JSON, NULL, invalid JSON targets; verify merged superset + graceful bad-data handling.
+### Planned coverage
 
----
+- **T4:** Expand `mergeReasoningCapabilities` tests to cover all meaningful
+  branches: nil inputs, effort unions (finite and unrestricted), toggle,
+  budget-range merging, parameter de-duplication, thinking-mode ordering,
+  default effort, and mandatory/default-enabled merging.
 
-### T3 — Budget-mapping application tests
-**Severity:** High | **File:** `internal/server/translate_reasoning_test.go`
+## Obsolete or invalid audit items
 
-Budget parsing tested (models.dev), but applying budget to target body is not. Test: budget emitted when supported, warning when unsupported, out-of-bounds, combined effort+budget.
-
----
-
-### T4 — `mergeReasoningCapabilities` comprehensive tests
-**Severity:** High | **File:** `internal/server/translate_reasoning_test.go` or `virtual_capabilities_test.go`
-
-1 test covers 1 of ~12 branches. Test: nil inputs, effort union (finite + unrestricted), toggle, budget range merge, parameter dedup, thinking-mode ordering, default effort fallback, mandatory/default-enabled merge.
-
----
-
-### T5 — `ExtractReasoningOptions` unit tests
-**Severity:** High | **File:** `internal/providers/registry_test.go`
-
-Bridge between stored metadata and mapping decision. Zero direct tests. Test: effort-only, toggle-only, budget-only, combined, unrestricted effort, nil caps.
-
----
-
-### T6 — `selector.Present == false` early-return
-**Severity:** Medium | **File:** `internal/server/translate_reasoning_test.go`
-
-The `if !selector.Present { return body, "" }` branch is never tested. Send body with no reasoning fields; verify unchanged, no warning.
-
----
-
-### T8 — `decodeReasoningCapabilities` with invalid JSON
-**Severity:** Medium | **File:** `internal/server/admin_providers_test.go`
-
-No test verifies graceful handling of malformed JSON. Insert bad JSON; verify returns nil without panicking.
-
----
-
-### T9 — `nullableReasoningCapabilities` marshaling round-trip
-**Severity:** Medium | **File:** `internal/providers/registry_test.go` or `manager_test.go`
-
-No round-trip test for storage marshaler. Test marshal → unmarshal equality; test nil → NULL → nil.
-
----
-
-## Deferred — HOLD (4 items)
-
-Gated on product decision about admin reasoning surface. Router is pass-through by design.
-
-| Item | Description | Why deferred |
-|---|---|---|
-| **F2** | `.warning-code` class emitted but not styled | Needs design decision (badge? color?) |
-| **F3** | Warning cell has no tooltip/help text | Needs copy/content from product |
-| **F4** | `capFlags` discards full `ReasoningCapabilities` shape | Would only matter if reasoning were admin-configurable |
-| **F5** | Stale `#capabilities-refresh-error` on dialog reopen | Small bug; fix independently when touching that dialog |
-
----
-
-## Suggested Priority
-
-T1 → T2 → T3 → T4 → T5 → T6, T8, T9
+- **T1 — obsolete:** warning persistence and CSV/JSON export coverage is no
+  longer applicable because the silent-default policy removes warning-code
+  production and storage.
+- **F2 — obsolete:** there is no warning-code cell to style.
+- **F3 — obsolete:** there is no warning-code message requiring tooltip copy.
+- **F5 — invalid:** the stale refresh-error scenario is not a valid remaining
+  issue for the current capability dialog implementation.
 
 ## Verification
 
-After all fixes: `./tiller-go.sh test ./...` + `./tiller-go.sh vet ./...` + `./tests/browser/run.sh`. Skip compatibility & runtime-readonly suites.
+Run only the applicable closeout checks:
 
----
+- `./tiller-go.sh test ./...`
+- `./tiller-go.sh vet ./...`
+- `./tests/browser/run.sh`
 
-## Open Questions
-
-1. **T1 stretch goal:** Seed DB row only (recommended), or also drive a real proxy request?
-2. **T2 location:** Add to `client_test.go` or create `virtual_capabilities_test.go`?
+Compatibility and runtime-readonly suites are out of scope for this change.
