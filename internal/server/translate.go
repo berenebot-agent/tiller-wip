@@ -199,6 +199,24 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 		return body, ""
 	}
 
+	// Normalize Toggle + Enabled semantics into the canonical effort form.
+	//   Mode="disabled" OR Enabled=false  → equivalent to effort="none"
+	//   Mode="enabled"  OR Enabled=true   → use provider default (or pass through)
+	if selector.Mode == "disabled" || (selector.Enabled != nil && !*selector.Enabled) {
+		if selector.Effort == "" {
+			selector.Effort = "none"
+		}
+	}
+	if selector.Mode == "enabled" || (selector.Enabled != nil && *selector.Enabled) {
+		if selector.Effort == "" {
+			if caps != nil && caps.DefaultEffort != "" {
+				selector.Effort = caps.DefaultEffort
+			} else {
+				return body, ""
+			}
+		}
+	}
+
 	// Determine what the target supports.
 	supportsEffort := false
 	var supportedEfforts []string
@@ -212,7 +230,6 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 			case providers.ReasoningOptionEffort:
 				supportsEffort = true
 				supportedEfforts = opt.Values
-				// Check if "none" is supported (maps to disabled in Messages).
 				for _, v := range opt.Values {
 					if v == "none" {
 						supportsDisable = true
@@ -226,12 +243,10 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 
 	// If target explicitly doesn't support reasoning, omit and warn.
 	if !unknownSupport && !supportsEffort && !supportsBudget {
-		// Remove all recognized selector fields.
 		body = stripReasoningSelector(body, target)
 		return body, warningReasoningSelectorOmitted
 	}
 
-	// Build the target wire form.
 	var warning string
 	switch target {
 	case providers.ProtocolChat:
@@ -280,19 +295,18 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 func applyChatReasoning(body []byte, selector reasoningSelector, supportedEfforts []string, supportsDisable, supportsBudget, unknownSupport bool) ([]byte, string) {
 	if selector.Effort != "" {
 		if matchesEffort(selector.Effort, supportedEfforts) {
-			setChatEffort(body, selector.Effort)
+			body = setChatEffort(body, selector.Effort)
 		} else if selector.Effort == "none" && supportsDisable {
-			// Keep none as-is for Chat.
-			setChatEffort(body, "none")
+			body = setChatEffort(body, "none")
 		} else if unknownSupport {
-			setChatEffort(body, selector.Effort)
+			body = setChatEffort(body, selector.Effort)
 		} else {
 			body = stripReasoningSelector(body, providers.ProtocolChat)
 			return body, warningReasoningSelectorOmitted
 		}
 	}
 	if selector.BudgetTokens != nil && (supportsBudget || unknownSupport) {
-		setChatBudget(body, *selector.BudgetTokens)
+		body = setChatBudget(body, *selector.BudgetTokens)
 	} else if selector.BudgetTokens != nil {
 		body = stripReasoningSelector(body, providers.ProtocolChat)
 		return body, warningReasoningSelectorOmitted
@@ -304,19 +318,18 @@ func applyChatReasoning(body []byte, selector reasoningSelector, supportedEffort
 func applyResponsesReasoning(body []byte, selector reasoningSelector, supportedEfforts []string, supportsDisable, supportsBudget, unknownSupport bool) ([]byte, string) {
 	if selector.Effort != "" {
 		if matchesEffort(selector.Effort, supportedEfforts) {
-			setResponsesEffort(body, selector.Effort)
+			body = setResponsesEffort(body, selector.Effort)
 		} else if selector.Effort == "none" && supportsDisable {
-			setResponsesEffort(body, "none")
+			body = setResponsesEffort(body, "none")
 		} else if unknownSupport {
-			setResponsesEffort(body, selector.Effort)
+			body = setResponsesEffort(body, selector.Effort)
 		} else {
 			body = stripReasoningSelector(body, providers.ProtocolResponses)
 			return body, warningReasoningSelectorOmitted
 		}
 	}
 	if selector.BudgetTokens != nil && (supportsBudget || unknownSupport) {
-		// Responses uses reasoning.max_tokens.
-		setResponsesBudget(body, *selector.BudgetTokens)
+		body = setResponsesBudget(body, *selector.BudgetTokens)
 	} else if selector.BudgetTokens != nil {
 		body = stripReasoningSelector(body, providers.ProtocolResponses)
 		return body, warningReasoningSelectorOmitted
@@ -327,30 +340,49 @@ func applyResponsesReasoning(body []byte, selector reasoningSelector, supportedE
 // applyMessagesReasoning maps a selector onto a Messages request.
 func applyMessagesReasoning(body []byte, selector reasoningSelector, supportedEfforts []string, supportsDisable, supportsBudget, unknownSupport bool, providerType string) ([]byte, string) {
 	if selector.Effort != "" {
-		if matchesEffort(selector.Effort, supportedEfforts) {
-			setMessagesEffort(body, selector.Effort)
-		} else if selector.Effort == "none" && supportsDisable {
-			// Map none -> thinking.type = disabled.
-			setMessagesDisabled(body)
+		if selector.Effort == "none" && supportsDisable {
+			// Map none -> thinking.type = disabled, removing output_config.effort.
+			body = stripMessagesOutputConfigEffort(body)
+			body = setMessagesDisabled(body)
+		} else if matchesEffort(selector.Effort, supportedEfforts) {
+			body = setMessagesEffort(body, selector.Effort)
 		} else if selector.Mode == "disabled" && supportsDisable {
-			setMessagesDisabled(body)
+			body = stripMessagesOutputConfigEffort(body)
+			body = setMessagesDisabled(body)
 		} else if unknownSupport {
-			setMessagesEffort(body, selector.Effort)
+			body = setMessagesEffort(body, selector.Effort)
 		} else {
 			body = stripReasoningSelector(body, providers.ProtocolMessages)
 			return body, warningReasoningSelectorOmitted
 		}
 	}
 	if selector.Mode == "disabled" && supportsDisable {
-		setMessagesDisabled(body)
+		body = stripMessagesOutputConfigEffort(body)
+		body = setMessagesDisabled(body)
 	}
 	if selector.BudgetTokens != nil && (supportsBudget || unknownSupport) {
-		setMessagesBudget(body, *selector.BudgetTokens)
+		body = setMessagesBudget(body, *selector.BudgetTokens)
 	} else if selector.BudgetTokens != nil {
 		body = stripReasoningSelector(body, providers.ProtocolMessages)
 		return body, warningReasoningSelectorOmitted
 	}
 	return body, ""
+}
+
+// stripMessagesOutputConfigEffort removes output_config.effort from a Messages body.
+func stripMessagesOutputConfigEffort(body []byte) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	if outputConfig, ok := source["output_config"].(map[string]any); ok {
+		delete(outputConfig, "effort")
+		if len(outputConfig) == 0 {
+			delete(source, "output_config")
+		}
+	}
+	result, _ := json.Marshal(source)
+	return result
 }
 
 // matchesEffort returns true when the target explicitly advertises the given

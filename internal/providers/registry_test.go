@@ -418,7 +418,7 @@ func TestParseReasoningCapabilitiesOpenRouter(t *testing.T) {
 		{
 			name: "full reasoning object",
 			raw: map[string]any{
-				"supported_effort":  []any{"low", "medium", "high"},
+				"supported_efforts": []any{"low", "medium", "high"},
 				"default_effort":    "medium",
 				"mandatory":         true,
 				"default_enabled":   false,
@@ -449,7 +449,7 @@ func TestParseReasoningCapabilitiesOpenRouter(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := openRouterReasoning(tc.raw)
+			got := openRouterReasoning(tc.raw, nil)
 			if tc.want == nil {
 				if got != nil {
 					t.Fatalf("expected nil, got %+v", got)
@@ -551,7 +551,7 @@ func TestPagedDiscoveryCapturesOpenRouterReasoning(t *testing.T) {
 			map[string]any{
 				"id": "model-a",
 				"reasoning": map[string]any{
-					"supported_effort":    []any{"low", "medium", "high"},
+					"supported_efforts":   []any{"low", "medium", "high"},
 					"default_effort":      "medium",
 					"supports_max_tokens": true,
 				},

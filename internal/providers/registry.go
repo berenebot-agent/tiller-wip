@@ -374,13 +374,15 @@ func githubCopilotModels() []Model {
 
 // parseReasoningCapabilities selects the correct parser for a provider type
 // and returns the normalized capabilities. Returns nil when no reasoning
-// metadata is reported by the provider.
+// metadata is reported by the provider. supportedParams is the top-level
+// supported_parameters array from the model entry (used as fallback for
+// parameter hints when the reasoning object omits them).
 func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesObj any, supportedParams []string) *ReasoningCapabilities {
 	if providerType == "anthropic" {
 		return anthropicReasoning(capabilitiesObj)
 	}
 	if reasoningObj != nil {
-		if rc := openRouterReasoning(reasoningObj); rc != nil {
+		if rc := openRouterReasoning(reasoningObj, supportedParams); rc != nil {
 			return rc
 		}
 	}
@@ -389,13 +391,27 @@ func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesO
 
 // openRouterReasoning parses an OpenRouter-style `reasoning` object from a
 // model entry. Returns nil when the field is absent or not an object.
-func openRouterReasoning(raw any) *ReasoningCapabilities {
+//
+// Real OpenRouter API shape (from GET /api/v1/models):
+//
+//	{
+//	  "id": "openai/gpt-5",
+//	  "supported_parameters": ["tools", "reasoning", "reasoning_effort", ...],
+//	  "reasoning": {
+//	    "supported_efforts": ["low", "medium", "high"],
+//	    "default_effort": "medium",
+//	    "mandatory": false,
+//	    "default_enabled": true,
+//	    "supports_max_tokens": true
+//	  }
+//	}
+func openRouterReasoning(raw any, topLevelParams []string) *ReasoningCapabilities {
 	obj, ok := raw.(map[string]any)
 	if !ok {
 		return nil
 	}
 	var rc ReasoningCapabilities
-	if v, ok := obj["supported_effort"].([]any); ok {
+	if v, ok := obj["supported_efforts"].([]any); ok {
 		var efforts []string
 		for _, e := range v {
 			if s, ok := e.(string); ok {
@@ -422,6 +438,15 @@ func openRouterReasoning(raw any) *ReasoningCapabilities {
 		for _, p := range v {
 			if s, ok := p.(string); ok && (s == "reasoning" || s == "reasoning_effort" || s == "include_reasoning") {
 				rc.Parameters = append(rc.Parameters, s)
+			}
+		}
+	}
+	// Fall back to top-level supported_parameters if the reasoning object
+	// carried none.
+	if len(rc.Parameters) == 0 {
+		for _, p := range topLevelParams {
+			if p == "reasoning" || p == "reasoning_effort" || p == "include_reasoning" {
+				rc.Parameters = append(rc.Parameters, p)
 			}
 		}
 	}
