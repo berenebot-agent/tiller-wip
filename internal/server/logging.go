@@ -14,8 +14,7 @@ import (
 
 // logRow is the metadata captured for a single routed request. It is built up
 // as the request progresses and written once, synchronously, before the
-// handler returns. Bodies are only stored for failed requests when the
-// installation-global sensitive logging setting is enabled.
+// handler returns.
 type logRow struct {
 	clientKeyID              string
 	requestedModel           string

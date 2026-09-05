@@ -357,6 +357,9 @@ func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string
 			body = setMessagesThinkingType(body, "adaptive")
 		} else if opts.SupportsEnabled || opts.SupportsToggle || unknownSupport {
 			body = setMessagesThinkingType(body, "enabled")
+			if selector.BudgetTokens == nil {
+				body = setMessagesBudget(body, messagesDefaultBudget(opts))
+			}
 		}
 	}
 	if selector.Effort != "" && selector.Effort != "none" {
@@ -553,6 +556,17 @@ func setMessagesBudget(body []byte, budget int64) []byte {
 	source["thinking"] = thinking
 	result, _ := json.Marshal(source)
 	return result
+}
+
+// messagesDefaultBudget returns a safe budget_tokens value for a target that
+// only supports thinking.type: "enabled" (where budget_tokens is required).
+// It prefers the target's advertised minimum; if unknown, it falls back to
+// Anthropic's documented floor of 1024.
+func messagesDefaultBudget(opts providers.ReasoningOptions) int64 {
+	if opts.BudgetMin != nil {
+		return *opts.BudgetMin
+	}
+	return 1024
 }
 
 func requestToChat(source map[string]any, from providers.Protocol) (map[string]any, error) {
