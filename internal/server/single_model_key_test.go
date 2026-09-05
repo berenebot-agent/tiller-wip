@@ -236,6 +236,88 @@ func TestSingleModelKeyEndToEnd(t *testing.T) {
 	}
 }
 
+// TestRepointedSingleKeyDoesNotAttributeRealTrafficToOldVirtualModel verifies
+// that a real request made after a Single key is repointed away from a virtual
+// model is not pulled into the old virtual model's Activity view merely because
+// the client still sends the old model identifier.
+func TestRepointedSingleKeyDoesNotAttributeRealTrafficToOldVirtualModel(t *testing.T) {
+	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
+
+	var providerID, modelID string
+	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelID); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != 201 {
+		t.Fatalf("create virtual group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{
+		"group_id": groupID, "name": "coding", "target_provider_id": providerID, "target_model_id": modelID,
+	})
+	if status != 201 {
+		t.Fatalf("create virtual model: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{
+		"name": "repointed single", "type": "single", "single_target_type": "virtual", "single_target_id": virtualID,
+	})
+	if status != 201 {
+		t.Fatalf("create Single key: %d %v", status, payload)
+	}
+	clientID, clientSecret := payload["id"].(string), payload["secret"].(string)
+
+	// This row is valid historical virtual traffic and must remain visible.
+	resp, _ := clientCall(t, api.base, clientSecret, "/v1/chat/completions", map[string]any{
+		"model": "anything", "messages": []any{},
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("virtual request status: %d", resp.StatusCode)
+	}
+
+	status, payload, _ = api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{
+		"single_target_type": "real", "single_target_id": modelID,
+	})
+	if status != 204 {
+		t.Fatalf("repoint to real model: %d %v", status, payload)
+	}
+
+	var bindingReal, bindingVirtual string
+	if err := db.SQL.QueryRow(`SELECT coalesce(real_model_id,''),coalesce(virtual_model_id,'') FROM client_single_bindings WHERE client_key_id=?`, clientID).Scan(&bindingReal, &bindingVirtual); err != nil {
+		t.Fatal(err)
+	}
+	if bindingReal != modelID || bindingVirtual != "" {
+		t.Fatalf("repoint left stale binding: real=%q virtual=%q", bindingReal, bindingVirtual)
+	}
+
+	// The old client-facing identifier is intentionally sent again. Single
+	// routing ignores it and must log the actual real route.
+	resp, _ = clientCall(t, api.base, clientSecret, "/v1/chat/completions", map[string]any{
+		"model": "virtual/coding", "messages": []any{},
+	})
+	if resp.StatusCode != 200 {
+		t.Fatalf("repointed real request status: %d", resp.StatusCode)
+	}
+
+	status, payload, _ = api.request("GET", "/api/admin/virtual-models/"+virtualID+"/activity", nil)
+	if status != 200 {
+		t.Fatalf("virtual activity: %d %v", status, payload)
+	}
+	rows := payload["data"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("expected only historical virtual traffic, got %d rows: %v", len(rows), rows)
+	}
+	row := rows[0].(map[string]any)
+	if row["route_kind"] != "virtual" || row["route_model_id"] != virtualID {
+		t.Fatalf("virtual activity included non-virtual route: %v", row)
+	}
+}
+
 // TestCatalogueKeyWithStaleBindingDoesNotBlockVirtualOrProviderDelete pins
 // V1 §28.10 ("Bound targets cannot be deleted until affected Single keys
 // are repointed"). Switching a key from Single to Catalogue leaves a

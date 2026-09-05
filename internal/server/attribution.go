@@ -16,7 +16,7 @@ package server
 // attributable to a virtual model, handling both new rows (route_model_id) and
 // legacy rows (route_kind NULL, matched by canonical name).
 func virtualAttribution(virtualID, canonical string) (string, []any) {
-	return `((route_kind='virtual' AND route_model_id=?) OR requested_model=? OR route_model=?)`,
+	return `((route_kind='virtual' AND route_model_id=?) OR (route_kind IS NULL AND requested_model=?) OR (route_kind IS NULL AND route_model=?))`,
 		[]any{virtualID, canonical, canonical}
 }
 
@@ -25,7 +25,7 @@ func virtualAttribution(virtualID, canonical string) (string, []any) {
 // canonical columns). It expresses the same attribution semantics as
 // virtualAttribution so usage aggregation and activity can never drift.
 func virtualAttributionJoin() string {
-	return `(l.route_kind='virtual' AND l.route_model_id=vm.id) OR l.requested_model=vm.canonical OR l.route_model=vm.canonical`
+	return `(l.route_kind='virtual' AND l.route_model_id=vm.id) OR (l.route_kind IS NULL AND l.requested_model=vm.canonical) OR (l.route_kind IS NULL AND l.route_model=vm.canonical)`
 }
 
 // realAttribution returns the SQL predicate + args that match rows that
