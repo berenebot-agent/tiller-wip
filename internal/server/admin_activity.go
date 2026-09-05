@@ -11,17 +11,17 @@ import (
 )
 
 type requestAttemptView struct {
-	AttemptNumber int     `json:"attempt_number"`
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	Result        string  `json:"result"`
-	HTTPStatus    *int    `json:"http_status"`
-	FailureClass  *string `json:"failure_class"`
-	ErrorMessage  *string `json:"error_message"`
-	ErrorBody     *string `json:"error_body"`
-	ErrorBodyTruncated bool `json:"error_body_truncated"`
-	LatencyMs     int64   `json:"latency_ms"`
-	CreatedAt     string  `json:"created_at"`
+	AttemptNumber      int     `json:"attempt_number"`
+	Provider           string  `json:"provider"`
+	Model              string  `json:"model"`
+	Result             string  `json:"result"`
+	HTTPStatus         *int    `json:"http_status"`
+	FailureClass       *string `json:"failure_class"`
+	ErrorMessage       *string `json:"error_message"`
+	ErrorBody          *string `json:"error_body"`
+	ErrorBodyTruncated bool    `json:"error_body_truncated"`
+	LatencyMs          int64   `json:"latency_ms"`
+	CreatedAt          string  `json:"created_at"`
 }
 
 func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
