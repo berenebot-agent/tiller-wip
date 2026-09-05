@@ -486,11 +486,11 @@ func decodeReasoningCapabilities(v sql.NullString) *providers.ReasoningCapabilit
 	if !v.Valid || v.String == "" {
 		return nil
 	}
-	var rc providers.ReasoningCapabilities
+	var rc *providers.ReasoningCapabilities
 	if err := json.Unmarshal([]byte(v.String), &rc); err != nil {
 		return nil
 	}
-	return &rc
+	return rc
 }
 
 // triBoolFromInt converts a nullable tri-state capability column (NULL/0/1)
