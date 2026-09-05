@@ -42,6 +42,7 @@ type Descriptor struct {
 	AuthMode         AuthMode   `json:"auth_mode"`
 	AuthFlow         string     `json:"auth_flow,omitempty"`
 	Protocols        []Protocol `json:"protocols"`
+	MinOutputTokens  int        `json:"min_output_tokens,omitempty"`
 	Discovery        string     `json:"-"`
 }
 
@@ -73,7 +74,7 @@ var descriptors = []Descriptor{
 	{Type: "minimax", Label: "MiniMax", DefaultBaseURL: "https://api.minimax.io/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
-	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, Discovery: "opencode"},
+	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, MinOutputTokens: 16, Discovery: "opencode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "lm-studio", Label: "LM Studio", DefaultBaseURL: "http://host.docker.internal:1234/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -117,6 +118,7 @@ type Instance struct {
 	OAuthState                          string
 	Enabled                             bool
 	Protocols                           []Protocol
+	MinOutputTokens                     int
 }
 
 // ReasoningOptionType enumerates the selector mechanisms a model may expose.
@@ -243,16 +245,6 @@ func SortEfforts(values []string) []string {
 	}
 	sort.Slice(known, func(i, j int) bool { return effortIndex(known[i]) < effortIndex(known[j]) })
 	return append(known, unknown...)
-}
-
-// mergeReasoningCapabilities merges provider-reported and models.dev reasoning
-// capabilities with provider-first precedence applied independently to each
-// capability field. The provider argument takes precedence over enrichment.
-func mergeReasoningCapabilities(provider, enrichment *ReasoningCapabilities) *ReasoningCapabilities {
-	if provider != nil {
-		return provider
-	}
-	return enrichment
 }
 
 type Model struct {

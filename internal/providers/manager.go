@@ -100,6 +100,9 @@ func (m *Manager) loadProvider(ctx context.Context, providerID string) (Instance
 	err := m.db.QueryRowContext(ctx, `SELECT id,name,type,base_url,coalesce(credential_secret,''),enabled,protocols FROM providers WHERE id=?`, providerID).
 		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.Credential, &p.Enabled, &protocols)
 	p.Protocols = DecodeProtocols(protocols)
+	if d, ok := Lookup(p.Type); ok {
+		p.MinOutputTokens = d.MinOutputTokens
+	}
 	m.HydrateOAuth(ctx, &p)
 	return p, err
 }

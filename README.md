@@ -275,7 +275,7 @@ Tiller stores its state under the configured data directory, normally `./data`. 
 
 **Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets, since anyone who can read the database file can recover your provider keys.
 
-Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records contain metadata only; request and provider response bodies are not persisted.
+Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records contain metadata only; current request and provider response bodies are not persisted. Migration 024 clears body columns from the live database, but this is not secure erasure: SQLite pages, WAL files, snapshots, and older backups may still contain historic sensitive data and must remain protected.
 
 For anything other than local-only use: use HTTPS, put Tiller behind a trusted reverse proxy, use a strong admin password, protect the data directory and exported backups, and do not expose the control panel casually to the public internet. See [SECURITY.md](SECURITY.md).
 

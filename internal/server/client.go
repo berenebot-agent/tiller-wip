@@ -335,6 +335,9 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			}
 			target.Provider.Enabled = scanBool(enabled)
 			target.Provider.Protocols = providers.DecodeProtocols(protocols)
+			if d, ok := providers.Lookup(target.Provider.Type); ok {
+				target.Provider.MinOutputTokens = d.MinOutputTokens
+			}
 			s.providers.HydrateOAuth(ctx, &target.Provider)
 			if nativeProtocol.Valid {
 				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
@@ -369,6 +372,9 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 	route.Provider.Enabled = scanBool(enabled)
 	route.Provider.Protocols = providers.DecodeProtocols(protocols)
+	if d, ok := providers.Lookup(route.Provider.Type); ok {
+		route.Provider.MinOutputTokens = d.MinOutputTokens
+	}
 	s.providers.HydrateOAuth(ctx, &route.Provider)
 	if nativeProtocol.Valid {
 		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
@@ -471,6 +477,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var translated bool
 	var cancel context.CancelFunc
 	protocolUnavailable := false
+	translationFailureClass := ""
+	nonTranslationFailure := false
 	terminalPreflightClass := ""
 	oauthRefreshed := make(map[string]bool)
 	for i := 0; i < len(candidates); i++ {
@@ -489,12 +497,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		attemptStart := time.Now()
 		if !candidate.Available {
+			nonTranslationFailure = true
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
 			continue
 		}
 		target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
 		if target == "" {
 			protocolUnavailable = true
+			nonTranslationFailure = true
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
 			continue
 		}
@@ -508,11 +518,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if errors.As(err, &unsupported) {
 					code = "unsupported_feature"
 				}
-				row.httpStatus = 400
-				row.errorText = strPtr(code)
-				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(code))
-				inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
-				return
+				if !route.Virtual {
+					row.httpStatus = 400
+					row.errorText = strPtr(code)
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(code))
+					inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
+					return
+				}
+				translationFailureClass = code
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
+				continue
 			}
 			// After translation, re-apply the canonical selector for the target.
 			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
@@ -521,8 +536,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			_ = json.Unmarshal(attemptBody, &attemptRaw)
 			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
 			attemptBody, _ = json.Marshal(attemptRaw)
-			// Native protocol: apply capability-based omission if needed.
-			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
 		}
 		if candidate.Provider.Type == "codex-subscription" {
 			attemptBody, err = normalizeCodexRequest(attemptBody)
@@ -534,8 +547,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				return
 			}
 		}
+		if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
+			attemptBody, err = clampMinOutputTokens(attemptBody, minOut, target)
+			if err != nil {
+				row.httpStatus = 400
+				row.errorText = strPtr("invalid_request")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
+				inferenceError(w, 400, "invalid_request_error", "invalid_request", "Could not apply minimum output tokens.", incoming == providers.ProtocolMessages)
+				return
+			}
+		}
 		endpoint, e := providers.Endpoint(candidate.Provider, target)
 		if e != nil {
+			nonTranslationFailure = true
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 408, failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
 			continue
 		}
@@ -554,6 +578,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
+		copySafeFeatureHeaders(req.Header, r.Header, target)
 		if candidate.Provider.Type == "codex-subscription" {
 			req.Header.Set("session-id", row.clientRequestID)
 		}
@@ -575,6 +600,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				class = "upstream_timeout"
 			}
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 408, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
+			nonTranslationFailure = true
 			if r.Context().Err() != nil {
 				if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 					class = "client_timeout"
@@ -615,6 +641,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			attemptCancel()
 			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
 			row.attempts = append(row.attempts, attempt)
+			nonTranslationFailure = true
 			// Stale-auth recovery: on 401/403 from an OAuth provider, force a
 			// token refresh once per request and retry the same target before
 			// falling through to normal virtual fallback. ForceOAuthRefresh
@@ -677,6 +704,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				status = 408
 			}
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: status, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			nonTranslationFailure = true
 			row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			if !route.Virtual || r.Context().Err() != nil {
 				row.httpStatus = 502
@@ -706,6 +734,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			row.errorText = strPtr(terminalPreflightClass)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(terminalPreflightClass))
 			inferenceError(w, 502, "api_error", terminalPreflightClass, "The upstream provider response exceeded Tiller's non-streaming response limit.", incoming == providers.ProtocolMessages)
+			return
+		}
+		if translationFailureClass != "" && !nonTranslationFailure {
+			row.httpStatus = 400
+			row.errorText = strPtr(translationFailureClass)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(translationFailureClass))
+			inferenceError(w, 400, "invalid_request_error", translationFailureClass, "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
 			return
 		}
 		if protocolUnavailable {
@@ -860,6 +895,46 @@ func copySafeResponseHeaders(dst, src http.Header) {
 		}
 	}
 }
+
+func copySafeFeatureHeaders(dst, src http.Header, target providers.Protocol) {
+	var names []string
+	switch target {
+	case providers.ProtocolMessages:
+		names = []string{"anthropic-beta"}
+	case providers.ProtocolChat, providers.ProtocolResponses:
+		names = []string{"OpenAI-Beta"}
+	}
+	for _, name := range names {
+		values := headerTokens(dst.Values(name))
+		seen := make(map[string]bool, len(values))
+		for _, value := range values {
+			seen[strings.ToLower(value)] = true
+		}
+		for _, value := range headerTokens(src.Values(name)) {
+			key := strings.ToLower(value)
+			if !seen[key] {
+				values = append(values, value)
+				seen[key] = true
+			}
+		}
+		if len(values) > 0 {
+			dst.Set(name, strings.Join(values, ", "))
+		}
+	}
+}
+
+func headerTokens(values []string) []string {
+	var tokens []string
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if token != "" {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return tokens
+}
 func isTimeout(err error) bool {
 	var netErr interface{ Timeout() bool }
 	return errors.As(err, &netErr) && netErr.Timeout()
@@ -882,6 +957,52 @@ func compatibleProtocol(protocols []providers.Protocol, native providers.Protoco
 		}
 	}
 	return ""
+}
+
+// clampMinOutputTokens ensures the request's max_output_tokens (Responses) or
+// max_tokens (Chat) is at least minOut. Some upstreams reject values below a
+// threshold (e.g. OpenCode Free requires >= 16). The field is only modified
+// when present and below the minimum; otherwise the body is returned unchanged.
+func clampMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) ([]byte, error) {
+	var field string
+	switch protocol {
+	case providers.ProtocolResponses:
+		field = "max_output_tokens"
+	case providers.ProtocolChat:
+		field = "max_tokens"
+	default:
+		return body, nil
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, err
+	}
+	maxAny, ok := parsed[field]
+	if !ok {
+		return body, nil
+	}
+	var maxVal int64
+	switch n := maxAny.(type) {
+	case int:
+		maxVal = int64(n)
+	case int64:
+		maxVal = n
+	case float64:
+		if n >= 0 && n == float64(int64(n)) {
+			maxVal = int64(n)
+		}
+	default:
+		return body, nil
+	}
+	if maxVal >= int64(minOut) {
+		return body, nil
+	}
+	parsed[field] = minOut
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) {

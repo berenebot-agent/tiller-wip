@@ -922,9 +922,13 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 		for _, raw := range asSlice(source["content"]) {
 			block, _ := raw.(map[string]any)
 			switch block["type"] {
-			case "text", "thinking":
+			case "text":
 				if text, _ := block["text"].(string); text != "" {
 					content = append(content, map[string]any{"type": "text", "text": text})
+				}
+			case "thinking":
+				if text, _ := block["thinking"].(string); text != "" {
+					message["reasoning_content"] = fmt.Sprint(message["reasoning_content"]) + text
 				}
 			case "tool_use":
 				calls, _ := message["tool_calls"].([]any)
@@ -948,8 +952,11 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 			case "message":
 				for _, partRaw := range asSlice(item["content"]) {
 					part, _ := partRaw.(map[string]any)
-					if part["type"] == "output_text" {
+					switch part["type"] {
+					case "output_text":
 						content = append(content, map[string]any{"type": "text", "text": part["text"]})
+					case "reasoning":
+						message["reasoning_content"] = fmt.Sprint(message["reasoning_content"]) + fmt.Sprint(part["text"])
 					}
 				}
 			case "function_call":
@@ -1063,14 +1070,14 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 }
 
 type streamState struct {
-	id, model                     string
-	started, contentStarted, done bool
-	outputIndex                   int
-	accumulated                   strings.Builder
-	inputTokens                   int64
-	outputTokens                  int64
-	hasInputTokens                bool
-	hasOutputTokens               bool
+	id, model                                       string
+	started, contentStarted, reasoningStarted, done bool
+	outputIndex                                     int
+	accumulated                                     strings.Builder
+	inputTokens                                     int64
+	outputTokens                                    int64
+	hasInputTokens                                  bool
+	hasOutputTokens                                 bool
 }
 type canonicalDelta struct {
 	Kind, Text, CallID, Name, Arguments, Finish string
@@ -1088,6 +1095,11 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			delta, _ := choice["delta"].(map[string]any)
 			if text, ok := delta["content"].(string); ok && text != "" {
 				out = append(out, canonicalDelta{Kind: "text", Text: text})
+			}
+			if text, ok := delta["reasoning_content"].(string); ok && text != "" {
+				out = append(out, canonicalDelta{Kind: "reasoning", Text: text})
+			} else if text, ok := delta["reasoning"].(string); ok && text != "" {
+				out = append(out, canonicalDelta{Kind: "reasoning", Text: text})
 			}
 			for _, callRaw := range asSlice(delta["tool_calls"]) {
 				call, _ := callRaw.(map[string]any)
@@ -1123,6 +1135,9 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				if text, ok := delta["text"].(string); ok {
 					out = append(out, canonicalDelta{Kind: "text", Text: text})
 				}
+				if thinking, ok := delta["thinking"].(string); ok && thinking != "" {
+					out = append(out, canonicalDelta{Kind: "reasoning", Text: thinking})
+				}
 				if partial, ok := delta["partial_json"].(string); ok {
 					out = append(out, canonicalDelta{Kind: "tool", Arguments: partial})
 				}
@@ -1149,6 +1164,8 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 		}
 	case "response.output_text.delta":
 		out = append(out, canonicalDelta{Kind: "text", Text: fmt.Sprint(payload["delta"])})
+	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+		out = append(out, canonicalDelta{Kind: "reasoning", Text: fmt.Sprint(payload["delta"])})
 	case "response.function_call_arguments.delta":
 		out = append(out, canonicalDelta{Kind: "tool", CallID: fmt.Sprint(payload["call_id"]), Arguments: fmt.Sprint(payload["delta"])})
 	case "response.output_item.added":
@@ -1181,6 +1198,8 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		switch delta.Kind {
 		case "text":
 			d["content"] = delta.Text
+		case "reasoning":
+			d["reasoning_content"] = delta.Text
 		case "tool":
 			d["tool_calls"] = []any{map[string]any{"index": 0, "id": emptyNil(delta.CallID), "type": "function", "function": map[string]any{"name": emptyNil(delta.Name), "arguments": delta.Arguments}}}
 		case "finish":
@@ -1206,6 +1225,12 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 				state.contentStarted = true
 			}
 			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": 0, "delta": map[string]any{"type": "text_delta", "text": delta.Text}})
+		case "reasoning":
+			if !state.reasoningStarted {
+				writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": 1, "content_block": map[string]any{"type": "thinking", "thinking": ""}})
+				state.reasoningStarted = true
+			}
+			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": 1, "delta": map[string]any{"type": "thinking_delta", "thinking": delta.Text}})
 		case "usage":
 			if u, ok := delta.Usage.(map[string]any); ok {
 				if value, ok := coerceInt64(u["input_tokens"]); ok && !state.hasInputTokens {
@@ -1218,6 +1243,9 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 				}
 			}
 		case "finish":
+			if state.reasoningStarted {
+				writeSSE(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 1})
+			}
 			if state.contentStarted {
 				writeSSE(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": 0})
 			}
@@ -1239,9 +1267,12 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		writeSSE(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "output_index": 0, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 		state.started = true
 	}
-	if delta.Kind == "text" {
+	switch delta.Kind {
+	case "text":
 		state.accumulated.WriteString(delta.Text)
 		writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": delta.Text})
+	case "reasoning":
+		writeSSE(w, "response.reasoning_summary_text.delta", map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "summary_index": 0, "delta": delta.Text})
 	}
 }
 

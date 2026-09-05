@@ -35,5 +35,10 @@ consideration. Take care with where you store the persistent database and any
 backups of it — treat `./data` and its backups as secrets, since anyone who can
 read the database file can recover your provider keys.
 
+Migration 024 clears request and provider response body columns from the live
+database; it is not secure erasure. SQLite pages, WAL files, snapshots, and old
+backups may still contain historic sensitive data, so they must continue to be
+protected as sensitive material.
+
 For questions that are not security reports, please use the project's normal
 public issue and discussion channels.
