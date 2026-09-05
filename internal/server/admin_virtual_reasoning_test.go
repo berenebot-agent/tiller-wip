@@ -83,6 +83,23 @@ func TestMergeReasoningCapabilitiesBuildsStableSuperset(t *testing.T) {
 	}
 }
 
+func TestMergeReasoningCapabilitiesHandlesNilAndFiniteEffortUnion(t *testing.T) {
+	if mergeReasoningCapabilities(nil, nil) != nil {
+		t.Fatal("nil inputs should produce nil capabilities")
+	}
+	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low"}}}}
+	if got := mergeReasoningCapabilities(nil, caps); got != caps {
+		t.Fatalf("nil left input returned %#v, want original capabilities", got)
+	}
+	merged := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"high", "low"}}}},
+		&providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"minimal", "medium"}}}},
+	)
+	if merged == nil || len(merged.Options) != 1 || !equalStrings(merged.Options[0].Values, []string{"minimal", "low", "medium", "high"}) {
+		t.Fatalf("finite effort union = %#v", merged)
+	}
+}
+
 func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *testing.T) {
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 	var modelA string
@@ -147,6 +164,26 @@ func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *t
 	options = aggregate["options"].([]any)
 	if len(options) != 2 || options[0].(map[string]any)["type"] != string(providers.ReasoningOptionEffort) || options[1].(map[string]any)["type"] != string(providers.ReasoningOptionToggle) {
 		t.Fatalf("eligible target capabilities were not merged: %#v", aggregate)
+	}
+
+	if _, err := db.SQL.Exec(`UPDATE providers SET enabled=0 WHERE id=?`, providerB); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/virtual-models", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list unavailable virtual models: %d %v", status, payload)
+	}
+	virtual = findObjectByID(t, payload["data"], virtualID)
+	aggregate = virtual["reasoning_capabilities"].(map[string]any)
+	options = aggregate["options"].([]any)
+	if len(options) != 1 || options[0].(map[string]any)["type"] != string(providers.ReasoningOptionEffort) {
+		t.Fatalf("unavailable target contributed to aggregate: %#v", aggregate)
+	}
+	if targets := virtual["targets"].([]any); targets[1].(map[string]any)["reasoning_capabilities"] == nil {
+		t.Fatalf("unavailable target metadata was hidden: %#v", targets[1])
+	}
+	if _, err := db.SQL.Exec(`UPDATE providers SET enabled=1 WHERE id=?`, providerB); err != nil {
+		t.Fatal(err)
 	}
 
 	if _, err := db.SQL.Exec(`UPDATE provider_models SET reasoning_capabilities=? WHERE id=?`, `{ "options":`, modelB); err != nil {
