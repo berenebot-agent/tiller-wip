@@ -511,14 +511,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				return
 			}
 			// After translation, re-apply the canonical selector for the target.
-			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
+			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
 		} else {
 			var attemptRaw map[string]json.RawMessage
 			_ = json.Unmarshal(attemptBody, &attemptRaw)
 			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
 			attemptBody, _ = json.Marshal(attemptRaw)
 			// Native protocol: apply capability-based omission if needed.
-			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
+			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
 		}
 		if candidate.Provider.Type == "codex-subscription" {
 			attemptBody, err = normalizeCodexRequest(attemptBody)

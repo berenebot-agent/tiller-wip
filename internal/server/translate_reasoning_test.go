@@ -229,7 +229,7 @@ func TestApplyReasoningSelector_ChatToResponses(t *testing.T) {
 			if tc.selector.Effort != "high" {
 				body = []byte(`{"model":"x","reasoning_effort":"` + tc.selector.Effort + `"}`)
 			}
-			result := applyReasoningSelector(body, tc.selector, tc.target, tc.caps, "openai")
+			result := applyReasoningSelector(body, tc.selector, tc.target, tc.caps)
 			if tc.wantEffort != "" {
 				if !containsString(result, `"reasoning":{"effort":"`+tc.wantEffort+`"}`) && !containsString(result, `"reasoning": {"effort": "`+tc.wantEffort+`"}`) {
 					t.Errorf("expected effort %q in body, got %s", tc.wantEffort, string(result))
@@ -272,7 +272,7 @@ func TestApplyReasoningSelector_ChatToMessages(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			// Start from a Messages-format body (output_config.effort).
 			body := []byte(`{"model":"x","output_config":{"effort":"` + tc.selector.Effort + `"}}`)
-			result := applyReasoningSelector(body, tc.selector, tc.target, tc.caps, "anthropic")
+			result := applyReasoningSelector(body, tc.selector, tc.target, tc.caps)
 			if tc.wantField != "" && !containsString(result, tc.wantField) {
 				t.Errorf("expected %q in body, got %s", tc.wantField, string(result))
 			}
@@ -286,7 +286,7 @@ func TestApplyReasoningSelector_MessagesToChat(t *testing.T) {
 	selector := extractMessagesReasoning(map[string]any{
 		"output_config": map[string]any{"effort": "high"},
 	})
-	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps)
 	if !containsString(result, `"reasoning_effort":"high"`) {
 		t.Errorf("expected reasoning_effort=high in body, got %s", string(result))
 	}
@@ -327,7 +327,7 @@ func TestApplyReasoningSelector_ToggleEnabledSemantics(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`{"model":"x","reasoning":{"enabled":true}}`)
-			result := applyReasoningSelector(body, tc.selector, providers.ProtocolChat, tc.caps, "openai")
+			result := applyReasoningSelector(body, tc.selector, providers.ProtocolChat, tc.caps)
 			if tc.wantEffort != "" && !containsString(result, `"reasoning_effort":"`+tc.wantEffort+`"`) {
 				t.Errorf("expected effort %q in body, got %s", tc.wantEffort, string(result))
 			}
@@ -339,7 +339,7 @@ func TestApplyReasoningSelector_SilentlyOmitsUnsupportedEffort(t *testing.T) {
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium"}}}}
 	selector := reasoningSelector{Present: true, Effort: "ultra"}
 	body := []byte(`{"model":"x","reasoning_effort":"ultra"}`)
-	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps)
 	if containsString(result, "reasoning_effort") {
 		t.Errorf("unsupported effort survived: %s", result)
 	}
@@ -372,7 +372,7 @@ func TestApplyReasoningSelector_BudgetApplication(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := applyReasoningSelector([]byte(tc.body), tc.selector, tc.target, tc.caps, "anthropic")
+			result := applyReasoningSelector([]byte(tc.body), tc.selector, tc.target, tc.caps)
 			if containsString(result, tc.field) != tc.wantField {
 				t.Fatalf("budget field presence = %v, want %v: %s", containsString(result, tc.field), tc.wantField, result)
 			}
@@ -382,7 +382,7 @@ func TestApplyReasoningSelector_BudgetApplication(t *testing.T) {
 
 func TestApplyReasoningSelector_NoSelectorPreservesBytes(t *testing.T) {
 	body := []byte(`{ "model": "x", "messages": [{"role":"user","content":"hi"}] }`)
-	result := applyReasoningSelector(body, reasoningSelector{}, providers.ProtocolChat, &providers.ReasoningCapabilities{}, "openai")
+	result := applyReasoningSelector(body, reasoningSelector{}, providers.ProtocolChat, &providers.ReasoningCapabilities{})
 	if string(result) != string(body) {
 		t.Fatalf("body changed without a selector: got %q, want %q", result, body)
 	}
@@ -390,46 +390,46 @@ func TestApplyReasoningSelector_NoSelectorPreservesBytes(t *testing.T) {
 
 func TestApplyReasoningSelector_T7AcrossProtocols(t *testing.T) {
 	type protocolCase struct {
-		name   string
-		target providers.Protocol
-		caps   *providers.ReasoningCapabilities
-		body   string
-		check  func(string) bool
+		name     string
+		target   providers.Protocol
+		caps     *providers.ReasoningCapabilities
+		body     string
+		selector reasoningSelector
+		check    func(string) bool
 	}
 	effortCaps := func() *providers.ReasoningCapabilities {
 		return &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}
 	}
 	tests := []protocolCase{
-		{name: "Chat disable wins over effort", target: providers.ProtocolChat, body: `{"model":"x"}`, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
+		{name: "Chat disable wins over effort", target: providers.ProtocolChat, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false), Effort: "high"}, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
 			return strings.Contains(s, `"enabled":false`) && !strings.Contains(s, `reasoning_effort`)
 		}},
-		{name: "Responses disable wins over effort", target: providers.ProtocolResponses, body: `{"model":"x"}`, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool { return strings.Contains(s, `"enabled":false`) && !strings.Contains(s, `"effort"`) }},
-		{name: "Messages disable wins over effort", target: providers.ProtocolMessages, body: `{"model":"x"}`, caps: &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}, Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "high"}}}}, check: func(s string) bool {
+		{name: "Responses disable wins over effort", target: providers.ProtocolResponses, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false), Effort: "high"}, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool { return strings.Contains(s, `"enabled":false`) && !strings.Contains(s, `"effort"`) }},
+		{name: "Messages disable wins over effort", target: providers.ProtocolMessages, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false), Effort: "high"}, caps: &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}, Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "high"}}}}, check: func(s string) bool {
 			return strings.Contains(s, `"type":"disabled"`) && !strings.Contains(s, `"effort"`)
 		}},
-		{name: "Chat enable and effort", target: providers.ProtocolChat, body: `{"model":"x"}`, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
+		{name: "Chat enable and effort", target: providers.ProtocolChat, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(true), Effort: "high"}, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
 			return strings.Contains(s, `"enabled":true`) && strings.Contains(s, `"reasoning_effort":"high"`)
 		}},
-		{name: "Responses enable and effort", target: providers.ProtocolResponses, body: `{"model":"x"}`, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
+		{name: "Responses enable and effort", target: providers.ProtocolResponses, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(true), Effort: "high"}, caps: &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
 			return strings.Contains(s, `"enabled":true`) && strings.Contains(s, `"effort":"high"`)
 		}},
-		{name: "Messages enable and effort", target: providers.ProtocolMessages, body: `{"model":"x"}`, caps: &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}, Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
+		{name: "Messages enable and effort", target: providers.ProtocolMessages, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(true), Effort: "high"}, caps: &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}, Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}, check: func(s string) bool {
 			return strings.Contains(s, `"type":"enabled"`) && strings.Contains(s, `"effort":"high"`)
 		}},
-		{name: "Chat unsupported disable defaults", target: providers.ProtocolChat, body: `{"model":"x","reasoning":{"enabled":true}}`, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "reasoning") }},
-		{name: "Responses unsupported disable defaults", target: providers.ProtocolResponses, body: `{"model":"x","reasoning":{"enabled":true}}`, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "reasoning") }},
-		{name: "Messages unsupported disable defaults", target: providers.ProtocolMessages, body: `{"model":"x","thinking":{"type":"enabled"}}`, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "thinking") }},
+		{name: "Chat disable alone", target: providers.ProtocolChat, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false)}, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "reasoning") }},
+		{name: "Responses disable alone", target: providers.ProtocolResponses, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false)}, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "reasoning") }},
+		{name: "Messages disable alone", target: providers.ProtocolMessages, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false)}, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "thinking") }},
+		{name: "Chat effort alone", target: providers.ProtocolChat, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Effort: "high"}, caps: effortCaps(), check: func(s string) bool { return strings.Contains(s, `"reasoning_effort":"high"`) }},
+		{name: "Responses effort alone", target: providers.ProtocolResponses, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Effort: "high"}, caps: effortCaps(), check: func(s string) bool { return strings.Contains(s, `"effort":"high"`) }},
+		{name: "Messages effort alone", target: providers.ProtocolMessages, body: `{"model":"x"}`, selector: reasoningSelector{Present: true, Effort: "high"}, caps: effortCaps(), check: func(s string) bool { return strings.Contains(s, `"effort":"high"`) }},
+		{name: "Chat unsupported disable plus effort defaults", target: providers.ProtocolChat, body: `{"model":"x","reasoning":{"enabled":true,"max_tokens":512}}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false), Effort: "high"}, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "reasoning") }},
+		{name: "Responses unsupported disable plus effort defaults", target: providers.ProtocolResponses, body: `{"model":"x","reasoning":{"enabled":true,"effort":"low"}}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false), Effort: "high"}, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "reasoning") }},
+		{name: "Messages unsupported disable plus effort defaults", target: providers.ProtocolMessages, body: `{"model":"x","thinking":{"type":"enabled","budget_tokens":512}}`, selector: reasoningSelector{Present: true, Enabled: boolPtr(false), Effort: "high"}, caps: effortCaps(), check: func(s string) bool { return !strings.Contains(s, "thinking") }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			selector := reasoningSelector{Present: true, Enabled: boolPtr(false), Effort: "high"}
-			if strings.Contains(tc.name, "enable") {
-				selector.Enabled = boolPtr(true)
-			}
-			if strings.Contains(tc.name, "unsupported") {
-				selector.Effort = ""
-			}
-			result := applyReasoningSelector([]byte(tc.body), selector, tc.target, tc.caps, "anthropic")
+			result := applyReasoningSelector([]byte(tc.body), tc.selector, tc.target, tc.caps)
 			if !tc.check(string(result)) {
 				t.Fatalf("mapped body did not satisfy selector semantics: %s", result)
 			}
@@ -443,7 +443,7 @@ func TestApplyReasoningSelector_ToggleOnlyTarget(t *testing.T) {
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}}
 	selector := reasoningSelector{Present: true, Enabled: boolPtr(true)}
 	body := []byte(`{"model":"x","reasoning":{"enabled":true}}`)
-	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps)
 	// Body should be preserved (pass-through).
 	if !containsString(result, "enabled") {
 		t.Errorf("expected body to be preserved for toggle-only target, got %s", string(result))
@@ -454,7 +454,7 @@ func TestApplyReasoningSelector_AdaptivePreserved(t *testing.T) {
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
 	selector := reasoningSelector{Present: true, Mode: "adaptive"}
 	body := []byte(`{"model":"x","thinking":{"type":"adaptive"}}`)
-	result := applyReasoningSelector(body, selector, providers.ProtocolMessages, caps, "anthropic")
+	result := applyReasoningSelector(body, selector, providers.ProtocolMessages, caps)
 	if !containsString(result, "adaptive") {
 		t.Errorf("expected adaptive thinking preserved, got %s", string(result))
 	}
@@ -465,7 +465,7 @@ func TestApplyReasoningSelector_ChatPreservesNonSelectorFields(t *testing.T) {
 	caps := &providers.ReasoningCapabilities{} // explicitly unsupported
 	selector := reasoningSelector{Present: true, Effort: "high"}
 	body := []byte(`{"model":"x","reasoning_effort":"high","reasoning":{"exclude":true}}`)
-	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps)
 	if !containsString(result, `"exclude":true`) {
 		t.Errorf("expected reasoning.exclude preserved, got %s", string(result))
 	}
@@ -484,7 +484,7 @@ func TestApplyReasoningSelector_OpenRouterMandatoryNone(t *testing.T) {
 	}
 	selector := reasoningSelector{Present: true, Enabled: boolPtr(true)}
 	body := []byte(`{"model":"x","reasoning":{"enabled":true}}`)
-	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	result := applyReasoningSelector(body, selector, providers.ProtocolChat, caps)
 	// Should not emit reasoning_effort=none (mandatory prevents none).
 	if containsString(result, "reasoning_effort") {
 		t.Errorf("expected no effort emitted for mandatory+none default, got %s", string(result))
@@ -499,7 +499,7 @@ func TestApplyReasoningSelector_TranslateRequestThenMap(t *testing.T) {
 		t.Fatalf("translateRequest: %v", err)
 	}
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium", "high"}}}}
-	result := applyReasoningSelector(translated, extractReasoningSelector(chatBody, providers.ProtocolChat), providers.ProtocolMessages, caps, "anthropic")
+	result := applyReasoningSelector(translated, extractReasoningSelector(chatBody, providers.ProtocolChat), providers.ProtocolMessages, caps)
 	if !containsString(result, `"effort":"high"`) {
 		t.Errorf("expected effort=high in Messages body, got %s", string(result))
 	}
@@ -512,7 +512,7 @@ func TestApplyReasoningSelector_TranslateEnabledToAdaptiveMessages(t *testing.T)
 		t.Fatalf("translateRequest: %v", err)
 	}
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
-	result := applyReasoningSelector(translated, extractReasoningSelector(chatBody, providers.ProtocolChat), providers.ProtocolMessages, caps, "anthropic")
+	result := applyReasoningSelector(translated, extractReasoningSelector(chatBody, providers.ProtocolChat), providers.ProtocolMessages, caps)
 	if !containsString(result, `"type":"adaptive"`) {
 		t.Fatalf("expected adaptive thinking in Messages body, got %s", string(result))
 	}
@@ -561,7 +561,7 @@ func TestApplyReasoningSelector_MaterializesTranslatedControls(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			result := applyReasoningSelector(tc.body, tc.selector, tc.target, tc.caps, "anthropic")
+			result := applyReasoningSelector(tc.body, tc.selector, tc.target, tc.caps)
 			for _, field := range tc.wantFields {
 				if !containsString(result, field) {
 					t.Errorf("expected %s in %s", field, result)
@@ -573,7 +573,7 @@ func TestApplyReasoningSelector_MaterializesTranslatedControls(t *testing.T) {
 
 func TestApplyReasoningSelectorRejectsIncompatibleMechanism(t *testing.T) {
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}}
-	result := applyReasoningSelector([]byte(`{"model":"x","reasoning_effort":"high"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolChat, caps, "openai")
+	result := applyReasoningSelector([]byte(`{"model":"x","reasoning_effort":"high"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolChat, caps)
 	if containsString(result, "reasoning_effort") {
 		t.Fatalf("incompatible effort survived: %s", result)
 	}

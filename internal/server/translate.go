@@ -188,7 +188,7 @@ func coerceInt64(v any) (int64, bool) {
 //   - Numeric budgets map when a numeric target control exists.
 //   - If the target is known not to support reasoning, the selector is omitted.
 //   - If support is unknown, the selector is passed through.
-func applyReasoningSelector(body []byte, selector reasoningSelector, target providers.Protocol, caps *providers.ReasoningCapabilities, providerType string) []byte {
+func applyReasoningSelector(body []byte, selector reasoningSelector, target providers.Protocol, caps *providers.ReasoningCapabilities) []byte {
 	if !selector.Present {
 		return body
 	}
@@ -221,7 +221,7 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 	case providers.ProtocolResponses:
 		body = applyResponsesReasoning(body, selector, mode, opts, unknownSupport)
 	case providers.ProtocolMessages:
-		body = applyMessagesReasoning(body, selector, mode, opts, unknownSupport, providerType)
+		body = applyMessagesReasoning(body, selector, mode, opts, unknownSupport)
 	}
 	return body
 }
@@ -277,16 +277,20 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 }
 
 // applyChatReasoning maps a selector onto a Chat Completions request.
-// Mode (enabled/disabled) is applied when representable. A representable
-// disable wins over all other selector parts; otherwise unsupported parts are
-// omitted independently and the provider's default is used for them.
+// Mode (enabled/disabled) is applied when representable. An explicit disable
+// wins over all other selector parts; when it cannot be represented, the
+// complete contradictory selector is omitted and the provider's default is
+// used.
 func applyChatReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, caps *providers.ReasoningCapabilities, unknownSupport bool) []byte {
 	disabled := mode == "disabled" || selector.Effort == "none"
-	if disabled && (opts.SupportsToggle || effortIsSupported("none", opts) || unknownSupport) {
+	if disabled {
 		if opts.SupportsToggle || unknownSupport {
 			return setChatEnabled(body, false)
 		}
-		return setChatEffort(body, "none")
+		if effortIsSupported("none", opts) {
+			return setChatEffort(body, "none")
+		}
+		return body
 	}
 	if mode == "enabled" {
 		if opts.SupportsToggle || unknownSupport {
@@ -309,11 +313,14 @@ func applyChatReasoning(body []byte, selector reasoningSelector, mode string, op
 // applyResponsesReasoning maps a selector onto a Responses request.
 func applyResponsesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) []byte {
 	disabled := mode == "disabled" || selector.Effort == "none"
-	if disabled && (opts.SupportsToggle || effortIsSupported("none", opts) || unknownSupport) {
+	if disabled {
 		if opts.SupportsToggle || unknownSupport {
 			return setResponsesEnabled(body, false)
 		}
-		return setResponsesEffort(body, "none")
+		if effortIsSupported("none", opts) {
+			return setResponsesEffort(body, "none")
+		}
+		return body
 	}
 	if mode == "enabled" && (opts.SupportsToggle || unknownSupport) {
 		body = setResponsesEnabled(body, true)
@@ -329,12 +336,16 @@ func applyResponsesReasoning(body []byte, selector reasoningSelector, mode strin
 }
 
 // applyMessagesReasoning maps a selector onto a Messages request.
-// Mode (enabled/disabled/adaptive) is applied when representable. A
-// representable disable wins over all other selector parts.
-func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool, providerType string) []byte {
+// Mode (enabled/disabled/adaptive) is applied when representable. An explicit
+// disable wins over all other selector parts; if it is not representable, the
+// complete contradictory selector is omitted.
+func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) []byte {
 	disabled := mode == "disabled" || selector.Effort == "none"
 	if disabled && (opts.SupportsDisable || unknownSupport) {
 		return setMessagesThinkingType(body, "disabled")
+	}
+	if disabled {
+		return body
 	}
 	switch mode {
 	case "adaptive":
