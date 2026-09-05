@@ -84,9 +84,6 @@ func mergeReasoningCapabilities(a, b *providers.ReasoningCapabilities) *provider
 	if result.DefaultEffort == "" {
 		result.DefaultEffort = b.DefaultEffort
 	}
-	if result.DefaultEffort == "" {
-		result.DefaultEffort = a.DefaultEffort
-	}
 	// Union effort values from all effort options. An effort option with no
 	// values is OpenRouter's explicit unrestricted form and dominates any
 	// finite allowlist in the virtual superset.

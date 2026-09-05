@@ -153,7 +153,7 @@ func extractMessagesReasoning(source map[string]any) reasoningSelector {
 		}
 	}
 	if thinking, ok := source["thinking"].(map[string]any); ok {
-		if t, ok := thinking["type"].(string); ok {
+		if t, ok := thinking["type"].(string); ok && t != "" {
 			sel.Present = true
 			sel.Mode = t
 		}
@@ -403,22 +403,6 @@ func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string
 		}
 	}
 	return body, warning
-}
-
-// stripMessagesOutputConfigEffort removes output_config.effort from a Messages body.
-func stripMessagesOutputConfigEffort(body []byte) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
-	if outputConfig, ok := source["output_config"].(map[string]any); ok {
-		delete(outputConfig, "effort")
-		if len(outputConfig) == 0 {
-			delete(source, "output_config")
-		}
-	}
-	result, _ := json.Marshal(source)
-	return result
 }
 
 // matchesEffort returns true when the target explicitly advertises the given
