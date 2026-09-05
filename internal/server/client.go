@@ -129,7 +129,7 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 			inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 			return
 		}
- 	entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
+		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
 			entry["context_length"] = contextLength.Int64
 		}
@@ -650,8 +650,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				class = "upstream_response_too_large"
 				message = "The upstream provider response exceeded Tiller's non-streaming response limit."
 			}
-		terminalPreflightClass = class
-		row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			terminalPreflightClass = class
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
 			nonTranslationFailure = true
 			row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			if !route.Virtual || r.Context().Err() != nil {
