@@ -287,9 +287,12 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 }
 
 // applyChatReasoning maps a selector onto a Chat Completions request.
+// Mode (enabled/disabled) is always applied. Effort is only applied when
+// mode is not "disabled" — a selector with both enabled=false and effort
+// set is contradictory: disable wins, effort is dropped with a warning.
 func applyChatReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, caps *providers.ReasoningCapabilities, unknownSupport bool) ([]byte, bool) {
 	var warning bool
-	if (mode == "enabled" || mode == "disabled") && selector.Effort == "" {
+	if mode == "enabled" || mode == "disabled" {
 		if opts.SupportsToggle || unknownSupport {
 			body = setChatEnabled(body, mode == "enabled")
 		} else if mode == "disabled" && effortIsSupported("none", opts) {
@@ -310,8 +313,10 @@ func applyChatReasoning(body []byte, selector reasoningSelector, mode string, op
 			warning = true
 		}
 	}
-	if selector.Effort != "" && mode != "disabled" {
-		if effortIsSupported(selector.Effort, opts) || unknownSupport {
+	if selector.Effort != "" {
+		if mode == "disabled" {
+			warning = true
+		} else if effortIsSupported(selector.Effort, opts) || unknownSupport {
 			body = setChatEffort(body, selector.Effort)
 		} else {
 			warning = true
@@ -328,9 +333,12 @@ func applyChatReasoning(body []byte, selector reasoningSelector, mode string, op
 }
 
 // applyResponsesReasoning maps a selector onto a Responses request.
+// Mode (enabled/disabled) is always applied. Effort is only applied when
+// mode is not "disabled" — a selector with both enabled=false and effort
+// set is contradictory: disable wins, effort is dropped with a warning.
 func applyResponsesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) ([]byte, bool) {
 	var warning bool
-	if (mode == "enabled" || mode == "disabled") && selector.Effort == "" {
+	if mode == "enabled" || mode == "disabled" {
 		if opts.SupportsToggle || unknownSupport {
 			body = setResponsesEnabled(body, mode == "enabled")
 		} else if effortIsSupported("none", opts) && mode == "disabled" {
@@ -346,8 +354,10 @@ func applyResponsesReasoning(body []byte, selector reasoningSelector, mode strin
 			warning = true
 		}
 	}
-	if selector.Effort != "" && mode != "disabled" {
-		if effortIsSupported(selector.Effort, opts) || unknownSupport {
+	if selector.Effort != "" {
+		if mode == "disabled" {
+			warning = true
+		} else if effortIsSupported(selector.Effort, opts) || unknownSupport {
 			body = setResponsesEffort(body, selector.Effort)
 		} else {
 			warning = true
@@ -362,6 +372,9 @@ func applyResponsesReasoning(body []byte, selector reasoningSelector, mode strin
 }
 
 // applyMessagesReasoning maps a selector onto a Messages request.
+// Mode (enabled/disabled/adaptive) is always applied. Effort is only applied
+// when mode is not "disabled" — a selector with both enabled=false and effort
+// set is contradictory: disable wins, effort is dropped with a warning.
 func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool, providerType string) ([]byte, bool) {
 	var warning bool
 	switch mode {
@@ -386,8 +399,10 @@ func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string
 			warning = true
 		}
 	}
-	if selector.Effort != "" && mode != "disabled" {
-		if selector.Effort == "none" && (opts.SupportsDisable || unknownSupport) {
+	if selector.Effort != "" {
+		if mode == "disabled" {
+			warning = true
+		} else if selector.Effort == "none" && (opts.SupportsDisable || unknownSupport) {
 			body = setMessagesThinkingType(body, "disabled")
 		} else if effortIsSupported(selector.Effort, opts) || unknownSupport {
 			body = setMessagesEffort(body, selector.Effort)
