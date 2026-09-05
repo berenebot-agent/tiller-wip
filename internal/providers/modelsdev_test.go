@@ -636,3 +636,16 @@ func TestEnrichReasoningKeepsGatewayProviderMetadata(t *testing.T) {
 		t.Fatalf("gateway metadata should remain provider-only, got %+v", got.Options)
 	}
 }
+
+func TestEnrichReasoningPreservesExplicitEmptyFallback(t *testing.T) {
+	r := NewRegistry()
+	options := []map[string]any{}
+	r.modelsDev = modelsDevDataset{"deepseek": {Models: map[string]modelsDevModel{
+		"deepseek-v4-flash": {ReasoningOptions: &options},
+	}}}
+	provider := &ReasoningCapabilities{}
+	got := r.enrich([]Model{{ID: "deepseek-v4-flash", ReasoningCapabilities: provider}}, "deepseek")[0].ReasoningCapabilities
+	if got == nil || got.Options == nil || len(got.Options) != 0 {
+		t.Fatalf("explicit empty models.dev options should remain known-empty, got %+v", got)
+	}
+}

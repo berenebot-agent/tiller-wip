@@ -282,6 +282,9 @@ func enrichModel(model Model, md modelsDevModel, providerType string) Model {
 func mergeReasoningCapabilitiesFallback(provider, fallback *ReasoningCapabilities) *ReasoningCapabilities {
 	result := *provider
 	result.Options = append([]ReasoningOption(nil), provider.Options...)
+	if provider.Options == nil && fallback.Options != nil {
+		result.Options = []ReasoningOption{}
+	}
 	present := make(map[ReasoningOptionType]bool)
 	for _, option := range result.Options {
 		present[option.Type] = true
