@@ -4,8 +4,10 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -81,13 +83,45 @@ type FlowStore struct {
 	mu         sync.Mutex
 	now        func() time.Time
 	byProvider map[string]Flow
+	path       string
 }
 
 func NewFlowStore(now func() time.Time) *FlowStore {
+	return NewPersistentFlowStore(now, "")
+}
+
+func NewPersistentFlowStore(now func() time.Time, path string) *FlowStore {
 	if now == nil {
 		now = time.Now
 	}
-	return &FlowStore{now: now, byProvider: make(map[string]Flow)}
+	store := &FlowStore{now: now, byProvider: make(map[string]Flow), path: path}
+	store.load()
+	return store
+}
+
+func (s *FlowStore) load() {
+	if s.path == "" {
+		return
+	}
+	body, err := os.ReadFile(s.path)
+	if err != nil {
+		return
+	}
+	_ = json.Unmarshal(body, &s.byProvider)
+}
+
+func (s *FlowStore) save() {
+	if s.path == "" {
+		return
+	}
+	body, err := json.Marshal(s.byProvider)
+	if err != nil {
+		return
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o600); err == nil {
+		_ = os.Rename(tmp, s.path)
+	}
 }
 
 func (s *FlowStore) Begin(providerID string) (Flow, error) {
@@ -103,6 +137,7 @@ func (s *FlowStore) Begin(providerID string) (Flow, error) {
 	}
 	flow := Flow{ProviderID: providerID, PKCE: pkce, CreatedAt: now}
 	s.byProvider[providerID] = flow
+	s.save()
 	return flow, nil
 }
 
@@ -112,10 +147,15 @@ func (s *FlowStore) Consume(providerID, state string) (Flow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	flow, ok := s.byProvider[providerID]
+	if !ok && s.path != "" {
+		s.load()
+		flow, ok = s.byProvider[providerID]
+	}
 	if !ok {
 		return Flow{}, ErrFlowInvalid
 	}
 	delete(s.byProvider, providerID)
+	s.save()
 	if s.now().UTC().Sub(flow.CreatedAt) >= flowLifetime {
 		return Flow{}, ErrFlowExpired
 	}
@@ -128,5 +168,6 @@ func (s *FlowStore) Consume(providerID, state string) (Flow, error) {
 func (s *FlowStore) Cancel(providerID string) {
 	s.mu.Lock()
 	delete(s.byProvider, providerID)
+	s.save()
 	s.mu.Unlock()
 }

@@ -112,7 +112,10 @@ func FetchCopilotToken(ctx context.Context, client *http.Client, accessToken str
 	}
 	result := oauth.TokenResponse{ProviderData: map[string]any{"copilot_token": response.Token, "copilot_token_expires_at": response.ExpiresAt}}
 	if response.ExpiresAt > 0 {
-		result.ExpiresIn = max(1, response.ExpiresAt-time.Now().Unix())
+		result.ExpiresIn = response.ExpiresAt - time.Now().Unix()
+		if result.ExpiresIn <= 0 {
+			result.ExpiresIn = -1
+		}
 	}
 	return result, status, nil
 }

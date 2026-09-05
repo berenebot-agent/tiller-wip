@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -276,9 +275,28 @@ func intVal(v any) (*int64, bool) {
 // rewriteModelBytes replaces the upstream model identifier in a non-streaming
 // JSON body with the client-facing requested model.
 func rewriteModelBytes(body []byte, upstream, requested string) []byte {
-	body = bytes.ReplaceAll(body, []byte(`"model":"`+upstream+`"`), []byte(`"model":"`+requested+`"`))
-	body = bytes.ReplaceAll(body, []byte(`"model": "`+upstream+`"`), []byte(`"model": "`+requested+`"`))
-	return body
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(body, &object); err != nil {
+		return body
+	}
+	model, ok := object["model"]
+	if !ok {
+		return body
+	}
+	var value string
+	if err := json.Unmarshal(model, &value); err != nil || value != upstream {
+		return body
+	}
+	replacement, err := json.Marshal(requested)
+	if err != nil {
+		return body
+	}
+	object["model"] = replacement
+	result, err := json.Marshal(object)
+	if err != nil {
+		return body
+	}
+	return result
 }
 
 // newRequestID generates the router-owned request ID returned to the client.

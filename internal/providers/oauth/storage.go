@@ -61,8 +61,13 @@ func MergeToken(old TokenRecord, response TokenResponse, now time.Time) (TokenRe
 	if response.TokenType != "" {
 		record.TokenType = response.TokenType
 	}
-	if response.ExpiresIn > 0 {
-		expires := now.UTC().Add(time.Duration(response.ExpiresIn) * time.Second)
+	if response.ExpiresIn != 0 {
+		var expires time.Time
+		if response.ExpiresIn < 0 {
+			expires = now.UTC()
+		} else {
+			expires = now.UTC().Add(time.Duration(response.ExpiresIn) * time.Second)
+		}
 		record.ExpiresAt = &expires
 	}
 	if response.RefreshExpiresIn > 0 {

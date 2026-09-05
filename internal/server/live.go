@@ -176,11 +176,11 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 			h.broadcast("activity", delta)
 		case <-debounce.C:
 			if dirty {
-				h.broadcastSnapshot()
+				h.broadcastSnapshot(ctx)
 				dirty = false
 			}
 		case <-idle.C:
-			h.broadcastSnapshot()
+			h.broadcastSnapshot(ctx)
 			dirty = false
 		}
 	}
@@ -188,11 +188,11 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 
 // broadcastSnapshot recomputes and pushes the full envelope. It is the
 // self-healing source of truth; a dropped outcome delta is corrected here.
-func (h *liveHub) broadcastSnapshot() {
+func (h *liveHub) broadcastSnapshot(ctx context.Context) {
 	if h.snapshot == nil {
 		return
 	}
-	snap, err := h.snapshot(context.Background())
+	snap, err := h.snapshot(ctx)
 	if err != nil {
 		return
 	}

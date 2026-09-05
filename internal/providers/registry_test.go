@@ -51,10 +51,12 @@ func TestSetResponseHeaderTimeout(t *testing.T) {
 
 func TestOpenCodeNativeProtocols(t *testing.T) {
 	zen := map[string]Protocol{
-		"gpt-5.5":           ProtocolResponses,
-		"claude-opus-4.6":   ProtocolMessages,
-		"deepseek-v4-flash": ProtocolChat,
-		"unknown-model":     ProtocolChat,
+		"gpt-5.5":            ProtocolResponses,
+		"claude-opus-4.6":    ProtocolMessages,
+		"deepseek-v4-flash":  ProtocolChat,
+		"unknown-model":      ProtocolChat,
+		"gpt-5.7":            ProtocolResponses,
+		"new-response-model": ProtocolResponses,
 	}
 	for modelID, want := range zen {
 		if got := nativeProtocol("opencode-zen", modelID); got != want {
@@ -74,6 +76,8 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 		"deepseek-v4-flash-free":          ProtocolChat,
 		"mimo-v2.5-free":                  ProtocolChat,
 		"unlisted-model-free":             ProtocolChat,
+		"gpt-5.7-free":                    ProtocolResponses,
+		"new-response-model-free":         ProtocolResponses,
 	}
 	for modelID, want := range freeModels {
 		if got := nativeProtocol("opencode-free", modelID); got != want {

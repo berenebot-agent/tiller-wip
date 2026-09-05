@@ -281,20 +281,26 @@ func nativeProtocol(providerType, modelID string) Protocol {
 		if protocol, ok := openCodeZenProtocolByModel[modelID]; ok {
 			return protocol
 		}
-	}
-	if providerType == "opencode-zen" {
-		if strings.HasSuffix(modelID, "-free") {
-			return ProtocolChat
+		if openCodeResponsesModel(modelID) {
+			return ProtocolResponses
 		}
-		return ProtocolChat
-	}
-	if providerType == "opencode-free" {
 		return ProtocolChat
 	}
 	if providerType == "opencode-go" {
 		return ProtocolChat
 	}
 	return ""
+}
+
+func openCodeResponsesModel(modelID string) bool {
+	lowerModelID := strings.ToLower(modelID)
+	if strings.Contains(lowerModelID, "response") {
+		return true
+	}
+	return strings.HasPrefix(lowerModelID, "gpt-5") ||
+		strings.HasPrefix(lowerModelID, "grok-4") ||
+		strings.HasPrefix(lowerModelID, "grok-build-") ||
+		strings.HasPrefix(lowerModelID, "muse-spark-")
 }
 
 type Registry struct {

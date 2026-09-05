@@ -41,10 +41,28 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		var modelName, realID, virtualID string
 		var real, virtual sql.NullString
 		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
-			inferenceError(w, 500, "server_error", "invalid_single_binding", "The Single client key is not configured correctly.", false)
+			if errors.Is(err, sql.ErrNoRows) {
+				inferenceError(w, 500, "server_error", "invalid_single_binding", "No binding configured for this API key.", false)
+			} else {
+				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+			}
 			return
 		}
 		realID, virtualID = real.String, virtual.String
+		var usable int
+		if real.Valid {
+			err := s.db.SQL.QueryRowContext(r.Context(), `SELECT 1 FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=? AND m.available=1 AND p.enabled=1`, realID).Scan(&usable)
+			if err != nil {
+				inferenceError(w, 500, "server_error", "invalid_single_binding", "Bound model is disabled or unavailable.", false)
+				return
+			}
+		} else {
+			err := s.db.SQL.QueryRowContext(r.Context(), `SELECT 1 FROM virtual_models v WHERE v.id=? AND EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)`, virtualID).Scan(&usable)
+			if err != nil {
+				inferenceError(w, 500, "server_error", "invalid_single_binding", "Bound model is disabled or unavailable.", false)
+				return
+			}
+		}
 		var contextLength, maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
 		var reasoningCaps *providers.ReasoningCapabilities
@@ -268,8 +286,9 @@ type resolvedRoute struct {
 	RouteKind, RouteModelID, RouteModel string
 	// ReasoningCapabilities holds the normalized selector metadata for this
 	// real target. nil when unknown.
-	ReasoningCapabilities *providers.ReasoningCapabilities
-}
+		ReasoningCapabilities *providers.ReasoningCapabilities
+		MaxOutputTokens       sql.NullInt64
+	}
 
 func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
 	tx, err := s.db.SQL.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
@@ -292,7 +311,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			route.RouteKind, route.RouteModelID = "real", realID.String
 			route.ProviderModelID = realID.String
 			var reasoningRaw sql.NullString
-			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id, m.reasoning_capabilities FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel, &reasoningRaw); err != nil {
+			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel, &reasoningRaw, &route.MaxOutputTokens); err != nil {
 				return resolvedRoute{}, err
 			}
 			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
@@ -304,7 +323,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		}
 	} else {
 		var reasoningRaw sql.NullString
-		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id, m.reasoning_capabilities FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel, &reasoningRaw)
+		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel, &reasoningRaw, &route.MaxOutputTokens)
 		if err == nil {
 			route.RouteKind = "real"
 			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
@@ -319,7 +338,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		}
 	}
 	if route.RouteKind == "virtual" {
-		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
+		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
 		if e != nil {
 			return resolvedRoute{}, e
 		}
@@ -330,7 +349,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			var enabled, available int
 			var nativeProtocol sql.NullString
 			var reasoningRaw sql.NullString
-			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available, &reasoningRaw); e != nil {
+			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available, &reasoningRaw, &target.MaxOutputTokens); e != nil {
 				return resolvedRoute{}, e
 			}
 			target.Provider.Enabled = scanBool(enabled)
@@ -511,7 +530,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		translated = target != incoming
 		attemptBody := append([]byte(nil), originalBody...)
 		if translated {
-			attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID)
+			attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
 			if err != nil {
 				code := "translation_error"
 				var unsupported unsupportedFeature

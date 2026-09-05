@@ -227,10 +227,10 @@ func parseModelsDevReasoningOptions(raw []map[string]any) *ReasoningCapabilities
 		case "budget_tokens":
 			var opt ReasoningOption
 			opt.Type = ReasoningOptionBudgetTokens
-			if min, ok := coerceInt64(entry["min"]); ok {
+			if min, ok := CoerceInt64(entry["min"]); ok {
 				opt.Min = &min
 			}
-			if max, ok := coerceInt64(entry["max"]); ok {
+			if max, ok := CoerceInt64(entry["max"]); ok {
 				opt.Max = &max
 			}
 			options = append(options, opt)
@@ -318,16 +318,16 @@ func mergeReasoningCapabilitiesFallback(provider, fallback *ReasoningCapabilitie
 	return &result
 }
 
-// coerceInt64 converts a JSON number or string to int64 without going
+// CoerceInt64 converts a JSON number or string to int64 without going
 // through float. Returns (0, false) when the value is not a clean integer.
-func coerceInt64(v any) (int64, bool) {
+func CoerceInt64(v any) (int64, bool) {
 	switch n := v.(type) {
 	case int64:
 		return n, true
 	case int:
 		return int64(n), true
 	case float64:
-		if n == float64(int64(n)) && n >= 0 {
+		if n >= 0 && n < float64(uint64(1)<<63) && n == float64(int64(n)) {
 			return int64(n), true
 		}
 	case string:

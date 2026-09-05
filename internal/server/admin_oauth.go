@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/providers"
@@ -14,7 +15,24 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
-const codexRedirectURI = "http://localhost:1455/auth/callback"
+const oauthRedirectPath = "/auth/callback"
+
+func (s *Server) oauthRedirectURI(r *http.Request) string {
+	scheme := "http"
+	if s.secureRequest(r) {
+		scheme = "https"
+	}
+	return (&url.URL{Scheme: scheme, Host: r.Host, Path: oauthRedirectPath}).String()
+}
+
+func (s *Server) oauthRateLimited(w http.ResponseWriter, r *http.Request, limiter *loginLimiter) bool {
+	key := clientIP(r, s.config.TrustedProxy)
+	if limiter.locked(key) || limiter.recordFailure(key) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
+		return true
+	}
+	return false
+}
 
 type oauthDeviceState struct {
 	Status string
@@ -24,6 +42,9 @@ type oauthDeviceState struct {
 }
 
 func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
+	if s.oauthRateLimited(w, r, s.oauthStartLimiter) {
+		return
+	}
 	id := r.PathValue("id")
 	providerType, err := s.oauthProviderType(r.Context(), id)
 	if err == sql.ErrNoRows {
@@ -56,20 +77,24 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "oauth_start_failed", "Could not start OAuth connection.")
 		return
 	}
+	redirectURI := s.oauthRedirectURI(r)
 	authURL := ""
 	if providerType == "codex-subscription" {
-		authURL, err = codex.AuthorizationURL(codexRedirectURI, flow.PKCE.State, flow.PKCE.Challenge)
+		authURL, err = codex.AuthorizationURL(redirectURI, flow.PKCE.State, flow.PKCE.Challenge)
 	} else {
-		authURL, err = claude.AuthorizationURL(codexRedirectURI, flow.PKCE.State, flow.PKCE.Challenge)
+		authURL, err = claude.AuthorizationURL(redirectURI, flow.PKCE.State, flow.PKCE.Challenge)
 	}
 	if err != nil {
 		adminError(w, 500, "oauth_start_failed", "Could not build OAuth authorization URL.")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"authorization_url": authURL, "redirect_uri": codexRedirectURI, "expires_in": int((10 * time.Minute) / time.Second)})
+	writeJSON(w, 200, map[string]any{"authorization_url": authURL, "redirect_uri": redirectURI, "expires_in": int((10 * time.Minute) / time.Second)})
 }
 
 func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
+	if s.oauthRateLimited(w, r, s.oauthCallbackLimiter) {
+		return
+	}
 	id := r.PathValue("id")
 	providerType, err := s.oauthProviderType(r.Context(), id)
 	if err == sql.ErrNoRows {
@@ -108,10 +133,11 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var tokens oauth.TokenResponse
+	redirectURI := s.oauthRedirectURI(r)
 	if providerType == "codex-subscription" {
-		tokens, err = codex.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, codexRedirectURI, flow.PKCE.Verifier)
+		tokens, err = codex.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, redirectURI, flow.PKCE.Verifier)
 	} else {
-		tokens, err = claude.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, codexRedirectURI, flow.PKCE.Verifier, flow.PKCE.State)
+		tokens, err = claude.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, redirectURI, flow.PKCE.Verifier, flow.PKCE.State)
 	}
 	if err != nil {
 		adminError(w, 502, "oauth_exchange_failed", "OAuth token exchange failed.")
@@ -148,14 +174,17 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.D
 		state.Device = device
 	}
 	s.oauthDeviceMu.Unlock()
+	pollCtx := s.backgroundCtx
 	go func() {
-		tokens, err := github.PollToken(context.Background(), s.providers.Registry().HTTPClient(), device)
+		tokens, err := github.PollToken(pollCtx, s.providers.Registry().HTTPClient(), device)
 		if err != nil {
-			s.finishDevice(id, "failed", err)
+			if !errors.Is(err, context.Canceled) {
+				s.finishDevice(id, "failed", err)
+			}
 			return
 		}
-		user, _ := github.FetchUser(context.Background(), s.providers.Registry().HTTPClient(), tokens.AccessToken)
-		copilot, _, err := github.FetchCopilotToken(context.Background(), s.providers.Registry().HTTPClient(), tokens.AccessToken)
+		user, _ := github.FetchUser(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
+		copilot, _, err := github.FetchCopilotToken(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		if err != nil {
 			s.finishDevice(id, "failed", err)
 			return
@@ -173,7 +202,7 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.D
 			s.finishDevice(id, "failed", err)
 			return
 		}
-		if err := oauth.NewStore(s.db.SQL).Put(context.Background(), record); err != nil {
+		if err := oauth.NewStore(s.db.SQL).Put(pollCtx, record); err != nil {
 			s.finishDevice(id, "failed", err)
 			return
 		}

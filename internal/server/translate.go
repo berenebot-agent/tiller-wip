@@ -32,7 +32,7 @@ type reasoningSelector struct {
 // translateRequest translates a request body from one protocol to another.
 // When the target protocol differs, reasoning controls are extracted before
 // conversion and must be re-applied by the caller via applyReasoningSelector.
-func translateRequest(body []byte, from, to providers.Protocol, model string) ([]byte, error) {
+func translateRequest(body []byte, from, to providers.Protocol, model string, modelMaxOutputTokens ...int64) ([]byte, error) {
 	if from == to {
 		return body, nil
 	}
@@ -64,6 +64,9 @@ func translateRequest(body []byte, from, to providers.Protocol, model string) ([
 		return json.Marshal(chat)
 	}
 	if to == providers.ProtocolMessages {
+		if len(modelMaxOutputTokens) > 0 && modelMaxOutputTokens[0] > 0 {
+			chat["max_output_tokens"] = modelMaxOutputTokens[0]
+		}
 		return json.Marshal(chatToMessagesRequest(chat))
 	}
 	if to == providers.ProtocolResponses {
@@ -164,17 +167,7 @@ func extractMessagesReasoning(source map[string]any) reasoningSelector {
 // coerceInt64 converts a JSON number to int64. Only float64 (how
 // encoding/json decodes numbers) and int64 are accepted.
 func coerceInt64(v any) (int64, bool) {
-	switch n := v.(type) {
-	case int64:
-		return n, true
-	case int:
-		return int64(n), true
-	case float64:
-		if n >= 0 && n == float64(int64(n)) {
-			return int64(n), true
-		}
-	}
-	return 0, false
+	return providers.CoerceInt64(v)
 }
 
 // applyReasoningSelector maps a canonical selector onto a target request body
@@ -445,6 +438,8 @@ func setChatMode(body []byte, mode string) []byte {
 }
 
 // setChatBudget sets reasoning.max_tokens on a Chat Completions body.
+const maxJavaScriptSafeInteger = int64(1<<53 - 1)
+
 func setChatBudget(body []byte, budget int64) []byte {
 	var source map[string]any
 	if err := json.Unmarshal(body, &source); err != nil {
@@ -454,7 +449,11 @@ func setChatBudget(body []byte, budget int64) []byte {
 	if reasoning == nil {
 		reasoning = map[string]any{}
 	}
-	reasoning["max_tokens"] = budget
+	if budget > maxJavaScriptSafeInteger {
+		reasoning["max_tokens"] = fmt.Sprint(budget)
+	} else {
+		reasoning["max_tokens"] = budget
+	}
 	source["reasoning"] = reasoning
 	result, _ := json.Marshal(source)
 	return result
@@ -678,7 +677,11 @@ func requestToChat(source map[string]any, from providers.Protocol) (map[string]a
 }
 
 func chatToMessagesRequest(chat map[string]any) map[string]any {
-	out := map[string]any{"model": chat["model"], "max_tokens": 4096}
+	maxTokens := any(4096)
+	if max, ok := chat["max_output_tokens"]; ok {
+		maxTokens = max
+	}
+	out := map[string]any{"model": chat["model"], "max_tokens": maxTokens}
 	for _, key := range []string{"temperature", "top_p", "stream", "stop_sequences", "metadata"} {
 		if v, ok := chat[key]; ok {
 			out[key] = v
@@ -834,7 +837,7 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		if choice == suppressToolChoice {
+		if choice == actionSuppressTools {
 			suppressTools = true
 		} else if choice != "" {
 			out["tool_choice"] = choice
@@ -1031,7 +1034,8 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 	flusher, _ := w.(http.Flusher)
 	state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model}
 	for {
-		event, data, err := readSSEEvent(reader)
+		event, err := readSSEEvent(reader)
+		data := event.Data
 		if string(data) == "[DONE]" {
 			writeStreamDone(w, incoming, state)
 			if flusher != nil {
@@ -1043,7 +1047,7 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 			var payload map[string]any
 			if json.Unmarshal(data, &payload) == nil {
 				captureStreamUsage(payload, target, usage)
-				deltas, done := canonicalDeltas(event, payload, target, state)
+				deltas, done := canonicalDeltas(event.Name, payload, target, state)
 				for _, delta := range deltas {
 					writeTranslatedEvent(w, incoming, state, delta)
 					if flusher != nil {
@@ -1069,11 +1073,15 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 	}
 }
 
+const maxAccumulatedTextBytes = 8 * 1024 * 1024
+
 type streamState struct {
 	id, model                                       string
 	started, contentStarted, reasoningStarted, done bool
 	outputIndex                                     int
 	accumulated                                     strings.Builder
+	accumulatedBytes                                int
+	toolStarted                                     bool
 	inputTokens                                     int64
 	outputTokens                                    int64
 	hasInputTokens                                  bool
@@ -1082,6 +1090,13 @@ type streamState struct {
 type canonicalDelta struct {
 	Kind, Text, CallID, Name, Arguments, Finish string
 	Usage                                       any
+}
+
+type sseEvent struct {
+	Name  string
+	Data  []byte
+	ID    string
+	Retry *int
 }
 
 func canonicalDeltas(event string, payload map[string]any, target providers.Protocol, state *streamState) ([]canonicalDelta, bool) {
@@ -1269,10 +1284,25 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 	}
 	switch delta.Kind {
 	case "text":
-		state.accumulated.WriteString(delta.Text)
+		if remaining := maxAccumulatedTextBytes - state.accumulatedBytes; remaining > 0 {
+			text := delta.Text
+			if len(text) > remaining {
+				text = text[:remaining]
+			}
+			state.accumulated.WriteString(text)
+			state.accumulatedBytes += len(text)
+		}
 		writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": 0, "content_index": 0, "delta": delta.Text})
 	case "reasoning":
 		writeSSE(w, "response.reasoning_summary_text.delta", map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": 0, "summary_index": 0, "delta": delta.Text})
+	case "tool":
+		if !state.toolStarted {
+			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": 1, "item": map[string]any{"type": "function_call", "call_id": delta.CallID, "name": delta.Name, "arguments": ""}})
+			state.toolStarted = true
+		}
+		if delta.Arguments != "" {
+			writeSSE(w, "response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "output_index": 1, "item_id": delta.CallID, "call_id": delta.CallID, "delta": delta.Arguments})
+		}
 	}
 }
 
@@ -1322,25 +1352,36 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 	writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "response": response})
 }
 
-func readSSEEvent(r *bufio.Reader) (string, []byte, error) {
-	var event string
-	var data []byte
+func readSSEEvent(r *bufio.Reader) (sseEvent, error) {
+	var event sseEvent
 	for {
 		line, err := r.ReadString('\n')
 		trim := strings.TrimRight(line, "\r\n")
-		if strings.HasPrefix(trim, "event:") {
-			event = strings.TrimSpace(strings.TrimPrefix(trim, "event:"))
-		} else if strings.HasPrefix(trim, "data:") {
-			if len(data) > 0 {
-				data = append(data, '\n')
-			}
-			data = append(data, strings.TrimSpace(strings.TrimPrefix(trim, "data:"))...)
+		field, value, hasField := strings.Cut(trim, ":")
+		if hasField {
+			value = strings.TrimPrefix(value, " ")
 		}
-		if trim == "" && len(data) > 0 {
-			return event, data, nil
+		switch field {
+		case "event":
+			event.Name = value
+		case "data":
+			if len(event.Data) > 0 {
+				event.Data = append(event.Data, '\n')
+			}
+			event.Data = append(event.Data, value...)
+		case "id":
+			event.ID = value
+		case "retry":
+			var retry int
+			if _, scanErr := fmt.Sscanf(value, "%d", &retry); scanErr == nil && retry >= 0 {
+				event.Retry = &retry
+			}
+		}
+		if trim == "" && (len(event.Data) > 0 || event.Name != "" || event.ID != "" || event.Retry != nil) {
+			return event, nil
 		}
 		if err != nil {
-			return event, data, err
+			return event, err
 		}
 	}
 }
@@ -1438,10 +1479,9 @@ func chatContentToResponsesParts(value any) ([]any, error) {
 	return parts, nil
 }
 
-// suppressToolChoice is a sentinel returned by convertToolChoice to signal
-// that the caller should omit both tool_choice and tools from the relay
-// request (the Chat "none" semantics: do not call tools).
-const suppressToolChoice = "__suppress_tools__"
+type toolChoiceAction int
+
+const actionSuppressTools toolChoiceAction = iota + 1
 
 func convertToolChoice(value any) (any, error) {
 	// The Responses wire shape used by chat-completions translation only
@@ -1457,7 +1497,7 @@ func convertToolChoice(value any) (any, error) {
 	case "auto":
 		return v, nil
 	case "none":
-		return suppressToolChoice, nil
+		return actionSuppressTools, nil
 	default:
 		return nil, unsupportedFeature{"tool_choice " + v}
 	}

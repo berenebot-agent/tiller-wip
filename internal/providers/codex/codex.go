@@ -95,12 +95,13 @@ func tokenRequest(ctx context.Context, client *http.Client, form url.Values) (oa
 type Account struct{ Email, ID, Plan string }
 
 func AccountInfo(idToken string) Account {
-	payload := jwtPayload(idToken)
+	payload := extractUnverifiedJWTClaims(idToken)
 	auth, _ := payload["https://api.openai.com/auth"].(map[string]any)
 	return Account{Email: stringValue(payload["email"]), ID: firstString(auth["chatgpt_account_id"], payload["account_id"]), Plan: firstString(auth["chatgpt_plan_type"], payload["plan_type"])}
 }
 
-func jwtPayload(token string) map[string]any {
+// extractUnverifiedJWTClaims reads display metadata; callers must not use it for authentication.
+func extractUnverifiedJWTClaims(token string) map[string]any {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return map[string]any{}
