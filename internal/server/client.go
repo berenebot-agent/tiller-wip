@@ -199,6 +199,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			}
 			target.Provider.Enabled = scanBool(enabled)
 			target.Provider.Protocols = providers.DecodeProtocols(protocols)
+			s.providers.HydrateOAuth(ctx, &target.Provider)
 			if nativeProtocol.Valid {
 				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
 			}
@@ -229,6 +230,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	}
 	route.Provider.Enabled = scanBool(enabled)
 	route.Provider.Protocols = providers.DecodeProtocols(protocols)
+	s.providers.HydrateOAuth(ctx, &route.Provider)
 	if nativeProtocol.Valid {
 		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
 	}
@@ -269,6 +271,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
+	logErrorBodies, _ := s.db.GetLogErrorBodies(r.Context())
 	originalBody := append([]byte(nil), body...)
 	start := time.Now()
 	streamed := false
@@ -277,6 +280,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
+		if logErrorBodies && row.httpStatus >= 400 {
+			row.requestBody, row.requestBodyTruncated = loggedBody(originalBody)
+		}
 		if route.Virtual {
 			s.inflight.end(route.RouteModelID, streamed)
 		}
@@ -324,7 +330,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var cancel context.CancelFunc
 	protocolUnavailable := false
 	terminalPreflightClass := ""
-	for _, candidate := range candidates {
+	oauthRefreshed := make(map[string]bool)
+	for i := 0; i < len(candidates); i++ {
+		candidate := candidates[i]
 		if ctxErr := r.Context().Err(); ctxErr != nil {
 			class := "client_cancelled"
 			if errors.Is(ctxErr, context.DeadlineExceeded) {
@@ -368,6 +376,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
 			attemptBody, _ = json.Marshal(attemptRaw)
 		}
+		if candidate.Provider.Type == "codex-subscription" {
+			attemptBody, err = normalizeCodexRequest(attemptBody)
+			if err != nil {
+				row.httpStatus = 400
+				row.errorText = strPtr("invalid_request")
+				inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
+				return
+			}
+		}
 		endpoint, e := providers.Endpoint(candidate.Provider, target)
 		if e != nil {
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
@@ -388,6 +405,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
+		if candidate.Provider.Type == "codex-subscription" {
+			req.Header.Set("session-id", row.clientRequestID)
+		}
 		targetID := candidate.ProviderModelID
 		if targetID == "" {
 			targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
@@ -436,17 +456,34 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			class := fmt.Sprintf("http_%d", response.StatusCode)
 			var upstreamErrorBody []byte
 			var upstreamErrorReadErr error
-			if !route.Virtual {
+			if !route.Virtual || logErrorBodies {
 				// Read the upstream error body for bounded passthrough to the
-				// originating client. The body is written directly to the
-				// client and never stored in the activity log. Virtual
-				// fallback paths never read the body: they close it below
-				// and move on to the next target.
+				// originating client. When sensitive body logging is enabled,
+				// retain the bounded body on the failed attempt as well.
 				upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
 			}
 			response.Body.Close()
 			attemptCancel()
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()}
+			if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+				attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
+			}
+			row.attempts = append(row.attempts, attempt)
+			// Stale-auth recovery: on 401/403 from an OAuth provider, force a
+			// token refresh once per request and retry the same target before
+			// falling through to normal virtual fallback. ForceOAuthRefresh
+			// transitions auth_state on failure, so a dead refresh token surfaces
+			// as reconnect_required without further handling here.
+			if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
+				if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+					if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
+						oauthRefreshed[candidate.Provider.ID] = true
+						candidates[i].Provider = candidate.Provider
+						i--
+						continue
+					}
+				}
+			}
 			// An upstream HTTP response is an upstream failure regardless of
 			// status. Ordered virtual routes try their next target by default;
 			// router-side failures (for example translation errors) are handled
@@ -454,6 +491,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+					row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
+				}
 				// Direct (non-virtual, non-translated) routes pass through
 				// the provider's structured error body verbatim so the
 				// client sees the provider's error shape. The body is

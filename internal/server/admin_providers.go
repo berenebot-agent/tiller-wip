@@ -23,6 +23,7 @@ type providerView struct {
 	Enabled              bool                 `json:"enabled"`
 	Protocols            []providers.Protocol `json:"protocols"`
 	CredentialConfigured bool                 `json:"credential_configured"`
+	AuthState            string               `json:"auth_state"`
 	LastRefreshAt        *string              `json:"last_refresh_at"`
 	NextRefreshAt        *string              `json:"next_refresh_at"`
 	LastRefreshError     *string              `json:"last_refresh_error"`
@@ -39,7 +40,7 @@ func (s *Server) providerTypes(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT p.id,p.name,p.type,p.base_url,p.enabled,p.protocols,p.credential_secret IS NOT NULL,p.last_refresh_at,p.next_refresh_at,p.last_refresh_error,p.created_at,p.updated_at,count(m.id),coalesce(sum(CASE WHEN m.available=1 THEN 1 ELSE 0 END),0) FROM providers p LEFT JOIN provider_models m ON m.provider_id=p.id WHERE p.name LIKE ? OR p.type LIKE ? GROUP BY p.id ORDER BY p.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT p.id,p.name,p.type,p.base_url,p.enabled,p.protocols,(p.credential_secret IS NOT NULL OR EXISTS(SELECT 1 FROM provider_oauth_tokens o WHERE o.provider_id=p.id)),coalesce(o.auth_state,''),p.last_refresh_at,p.next_refresh_at,p.last_refresh_error,p.created_at,p.updated_at,count(m.id),coalesce(sum(CASE WHEN m.available=1 THEN 1 ELSE 0 END),0) FROM providers p LEFT JOIN provider_models m ON m.provider_id=p.id LEFT JOIN provider_oauth_tokens o ON o.provider_id=p.id WHERE p.name LIKE ? OR p.type LIKE ? GROUP BY p.id ORDER BY p.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list providers.")
 		return
@@ -50,7 +51,7 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		var v providerView
 		var enabled, configured int
 		var raw string
-		if err := rows.Scan(&v.ID, &v.Name, &v.Type, &v.BaseURL, &enabled, &raw, &configured, &v.LastRefreshAt, &v.NextRefreshAt, &v.LastRefreshError, &v.CreatedAt, &v.UpdatedAt, &v.ModelCount, &v.AvailableModelCount); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Type, &v.BaseURL, &enabled, &raw, &configured, &v.AuthState, &v.LastRefreshAt, &v.NextRefreshAt, &v.LastRefreshError, &v.CreatedAt, &v.UpdatedAt, &v.ModelCount, &v.AvailableModelCount); err != nil {
 			adminError(w, 500, "database_error", "Could not list providers.")
 			return
 		}
@@ -83,6 +84,9 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.Name == "" {
 		input.Name = descriptor.Type
+		if input.Type == "codex-subscription" {
+			input.Name = "codex"
+		}
 	}
 	input.Name = strings.ToLower(strings.TrimSpace(input.Name))
 	// Matches DB CHECK: name=lower(name) AND length 1..63 AND GLOB '[a-z0-9-]*' AND first/last [a-z0-9]
@@ -110,6 +114,10 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if descriptor.CredentialNeeded && input.Credential == "" {
 		adminError(w, 400, "credential_required", "This provider requires an API credential.")
+		return
+	}
+	if descriptor.AuthMode == providers.AuthModeOAuth && input.Credential != "" {
+		adminError(w, 400, "oauth_credential_not_allowed", "This provider must be connected through OAuth.")
 		return
 	}
 	protocols := descriptor.Protocols
@@ -256,6 +264,18 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Request) {
+	var providerType string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT type FROM providers WHERE id=?`, r.PathValue("id")).Scan(&providerType); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	} else if err != nil {
+		adminError(w, 500, "database_error", "Could not load provider.")
+		return
+	}
+	if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+		adminError(w, 400, "oauth_credential_not_allowed", "This provider must be connected through OAuth.")
+		return
+	}
 	var input struct {
 		Credential string `json:"credential"`
 	}
@@ -293,6 +313,14 @@ func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("id")
+	var providerType string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT type FROM providers WHERE id=?`, providerID).Scan(&providerType); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	} else if err != nil {
+		adminError(w, 500, "database_error", "Could not delete provider.")
+		return
+	}
 	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
@@ -349,9 +377,24 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `DELETE FROM namespaces WHERE entity_id=? AND kind='real'`, providerID)
 	}
+	// Delete absorbs disconnect: clean up OAuth material (token row) inside
+	// the transaction, after all reference checks pass. A rejected delete
+	// (409) rolls back and leaves credentials untouched.
+	if err == nil {
+		if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+			_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_oauth_tokens WHERE provider_id=?`, providerID)
+		}
+	}
 	if err != nil || tx.Commit() != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
+	}
+	// Clean up in-memory OAuth state only after the transaction commits.
+	if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+		s.oauthDeviceMu.Lock()
+		delete(s.oauthDevices, providerID)
+		s.oauthDeviceMu.Unlock()
+		s.oauthFlows.Cancel(providerID)
 	}
 	w.WriteHeader(204)
 }

@@ -13,9 +13,23 @@ import (
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
-	for _, providerType := range []string{"openai", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
+	for _, providerType := range []string{"openai", "codex-subscription", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
 		if _, ok := Lookup(providerType); !ok {
 			t.Errorf("missing provider type %s", providerType)
+		}
+	}
+}
+
+func TestDescriptorsDefaultToAPIKeyAuth(t *testing.T) {
+	for _, descriptor := range Descriptors() {
+		if descriptor.Type == "codex-subscription" || descriptor.Type == "claude-subscription" || descriptor.Type == "github-copilot" {
+			if descriptor.AuthMode != AuthModeOAuth {
+				t.Errorf("Codex auth mode = %q, want %q", descriptor.AuthMode, AuthModeOAuth)
+			}
+			continue
+		}
+		if descriptor.AuthMode != AuthModeAPIKey {
+			t.Errorf("%s auth mode = %q, want %q", descriptor.Type, descriptor.AuthMode, AuthModeAPIKey)
 		}
 	}
 }

@@ -47,7 +47,7 @@
 
 .activity-attempt {
   display: grid;
-  grid-template-columns: 19px minmax(0, 1fr) auto auto;
+  grid-template-columns: 19px minmax(0, 1fr) auto;
   align-items: center;
   gap: 4px;
   padding: 3px 5px;
@@ -73,7 +73,6 @@
 .error-content pre { margin: 0; padding: 12px 14px; background: #f2f5f7; border: 1px solid var(--line); border-radius: 3px; max-height: 40vh; overflow: auto; }
 .error-content code { display: block; color: var(--ink); font-family: var(--mono); font-size: 12px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 .error-dialog .copy-state { margin: 10px 22px 0; }
-.attempt-latency { color: var(--muted); font: 10px var(--mono); }
 .attempt-failed .attempt-status { color: var(--red); }
 .attempt-success .attempt-status { color: var(--green); }
 .attempt-neutral .attempt-status { color: var(--muted); }

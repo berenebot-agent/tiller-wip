@@ -84,7 +84,7 @@ Each attempt is visible in Activity, including the fallback — the client gets 
 - **Providers & models** — multiple named instances; credentials entered once; automatic catalogue discovery; manual/periodic refresh; retired models preserved rather than silently remapped; context/capability metadata.
 - **Routing** — fixed virtual routes; ordered fallback; configurable fallback timeout; no silent fallback on direct real-model calls; no response-stream splicing after output begins; client cancellation propagates upstream.
 - **Client API** — `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, covering the common OpenAI and Anthropic surfaces with safe protocol translation.
-- **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks). Never persists prompt or response content. Retention controlled per client key.
+- **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks). Client request bodies and provider error responses are never retained unless you turn on detailed error logging. Retention controlled per client key.
 - **Notifications** — optional best-effort webhooks for fallback, all-targets-failed, key created/deleted, admin login. Metadata-only, never blocks inference.
 - **Operations** — persistent admin sessions; key rotation; SQLite backup export; health endpoints; single Docker container; embedded UI; read-only rootfs; non-root runtime user.
 
@@ -245,7 +245,7 @@ With a Single key, `main` can be redirected from the control panel without chang
 
 ## Architecture
 
-Tiller is intentionally small: a Go HTTP server (client API, provider adapters, protocol translation, route/fallback resolver, admin API, embedded control-panel assets) over SQLite (providers, model catalogue, virtual routes, client keys, sessions, settings, metadata-only Activity).
+Tiller is intentionally small: a Go HTTP server (client API, provider adapters, protocol translation, route/fallback resolver, admin API, embedded control-panel assets) over SQLite (providers, model catalogue, virtual routes, client keys, sessions, settings, Activity).
 
 No Redis. No Postgres. No separate frontend service. No message broker. No vector database. The normal deployment is one container with one bind-mounted data directory.
 
@@ -257,7 +257,7 @@ No Redis. No Postgres. No separate frontend service. No message broker. No vecto
 - **Stable clients, movable backends** — the client should know as little as possible about the real provider arrangement.
 - **Failure should be boring** — a rate-limited upstream falls through to the next target without turning into an emergency reconfiguration.
 - **Keep infrastructure small** — Go, SQLite, one container, few dependencies.
-- **Don't collect content you don't need** — Activity answers "what route did this request take?", not "what did it say?".
+- **Don't collect content you don't need** — Activity answers "what route did this request take?", not "what did it say?". Detailed error logging is an explicit, bounded opt-in for diagnosing failed requests and stores sensitive bodies in the database and exports.
 
 ---
 
@@ -275,7 +275,7 @@ Tiller stores its state under the configured data directory, normally `./data`. 
 
 **Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets, since anyone who can read the database file can recover your provider keys.
 
-Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records are metadata-only and should not contain prompt or response bodies.
+Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records are metadata-only by default; the optional detailed error logging setting stores bounded failed request and provider error bodies for clients with logging enabled.
 
 For anything other than local-only use: use HTTPS, put Tiller behind a trusted reverse proxy, use a strong admin password, protect the data directory and exported backups, and do not expose the control panel casually to the public internet. See [SECURITY.md](SECURITY.md).
 

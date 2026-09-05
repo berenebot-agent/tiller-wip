@@ -14,20 +14,63 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
+	"github.com/tiller-router/tiller-router/internal/providers/claude"
+	"github.com/tiller-router/tiller-router/internal/providers/codex"
+	"github.com/tiller-router/tiller-router/internal/providers/github"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 type Manager struct {
 	db       *sql.DB
 	registry *Registry
+	oauth    *oauth.Manager
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex
 }
 
 func NewManager(db *sql.DB, registry *Registry) *Manager {
-	return &Manager{db: db, registry: registry, locks: make(map[string]*sync.Mutex)}
+	return &Manager{db: db, registry: registry, oauth: oauth.NewManager(oauth.NewStore(db), 5*time.Minute), locks: make(map[string]*sync.Mutex)}
 }
 
 func (m *Manager) Registry() *Registry { return m.registry }
+
+// ForceOAuthRefresh forces a token refresh for an OAuth provider and updates
+// the instance credential in place. Returns ErrReconnectRequired when the
+// refresh token is dead, ErrAuthUnavailable on transient failure, or nil on
+// success. Non-OAuth providers return an error immediately.
+func (m *Manager) ForceOAuthRefresh(ctx context.Context, p *Instance) error {
+	refresh := m.oauthRefreshFunc(p.Type)
+	if refresh == nil {
+		return errors.New("not an oauth provider")
+	}
+	record, err := m.oauth.ForceRefresh(ctx, p.ID, refresh)
+	if err == nil {
+		p.Credential = record.AccessToken
+		p.OAuthProviderData = record.ProviderData
+		if p.Type == codexProviderType {
+			p.OAuthAccountID = codex.AccountInfo(record.IDToken).ID
+		}
+	}
+	return err
+}
+
+func (m *Manager) oauthRefreshFunc(providerType string) oauth.RefreshFunc {
+	switch providerType {
+	case codexProviderType:
+		return func(ctx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return codex.Refresh(ctx, m.registry.HTTPClient(), current.RefreshToken)
+		}
+	case "claude-subscription":
+		return func(ctx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return claude.Refresh(ctx, m.registry.HTTPClient(), current.RefreshToken)
+		}
+	case "github-copilot":
+		return func(ctx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return github.Refresh(ctx, m.registry.HTTPClient(), current)
+		}
+	}
+	return nil
+}
 
 func (m *Manager) Refresh(ctx context.Context, providerID string) error {
 	lock := m.providerLock(providerID)
@@ -57,7 +100,48 @@ func (m *Manager) loadProvider(ctx context.Context, providerID string) (Instance
 	err := m.db.QueryRowContext(ctx, `SELECT id,name,type,base_url,coalesce(credential_secret,''),enabled,protocols FROM providers WHERE id=?`, providerID).
 		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.Credential, &p.Enabled, &protocols)
 	p.Protocols = DecodeProtocols(protocols)
+	m.HydrateOAuth(ctx, &p)
 	return p, err
+}
+
+// HydrateOAuth loads the current access token only for OAuth descriptors. It
+// deliberately leaves API-key credentials untouched. On success it sets
+// p.Credential and p.OAuthProviderData; on failure it leaves p.Credential empty
+// and sets p.OAuthState to the classified auth state so the routing layer can
+// distinguish "not connected", "refresh failed", and "reconnect required".
+func (m *Manager) HydrateOAuth(ctx context.Context, p *Instance) error {
+	descriptor, ok := Lookup(p.Type)
+	if !ok || descriptor.AuthMode != AuthModeOAuth {
+		return nil
+	}
+	var token oauth.TokenRecord
+	var err error
+	if p.Type == codexProviderType {
+		token, err = m.oauth.Current(ctx, p.ID, func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return codex.Refresh(refreshCtx, m.registry.HTTPClient(), current.RefreshToken)
+		})
+	} else if p.Type == "claude-subscription" {
+		token, err = m.oauth.Current(ctx, p.ID, func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return claude.Refresh(refreshCtx, m.registry.HTTPClient(), current.RefreshToken)
+		})
+	} else if p.Type == "github-copilot" {
+		token, err = m.oauth.Current(ctx, p.ID, func(refreshCtx context.Context, current oauth.TokenRecord) (oauth.TokenResponse, error) {
+			return github.Refresh(refreshCtx, m.registry.HTTPClient(), current)
+		})
+	} else {
+		token, err = oauth.NewStore(m.db).Get(ctx, p.ID)
+	}
+	if err != nil {
+		p.OAuthState = string(oauth.Classify(token, time.Now().UTC()))
+		return err
+	}
+	p.Credential = token.AccessToken
+	p.OAuthProviderData = token.ProviderData
+	p.OAuthState = string(oauth.AuthConnected)
+	if p.Type == codexProviderType {
+		p.OAuthAccountID = codex.AccountInfo(token.IDToken).ID
+	}
+	return nil
 }
 
 func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models []Model) error {

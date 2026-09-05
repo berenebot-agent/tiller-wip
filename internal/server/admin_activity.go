@@ -11,19 +11,21 @@ import (
 )
 
 type requestAttemptView struct {
-	AttemptNumber int     `json:"attempt_number"`
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	Result        string  `json:"result"`
-	HTTPStatus    *int    `json:"http_status"`
-	FailureClass  *string `json:"failure_class"`
-	ErrorMessage  *string `json:"error_message"`
-	LatencyMs     int64   `json:"latency_ms"`
-	CreatedAt     string  `json:"created_at"`
+	AttemptNumber      int     `json:"attempt_number"`
+	Provider           string  `json:"provider"`
+	Model              string  `json:"model"`
+	Result             string  `json:"result"`
+	HTTPStatus         *int    `json:"http_status"`
+	FailureClass       *string `json:"failure_class"`
+	ErrorMessage       *string `json:"error_message"`
+	ErrorBody          *string `json:"error_body"`
+	ErrorBodyTruncated bool    `json:"error_body_truncated"`
+	LatencyMs          int64   `json:"latency_ms"`
+	CreatedAt          string  `json:"created_at"`
 }
 
 func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT attempt_number,provider,model,result,http_status,failure_class,error_message,latency_ms,created_at FROM request_attempts WHERE request_log_id=? ORDER BY attempt_number`, r.PathValue("id"))
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at FROM request_attempts WHERE request_log_id=? ORDER BY attempt_number`, r.PathValue("id"))
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load request attempts.")
 		return
@@ -32,10 +34,12 @@ func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
 	data := []requestAttemptView{}
 	for rows.Next() {
 		var item requestAttemptView
-		if err := rows.Scan(&item.AttemptNumber, &item.Provider, &item.Model, &item.Result, &item.HTTPStatus, &item.FailureClass, &item.ErrorMessage, &item.LatencyMs, &item.CreatedAt); err != nil {
+		var truncated int
+		if err := rows.Scan(&item.AttemptNumber, &item.Provider, &item.Model, &item.Result, &item.HTTPStatus, &item.FailureClass, &item.ErrorMessage, &item.ErrorBody, &truncated, &item.LatencyMs, &item.CreatedAt); err != nil {
 			adminError(w, 500, "database_error", "Could not load request attempts.")
 			return
 		}
+		item.ErrorBodyTruncated = scanBool(truncated)
 		data = append(data, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -66,6 +70,10 @@ type activityView struct {
 	ClientRequestID          string  `json:"client_request_id"`
 	ErrorText                *string `json:"error_text"`
 	ErrorMessage             *string `json:"error_message"`
+	RequestBody              *string `json:"request_body"`
+	RequestBodyTruncated     bool    `json:"request_body_truncated"`
+	ErrorBody                *string `json:"error_body"`
+	ErrorBodyTruncated       bool    `json:"error_body_truncated"`
 	AttemptCount             int     `json:"attempt_count"`
 	FallbackUsed             bool    `json:"fallback_used"`
 	FallbackReason           *string `json:"fallback_reason"`
@@ -78,8 +86,8 @@ type activityView struct {
 // populated. The streaming/fallback int columns are converted to bools here so
 // every scan loop shares the same single column list.
 func scanActivityRow(scan func(dest ...any) error, v *activityView, withClient bool, clientKeyID, clientName *string) error {
-	var streaming, fallback int
-	dest := []any{&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.CacheCreationInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.ErrorMessage, &v.AttemptCount, &fallback, &v.FallbackReason, &v.CreatedAt}
+	var streaming, fallback, requestBodyTruncated, errorBodyTruncated int
+	dest := []any{&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.CacheCreationInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.ErrorMessage, &v.RequestBody, &requestBodyTruncated, &v.ErrorBody, &errorBodyTruncated, &v.AttemptCount, &fallback, &v.FallbackReason, &v.CreatedAt}
 	if withClient {
 		if clientKeyID != nil {
 			dest = append(dest, clientKeyID)
@@ -92,6 +100,7 @@ func scanActivityRow(scan func(dest ...any) error, v *activityView, withClient b
 		return err
 	}
 	v.Streaming, v.FallbackUsed = scanBool(streaming), scanBool(fallback)
+	v.RequestBodyTruncated, v.ErrorBodyTruncated = scanBool(requestBodyTruncated), scanBool(errorBodyTruncated)
 	return nil
 }
 
@@ -104,7 +113,7 @@ func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,attempt_count,fallback_used,fallback_reason,created_at FROM request_logs WHERE client_key_id=? AND (requested_model LIKE ? OR coalesce(exposed_model,'') LIKE ? OR coalesce(route_model,'') LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ? OR coalesce(error_message,'') LIKE ?) ORDER BY created_at DESC LIMIT ? OFFSET ?`, clientID, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at FROM request_logs WHERE client_key_id=? AND (requested_model LIKE ? OR coalesce(exposed_model,'') LIKE ? OR coalesce(route_model,'') LIKE ? OR coalesce(resolved_provider,'') LIKE ? OR CAST(http_status AS TEXT) LIKE ? OR coalesce(error_text,'') LIKE ? OR coalesce(error_message,'') LIKE ?) ORDER BY created_at DESC LIMIT ? OFFSET ?`, clientID, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
@@ -142,11 +151,11 @@ type globalActivityView struct {
 
 // listGlobalActivity returns recent request metadata across all client keys,
 // newest first, with a deterministic id secondary sort. It is read-only and
-// returns metadata only (never body-related fields).
+// returns metadata plus bodies only when sensitive error logging is enabled.
 func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE (ck.name LIKE ? OR rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR coalesce(rl.resolved_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') || '/' || coalesce(rl.resolved_model,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR rl.client_request_id LIKE ? OR coalesce(rl.provider_request_id,'') LIKE ? OR coalesce(rl.error_text,'') LIKE ? OR coalesce(rl.error_message,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE (ck.name LIKE ? OR rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR coalesce(rl.resolved_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') || '/' || coalesce(rl.resolved_model,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR rl.client_request_id LIKE ? OR coalesce(rl.provider_request_id,'') LIKE ? OR coalesce(rl.error_text,'') LIKE ? OR coalesce(rl.error_message,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
@@ -194,13 +203,13 @@ type activityExportRow struct {
 	ClientName string
 }
 
-// queryActivityExport runs a metadata-only SELECT over request_logs joined to
+// queryActivityExport runs a SELECT over request_logs joined to
 // client_keys, applying the given WHERE clause and optional search pattern, and
 // returns one row per inference request ordered newest-first. It is shared by
 // the client-key and virtual-model CSV export handlers so the column set cannot
 // drift between them.
 func (s *Server) queryActivityExport(ctx context.Context, where string, args []any) ([]activityExportRow, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` ORDER BY rl.created_at DESC, rl.id DESC`, args...)
+	rows, err := s.db.SQL.QueryContext(ctx, `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` ORDER BY rl.created_at DESC, rl.id DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -216,7 +225,7 @@ func (s *Server) queryActivityExport(ctx context.Context, where string, args []a
 	return data, rows.Err()
 }
 
-// exportClientActivityCSV streams a metadata-only CSV of the client key's
+// exportClientActivityCSV streams a CSV of the client key's
 // activity, honouring the active search filter. One inference request = one row.
 func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
@@ -241,7 +250,7 @@ func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request)
 	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(name)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
-// exportVirtualActivityCSV streams a metadata-only CSV of activity attributable
+// exportVirtualActivityCSV streams a CSV of activity attributable
 // to a virtual model, honouring the active search filter. It matches new rows by
 // route_model_id and legacy rows (route_kind NULL) by canonical name. One
 // inference request = one row.
@@ -267,7 +276,7 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
-// exportRealModelActivityCSV streams a metadata-only CSV of activity that
+// exportRealModelActivityCSV streams a CSV of activity that
 // resolved to a real model (resolved_provider + resolved_model), honouring the
 // active search filter. Scoping by resolved names keeps legacy rows and
 // virtual-routed requests visible. One inference request = one row.
@@ -306,7 +315,7 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 		"timestamp", "client_key", "client_requested_model", "client_exposed_model",
 		"virtual_model", "bound_target", "final_provider", "final_model", "protocol",
 		"streaming", "http_status", "latency_ms", "input_tokens", "output_tokens",
-		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message",
+		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message", "request_body", "request_body_truncated", "error_body", "error_body_truncated",
 		"provider_request_id", "client_request_id", "route_kind",
 	})
 	for _, row := range rows {
@@ -339,6 +348,10 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 			strconv.FormatBool(row.FallbackUsed),
 			strPtrOrEmpty(row.FallbackReason),
 			neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
+			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)),
+			strconv.FormatBool(row.RequestBodyTruncated),
+			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)),
+			strconv.FormatBool(row.ErrorBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)),
 			row.ClientRequestID,
 			strPtrOrEmpty(row.RouteKind),
@@ -361,7 +374,7 @@ func (s *Server) listScopedActivity(w http.ResponseWriter, r *http.Request, wher
 	pattern := "%" + search + "%"
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, pattern, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ? OR coalesce(rl.error_message,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ? OR coalesce(rl.error_message,'') LIKE ?) ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
