@@ -77,6 +77,7 @@ type activityView struct {
 	AttemptCount             int     `json:"attempt_count"`
 	FallbackUsed             bool    `json:"fallback_used"`
 	FallbackReason           *string `json:"fallback_reason"`
+	WarningCode              *string `json:"warning_code,omitempty"`
 	CreatedAt                string  `json:"created_at"`
 }
 
@@ -312,7 +313,7 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 		"timestamp", "client_key", "client_requested_model", "client_exposed_model",
 		"virtual_model", "bound_target", "final_provider", "final_model", "protocol",
 		"streaming", "http_status", "latency_ms", "input_tokens", "output_tokens",
-		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message", "request_body", "request_body_truncated", "error_body", "error_body_truncated",
+		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "warning_code", "error_message", "request_body", "request_body_truncated", "error_body", "error_body_truncated",
 		"provider_request_id", "client_request_id", "route_kind",
 	})
 	for _, row := range rows {
@@ -344,6 +345,7 @@ func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, r
 			strconv.Itoa(row.AttemptCount),
 			strconv.FormatBool(row.FallbackUsed),
 			strPtrOrEmpty(row.FallbackReason),
+			neutralizeCSVField(strPtrOrEmpty(row.WarningCode)),
 			neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
 			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)),
 			strconv.FormatBool(row.RequestBodyTruncated),

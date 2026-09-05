@@ -49,20 +49,6 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		realID, virtualID = real.String, virtual.String
-		var usable int
-		if real.Valid {
-			err := s.db.SQL.QueryRowContext(r.Context(), `SELECT 1 FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=? AND m.available=1 AND p.enabled=1`, realID).Scan(&usable)
-			if err != nil {
-				inferenceError(w, 500, "server_error", "invalid_single_binding", "Bound model is disabled or unavailable.", false)
-				return
-			}
-		} else {
-			err := s.db.SQL.QueryRowContext(r.Context(), `SELECT 1 FROM virtual_models v WHERE v.id=? AND EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)`, virtualID).Scan(&usable)
-			if err != nil {
-				inferenceError(w, 500, "server_error", "invalid_single_binding", "Bound model is disabled or unavailable.", false)
-				return
-			}
-		}
 		var contextLength, maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
 		var reasoningCaps *providers.ReasoningCapabilities
