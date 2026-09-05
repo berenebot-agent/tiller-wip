@@ -362,8 +362,6 @@ func TestApplyReasoningSelector_ToggleEnabledSemantics(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_NoWarningForFailedCandidate(t *testing.T) {
-	// A warning from a failed candidate must NOT be persisted — only the
-	// final successful candidate's warning is assigned.
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium"}}}}
 	selector := reasoningSelector{Present: true, Effort: "ultra"}
 	body := []byte(`{"model":"x","reasoning_effort":"ultra"}`)
@@ -371,9 +369,88 @@ func TestApplyReasoningSelector_NoWarningForFailedCandidate(t *testing.T) {
 	if warning != warningReasoningSelectorOmitted {
 		t.Errorf("expected warning for unsupported effort, got %q", warning)
 	}
-	// The body should have had its selector stripped.
-	if containsString(body, "reasoning_effort") {
-		// Note: we pass a copy, so original body is unchanged. The returned body is stripped.
+}
+
+func TestApplyReasoningSelector_ToggleOnlyTarget(t *testing.T) {
+	// A model whose only capability is Toggle (no effort, no budget) must NOT
+	// be treated as explicitly non-reasoning.
+	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}}
+	selector := reasoningSelector{Present: true, Enabled: boolPtr(true)}
+	body := []byte(`{"model":"x","reasoning":{"enabled":true}}`)
+	result, warning := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	if warning != "" {
+		t.Errorf("unexpected warning for toggle-only target: %q", warning)
+	}
+	// Body should be preserved (pass-through).
+	if !containsString(result, "enabled") {
+		t.Errorf("expected body to be preserved for toggle-only target, got %s", string(result))
+	}
+}
+
+func TestApplyReasoningSelector_AdaptivePreserved(t *testing.T) {
+	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
+	selector := reasoningSelector{Present: true, Mode: "adaptive"}
+	body := []byte(`{"model":"x","thinking":{"type":"adaptive"}}`)
+	result, warning := applyReasoningSelector(body, selector, providers.ProtocolMessages, caps, "anthropic")
+	if warning != "" {
+		t.Errorf("unexpected warning for adaptive: %q", warning)
+	}
+	if !containsString(result, "adaptive") {
+		t.Errorf("expected adaptive thinking preserved, got %s", string(result))
+	}
+}
+
+func TestApplyReasoningSelector_ChatPreservesNonSelectorFields(t *testing.T) {
+	// stripReasoningSelector for Chat must preserve reasoning.exclude.
+	caps := &providers.ReasoningCapabilities{} // explicitly unsupported
+	selector := reasoningSelector{Present: true, Effort: "high"}
+	body := []byte(`{"model":"x","reasoning_effort":"high","reasoning":{"exclude":true}}`)
+	result, warning := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	if warning != warningReasoningSelectorOmitted {
+		t.Errorf("expected warning, got %q", warning)
+	}
+	if !containsString(result, `"exclude":true`) {
+		t.Errorf("expected reasoning.exclude preserved, got %s", string(result))
+	}
+	if containsString(result, "reasoning_effort") {
+		t.Errorf("expected reasoning_effort stripped, got %s", string(result))
+	}
+}
+
+func TestApplyReasoningSelector_OpenRouterMandatoryNone(t *testing.T) {
+	// OpenRouter: mandatory=true + default_effort=none means reasoning is
+	// required; don't use "none" to force-enable when user explicitly enables.
+	caps := &providers.ReasoningCapabilities{
+		Options:        []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium", "high"}}},
+		DefaultEffort:  "none",
+		Mandatory:      boolPtr(true),
+	}
+	selector := reasoningSelector{Present: true, Enabled: boolPtr(true)}
+	body := []byte(`{"model":"x","reasoning":{"enabled":true}}`)
+	result, warning := applyReasoningSelector(body, selector, providers.ProtocolChat, caps, "openai")
+	if warning != "" {
+		t.Errorf("unexpected warning: %q", warning)
+	}
+	// Should not emit reasoning_effort=none (mandatory prevents none).
+	if containsString(result, "reasoning_effort") {
+		t.Errorf("expected no effort emitted for mandatory+none default, got %s", string(result))
+	}
+}
+
+func TestApplyReasoningSelector_TranslateRequestThenMap(t *testing.T) {
+	// Full path: Chat→Messages via translateRequest then applyReasoningSelector.
+	chatBody := []byte(`{"model":"client-x","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
+	translated, err := translateRequest(chatBody, providers.ProtocolChat, providers.ProtocolMessages, "claude-opus-5")
+	if err != nil {
+		t.Fatalf("translateRequest: %v", err)
+	}
+	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium", "high"}}}}
+	result, warning := applyReasoningSelector(translated, extractReasoningSelector(chatBody, providers.ProtocolChat), providers.ProtocolMessages, caps, "anthropic")
+	if warning != "" {
+		t.Errorf("unexpected warning: %q", warning)
+	}
+	if !containsString(result, `"effort":"high"`) {
+		t.Errorf("expected effort=high in Messages body, got %s", string(result))
 	}
 }
 

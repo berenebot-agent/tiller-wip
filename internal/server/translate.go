@@ -210,6 +210,11 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 	if selector.Mode == "enabled" || (selector.Enabled != nil && *selector.Enabled) {
 		if selector.Effort == "" {
 			if caps != nil && caps.DefaultEffort != "" {
+				// OpenRouter: default_effort="none" means off-by-default; don't
+				// use it to force-enable reasoning when user explicitly enables.
+				if caps.Mandatory != nil && *caps.Mandatory && caps.DefaultEffort == "none" {
+					return body, ""
+				}
 				selector.Effort = caps.DefaultEffort
 			} else {
 				return body, ""
@@ -218,50 +223,43 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 	}
 
 	// Determine what the target supports.
-	supportsEffort := false
-	var supportedEfforts []string
-	supportsDisable := false
-	supportsBudget := false
+	opts := providers.ExtractReasoningOptions(caps)
 	unknownSupport := caps == nil
 
-	if !unknownSupport {
-		for _, opt := range caps.Options {
-			switch opt.Type {
-			case providers.ReasoningOptionEffort:
-				supportsEffort = true
-				supportedEfforts = opt.Values
-				for _, v := range opt.Values {
-					if v == "none" {
-						supportsDisable = true
-					}
-				}
-			case providers.ReasoningOptionBudgetTokens:
-				supportsBudget = true
-			}
-		}
-	}
-
 	// If target explicitly doesn't support reasoning, omit and warn.
-	if !unknownSupport && !supportsEffort && !supportsBudget {
+	if !unknownSupport && !opts.SupportsEffort && !opts.SupportsBudget && !opts.SupportsToggle && !opts.SupportsAdaptive && !opts.SupportsEnabled {
 		body = stripReasoningSelector(body, target)
 		return body, warningReasoningSelectorOmitted
+	}
+
+	// Handle pure-toggle targets: if the only mechanism is toggle and the
+	// selector is a toggle/enabled form, pass through (no effort mapping needed).
+	if !unknownSupport && !opts.SupportsEffort && !opts.SupportsBudget && opts.SupportsToggle {
+		return body, ""
+	}
+
+	// Handle adaptive thinking: if the target supports adaptive and the selector
+	// is adaptive mode, preserve it.
+	if !unknownSupport && opts.SupportsAdaptive && selector.Mode == "adaptive" {
+		return body, ""
 	}
 
 	var warning string
 	switch target {
 	case providers.ProtocolChat:
-		body, warning = applyChatReasoning(body, selector, supportedEfforts, supportsDisable, supportsBudget, unknownSupport)
+		body, warning = applyChatReasoning(body, selector, opts.SupportedEfforts, opts.SupportsDisable, opts.SupportsBudget, unknownSupport)
 	case providers.ProtocolResponses:
-		body, warning = applyResponsesReasoning(body, selector, supportedEfforts, supportsDisable, supportsBudget, unknownSupport)
+		body, warning = applyResponsesReasoning(body, selector, opts.SupportedEfforts, opts.SupportsDisable, opts.SupportsBudget, unknownSupport)
 	case providers.ProtocolMessages:
-		body, warning = applyMessagesReasoning(body, selector, supportedEfforts, supportsDisable, supportsBudget, unknownSupport, providerType)
+		body, warning = applyMessagesReasoning(body, selector, opts.SupportedEfforts, opts.SupportsDisable, opts.SupportsBudget, unknownSupport, providerType)
 	}
 	return body, warning
 }
 
 // stripReasoningSelector removes recognized reasoning selector fields from a
 // request body so that a target known not to support reasoning receives a
-// clean request.
+// clean request. Non-selector fields (e.g. OpenRouter's reasoning.exclude,
+// which controls whether reasoning is returned) are preserved.
 func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 	var source map[string]any
 	if err := json.Unmarshal(body, &source); err != nil {
@@ -270,7 +268,15 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 	switch target {
 	case providers.ProtocolChat:
 		delete(source, "reasoning_effort")
-		delete(source, "reasoning")
+		// Preserve non-selector fields like reasoning.exclude.
+		if reasoning, ok := source["reasoning"].(map[string]any); ok {
+			delete(reasoning, "effort")
+			delete(reasoning, "max_tokens")
+			delete(reasoning, "enabled")
+			if len(reasoning) == 0 {
+				delete(source, "reasoning")
+			}
+		}
 	case providers.ProtocolResponses:
 		if reasoning, ok := source["reasoning"].(map[string]any); ok {
 			delete(reasoning, "effort")

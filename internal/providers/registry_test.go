@@ -446,6 +446,21 @@ func TestParseReasoningCapabilitiesOpenRouter(t *testing.T) {
 			raw:  map[string]any{},
 			want: nil,
 		},
+		{
+			name: "supported_efforts null (all gateway efforts accepted)",
+			raw:  map[string]any{"supported_efforts": nil, "default_effort": "medium"},
+			want: &ReasoningCapabilities{
+				Options:       []ReasoningOption{{Type: ReasoningOptionEffort}},
+				DefaultEffort: "medium",
+			},
+		},
+		{
+			name: "supported_efforts absent (no effort selector)",
+			raw:  map[string]any{"default_effort": "medium"},
+			want: &ReasoningCapabilities{
+				DefaultEffort: "medium",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -460,7 +475,7 @@ func TestParseReasoningCapabilitiesOpenRouter(t *testing.T) {
 				t.Fatalf("expected %+v, got nil", tc.want)
 			}
 			if len(got.Options) != len(tc.want.Options) {
-				t.Fatalf("options count = %d, want %d", len(got.Options), len(tc.want.Options))
+				t.Fatalf("options count = %d, want %d: got %+v, want %+v", len(got.Options), len(tc.want.Options), got.Options, tc.want.Options)
 			}
 			for i, opt := range got.Options {
 				if opt.Type != tc.want.Options[i].Type {
@@ -493,7 +508,7 @@ func TestParseReasoningCapabilitiesAnthropic(t *testing.T) {
 		want *ReasoningCapabilities
 	}{
 		{
-			name: "effort levels and thinking toggle",
+			name: "effort levels and legacy thinking toggle",
 			raw: map[string]any{
 				"effort": map[string]any{
 					"low":    map[string]any{"supported": true},
@@ -506,6 +521,25 @@ func TestParseReasoningCapabilitiesAnthropic(t *testing.T) {
 				{Type: ReasoningOptionEffort, Values: []string{"low", "medium"}},
 				{Type: ReasoningOptionToggle},
 			}},
+		},
+		{
+			name: "effort with adaptive and enabled thinking types",
+			raw: map[string]any{
+				"effort": map[string]any{
+					"low":    map[string]any{"supported": true},
+					"medium": map[string]any{"supported": true},
+				},
+				"thinking": map[string]any{
+					"types": map[string]any{
+						"adaptive": map[string]any{"supported": true},
+						"enabled":  map[string]any{"supported": false},
+					},
+				},
+			},
+			want: &ReasoningCapabilities{
+				Options:       []ReasoningOption{{Type: ReasoningOptionEffort, Values: []string{"low", "medium"}}},
+				ThinkingModes: []string{"adaptive"},
+			},
 		},
 		{
 			name: "nil capabilities",
@@ -540,6 +574,9 @@ func TestParseReasoningCapabilitiesAnthropic(t *testing.T) {
 				if !slicesEqual(opt.Values, tc.want.Options[i].Values) {
 					t.Errorf("option[%d].Values = %v, want %v", i, opt.Values, tc.want.Options[i].Values)
 				}
+			}
+			if !slicesEqual(got.ThinkingModes, tc.want.ThinkingModes) {
+				t.Errorf("thinking modes = %v, want %v", got.ThinkingModes, tc.want.ThinkingModes)
 			}
 		})
 	}

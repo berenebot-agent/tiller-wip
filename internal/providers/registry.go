@@ -144,10 +144,57 @@ type ReasoningOption struct {
 // selector.
 type ReasoningCapabilities struct {
 	Options        []ReasoningOption `json:"options"`
+	ThinkingModes  []string          `json:"thinking_modes,omitempty"`
 	DefaultEffort  string            `json:"default_effort,omitempty"`
 	Mandatory      *bool             `json:"mandatory,omitempty"`
 	DefaultEnabled *bool             `json:"default_enabled,omitempty"`
 	Parameters     []string          `json:"parameters,omitempty"`
+}
+
+// ReasoningOptions is the set of selector mechanisms a model supports, derived
+// from Options. It is used by the mapper to decide what a target accepts.
+type ReasoningOptions struct {
+	SupportsEffort   bool
+	SupportedEfforts []string
+	SupportsDisable  bool
+	SupportsBudget   bool
+	SupportsToggle   bool
+	SupportsAdaptive bool
+	SupportsEnabled  bool
+}
+
+// ExtractReasoningOptions derives the set of supported reasoning mechanisms
+// from a capabilities struct for use by the mapper.
+func ExtractReasoningOptions(caps *ReasoningCapabilities) ReasoningOptions {
+	var r ReasoningOptions
+	if caps == nil {
+		return r
+	}
+	for _, opt := range caps.Options {
+		switch opt.Type {
+		case ReasoningOptionEffort:
+			r.SupportsEffort = true
+			r.SupportedEfforts = opt.Values
+			for _, v := range opt.Values {
+				if v == "none" {
+					r.SupportsDisable = true
+				}
+			}
+		case ReasoningOptionBudgetTokens:
+			r.SupportsBudget = true
+		case ReasoningOptionToggle:
+			r.SupportsToggle = true
+		}
+	}
+	for _, mode := range caps.ThinkingModes {
+		switch mode {
+		case "adaptive":
+			r.SupportsAdaptive = true
+		case "enabled":
+			r.SupportsEnabled = true
+		}
+	}
+	return r
 }
 
 // Canonical effort ordering for de-duplication and emission. Unknown
@@ -405,23 +452,40 @@ func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesO
 //	    "supports_max_tokens": true
 //	  }
 //	}
+//
+// Key edge cases:
+//   - supported_efforts omitted (field absent): no effort selector exposed.
+//   - supported_efforts: null: all gateway effort values accepted (effort selector
+//     present but unrestricted).
+//   - supported_efforts: []: present but empty — treated as no effort selector.
+//   - mandatory: true + effort="none": none is not a valid user choice; the gateway
+//     will reject it. The mapper must not send none when mandatory is set.
 func openRouterReasoning(raw any, topLevelParams []string) *ReasoningCapabilities {
 	obj, ok := raw.(map[string]any)
 	if !ok {
 		return nil
 	}
 	var rc ReasoningCapabilities
-	if v, ok := obj["supported_efforts"].([]any); ok {
-		var efforts []string
-		for _, e := range v {
-			if s, ok := e.(string); ok {
-				efforts = append(efforts, s)
+
+	// supported_efforts: distinguish absent vs null vs list.
+	if v, exists := obj["supported_efforts"]; exists {
+		if v == nil {
+			// null — all gateway effort values accepted. Mark effort as
+			// supported with empty values (mapper will pass through any effort).
+			rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionEffort})
+		} else if arr, ok := v.([]any); ok && len(arr) > 0 {
+			var efforts []string
+			for _, e := range arr {
+				if s, ok := e.(string); ok {
+					efforts = append(efforts, s)
+				}
+			}
+			if len(efforts) > 0 {
+				rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
 			}
 		}
-		if len(efforts) > 0 {
-			rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
-		}
 	}
+
 	if v, ok := obj["default_effort"].(string); ok && v != "" {
 		rc.DefaultEffort = v
 	}
@@ -459,6 +523,10 @@ func openRouterReasoning(raw any, topLevelParams []string) *ReasoningCapabilitie
 // anthropicReasoning parses an Anthropic-style model entry with
 // capabilities.effort and capabilities.thinking levels. Returns nil when no
 // reasoning capability data is present.
+//
+// Anthropic's current Models API distinguishes thinking.types.adaptive from
+// thinking.types.enabled (legacy). We model them separately so the mapper can
+// avoid silently dropping adaptive thinking during cross-protocol translation.
 func anthropicReasoning(capabilitiesRaw any) *ReasoningCapabilities {
 	caps, ok := capabilitiesRaw.(map[string]any)
 	if !ok {
@@ -479,11 +547,20 @@ func anthropicReasoning(capabilitiesRaw any) *ReasoningCapabilities {
 		}
 	}
 	if thinkingRaw, ok := caps["thinking"].(map[string]any); ok {
-		if supported, ok := thinkingRaw["supported"].(bool); ok && supported {
+		if typesRaw, ok := thinkingRaw["types"].(map[string]any); ok {
+			for _, mode := range []string{"adaptive", "enabled"} {
+				if modeRaw, ok := typesRaw[mode].(map[string]any); ok {
+					if supported, ok := modeRaw["supported"].(bool); ok && supported {
+						rc.ThinkingModes = append(rc.ThinkingModes, mode)
+					}
+				}
+			}
+		} else if supported, ok := thinkingRaw["supported"].(bool); ok && supported {
+			// Legacy: no types breakdown — treat as generic toggle.
 			rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionToggle})
 		}
 	}
-	if len(rc.Options) == 0 {
+	if len(rc.Options) == 0 && len(rc.ThinkingModes) == 0 {
 		return nil
 	}
 	return &rc
