@@ -15,9 +15,12 @@ import (
 
 // models.dev is an open-source, community-maintained registry of model metadata
 // (context length, max output, capability flags, modalities). Tiller uses it as
-// a *fallback* only: provider-reported data stays the source of truth, and
-// models.dev fills in only the fields the provider left unknown. A field stays
-// unknown if neither source reports it (tri-state semantics preserved).
+// a *fallback* only: provider-reported data stays the source of truth. For
+// most fields, models.dev fills in only the fields the provider left unknown; a
+// field stays unknown if neither source reports it (tri-state semantics
+// preserved). ReasoningCapabilities is handled differently: a provider-reported
+// object is kept whole, and models.dev only fills individual mechanisms/fields
+// the provider omitted (an explicitly empty provider object is left intact).
 
 const (
 	// modelsDevCacheFile is the cache file name under the data directory.
@@ -154,8 +157,10 @@ func ollamaPlainName(id string) string {
 }
 
 // enrich merges models.dev capability metadata into the discovered models for a
-// provider. It fills in only the fields the provider left unknown and never
-// overrides a provider-reported value. It is a no-op when models.dev is disabled
+// provider. For most fields it fills in only the fields the provider left
+// unknown and never overrides a provider-reported value. ReasoningCapabilities
+// uses whole-object provider precedence with field-level gap fill. It is a
+// no-op when models.dev is disabled
 // or the dataset is unavailable. Non-Ollama providers are looked up by their
 // exact provider key + model ID; Ollama has no lab of its own, so its models are
 // resolved by plain (tag/namespace-stripped) name under an inferred canonical
