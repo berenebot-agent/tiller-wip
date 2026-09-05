@@ -50,6 +50,10 @@ type modelsDevModel struct {
 	StructuredOutput *bool               `json:"structured_output"`
 	Modalities       modelsDevModalities `json:"modalities"`
 	Limit            modelsDevLimit      `json:"limit"`
+	// reasoning_options is the raw options array from models.dev. Each entry
+	// is parsed individually; a malformed entry is skipped while valid siblings
+	// are retained.
+	ReasoningOptions []map[string]any `json:"reasoning_options"`
 }
 
 type modelsDevModalities struct {
@@ -177,6 +181,54 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 	return out
 }
 
+// parseModelsDevReasoningOptions converts raw models.dev reasoning_options
+// entries into normalized ReasoningOption values. Each entry is parsed
+// independently: a malformed entry is skipped while valid siblings are kept.
+// Returns nil only when every entry is malformed or the list is empty AND no
+// options could be derived. A non-nil result may have an empty Options list
+// only if the source explicitly reported an empty list — but models.dev
+// always reports non-empty option lists, so nil is returned for no data.
+func parseModelsDevReasoningOptions(raw []map[string]any) *ReasoningCapabilities {
+	if len(raw) == 0 {
+		return nil
+	}
+	var options []ReasoningOption
+	for _, entry := range raw {
+		rawType, _ := entry["type"].(string)
+		switch rawType {
+		case "effort":
+			if vals, ok := entry["values"].([]any); ok {
+				var efforts []string
+				for _, v := range vals {
+					if s, ok := v.(string); ok {
+						efforts = append(efforts, s)
+					}
+				}
+			if len(efforts) > 0 {
+				options = append(options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
+			}
+			}
+		case "toggle":
+			// Retain the toggle mechanism without inventing defaults.
+			options = append(options, ReasoningOption{Type: ReasoningOptionToggle})
+		case "budget_tokens":
+			var opt ReasoningOption
+			opt.Type = ReasoningOptionBudgetTokens
+			if min, ok := coerceInt64(entry["min"]); ok {
+				opt.Min = &min
+			}
+			if max, ok := coerceInt64(entry["max"]); ok {
+				opt.Max = &max
+			}
+			options = append(options, opt)
+		}
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	return &ReasoningCapabilities{Options: options}
+}
+
 // enrichModel fills the gaps in a single model from its models.dev entry.
 func enrichModel(model Model, md modelsDevModel) Model {
 	if model.ContextLength == 0 && md.Limit.Context > 0 {
@@ -205,7 +257,31 @@ func enrichModel(model Model, md modelsDevModel) Model {
 	if len(model.OutputModalities) == 0 && len(md.Modalities.Output) > 0 {
 		model.OutputModalities = md.Modalities.Output
 	}
+	if model.ReasoningCapabilities == nil {
+		model.ReasoningCapabilities = parseModelsDevReasoningOptions(md.ReasoningOptions)
+	}
 	return model
+}
+
+// coerceInt64 converts a JSON number or string to int64 without going
+// through float. Returns (0, false) when the value is not a clean integer.
+func coerceInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		if n == float64(int64(n)) && n >= 0 {
+			return int64(n), true
+		}
+	case string:
+		var parsed int64
+		if _, err := fmt.Sscanf(n, "%d", &parsed); err == nil && parsed >= 0 {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 // visionFromModalities derives the vision capability from the models.dev input

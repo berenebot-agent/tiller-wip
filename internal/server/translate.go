@@ -19,6 +19,23 @@ func (u unsupportedFeature) Error() string {
 	return fmt.Sprintf("%s is only supported through a native Responses provider", u.feature)
 }
 
+// reasoningSelector is a request-local representation of the client's
+// reasoning choice. It is never serialized directly.
+type reasoningSelector struct {
+	Present      bool
+	Enabled      *bool
+	Mode         string
+	Effort       string
+	BudgetTokens *int64
+}
+
+// warningCode is a metadata-only annotation indicating the final successful
+// route had to omit the requested reasoning selector.
+const warningReasoningSelectorOmitted = "reasoning_selector_omitted"
+
+// translateRequest translates a request body from one protocol to another.
+// When the target protocol differs, reasoning controls are extracted before
+// conversion and must be re-applied by the caller via applyReasoningSelector.
 func translateRequest(body []byte, from, to providers.Protocol, model string) ([]byte, error) {
 	if from == to {
 		return body, nil
@@ -61,6 +78,397 @@ func translateRequest(body []byte, from, to providers.Protocol, model string) ([
 		return json.Marshal(translated)
 	}
 	return nil, errors.New("unsupported protocol translation")
+}
+
+// extractReasoningSelector extracts a canonical reasoning selector from the
+// incoming request body according to its protocol. Returns a zero-value
+// selector with Present=false when no reasoning control is found.
+func extractReasoningSelector(body []byte, protocol providers.Protocol) reasoningSelector {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return reasoningSelector{}
+	}
+	switch protocol {
+	case providers.ProtocolChat:
+		return extractChatReasoning(source)
+	case providers.ProtocolResponses:
+		return extractResponsesReasoning(source)
+	case providers.ProtocolMessages:
+		return extractMessagesReasoning(source)
+	}
+	return reasoningSelector{}
+}
+
+// extractChatReasoning extracts reasoning controls from Chat Completions.
+// Determinism: top-level reasoning_effort takes precedence over nested
+// reasoning.effort; nested reasoning.max_tokens maps to budget.
+func extractChatReasoning(source map[string]any) reasoningSelector {
+	sel := reasoningSelector{Present: false}
+	// Top-level reasoning_effort takes precedence.
+	if effort, ok := source["reasoning_effort"].(string); ok && effort != "" {
+		sel.Present = true
+		sel.Effort = effort
+	}
+	// Nested reasoning object: effort, max_tokens, and enable/disable.
+	if reasoning, ok := source["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok && effort != "" {
+			sel.Present = true
+			if sel.Effort == "" {
+				sel.Effort = effort
+			}
+		}
+		if maxTokens, ok := coerceInt64(reasoning["max_tokens"]); ok {
+			sel.Present = true
+			sel.BudgetTokens = &maxTokens
+		}
+		// Enable/disable controls.
+		if enabled, ok := reasoning["enabled"].(bool); ok {
+			sel.Present = true
+			sel.Enabled = &enabled
+		}
+	}
+	return sel
+}
+
+// extractResponsesReasoning extracts reasoning controls from Responses.
+// Only reasoning.effort is extracted; reasoning.summary (display) is ignored.
+func extractResponsesReasoning(source map[string]any) reasoningSelector {
+	if reasoning, ok := source["reasoning"].(map[string]any); ok {
+		if effort, ok := reasoning["effort"].(string); ok && effort != "" {
+			return reasoningSelector{Present: true, Effort: effort}
+		}
+	}
+	return reasoningSelector{}
+}
+
+// extractMessagesReasoning extracts reasoning controls from Messages.
+// output_config.effort, thinking.type, and thinking.budget_tokens are
+// extracted; thinking.display is ignored.
+func extractMessagesReasoning(source map[string]any) reasoningSelector {
+	sel := reasoningSelector{Present: false}
+	if outputConfig, ok := source["output_config"].(map[string]any); ok {
+		if effort, ok := outputConfig["effort"].(string); ok && effort != "" {
+			sel.Present = true
+			sel.Effort = effort
+		}
+	}
+	if thinking, ok := source["thinking"].(map[string]any); ok {
+		if t, ok := thinking["type"].(string); ok {
+			sel.Present = true
+			sel.Mode = t
+		}
+		if budget, ok := coerceInt64(thinking["budget_tokens"]); ok {
+			sel.Present = true
+			sel.BudgetTokens = &budget
+		}
+	}
+	return sel
+}
+
+// coerceInt64 converts a JSON number to int64. Only float64 (how
+// encoding/json decodes numbers) and int64 are accepted.
+func coerceInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		if n >= 0 && n == float64(int64(n)) {
+			return int64(n), true
+		}
+	}
+	return 0, false
+}
+
+// applyReasoningSelector maps a canonical selector onto a target request body
+// according to the target protocol and the target model's reasoning
+// capabilities. Returns the modified body and a warning code (empty when no
+// omission occurred).
+//
+// Mapping rules:
+//   - Exact effort values map directly when the target advertises them.
+//   - "none" maps to Messages disabled when supported.
+//   - "minimal" maps only when explicitly advertised.
+//   - Numeric budgets map when a numeric target control exists.
+//   - If the target is known not to support reasoning, the selector is omitted
+//     and a warning is returned.
+//   - If support is unknown, the selector is passed through.
+func applyReasoningSelector(body []byte, selector reasoningSelector, target providers.Protocol, caps *providers.ReasoningCapabilities, providerType string) ([]byte, string) {
+	if !selector.Present {
+		return body, ""
+	}
+
+	// Determine what the target supports.
+	supportsEffort := false
+	var supportedEfforts []string
+	supportsDisable := false
+	supportsBudget := false
+	unknownSupport := caps == nil
+
+	if !unknownSupport {
+		for _, opt := range caps.Options {
+			switch opt.Type {
+			case providers.ReasoningOptionEffort:
+				supportsEffort = true
+				supportedEfforts = opt.Values
+				// Check if "none" is supported (maps to disabled in Messages).
+				for _, v := range opt.Values {
+					if v == "none" {
+						supportsDisable = true
+					}
+				}
+			case providers.ReasoningOptionBudgetTokens:
+				supportsBudget = true
+			}
+		}
+	}
+
+	// If target explicitly doesn't support reasoning, omit and warn.
+	if !unknownSupport && !supportsEffort && !supportsBudget {
+		// Remove all recognized selector fields.
+		body = stripReasoningSelector(body, target)
+		return body, warningReasoningSelectorOmitted
+	}
+
+	// Build the target wire form.
+	var warning string
+	switch target {
+	case providers.ProtocolChat:
+		body, warning = applyChatReasoning(body, selector, supportedEfforts, supportsDisable, supportsBudget, unknownSupport)
+	case providers.ProtocolResponses:
+		body, warning = applyResponsesReasoning(body, selector, supportedEfforts, supportsDisable, supportsBudget, unknownSupport)
+	case providers.ProtocolMessages:
+		body, warning = applyMessagesReasoning(body, selector, supportedEfforts, supportsDisable, supportsBudget, unknownSupport, providerType)
+	}
+	return body, warning
+}
+
+// stripReasoningSelector removes recognized reasoning selector fields from a
+// request body so that a target known not to support reasoning receives a
+// clean request.
+func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	switch target {
+	case providers.ProtocolChat:
+		delete(source, "reasoning_effort")
+		delete(source, "reasoning")
+	case providers.ProtocolResponses:
+		if reasoning, ok := source["reasoning"].(map[string]any); ok {
+			delete(reasoning, "effort")
+			if len(reasoning) == 0 {
+				delete(source, "reasoning")
+			}
+		}
+	case providers.ProtocolMessages:
+		if outputConfig, ok := source["output_config"].(map[string]any); ok {
+			delete(outputConfig, "effort")
+		}
+		if thinking, ok := source["thinking"].(map[string]any); ok {
+			delete(thinking, "type")
+			delete(thinking, "budget_tokens")
+		}
+	}
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// applyChatReasoning maps a selector onto a Chat Completions request.
+func applyChatReasoning(body []byte, selector reasoningSelector, supportedEfforts []string, supportsDisable, supportsBudget, unknownSupport bool) ([]byte, string) {
+	if selector.Effort != "" {
+		if matchesEffort(selector.Effort, supportedEfforts) {
+			setChatEffort(body, selector.Effort)
+		} else if selector.Effort == "none" && supportsDisable {
+			// Keep none as-is for Chat.
+			setChatEffort(body, "none")
+		} else if unknownSupport {
+			setChatEffort(body, selector.Effort)
+		} else {
+			body = stripReasoningSelector(body, providers.ProtocolChat)
+			return body, warningReasoningSelectorOmitted
+		}
+	}
+	if selector.BudgetTokens != nil && (supportsBudget || unknownSupport) {
+		setChatBudget(body, *selector.BudgetTokens)
+	} else if selector.BudgetTokens != nil {
+		body = stripReasoningSelector(body, providers.ProtocolChat)
+		return body, warningReasoningSelectorOmitted
+	}
+	return body, ""
+}
+
+// applyResponsesReasoning maps a selector onto a Responses request.
+func applyResponsesReasoning(body []byte, selector reasoningSelector, supportedEfforts []string, supportsDisable, supportsBudget, unknownSupport bool) ([]byte, string) {
+	if selector.Effort != "" {
+		if matchesEffort(selector.Effort, supportedEfforts) {
+			setResponsesEffort(body, selector.Effort)
+		} else if selector.Effort == "none" && supportsDisable {
+			setResponsesEffort(body, "none")
+		} else if unknownSupport {
+			setResponsesEffort(body, selector.Effort)
+		} else {
+			body = stripReasoningSelector(body, providers.ProtocolResponses)
+			return body, warningReasoningSelectorOmitted
+		}
+	}
+	if selector.BudgetTokens != nil && (supportsBudget || unknownSupport) {
+		// Responses uses reasoning.max_tokens.
+		setResponsesBudget(body, *selector.BudgetTokens)
+	} else if selector.BudgetTokens != nil {
+		body = stripReasoningSelector(body, providers.ProtocolResponses)
+		return body, warningReasoningSelectorOmitted
+	}
+	return body, ""
+}
+
+// applyMessagesReasoning maps a selector onto a Messages request.
+func applyMessagesReasoning(body []byte, selector reasoningSelector, supportedEfforts []string, supportsDisable, supportsBudget, unknownSupport bool, providerType string) ([]byte, string) {
+	if selector.Effort != "" {
+		if matchesEffort(selector.Effort, supportedEfforts) {
+			setMessagesEffort(body, selector.Effort)
+		} else if selector.Effort == "none" && supportsDisable {
+			// Map none -> thinking.type = disabled.
+			setMessagesDisabled(body)
+		} else if selector.Mode == "disabled" && supportsDisable {
+			setMessagesDisabled(body)
+		} else if unknownSupport {
+			setMessagesEffort(body, selector.Effort)
+		} else {
+			body = stripReasoningSelector(body, providers.ProtocolMessages)
+			return body, warningReasoningSelectorOmitted
+		}
+	}
+	if selector.Mode == "disabled" && supportsDisable {
+		setMessagesDisabled(body)
+	}
+	if selector.BudgetTokens != nil && (supportsBudget || unknownSupport) {
+		setMessagesBudget(body, *selector.BudgetTokens)
+	} else if selector.BudgetTokens != nil {
+		body = stripReasoningSelector(body, providers.ProtocolMessages)
+		return body, warningReasoningSelectorOmitted
+	}
+	return body, ""
+}
+
+// matchesEffort returns true when the target explicitly advertises the given
+// effort value. "minimal" only matches when explicitly advertised.
+func matchesEffort(effort string, supported []string) bool {
+	for _, s := range supported {
+		if s == effort {
+			return true
+		}
+	}
+	return false
+}
+
+// setChatEffort sets reasoning_effort on a Chat Completions body.
+func setChatEffort(body []byte, effort string) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	source["reasoning_effort"] = effort
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// setChatBudget sets reasoning.max_tokens on a Chat Completions body.
+func setChatBudget(body []byte, budget int64) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	reasoning, _ := source["reasoning"].(map[string]any)
+	if reasoning == nil {
+		reasoning = map[string]any{}
+	}
+	reasoning["max_tokens"] = budget
+	source["reasoning"] = reasoning
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// setResponsesEffort sets reasoning.effort on a Responses body.
+func setResponsesEffort(body []byte, effort string) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	reasoning, _ := source["reasoning"].(map[string]any)
+	if reasoning == nil {
+		reasoning = map[string]any{}
+	}
+	reasoning["effort"] = effort
+	source["reasoning"] = reasoning
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// setResponsesBudget sets reasoning.max_tokens on a Responses body.
+func setResponsesBudget(body []byte, budget int64) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	reasoning, _ := source["reasoning"].(map[string]any)
+	if reasoning == nil {
+		reasoning = map[string]any{}
+	}
+	reasoning["max_tokens"] = budget
+	source["reasoning"] = reasoning
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// setMessagesEffort sets output_config.effort on a Messages body.
+func setMessagesEffort(body []byte, effort string) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	outputConfig, _ := source["output_config"].(map[string]any)
+	if outputConfig == nil {
+		outputConfig = map[string]any{}
+	}
+	outputConfig["effort"] = effort
+	source["output_config"] = outputConfig
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// setMessagesDisabled sets thinking.type = disabled on a Messages body.
+func setMessagesDisabled(body []byte) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	thinking, _ := source["thinking"].(map[string]any)
+	if thinking == nil {
+		thinking = map[string]any{}
+	}
+	thinking["type"] = "disabled"
+	source["thinking"] = thinking
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// setMessagesBudget sets thinking.budget_tokens on a Messages body.
+func setMessagesBudget(body []byte, budget int64) []byte {
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
+	thinking, _ := source["thinking"].(map[string]any)
+	if thinking == nil {
+		thinking = map[string]any{}
+	}
+	thinking["budget_tokens"] = budget
+	source["thinking"] = thinking
+	result, _ := json.Marshal(source)
+	return result
 }
 
 func requestToChat(source map[string]any, from providers.Protocol) (map[string]any, error) {

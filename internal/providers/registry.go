@@ -119,6 +119,85 @@ type Instance struct {
 	Protocols                           []Protocol
 }
 
+// ReasoningOptionType enumerates the selector mechanisms a model may expose.
+type ReasoningOptionType string
+
+const (
+	ReasoningOptionEffort       ReasoningOptionType = "effort"
+	ReasoningOptionToggle       ReasoningOptionType = "toggle"
+	ReasoningOptionBudgetTokens ReasoningOptionType = "budget_tokens"
+)
+
+// ReasoningOption is a provider-neutral representation of a single reasoning
+// selector mechanism. Values is populated for effort-type options. Min and Max
+// (int64 pointers, never float) are populated for budget_tokens options.
+type ReasoningOption struct {
+	Type   ReasoningOptionType `json:"type"`
+ Values []string            `json:"values,omitempty"`
+	Min    *int64              `json:"min,omitempty"`
+	Max    *int64              `json:"max,omitempty"`
+}
+
+// ReasoningCapabilities is the normalized, provider-neutral reasoning metadata
+// for a model. nil means option metadata is unknown; a non-nil struct with an
+// empty Options list means the source explicitly reported no configurable
+// selector.
+type ReasoningCapabilities struct {
+	Options        []ReasoningOption `json:"options"`
+	DefaultEffort  string            `json:"default_effort,omitempty"`
+	Mandatory      *bool             `json:"mandatory,omitempty"`
+	DefaultEnabled *bool             `json:"default_enabled,omitempty"`
+	Parameters     []string          `json:"parameters,omitempty"`
+}
+
+// Canonical effort ordering for de-duplication and emission. Unknown
+// provider-specific values are appended after these in encounter order.
+var canonicalEffortOrder = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+
+// CanonicalEffortOrder returns the canonical ordering of effort values.
+func CanonicalEffortOrder() []string {
+	return canonicalEffortOrder
+}
+
+func effortIndex(value string) int {
+	for i, known := range canonicalEffortOrder {
+		if known == value {
+			return i
+		}
+	}
+	return -1
+}
+
+// SortEfforts de-duplicates and orders effort values: known values first in
+// canonical order, then unknown values in encounter order.
+func SortEfforts(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	var known, unknown []string
+	for _, v := range values {
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		if effortIndex(v) >= 0 {
+			known = append(known, v)
+		} else {
+			unknown = append(unknown, v)
+		}
+	}
+	sort.Slice(known, func(i, j int) bool { return effortIndex(known[i]) < effortIndex(known[j]) })
+	return append(known, unknown...)
+}
+
+// mergeReasoningCapabilities merges provider-reported and models.dev reasoning
+// capabilities with provider-first precedence applied independently to each
+// capability field. The provider argument takes precedence over enrichment.
+func mergeReasoningCapabilities(provider, enrichment *ReasoningCapabilities) *ReasoningCapabilities {
+	if provider != nil {
+		return provider
+	}
+	return enrichment
+}
+
 type Model struct {
 	ID, DisplayName string
 	ContextLength   int
@@ -126,6 +205,9 @@ type Model struct {
 	NativeProtocol  Protocol
 	// Tri-state capability flags: nil = unknown, non-nil = supported/unsupported.
 	SupportsTools, SupportsVision, SupportsReasoning, SupportsStructuredOutput *bool
+	// ReasoningCapabilities holds normalized selector metadata. nil means
+	// unknown; a non-nil struct describes the advertised selectors.
+	ReasoningCapabilities *ReasoningCapabilities
 	InputModalities, OutputModalities                                          []string
 }
 
@@ -290,6 +372,98 @@ func githubCopilotModels() []Model {
 	return models
 }
 
+// parseReasoningCapabilities selects the correct parser for a provider type
+// and returns the normalized capabilities. Returns nil when no reasoning
+// metadata is reported by the provider.
+func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesObj any, supportedParams []string) *ReasoningCapabilities {
+	if providerType == "anthropic" {
+		return anthropicReasoning(capabilitiesObj)
+	}
+	if reasoningObj != nil {
+		if rc := openRouterReasoning(reasoningObj); rc != nil {
+			return rc
+		}
+	}
+	return nil
+}
+
+// openRouterReasoning parses an OpenRouter-style `reasoning` object from a
+// model entry. Returns nil when the field is absent or not an object.
+func openRouterReasoning(raw any) *ReasoningCapabilities {
+	obj, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	var rc ReasoningCapabilities
+	if v, ok := obj["supported_effort"].([]any); ok {
+		var efforts []string
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				efforts = append(efforts, s)
+			}
+		}
+		if len(efforts) > 0 {
+			rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
+		}
+	}
+	if v, ok := obj["default_effort"].(string); ok && v != "" {
+		rc.DefaultEffort = v
+	}
+	if v, ok := obj["mandatory"].(bool); ok {
+		rc.Mandatory = &v
+	}
+	if v, ok := obj["default_enabled"].(bool); ok {
+		rc.DefaultEnabled = &v
+	}
+	if v, ok := obj["supports_max_tokens"].(bool); ok && v {
+		rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionBudgetTokens})
+	}
+	if v, ok := obj["supported_parameters"].([]any); ok {
+		for _, p := range v {
+			if s, ok := p.(string); ok && (s == "reasoning" || s == "reasoning_effort" || s == "include_reasoning") {
+				rc.Parameters = append(rc.Parameters, s)
+			}
+		}
+	}
+	if len(rc.Options) == 0 && rc.DefaultEffort == "" && rc.Mandatory == nil && rc.DefaultEnabled == nil && len(rc.Parameters) == 0 {
+		return nil
+	}
+	return &rc
+}
+
+// anthropicReasoning parses an Anthropic-style model entry with
+// capabilities.effort and capabilities.thinking levels. Returns nil when no
+// reasoning capability data is present.
+func anthropicReasoning(capabilitiesRaw any) *ReasoningCapabilities {
+	caps, ok := capabilitiesRaw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	var rc ReasoningCapabilities
+	if effortRaw, ok := caps["effort"].(map[string]any); ok {
+		var efforts []string
+		for _, level := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"} {
+			if lvl, ok := effortRaw[level].(map[string]any); ok {
+				if supported, ok := lvl["supported"].(bool); ok && supported {
+					efforts = append(efforts, level)
+				}
+			}
+		}
+		if len(efforts) > 0 {
+			rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
+		}
+	}
+	if thinkingRaw, ok := caps["thinking"].(map[string]any); ok {
+		if supported, ok := thinkingRaw["supported"].(bool); ok && supported {
+			rc.Options = append(rc.Options, ReasoningOption{Type: ReasoningOptionToggle})
+		}
+	}
+	if len(rc.Options) == 0 {
+		return nil
+	}
+	return &rc
+}
+
 func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthropic bool) ([]Model, error) {
 	endpoint, err := appendEndpoint(provider.BaseURL, "models")
 	if err != nil {
@@ -327,11 +501,14 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 				TopProvider     struct {
 					MaxCompletionTokens int `json:"max_completion_tokens"`
 				} `json:"top_provider"`
-				SupportedParameters []string `json:"supported_parameters"`
+				SupportedParameters []string         `json:"supported_parameters"`
 				Architecture        struct {
 					InputModalities  []string `json:"input_modalities"`
 					OutputModalities []string `json:"output_modalities"`
 				} `json:"architecture"`
+				// OpenRouter exposes reasoning metadata as a nested object.
+				Reasoning    map[string]any `json:"reasoning"`
+				Capabilities map[string]any `json:"capabilities"`
 			} `json:"data"`
 			HasMore bool   `json:"has_more"`
 			LastID  string `json:"last_id"`
@@ -359,7 +536,20 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			}
 			sp := item.SupportedParameters
 			arch := item.Architecture
-			result = append(result, Model{ID: modelID, DisplayName: display, ContextLength: firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens), MaxOutputTokens: maxOutputTokens, NativeProtocol: nativeProtocol(provider.Type, modelID), SupportsTools: triBool(len(sp) > 0, slices.Contains(sp, "tools")), SupportsVision: triBool(len(arch.InputModalities) > 0, slices.Contains(arch.InputModalities, "image")), SupportsReasoning: triBool(len(sp) > 0, slices.Contains(sp, "reasoning")), SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")), InputModalities: arch.InputModalities, OutputModalities: arch.OutputModalities})
+			reasoningCaps := parseReasoningCapabilities(provider.Type, item.Reasoning, item.Capabilities, sp)
+			result = append(result, Model{
+				ID: modelID, DisplayName: display,
+				ContextLength:   firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens),
+				MaxOutputTokens: maxOutputTokens,
+				NativeProtocol:  nativeProtocol(provider.Type, modelID),
+				SupportsTools:    triBool(len(sp) > 0, slices.Contains(sp, "tools")),
+				SupportsVision:   triBool(len(arch.InputModalities) > 0, slices.Contains(arch.InputModalities, "image")),
+				SupportsReasoning:              triBool(len(sp) > 0, slices.Contains(sp, "reasoning")),
+				SupportsStructuredOutput:       triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")),
+				ReasoningCapabilities:          reasoningCaps,
+				InputModalities:                arch.InputModalities,
+				OutputModalities:               arch.OutputModalities,
+			})
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break

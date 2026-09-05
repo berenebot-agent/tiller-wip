@@ -36,6 +36,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
+	anthropic := isAnthropicRequest(r)
 	if keyType == "single" {
 		var modelName, realID, virtualID string
 		var real, virtual sql.NullString
@@ -46,10 +47,14 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		realID, virtualID = real.String, virtual.String
 		var contextLength, maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
+		var reasoningCaps *providers.ReasoningCapabilities
 		if real.Valid {
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
+			var reasoningRaw sql.NullString
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw)
+			reasoningCaps = decodeReasoningCapabilities(reasoningRaw)
 		} else {
 			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
+			reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID)
 		}
 		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
@@ -59,14 +64,15 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 			entry["max_output_tokens"] = maxOutputTokens.Int64
 		}
 		caps.addTo(entry)
+		addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
 		return
 	}
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output FROM (
-	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output, reasoning_capabilities FROM (
+	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output, m.reasoning_capabilities FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical, `+conservativeMin("t.context_length")+`, `+conservativeMin("t.max_output_tokens")+`, `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+` FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
-) ORDER BY canonical`, identity.ID, identity.ID)
+	SELECT g.name||'/'||v.name canonical, `+conservativeMin("t.context_length")+`, `+conservativeMin("t.max_output_tokens")+`, `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+`, NULL FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
+	) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
@@ -78,7 +84,8 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		var contextLength sql.NullInt64
 		var maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
-		if rows.Scan(&modelID, &contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput) == nil {
+		var reasoningRaw sql.NullString
+		if rows.Scan(&modelID, &contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw) == nil {
 			entry := map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"}
 			if contextLength.Valid && contextLength.Int64 > 0 {
 				entry["context_length"] = contextLength.Int64
@@ -87,10 +94,94 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 				entry["max_output_tokens"] = maxOutputTokens.Int64
 			}
 			caps.addTo(entry)
+			reasoningCaps := decodeReasoningCapabilities(reasoningRaw)
+			addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
 			data = append(data, entry)
 		}
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
+}
+
+// isAnthropicRequest returns true when the request carries an Anthropic
+// version header, signalling that the client expects an Anthropic-shaped
+// model-list envelope.
+func isAnthropicRequest(r *http.Request) bool {
+	return r.Header.Get("anthropic-version") != ""
+}
+
+// addReasoningToCatalogueEntry extends a client-facing catalogue entry with
+// reasoning-selector metadata. When anthropic is true, the entry is shaped as
+// an Anthropic capabilities envelope; otherwise it uses OpenAI-compatible
+// extension fields.
+func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningCapabilities, anthropic bool) {
+	if rc == nil {
+		return
+	}
+	if anthropic {
+		// Anthropic shape: capabilities.effort + capabilities.thinking.
+		caps := map[string]any{}
+		for _, opt := range rc.Options {
+			switch opt.Type {
+			case providers.ReasoningOptionEffort:
+				effort := map[string]any{"supported": true}
+				for _, level := range providers.CanonicalEffortOrder() {
+					for _, v := range opt.Values {
+						if v == level {
+							effort[level] = map[string]any{"supported": true}
+							break
+						}
+					}
+				}
+				caps["effort"] = effort
+			case providers.ReasoningOptionToggle:
+				caps["thinking"] = map[string]any{"supported": true}
+			}
+		}
+		if len(caps) > 0 {
+			entry["capabilities"] = caps
+		}
+		return
+	}
+	// OpenAI-compatible shape: reasoning_options + reasoning.supported_efforts.
+	var effortValues []string
+	var reasoningOptions []map[string]any
+	for _, opt := range rc.Options {
+		switch opt.Type {
+		case providers.ReasoningOptionEffort:
+			effortValues = opt.Values
+			reasoningOptions = append(reasoningOptions, map[string]any{"type": "effort", "values": opt.Values})
+		case providers.ReasoningOptionToggle:
+			reasoningOptions = append(reasoningOptions, map[string]any{"type": "toggle"})
+		case providers.ReasoningOptionBudgetTokens:
+			reasoningOptions = append(reasoningOptions, map[string]any{"type": "budget_tokens"})
+		}
+	}
+	if len(reasoningOptions) > 0 {
+		entry["reasoning_options"] = reasoningOptions
+	}
+	if len(effortValues) > 0 {
+		entry["reasoning"] = map[string]any{"supported_efforts": effortValues}
+	}
+}
+
+// aggregateVirtualReasoningCapabilities computes the router-supported superset
+// of reasoning capabilities for a virtual model by querying its eligible
+// targets' stored capabilities.
+func (s *Server) aggregateVirtualReasoningCapabilities(ctx context.Context, virtualModelID string) *providers.ReasoningCapabilities {
+	rows, err := s.db.SQL.QueryContext(ctx, `SELECT m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualModelID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var merged *providers.ReasoningCapabilities
+	for rows.Next() {
+		var raw sql.NullString
+		if rows.Scan(&raw) == nil {
+			rc := decodeReasoningCapabilities(raw)
+			merged = mergeReasoningCapabilities(merged, rc)
+		}
+	}
+	return merged
 }
 
 // modelCapabilities holds the tri-state capability flags for a model. A flag is
@@ -138,6 +229,13 @@ type resolvedRoute struct {
 	Virtual, Available                  bool
 	Targets                             []resolvedRoute
 	RouteKind, RouteModelID, RouteModel string
+	// ReasoningCapabilities holds the normalized selector metadata for this
+	// real target. nil when unknown.
+	ReasoningCapabilities *providers.ReasoningCapabilities
+	// warningCode holds the per-candidate warning computed during request
+	// preparation. Only the final successful candidate's warningCode is
+	// persisted to the Activity row.
+	warningCode string
 }
 
 func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
@@ -160,9 +258,11 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		if realID.Valid {
 			route.RouteKind, route.RouteModelID = "real", realID.String
 			route.ProviderModelID = realID.String
-			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel); err != nil {
+			var reasoningRaw sql.NullString
+			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id, m.reasoning_capabilities FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel, &reasoningRaw); err != nil {
 				return resolvedRoute{}, err
 			}
+			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 		} else {
 			route.RouteKind, route.RouteModelID = "virtual", virtualID.String
 			if err = tx.QueryRowContext(ctx, `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, virtualID.String).Scan(&route.RouteModel); err != nil {
@@ -170,9 +270,11 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			}
 		}
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
+		var reasoningRaw sql.NullString
+		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id, m.reasoning_capabilities FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel, &reasoningRaw)
 		if err == nil {
 			route.RouteKind = "real"
+			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 		} else if err == sql.ErrNoRows {
 			err = tx.QueryRowContext(ctx, `SELECT v.id,g.name||'/'||v.name FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
 			if err != nil {
@@ -184,7 +286,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		}
 	}
 	if route.RouteKind == "virtual" {
-		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
+		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
 		if e != nil {
 			return resolvedRoute{}, e
 		}
@@ -194,7 +296,8 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			var protocols string
 			var enabled, available int
 			var nativeProtocol sql.NullString
-			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available); e != nil {
+			var reasoningRaw sql.NullString
+			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available, &reasoningRaw); e != nil {
 				return resolvedRoute{}, e
 			}
 			target.Provider.Enabled = scanBool(enabled)
@@ -203,6 +306,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			if nativeProtocol.Valid {
 				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
 			}
+			target.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 			target.Available = target.Provider.Enabled && scanBool(available)
 			target.Virtual, target.RequestedModel = true, clientModel
 			target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
@@ -224,7 +328,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	var enabled, modelAvailable int
 	var nativeProtocol sql.NullString
 	route.ProviderModelID = route.RouteModelID
-	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, route.RouteModelID).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable)
+	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, route.RouteModelID).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable, &route.ReasoningCapabilities)
 	if err != nil {
 		return resolvedRoute{}, err
 	}
@@ -273,6 +377,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	}
 	logErrorBodies, _ := s.db.GetLogErrorBodies(r.Context())
 	originalBody := append([]byte(nil), body...)
+	// Extract the canonical reasoning selector once from the original request.
+	// It is recomputed for each candidate against that target's capabilities.
+	canonicalSelector := extractReasoningSelector(originalBody, incoming)
 	start := time.Now()
 	streamed := false
 	clientTracked := false
@@ -370,11 +477,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
 				return
 			}
+			// After translation, re-apply the canonical selector for the target.
+			attemptBody, candidate.warningCode = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
 		} else {
 			var attemptRaw map[string]json.RawMessage
 			_ = json.Unmarshal(attemptBody, &attemptRaw)
 			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
 			attemptBody, _ = json.Marshal(attemptRaw)
+			// Native protocol: apply capability-based omission if needed.
+			attemptBody, candidate.warningCode = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities, candidate.Provider.Type)
 		}
 		if candidate.Provider.Type == "codex-subscription" {
 			attemptBody, err = normalizeCodexRequest(attemptBody)
@@ -545,6 +656,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if route.Virtual {
 			activeTargetID = targetID
 		}
+		// Assign the final successful candidate's warning code to the row.
+		row.warningCode = candidate.warningCode
 		row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 		break
 	}

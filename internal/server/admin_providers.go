@@ -400,24 +400,25 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 type modelView struct {
-	ID                       string             `json:"id"`
-	ProviderID               string             `json:"provider_id"`
-	ProviderName             string             `json:"provider_name"`
-	UpstreamModelID          string             `json:"upstream_model_id"`
-	CanonicalModelID         string             `json:"canonical_model_id"`
-	DisplayName              string             `json:"display_name"`
-	ContextLength            *int64             `json:"context_length"`
-	MaxOutputTokens          *int64             `json:"max_output_tokens"`
-	NativeProtocol           providers.Protocol `json:"native_protocol,omitempty"`
-	SupportsTools            *bool              `json:"supports_tools"`
-	SupportsVision           *bool              `json:"supports_vision"`
-	SupportsReasoning        *bool              `json:"supports_reasoning"`
-	SupportsStructuredOutput *bool              `json:"supports_structured_output"`
-	InputModalities          []string           `json:"input_modalities,omitempty"`
-	OutputModalities         []string           `json:"output_modalities,omitempty"`
-	Available                bool               `json:"available"`
-	FirstSeenAt              string             `json:"first_seen_at"`
-	LastSeenAt               string             `json:"last_seen_at"`
+	ID                       string                            `json:"id"`
+	ProviderID               string                            `json:"provider_id"`
+	ProviderName             string                            `json:"provider_name"`
+	UpstreamModelID          string                            `json:"upstream_model_id"`
+	CanonicalModelID         string                            `json:"canonical_model_id"`
+	DisplayName              string                            `json:"display_name"`
+	ContextLength            *int64                            `json:"context_length"`
+	MaxOutputTokens          *int64                            `json:"max_output_tokens"`
+	NativeProtocol           providers.Protocol                `json:"native_protocol,omitempty"`
+	SupportsTools            *bool                             `json:"supports_tools"`
+	SupportsVision           *bool                             `json:"supports_vision"`
+	SupportsReasoning        *bool                             `json:"supports_reasoning"`
+	SupportsStructuredOutput *bool                             `json:"supports_structured_output"`
+	ReasoningCapabilities    *providers.ReasoningCapabilities  `json:"reasoning_capabilities,omitempty"`
+	InputModalities          []string                          `json:"input_modalities,omitempty"`
+	OutputModalities         []string                          `json:"output_modalities,omitempty"`
+	Available                bool                              `json:"available"`
+	FirstSeenAt              string                            `json:"first_seen_at"`
+	LastSeenAt               string                            `json:"last_seen_at"`
 }
 
 func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request) {
@@ -432,7 +433,7 @@ func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where s
 		limit = 100000 // return the full catalogue (e.g. for the virtual-model target selector)
 		offset = 0
 	}
-	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.max_output_tokens,m.native_protocol,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.input_modalities,m.output_modalities,m.available,m.first_seen_at,m.last_seen_at FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
+	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.max_output_tokens,m.native_protocol,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities,m.input_modalities,m.output_modalities,m.available,m.first_seen_at,m.last_seen_at FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
 	pattern := "%" + search + "%"
 	args = append(args, pattern, pattern, limit, offset)
 	rows, err := s.db.SQL.QueryContext(r.Context(), query, args...)
@@ -447,8 +448,9 @@ func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where s
 		var available int
 		var nativeProtocol sql.NullString
 		var tools, vision, reasoning, structured sql.NullInt64
+		var reasoningCaps sql.NullString
 		var inputMod, outputMod sql.NullString
-		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &v.ContextLength, &v.MaxOutputTokens, &nativeProtocol, &tools, &vision, &reasoning, &structured, &inputMod, &outputMod, &available, &v.FirstSeenAt, &v.LastSeenAt) != nil {
+		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &v.ContextLength, &v.MaxOutputTokens, &nativeProtocol, &tools, &vision, &reasoning, &structured, &reasoningCaps, &inputMod, &outputMod, &available, &v.FirstSeenAt, &v.LastSeenAt) != nil {
 			adminError(w, 500, "database_error", "Could not list models.")
 			return
 		}
@@ -459,6 +461,7 @@ func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where s
 		v.SupportsVision = triBoolFromInt(vision)
 		v.SupportsReasoning = triBoolFromInt(reasoning)
 		v.SupportsStructuredOutput = triBoolFromInt(structured)
+		v.ReasoningCapabilities = decodeReasoningCapabilities(reasoningCaps)
 		v.InputModalities = decodeModalities(inputMod)
 		v.OutputModalities = decodeModalities(outputMod)
 		v.Available = scanBool(available)
@@ -474,6 +477,20 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=0`).Scan(&retired)
 	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v WHERE NOT EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)`).Scan(&broken)
 	writeJSON(w, 200, map[string]any{"status": "ready", "providers": providersCount, "available_models": available, "retired_models": retired, "broken_virtual_models": broken})
+}
+
+// decodeReasoningCapabilities decodes a stored JSON reasoning_capabilities
+// column into a *ReasoningCapabilities. Returns nil when the column is NULL
+// or unreadable (unknown).
+func decodeReasoningCapabilities(v sql.NullString) *providers.ReasoningCapabilities {
+	if !v.Valid || v.String == "" {
+		return nil
+	}
+	var rc providers.ReasoningCapabilities
+	if err := json.Unmarshal([]byte(v.String), &rc); err != nil {
+		return nil
+	}
+	return &rc
 }
 
 // triBoolFromInt converts a nullable tri-state capability column (NULL/0/1)

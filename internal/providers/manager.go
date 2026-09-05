@@ -211,11 +211,11 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	// every metadata field plus available=1 / last_seen_at. Previously this was
 	// O(N) INSERT-or-UPDATE statements inside the transaction.
 	if len(unique) > 0 {
-		const upsertColumns = 17
+		const upsertColumns = 18
 		placeholders := make([]string, 0, len(unique))
 		args := make([]any, 0, len(unique)*upsertColumns)
 		for i, model := range unique {
-			placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
+			placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
 			args = append(args,
 				ids[i], providerID, model.ID, model.DisplayName,
 				nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens),
@@ -223,10 +223,11 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				nullableBool(model.SupportsTools), nullableBool(model.SupportsVision),
 				nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
 				nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
+				nullableReasoningCapabilities(model.ReasoningCapabilities),
 				now, now, now, now,
 			)
 		}
-		stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
+		stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
 			strings.Join(placeholders, ",") + `
 			ON CONFLICT(provider_id, upstream_model_id) DO UPDATE SET
 				display_name=excluded.display_name,
@@ -239,6 +240,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				supports_structured_output=excluded.supports_structured_output,
 				input_modalities=excluded.input_modalities,
 				output_modalities=excluded.output_modalities,
+				reasoning_capabilities=excluded.reasoning_capabilities,
 				available=1,
 				last_seen_at=excluded.last_seen_at,
 				updated_at=excluded.updated_at`
@@ -392,6 +394,17 @@ func nullableBool(v *bool) any {
 		return 1
 	}
 	return 0
+}
+
+func nullableReasoningCapabilities(rc *ReasoningCapabilities) any {
+	if rc == nil {
+		return nil
+	}
+	b, err := json.Marshal(rc)
+	if err != nil {
+		return nil
+	}
+	return string(b)
 }
 
 func nullableJSON(list []string) any {
