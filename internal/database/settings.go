@@ -10,6 +10,7 @@ import (
 const (
 	SettingDefaultLoggingEnabled              = "default_logging_enabled"
 	SettingDefaultRetentionDays               = "default_retention_days"
+	SettingLogErrorBodies                     = "log_error_bodies"
 	SettingFallbackTimeoutSeconds             = "fallback_timeout_seconds"
 	SettingNotificationsEnabled               = "notifications_enabled"
 	SettingNotificationsWebhookURL            = "notifications_webhook_url"
@@ -69,6 +70,16 @@ func (d *DB) GetLoggingDefaults(ctx context.Context) (enabled bool, retentionDay
 		return false, 0, e
 	}
 	return enabled, retentionDays, nil
+}
+
+// GetLogErrorBodies returns whether failed request and upstream error bodies
+// should be retained. The safe default is disabled.
+func (d *DB) GetLogErrorBodies(ctx context.Context) (bool, error) {
+	v, err := d.GetBool(ctx, SettingLogErrorBodies)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return v, err
 }
 
 // GetFallbackTimeout returns the configured fallback timeout in seconds, with a
