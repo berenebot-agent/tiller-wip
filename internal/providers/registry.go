@@ -282,31 +282,23 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 	"qwen3.6-plus": ProtocolMessages, "qwen3.5-plus": ProtocolMessages,
 }
 
+// openCodeZenProtocolByModel is an explicit, provider-scoped model→protocol
+// compatibility override for OpenCode models whose discovery payload does not
+// report a native protocol. Explicit per-model entries are permitted
+// compatibility data (see AGENTS.md); speculative model-name heuristics are
+// not — unknown models return "" so compatibleProtocol() falls back to the
+// client's incoming protocol instead of guessing from the name shape.
 func nativeProtocol(providerType, modelID string) Protocol {
 	if providerType == "opencode-zen" || providerType == "opencode-free" {
 		if protocol, ok := openCodeZenProtocolByModel[modelID]; ok {
 			return protocol
 		}
-		if openCodeResponsesModel(modelID) {
-			return ProtocolResponses
-		}
-		return ProtocolChat
+		return ""
 	}
 	if providerType == "opencode-go" {
 		return ProtocolChat
 	}
 	return ""
-}
-
-func openCodeResponsesModel(modelID string) bool {
-	lowerModelID := strings.ToLower(modelID)
-	if strings.Contains(lowerModelID, "response") {
-		return true
-	}
-	return strings.HasPrefix(lowerModelID, "gpt-5") ||
-		strings.HasPrefix(lowerModelID, "grok-4") ||
-		strings.HasPrefix(lowerModelID, "grok-build-") ||
-		strings.HasPrefix(lowerModelID, "muse-spark-")
 }
 
 type Registry struct {

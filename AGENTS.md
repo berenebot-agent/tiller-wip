@@ -88,6 +88,7 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 
 - Never hardcode model IDs, model lists, or per-model behaviour (native protocol, capabilities, reasoning levels, context windows) in code. Catalogues and capabilities must come from live provider discovery (`Registry.Discover`) or provider-reported metadata, with models.dev as fallback-only enrichment (provider data stays authoritative).
 - Prefix/substring matching on model IDs is hardcoding by another name — do not add new ID-shape heuristics. Provider-type branching (auth headers, endpoints, discovery dispatch) is fine; per-model branching is not.
+- Narrow exception: where a provider's live discovery provably omits a compatibility fact the router needs (e.g. OpenCode Zen/Free models reporting no native protocol, OpenCode Free's minimum output tokens), an explicit, provider-scoped compatibility override is permitted — a literal model→value map or a provider-level constant, reviewed like any other provider quirk. Speculative name-shape guessing (`HasPrefix`/`Contains` on model IDs) stays prohibited; unknown models must degrade to a neutral default (e.g. the client's incoming protocol), never to a guessed value.
 - Discovery failures fail loud (surface as `refresh_error`). Never silently fall back to a stale hardcoded list.
 
 ## When to stop and ask instead of proceeding

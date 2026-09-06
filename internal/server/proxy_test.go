@@ -357,7 +357,7 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 		chatBody, _ := json.Marshal(map[string]any{
 			"model":      "opencode-free-muse/" + upstreamID,
 			"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
-			"max_tokens": 8,
+			"max_tokens": 32,
 			"stream":     false,
 		})
 		req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(chatBody))
@@ -383,5 +383,144 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 		if raw.(map[string]any)["streaming"] == true {
 			t.Fatal("translated JSON response was marked streaming")
 		}
+	}
+}
+
+// TestOpenCodeFreeMinOutputTokensRejectsExplicitLowLimit verifies the router
+// never silently raises an explicit client max_tokens below the provider
+// minimum (opencode-free requires >= 16): a direct request fails loud with a
+// 400, while a request without the field gets the minimum supplied as the
+// default and succeeds.
+func TestOpenCodeFreeMinOutputTokensRejectsExplicitLowLimit(t *testing.T) {
+	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data":   []any{map[string]any{"id": "mimo-v2.5-free", "object": "model"}},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "resp",
+			"object":  "chat.completion",
+			"model":   "test",
+			"choices": []any{map[string]any{"message": map[string]any{"content": "ok"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1},
+		})
+	}))
+	t.Cleanup(dedicated.Close)
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	status, payload, _ := api.request("POST", "/api/admin/providers", map[string]any{
+		"name":      "opencode-free-min",
+		"type":      "opencode-free",
+		"base_url":  dedicated.URL + "/v1",
+		"protocols": []string{"chat", "responses"},
+	})
+	if status != 201 {
+		t.Fatalf("create provider: %d %v", status, payload)
+	}
+	providerID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/providers/"+providerID+"/refresh", nil)
+	if status != 200 && status != 204 {
+		t.Fatalf("refresh: %d %v", status, payload)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatalf("list models: %d %v", status, payload)
+	}
+	modelIDs := map[string]string{}
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if upID, ok := m["upstream_model_id"].(string); ok {
+			if id, ok := m["id"].(string); ok {
+				modelIDs[upID] = id
+			}
+		}
+	}
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "min-test", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+	clientSecret := payload["secret"].(string)
+	perms := []any{}
+	for _, modelID := range modelIDs {
+		perms = append(perms, map[string]any{"kind": "real", "model_id": modelID, "enabled": true})
+	}
+	status, _, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{"defaults": []any{}, "permissions": perms})
+	if status != 204 {
+		t.Fatalf("permissions: %d", status)
+	}
+
+	call := func(body map[string]any) (int, map[string]any) {
+		t.Helper()
+		raw, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+clientSecret)
+		resp, err := api.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	model := "opencode-free-min/mimo-v2.5-free"
+	// Explicit max_tokens below the provider minimum: loud 400, never silent.
+	if status, out := call(map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "max_tokens": 8}); status != 400 {
+		t.Fatalf("below-minimum max_tokens: expected 400, got %d (%v)", status, out)
+	} else if errObj, ok := out["error"].(map[string]any); !ok || errObj["code"] != "unsupported_feature" {
+		t.Fatalf("below-minimum max_tokens: expected unsupported_feature, got %v", out)
+	}
+	// No max_tokens: minimum supplied as default, request succeeds.
+	if status, out := call(map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}}); status != 200 {
+		t.Fatalf("absent max_tokens: expected 200, got %d (%v)", status, out)
+	}
+	// At/above minimum: untouched, succeeds.
+	if status, out := call(map[string]any{"model": model, "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "max_tokens": 32}); status != 200 {
+		t.Fatalf("above-minimum max_tokens: expected 200, got %d (%v)", status, out)
+	}
+}
+
+func TestCheckMinOutputTokens(t *testing.T) {
+	// Absent field: minimum supplied, compatible.
+	out, ok, err := checkMinOutputTokens([]byte(`{"model":"m"}`), 16, providers.ProtocolChat)
+	if err != nil || !ok {
+		t.Fatalf("absent field: ok=%v err=%v", ok, err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(out, &parsed); err != nil || parsed["max_tokens"] != float64(16) {
+		t.Fatalf("absent field: minimum not supplied: %s err=%v", out, err)
+	}
+	// Explicit below minimum: incompatible, body untouched.
+	raw := []byte(`{"model":"m","max_tokens":8}`)
+	out, ok, err = checkMinOutputTokens(raw, 16, providers.ProtocolChat)
+	if err != nil || ok {
+		t.Fatalf("below minimum: ok=%v err=%v, want incompatible", ok, err)
+	}
+	if string(out) != string(raw) {
+		t.Fatalf("below minimum: body must be untouched, got %s", out)
+	}
+	// At/above minimum: untouched, compatible.
+	for _, body := range []string{`{"model":"m","max_tokens":16}`, `{"model":"m","max_tokens":64}`} {
+		out, ok, err := checkMinOutputTokens([]byte(body), 16, providers.ProtocolChat)
+		if err != nil || !ok || string(out) != body {
+			t.Fatalf("above minimum %s: ok=%v err=%v out=%s", body, ok, err, out)
+		}
+	}
+	// Responses protocol uses max_output_tokens.
+	out, ok, err = checkMinOutputTokens([]byte(`{"model":"m"}`), 16, providers.ProtocolResponses)
+	if err != nil || !ok {
+		t.Fatalf("responses absent: ok=%v err=%v", ok, err)
+	}
+	if err := json.Unmarshal(out, &parsed); err != nil || parsed["max_output_tokens"] != float64(16) {
+		t.Fatalf("responses absent: minimum not supplied: %s", out)
+	}
+	if _, ok, _ := checkMinOutputTokens([]byte(`{"model":"m","max_output_tokens":4}`), 16, providers.ProtocolResponses); ok {
+		t.Fatal("responses below minimum must be incompatible")
 	}
 }

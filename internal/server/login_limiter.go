@@ -36,11 +36,13 @@ func newLoginLimiter(max int, window, lockout time.Duration) *loginLimiter {
 	}
 }
 
-// maxLimiterEntries bounds the limiter map so spoofed X-Forwarded-For values
-// (usable by anyone behind the trusted proxy) cannot grow memory without
-// bound. When exceeded, expired entries are purged; if still over budget,
-// the oldest counting entries are dropped (fail-open for that IP, which only
-// resets its failure streak).
+// maxLimiterEntries is a true hard bound on the limiter map so spoofed
+// X-Forwarded-For values (usable by anyone behind the trusted proxy) cannot
+// grow memory without bound. When exceeded, expired entries are purged; if
+// still over budget, one non-locked-out counting entry is dropped (fail-open
+// for that IP, which only resets its failure streak). If every entry is an
+// active lockout and nothing can be safely evicted, the new entry is refused
+// and the caller proceeds unlocked (fail-open) rather than growing the map.
 const maxLimiterEntries = 4096
 
 // purge removes expired lockouts and stale counting windows. Callers must
@@ -92,12 +94,19 @@ func (l *loginLimiter) recordFailure(key string) bool {
 			if len(l.failures) >= maxLimiterEntries {
 				// Still over budget: evict one non-locked-out counting
 				// entry (fail-open for that IP only). Active lockouts are
-				// never evicted so brute-force protection holds.
+				// never evicted so brute-force protection holds. If every
+				// entry is an active lockout, refuse the insert and let
+				// this attempt through rather than growing the map.
+				evicted := false
 				for k, v := range l.failures {
 					if v.until.IsZero() {
 						delete(l.failures, k)
+						evicted = true
 						break
 					}
+				}
+				if !evicted {
+					return false
 				}
 			}
 		}

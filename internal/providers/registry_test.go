@@ -53,10 +53,10 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 	zen := map[string]Protocol{
 		"gpt-5.5":            ProtocolResponses,
 		"claude-opus-4.6":    ProtocolMessages,
-		"deepseek-v4-flash":  ProtocolChat,
-		"unknown-model":      ProtocolChat,
-		"gpt-5.7":            ProtocolResponses,
-		"new-response-model": ProtocolResponses,
+		"deepseek-v4-flash":  "",
+		"unknown-model":      "",
+		"gpt-5.7":            "",
+		"new-response-model": "",
 	}
 	for modelID, want := range zen {
 		if got := nativeProtocol("opencode-zen", modelID); got != want {
@@ -66,18 +66,18 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 	if got := nativeProtocol("opencode-go", "any-model"); got != ProtocolChat {
 		t.Fatalf("Go model protocol = %q, want %q", got, ProtocolChat)
 	}
-	if got := nativeProtocol("opencode-zen", "unknown-model"); got != ProtocolChat {
-		t.Fatalf("unknown Zen model protocol = %q, want %q", got, ProtocolChat)
+	if got := nativeProtocol("opencode-zen", "unknown-model"); got != "" {
+		t.Fatalf("unknown Zen model protocol = %q, want %q", got, "")
 	}
 	freeModels := map[string]Protocol{
 		"muse-spark-1.2-contributor-free": ProtocolResponses,
 		"muse-spark-1.3-contributor-free": ProtocolResponses,
-		"nemotron-3-ultra-free":           ProtocolChat,
-		"deepseek-v4-flash-free":          ProtocolChat,
-		"mimo-v2.5-free":                  ProtocolChat,
-		"unlisted-model-free":             ProtocolChat,
-		"gpt-5.7-free":                    ProtocolResponses,
-		"new-response-model-free":         ProtocolResponses,
+		"nemotron-3-ultra-free":           "",
+		"deepseek-v4-flash-free":          "",
+		"mimo-v2.5-free":                  "",
+		"unlisted-model-free":             "",
+		"gpt-5.7-free":                    "",
+		"new-response-model-free":         "",
 	}
 	for modelID, want := range freeModels {
 		if got := nativeProtocol("opencode-free", modelID); got != want {
@@ -87,9 +87,9 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 	for modelID, want := range map[string]Protocol{
 		"muse-spark-1.2-contributor-free": ProtocolResponses,
 		"muse-spark-1.3-contributor-free": ProtocolResponses,
-		"nemotron-3-ultra-free":           ProtocolChat,
-		"deepseek-v4-flash-free":          ProtocolChat,
-		"mimo-v2.5-free":                  ProtocolChat,
+		"nemotron-3-ultra-free":           "",
+		"deepseek-v4-flash-free":          "",
+		"mimo-v2.5-free":                  "",
 	} {
 		if got := nativeProtocol("opencode-zen", modelID); got != want {
 			t.Errorf("opencode-zen model %q protocol = %q, want %q", modelID, got, want)
@@ -147,7 +147,7 @@ func TestOpenCodeDiscoveryAssignsNativeProtocols(t *testing.T) {
 	for _, model := range models {
 		got[model.ID] = model.NativeProtocol
 	}
-	want := map[string]Protocol{"gpt-5.5": ProtocolResponses, "claude-opus-4.6": ProtocolMessages, "deepseek-v4-flash": ProtocolChat, "unlisted-model": ProtocolChat}
+	want := map[string]Protocol{"gpt-5.5": ProtocolResponses, "claude-opus-4.6": ProtocolMessages, "deepseek-v4-flash": "", "unlisted-model": ""}
 	for modelID, protocol := range want {
 		if got[modelID] != protocol {
 			t.Errorf("model %q protocol = %q, want %q", modelID, got[modelID], protocol)

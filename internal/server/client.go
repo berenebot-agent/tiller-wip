@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
@@ -618,13 +617,29 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 		}
 		if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
-			attemptBody, err = clampMinOutputTokens(attemptBody, minOut, target)
+			var compatible bool
+			attemptBody, compatible, err = checkMinOutputTokens(attemptBody, minOut, target)
 			if err != nil {
 				row.httpStatus = 400
 				row.errorText = strPtr("invalid_request")
 				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
 				inferenceError(w, 400, "invalid_request_error", "invalid_request", "Could not apply minimum output tokens.", incoming == providers.ProtocolMessages)
 				return
+			}
+			if !compatible {
+				// The client explicitly requested fewer output tokens than
+				// this target's provider minimum. Never silently raise an
+				// explicit client limit: skip the target on virtual routes,
+				// fail loud on direct routes.
+				if !route.Virtual {
+					row.httpStatus = 400
+					row.errorText = strPtr("unsupported_feature")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+					inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires a higher minimum output length than requested.", incoming == providers.ProtocolMessages)
+					return
+				}
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+				continue
 			}
 		}
 		endpoint, e := providers.Endpoint(candidate.Provider, target)
@@ -959,24 +974,18 @@ func preflightResponseLimit(resp *http.Response, limit int64) error {
 type idleReader struct {
 	reader io.Reader
 	timer  *time.Timer
-	mu     sync.Mutex
 }
 
 func (i *idleReader) Read(p []byte) (int, error) {
 	n, err := i.reader.Read(p)
 	if n > 0 {
-		// Guard the timer reset against a concurrent cancel: if the timer
-		// has already fired and the cancel is in flight, Stop returns false
-		// and we drain the channel so a later Reset cannot immediately fire.
-		i.mu.Lock()
-		if !i.timer.Stop() {
-			select {
-			case <-i.timer.C:
-			default:
-			}
-		}
+		// Simple reset. Residual boundary race, documented honestly: if the
+		// AfterFunc already fired (or is executing) concurrently with this
+		// reset, the cancel still runs and the stream ends early. Stop/drain
+		// cannot recall an in-flight callback, so no reset scheme eliminates
+		// it — the window is microseconds at exactly idleTimeout of silence
+		// and the behaviour predates this code.
 		i.timer.Reset(idleTimeout)
-		i.mu.Unlock()
 	}
 	return n, err
 }
@@ -1055,11 +1064,19 @@ func compatibleProtocol(protocols []providers.Protocol, native providers.Protoco
 	return ""
 }
 
-// clampMinOutputTokens ensures the request's max_output_tokens (Responses) or
-// max_tokens (Chat) is at least minOut. Some upstreams reject values below a
-// threshold (e.g. OpenCode Free requires >= 16). The field is only modified
-// when present and below the minimum; otherwise the body is returned unchanged.
-func clampMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) ([]byte, error) {
+// checkMinOutputTokens enforces a provider's minimum output length without
+// ever overriding an explicit client limit. It returns the (possibly
+// default-filled) body and whether the target is compatible:
+//   - field absent: the minimum is supplied as the default (overrides
+//     nothing) and the target is compatible;
+//   - field present and >= min: untouched, compatible;
+//   - field present and < min: incompatible — the caller skips the target
+//     (virtual) or returns a 400 (direct).
+//
+// Some upstreams reject values below a threshold (e.g. OpenCode Free
+// requires >= 16). A non-numeric field value is left untouched for the
+// upstream to validate.
+func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) (out []byte, compatible bool, err error) {
 	var field string
 	switch protocol {
 	case providers.ProtocolResponses:
@@ -1067,17 +1084,23 @@ func clampMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 	case providers.ProtocolChat:
 		field = "max_tokens"
 	default:
-		return body, nil
+		return body, true, nil
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	maxAny, ok := parsed[field]
 	if !ok {
-		return body, nil
+		parsed[field] = minOut
+		out, err := json.Marshal(parsed)
+		if err != nil {
+			return nil, false, err
+		}
+		return out, true, nil
 	}
 	var maxVal int64
+	integral := true
 	switch n := maxAny.(type) {
 	case int:
 		maxVal = int64(n)
@@ -1086,19 +1109,19 @@ func clampMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 	case float64:
 		if n >= 0 && n == float64(int64(n)) {
 			maxVal = int64(n)
+		} else {
+			integral = false
 		}
 	default:
-		return body, nil
+		return body, true, nil
+	}
+	if !integral {
+		return nil, false, nil
 	}
 	if maxVal >= int64(minOut) {
-		return body, nil
+		return body, true, nil
 	}
-	parsed[field] = minOut
-	out, err := json.Marshal(parsed)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+	return body, false, nil
 }
 
 func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) {

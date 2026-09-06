@@ -590,8 +590,13 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		t.Fatalf("expected header + 1 row, got %d records", len(records))
 	}
 	header := records[0]
-	if len(header) != 28 {
-		t.Fatalf("expected 28 columns, got %d", len(header))
+	if len(header) != 27 {
+		t.Fatalf("expected 27 columns, got %d", len(header))
+	}
+	for _, h := range header {
+		if h == "warning_code" {
+			t.Fatal("warning_code column must stay removed (silent-omission decision)")
+		}
 	}
 	row := records[1]
 

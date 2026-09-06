@@ -493,6 +493,80 @@ func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
 	}
 }
 
+// TestRequestLoggingCapturesBodiesWhenEnabled is the positive counterpart to
+// TestRequestLoggingDoesNotCaptureBodies: with log_error_bodies=true, failed
+// request and upstream error bodies are persisted (bounded), and over-bound
+// bodies are truncated with the truncated flag set.
+func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
+	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
+	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
+	bigBody := strings.Repeat("x", int(maxUpstreamErrorBytes)+100)
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusBadGateway)
+		if strings.Contains(string(raw), "TRIGGER-BIG-BODY") {
+			_, _ = w.Write([]byte(bigBody))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
+	})
+	api, db, clientID, secret := loggingTestHarness(t, upstream)
+	if err := db.SetSetting(context.Background(), database.SettingLogErrorBodies, "1"); err != nil {
+		t.Fatal(err)
+	}
+	// Small-body failure: both bodies persisted verbatim, not truncated.
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": requestMarker}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var requestBody, errorBody *string
+	var requestTruncated, errorTruncated int
+	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if requestBody == nil || !strings.Contains(*requestBody, requestMarker) {
+		t.Fatalf("request body was not persisted when enabled: %v", requestBody)
+	}
+	if errorBody == nil || !strings.Contains(*errorBody, errorMarker) {
+		t.Fatalf("provider error body was not persisted when enabled: %v", errorBody)
+	}
+	if requestTruncated != 0 || errorTruncated != 0 {
+		t.Fatalf("small bodies must not be marked truncated: %d/%d", requestTruncated, errorTruncated)
+	}
+	// The activity API must expose the persisted error body.
+	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK {
+		t.Fatalf("activity: %d", status)
+	}
+	if !strings.Contains(string(mustJSON(t, activity)), errorMarker) {
+		t.Fatal("persisted error body missing from activity when enabled")
+	}
+	// Over-bound failure: body truncated with the truncated flag set.
+	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "TRIGGER-BIG-BODY"}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var bigError *string
+	var bigTruncated int
+	if err := db.SQL.QueryRow(`SELECT error_body,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&bigError, &bigTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if bigTruncated != 1 {
+		t.Fatal("over-bound error body must be marked truncated")
+	}
+	if bigError == nil || int64(len(*bigError)) > maxUpstreamErrorBytes {
+		t.Fatalf("truncated error body exceeds bound: %d", len(*bigError))
+	}
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := json.Marshal(value)
