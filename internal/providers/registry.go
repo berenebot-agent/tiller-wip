@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/providers/codex"
 )
 
 // Codex uses the Responses API over a subscription-backed OAuth credential.
@@ -354,7 +356,7 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	var err error
 	switch d.Discovery {
 	case "codex":
-		models = codexModels()
+		models, err = r.discoverCodex(ctx, provider)
 	case "claude":
 		models = claudeModels()
 	case "github-copilot":
@@ -391,13 +393,83 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	return r.enrich(models, provider.Type), nil
 }
 
-func codexModels() []Model {
-	ids := []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"}
-	models := make([]Model, 0, len(ids))
-	for _, id := range ids {
-		models = append(models, Model{ID: id, DisplayName: id, NativeProtocol: ProtocolResponses})
+func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Model, error) {
+	endpoint, err := appendEndpoint(provider.BaseURL, "models")
+	if err != nil {
+		return nil, err
 	}
-	return models
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	q.Set("client_version", codex.ClientVersion)
+	u.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	ApplyRequestAuth(req, provider)
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("Codex model discovery returned HTTP %d", resp.StatusCode)
+	}
+
+	var payload struct {
+		Models []struct {
+			Slug                     string   `json:"slug"`
+			DisplayName              string   `json:"display_name"`
+			ContextWindow            int      `json:"context_window"`
+			SupportedInAPI           *bool    `json:"supported_in_api"`
+			Visibility               string   `json:"visibility"`
+			InputModalities          []string `json:"input_modalities"`
+			SupportedReasoningLevels []struct {
+				Effort string `json:"effort"`
+			} `json:"supported_reasoning_levels"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("decode Codex model catalogue: %w", err)
+	}
+
+	models := make([]Model, 0, len(payload.Models))
+	seen := make(map[string]bool, len(payload.Models))
+	for _, item := range payload.Models {
+		if item.Slug == "" || seen[item.Slug] || (item.SupportedInAPI != nil && !*item.SupportedInAPI) || item.Visibility == "hidden" {
+			continue
+		}
+		seen[item.Slug] = true
+		var efforts []string
+		for _, level := range item.SupportedReasoningLevels {
+			efforts = append(efforts, level.Effort)
+		}
+		var reasoning *ReasoningCapabilities
+		if len(efforts) > 0 {
+			reasoning = &ReasoningCapabilities{Options: []ReasoningOption{{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)}}}
+		}
+		displayName := item.DisplayName
+		if displayName == "" {
+			displayName = item.Slug
+		}
+		models = append(models, Model{
+			ID: item.Slug, DisplayName: displayName,
+			ContextLength: item.ContextWindow, NativeProtocol: ProtocolResponses,
+			SupportsVision:        triBool(len(item.InputModalities) > 0, slices.Contains(item.InputModalities, "image")),
+			SupportsReasoning:     triBool(len(efforts) > 0, len(efforts) > 0),
+			ReasoningCapabilities: reasoning, InputModalities: item.InputModalities,
+		})
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models, nil
 }
 
 func claudeModels() []Model {

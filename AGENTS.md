@@ -84,11 +84,18 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 - Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing — treat any code path that blurs it as a bug.
 - Preserve the real/virtual model permission boundary exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
 
+## Model metadata — discover, never hardcode
+
+- Never hardcode model IDs, model lists, or per-model behaviour (native protocol, capabilities, reasoning levels, context windows) in code. Catalogues and capabilities must come from live provider discovery (`Registry.Discover`) or provider-reported metadata, with models.dev as fallback-only enrichment (provider data stays authoritative).
+- Prefix/substring matching on model IDs is hardcoding by another name — do not add new ID-shape heuristics. Provider-type branching (auth headers, endpoints, discovery dispatch) is fine; per-model branching is not.
+- Discovery failures fail loud (surface as `refresh_error`). Never silently fall back to a stale hardcoded list.
+
 ## When to stop and ask instead of proceeding
 
 - The request would add a brand-new dependency, service, or infrastructure component that the human has not explicitly named.
 - The request would change client-facing model IDs, provider names, or virtual model names (renames are breaking — confirm intent before touching).
 - The request touches credential handling, auth, or logging in a way not explicitly covered by the security guardrails above.
+- No discovery path exists for a provider's models or capabilities — stop and present the human with options (e.g. a live endpoint to use, a user-supplied list, deferring support) instead of inventing a hardcoded catalogue.
 - You find an actual inconsistency between the docs and the current code — report it, don't resolve it silently.
 
 ## Branching and commits

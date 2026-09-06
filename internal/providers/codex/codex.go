@@ -19,7 +19,8 @@ const (
 	Scope          = "openid profile email offline_access"
 	DefaultBaseURL = "https://chatgpt.com/backend-api/codex"
 	Originator     = "codex_cli_rs"
-	UserAgent      = "codex_cli_rs/0.136.0"
+	ClientVersion  = "0.153.4"
+	UserAgent      = "codex_cli_rs/" + ClientVersion
 )
 
 func AuthorizationURL(redirectURI, state, challenge string) (string, error) {
