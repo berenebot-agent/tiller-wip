@@ -174,6 +174,8 @@ func TestOpenCodeFreeDiscoveryFiltersToFreeModels(t *testing.T) {
 			map[string]any{"id": "claude-opus-4.6"},
 			map[string]any{"id": "mimo-v2.5-free"},
 			map[string]any{"id": "plain-model"},
+			map[string]any{"id": "ox-alpha-free"},
+			map[string]any{"id": "big-pickle"},
 		}})
 	}))
 	defer upstream.Close()
@@ -182,21 +184,44 @@ func TestOpenCodeFreeDiscoveryFiltersToFreeModels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 3 {
-		t.Fatalf("expected 3 free models, got %d: %v", len(models), models)
+	if len(models) != 4 {
+		t.Fatalf("expected 4 free models, got %d: %v", len(models), models)
 	}
 	ids := make(map[string]bool)
 	for _, m := range models {
 		ids[m.ID] = true
 	}
-	for _, want := range []string{"deepseek-v4-flash-free", "muse-spark-1.2-contributor-free", "mimo-v2.5-free"} {
+	for _, want := range []string{"deepseek-v4-flash-free", "muse-spark-1.2-contributor-free", "mimo-v2.5-free", "big-pickle"} {
 		if !ids[want] {
 			t.Errorf("missing free model %q in %v", want, ids)
 		}
 	}
-	for _, notWant := range []string{"gpt-5.5", "claude-opus-4.6", "plain-model"} {
+	for _, notWant := range []string{"gpt-5.5", "claude-opus-4.6", "plain-model", "ox-alpha-free"} {
 		if ids[notWant] {
 			t.Errorf("non-free model %q should have been filtered", notWant)
+		}
+	}
+}
+
+func TestIsOpenCodeFreeModel(t *testing.T) {
+	for _, tc := range []struct {
+		id   string
+		free bool
+	}{
+		{"deepseek-v4-flash-free", true},
+		{"mimo-v2.5-free", true},
+		{"MIMO-V2.5-FREE", true},
+		{"big-pickle", true},
+		{"Big-Pickle", true},
+		{"ox-alpha-free", false},
+		{"OX-ALPHA-FREE", false},
+		{"gpt-5.5", false},
+		{"plain-model", false},
+		{"", false},
+		{"free", false},
+	} {
+		if got := IsOpenCodeFreeModel(tc.id); got != tc.free {
+			t.Errorf("IsOpenCodeFreeModel(%q) = %v, want %v", tc.id, got, tc.free)
 		}
 	}
 }

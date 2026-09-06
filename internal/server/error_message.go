@@ -35,6 +35,8 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "The upstream provider returned an error"
 	case "protocol_unavailable":
 		return "No compatible protocol is available for this request"
+	case "free_model_requires_keyless":
+		return "This OpenCode free-tier model must be served without a credential"
 	case "virtual_model_unavailable":
 		return "All targets for the virtual model are currently unavailable"
 	case "model_unavailable":

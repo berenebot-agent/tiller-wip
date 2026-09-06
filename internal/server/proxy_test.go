@@ -386,6 +386,103 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 	}
 }
 
+// TestFreeModelViaKeyedZenFailsLoud verifies the fail-loud guard: a free-tier
+// model (mimo-v2.5-free) discovered through a keyed opencode-zen instance can
+// never be served with a credential — the Zen relay rejects any unrecognized
+// bearer with 401. A direct request fails with a 400 naming the keyless
+// opencode-free provider (remediation); the attempt is never sent upstream.
+func TestFreeModelViaKeyedZenFailsLoud(t *testing.T) {
+	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data": []any{
+					map[string]any{"id": "mimo-v2.5-free", "object": "model"},
+				},
+			})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "should not reach upstream"}}},
+		})
+	}))
+	t.Cleanup(dedicated.Close)
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+
+	status, payload, _ := api.request("POST", "/api/admin/providers", map[string]any{
+		"name":       "opencode-zen-keyed",
+		"type":       "opencode-zen",
+		"base_url":   dedicated.URL + "/v1",
+		"credential": "zen-secret",
+		"protocols":  []string{"chat", "responses", "messages"},
+	})
+	if status != 201 {
+		t.Fatalf("create zen provider: %d %v", status, payload)
+	}
+	zenProviderID := payload["id"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/providers/"+zenProviderID+"/refresh", nil)
+	if status != 200 && status != 204 {
+		t.Fatalf("refresh zen provider: %d %v", status, payload)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+zenProviderID+"/models", nil)
+	if status != 200 {
+		t.Fatalf("list zen models: %d %v", status, payload)
+	}
+	var zenModelID string
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["upstream_model_id"] == "mimo-v2.5-free" {
+			zenModelID = m["id"].(string)
+		}
+	}
+	if zenModelID == "" {
+		t.Fatalf("zen discovery did not surface the free model")
+	}
+
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "zen client", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+	clientSecret := payload["secret"].(string)
+
+	status, _, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{
+		"defaults":    []any{},
+		"permissions": []any{map[string]any{"kind": "real", "model_id": zenModelID, "enabled": true}},
+	})
+	if status != 204 {
+		t.Fatalf("permissions: %d", status)
+	}
+
+	chatBody, _ := json.Marshal(map[string]any{
+		"model":      "opencode-zen-keyed/mimo-v2.5-free",
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_tokens": 32,
+		"stream":     false,
+	})
+	req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(chatBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+clientSecret)
+	resp, err := api.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	decoded := map[string]any{}
+	_ = json.NewDecoder(resp.Body).Decode(&decoded)
+
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400; payload=%v", resp.StatusCode, decoded)
+	}
+	errObj, _ := decoded["error"].(map[string]any)
+	if errObj["code"] != "free_model_requires_keyless" {
+		t.Fatalf("error code = %v, want free_model_requires_keyless; payload=%v", errObj["code"], decoded)
+	}
+}
+
 // TestOpenCodeFreeMinOutputTokensRejectsExplicitLowLimit verifies the router
 // never silently raises an explicit client max_tokens below the provider
 // minimum (opencode-free requires >= 16): a direct request fails loud with a

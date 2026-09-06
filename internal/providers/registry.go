@@ -282,6 +282,38 @@ var openCodeZenProtocolByModel = map[string]Protocol{
 	"qwen3.6-plus": ProtocolMessages, "qwen3.5-plus": ProtocolMessages,
 }
 
+// openCodeFreeKeyedSuffixModels holds upstream model IDs that carry the
+// -free suffix but are NOT anonymous-servable: they are keyed
+// (Go-subscription) models and must be excluded from the keyless free
+// catalogue even though the suffix looks free. ox-alpha-free is the Go
+// relay's subscription twin of the Zen keyless Ox Alpha. Explicit literal
+// entries only — never extend this by name-shape guessing.
+var openCodeFreeKeyedSuffixModels = map[string]bool{
+	"ox-alpha-free": true,
+}
+
+// openCodeFreeUnsuffixedModels holds free-tier model IDs that do NOT carry
+// the -free suffix. big-pickle is OpenCode's rotating free stealth slot.
+// Explicit literal entries only — never extend this by name-shape guessing.
+var openCodeFreeUnsuffixedModels = map[string]bool{
+	"big-pickle": true,
+}
+
+// IsOpenCodeFreeModel reports whether an upstream model ID belongs to the
+// anonymous, keyless OpenCode free tier: the -free suffix convention minus
+// the known keyed exceptions, plus the known unsuffixed free slots.
+// Comparison is case-insensitive; the empty ID is never free.
+func IsOpenCodeFreeModel(modelID string) bool {
+	id := strings.ToLower(modelID)
+	if id == "" {
+		return false
+	}
+	if openCodeFreeUnsuffixedModels[id] {
+		return true
+	}
+	return strings.HasSuffix(id, "-free") && !openCodeFreeKeyedSuffixModels[id]
+}
+
 // openCodeZenProtocolByModel is an explicit, provider-scoped model→protocol
 // compatibility override for OpenCode models whose discovery payload does not
 // report a native protocol. Explicit per-model entries are permitted
@@ -385,15 +417,15 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	if err != nil {
 		return nil, err
 	}
-	// opencode-free is the anonymous, keyless tier — only models whose ID
-	// ends with -free are usable without a credential. The upstream catalogue
-	// at /zen/v1/models lists all 64 Zen models, so we filter here to surface
-	// only the 7 free ones. The suffix convention is used by the provider and
-	// is stable for future free models.
+	// opencode-free is the anonymous, keyless tier — only models in the free
+	// set (isOpenCodeFreeModel: the -free suffix minus known keyed
+	// exceptions, plus known unsuffixed free slots) are usable without a
+	// credential. The upstream catalogue at /zen/v1/models lists all Zen
+	// models, so we filter here to surface only the free ones.
 	if provider.Type == "opencode-free" {
 		filtered := models[:0]
 		for _, m := range models {
-			if strings.HasSuffix(m.ID, "-free") {
+			if IsOpenCodeFreeModel(m.ID) {
 				filtered = append(filtered, m)
 			}
 		}

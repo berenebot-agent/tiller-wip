@@ -570,6 +570,23 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
 			continue
 		}
+		if candidate.Provider.Credential != "" && (candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go") && providers.IsOpenCodeFreeModel(candidate.UpstreamModelID) {
+			// Free-tier models are served anonymously on the Zen relay: any
+			// unrecognized bearer is rejected with 401, so a keyed
+			// zen/go instance can never serve them. Fail loud with a
+			// remediation instead of burning the attempt upstream — never
+			// silently re-route to another provider.
+			if !route.Virtual {
+				row.httpStatus = 400
+				row.errorText = strPtr("free_model_requires_keyless")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless"))
+				inferenceError(w, 400, "invalid_request_error", "free_model_requires_keyless", "This is an OpenCode free-tier model and cannot be served with a credential. Configure it through an opencode-free provider instead.", incoming == providers.ProtocolMessages)
+				return
+			}
+			nonTranslationFailure = true
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
+			continue
+		}
 		target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
 		if target == "" {
 			protocolUnavailable = true
