@@ -11,10 +11,10 @@ func TestValidateResponseReasoningState_AllProtocolDirections(t *testing.T) {
 	claudeDetails := []any{map[string]any{"type": "reasoning.text", "text": "plan", "signature": "sig", "format": "anthropic-claude-v1"}}
 	openAIDetails := []any{map[string]any{"type": "reasoning.encrypted", "data": "opaque", "format": "openai-responses-v1"}}
 	tests := []struct {
-		name   string
-		source map[string]any
-		from   providers.Protocol
-		to     providers.Protocol
+		name    string
+		source  map[string]any
+		from    providers.Protocol
+		to      providers.Protocol
 		wantErr bool
 	}{
 		{"Messages to Chat accepts signed Claude state", map[string]any{"content": []any{map[string]any{"type": "thinking", "thinking": "plan", "signature": "sig"}}}, providers.ProtocolMessages, providers.ProtocolChat, false},

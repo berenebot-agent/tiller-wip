@@ -132,6 +132,19 @@ Run the **minimum** tier that matches the change. Do **not** default to the full
 
 When a change is purely frontend (`internal/web/assets/**`), the browser suite is the gate; run `./tiller-go.sh test ./...` for sanity but the UI tests are the ones that matter.
 
+### Formatting gate (every Go change, before every push)
+
+CI fails the build on unformatted Go files (`gofmt -l .` must print nothing).
+Run this locally before pushing — it uses the same pinned Go image as CI:
+
+```bash
+./tests/scripts/check-fmt.sh        # read-only check, exits 1 with the file list
+./tiller-go.sh fmt ./...            # fix, then re-run the check
+```
+
+Write Go with tabs, never spaces, and never collapse a block onto one line
+(`if x { y }`) — `gofmt` always rewrites both, and that is what keeps tripping CI.
+
 ### Test log convention (X = summary, Y = detail)
 
 All test runners follow a two-tier logging convention so agents (or humans)

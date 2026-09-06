@@ -73,28 +73,28 @@ type modelsDevLimit struct {
 // provider key. Providers not listed here are never enriched (their models.dev
 // key is unknown or ambiguous).
 var modelsDevProviderKey = map[string]string{
-	"openrouter":         "openrouter",
-	"deepseek":           "deepseek",
-	"nvidia-nim":         "nvidia",
-	"zai":                "zhipuai",
-	"gemini":             "google",
-	"alibaba-qwen":       "alibaba",
-	"fireworks":          "fireworks-ai",
-	"azure-openai":       "azure",
-	"opencode-zen":       "opencode",
-	"opencode-go":        "opencode",
-	"opencode-free":      "opencode",
-	"openai":             "openai",
-	"anthropic":          "anthropic",
+	"openrouter":          "openrouter",
+	"deepseek":            "deepseek",
+	"nvidia-nim":          "nvidia",
+	"zai":                 "zhipuai",
+	"gemini":              "google",
+	"alibaba-qwen":        "alibaba",
+	"fireworks":           "fireworks-ai",
+	"azure-openai":        "azure",
+	"opencode-zen":        "opencode",
+	"opencode-go":         "opencode",
+	"opencode-free":       "opencode",
+	"openai":              "openai",
+	"anthropic":           "anthropic",
 	"claude-subscription": "anthropic",
-	"groq":               "groq",
-	"mistral":            "mistral",
-	"xai":                "xai",
-	"cerebras":           "cerebras",
-	"perplexity":         "perplexity",
-	"minimax":            "minimax",
-	"huggingface":        "huggingface",
-	"codex-subscription": "openai",
+	"groq":                "groq",
+	"mistral":             "mistral",
+	"xai":                 "xai",
+	"cerebras":            "cerebras",
+	"perplexity":          "perplexity",
+	"minimax":             "minimax",
+	"huggingface":         "huggingface",
+	"codex-subscription":  "openai",
 }
 
 // Gateway providers may expose a model through a compatibility layer whose
@@ -133,6 +133,7 @@ func copilotLookup(data modelsDevDataset, vendor, id string) modelsDevModel {
 	}
 	return provider.Models[id]
 }
+
 // tag/namespace-stripped model name) to the canonical models.dev lab that holds
 // exact, plain-key entries for that family. It is deliberately small: only
 // families with a verified canonical lab that stores the model under its plain

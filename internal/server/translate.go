@@ -715,7 +715,9 @@ func requestToChat(source map[string]any, from providers.Protocol) (map[string]a
 			}
 			if len(textBlocks) > 0 || len(toolCalls) > 0 || len(reasoningDetails) > 0 || reasoningText != "" {
 				m := map[string]any{"role": role, "content": textBlocks}
-				if reasoningText != "" { m["reasoning_content"] = reasoningText }
+				if reasoningText != "" {
+					m["reasoning_content"] = reasoningText
+				}
 				if len(toolCalls) > 0 {
 					m["tool_calls"] = toolCalls
 				}
@@ -898,7 +900,9 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 			case "assistant":
 				if details, ok := msg["reasoning_details"]; ok {
 					reasoning, err := chatReasoningDetailsToResponses(details)
-					if err != nil { return nil, err }
+					if err != nil {
+						return nil, err
+					}
 					input = append(input, reasoning...)
 				}
 				if calls := asSlice(msg["tool_calls"]); calls != nil && len(calls) > 0 {
@@ -1251,17 +1255,17 @@ type streamState struct {
 	accumulated                                     strings.Builder
 	accumulatedBytes                                int
 	reasoningAccumulated                            strings.Builder
-	nextIndex                                        int
-	reasoningIndex, messageIndex, toolIndex          int
-	outputOrder                                      []string
-	extraOutputs                                     map[int]any
-	activeKind                                       string
-	activeIndex                                      int
-	currentToolID                                    string
-	currentToolIndex                                 int
-	toolName                                         string
-	toolArguments                                    strings.Builder
-	toolStarted                                      bool
+	nextIndex                                       int
+	reasoningIndex, messageIndex, toolIndex         int
+	outputOrder                                     []string
+	extraOutputs                                    map[int]any
+	activeKind                                      string
+	activeIndex                                     int
+	currentToolID                                   string
+	currentToolIndex                                int
+	toolName                                        string
+	toolArguments                                   strings.Builder
+	toolStarted                                     bool
 	inputTokens                                     int64
 	outputTokens                                    int64
 	hasInputTokens                                  bool
@@ -1418,23 +1422,29 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		case "text":
 			if state.activeKind != "text" {
 				closeMessagesBlock(w, state)
-				state.activeIndex = state.nextIndex; state.nextIndex++
+				state.activeIndex = state.nextIndex
+				state.nextIndex++
 				writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": state.activeIndex, "content_block": map[string]any{"type": "text", "text": ""}})
-				state.activeKind = "text"; state.contentStarted = true
+				state.activeKind = "text"
+				state.contentStarted = true
 			}
 			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "text_delta", "text": delta.Text}})
 		case "reasoning":
 			if state.activeKind != "reasoning" {
 				closeMessagesBlock(w, state)
-				state.activeIndex = state.nextIndex; state.nextIndex++
+				state.activeIndex = state.nextIndex
+				state.nextIndex++
 				writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": state.activeIndex, "content_block": map[string]any{"type": "thinking", "thinking": ""}})
-				state.activeKind = "reasoning"; state.reasoningStarted = true
+				state.activeKind = "reasoning"
+				state.reasoningStarted = true
 			}
 			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": delta.Text}})
 		case "tool":
 			if state.activeKind != "tool" || (delta.CallID != "" && delta.CallID != state.currentToolID) {
 				closeMessagesBlock(w, state)
-				state.currentToolID = delta.CallID; state.activeIndex = state.nextIndex; state.nextIndex++
+				state.currentToolID = delta.CallID
+				state.activeIndex = state.nextIndex
+				state.nextIndex++
 				writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": state.activeIndex, "content_block": map[string]any{"type": "tool_use", "id": delta.CallID, "name": delta.Name, "input": map[string]any{}}})
 				state.activeKind = "tool"
 			}
@@ -1473,7 +1483,10 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 	switch delta.Kind {
 	case "text":
 		if state.contentStarted == false {
-			state.outputIndex = state.nextIndex; state.messageIndex = state.outputIndex; state.nextIndex++; state.outputOrder = append(state.outputOrder, "message")
+			state.outputIndex = state.nextIndex
+			state.messageIndex = state.outputIndex
+			state.nextIndex++
+			state.outputOrder = append(state.outputOrder, "message")
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
 			writeSSE(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "output_index": state.outputIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 			state.contentStarted = true
@@ -1489,13 +1502,20 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": state.messageIndex, "item_id": "msg_" + state.id, "content_index": 0, "delta": delta.Text})
 	case "reasoning":
 		if !state.reasoningStarted {
-			state.outputIndex = state.nextIndex; state.reasoningIndex = state.outputIndex; state.nextIndex++; state.outputOrder = append(state.outputOrder, "reasoning")
+			state.outputIndex = state.nextIndex
+			state.reasoningIndex = state.outputIndex
+			state.nextIndex++
+			state.outputOrder = append(state.outputOrder, "reasoning")
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "in_progress", "summary": []any{}}})
 			writeSSE(w, "response.reasoning_summary_part.added", map[string]any{"type": "response.reasoning_summary_part.added", "output_index": state.outputIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""}})
 			state.reasoningStarted = true
 		}
 		if remaining := maxAccumulatedTextBytes - state.reasoningAccumulated.Len(); remaining > 0 {
-			text := delta.Text; if len(text) > remaining { text = text[:remaining] }; state.reasoningAccumulated.WriteString(text)
+			text := delta.Text
+			if len(text) > remaining {
+				text = text[:remaining]
+			}
+			state.reasoningAccumulated.WriteString(text)
 		}
 		writeSSE(w, "response.reasoning_summary_text.delta", map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": state.reasoningIndex, "item_id": "rs_" + state.id, "summary_index": 0, "delta": delta.Text})
 	case "tool":
@@ -1505,7 +1525,10 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 				writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.toolIndex, "item": map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"}})
 				state.toolArguments.Reset()
 			}
-			state.outputIndex = state.nextIndex; state.toolIndex = state.outputIndex; state.nextIndex++; state.outputOrder = append(state.outputOrder, "tool")
+			state.outputIndex = state.nextIndex
+			state.toolIndex = state.outputIndex
+			state.nextIndex++
+			state.outputOrder = append(state.outputOrder, "tool")
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"type": "function_call", "call_id": delta.CallID, "name": delta.Name, "arguments": ""}})
 			state.toolStarted = true
 			state.currentToolID = delta.CallID
@@ -1590,9 +1613,19 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		if len(state.outputOrder) > 1 {
 			output = nil
 			for _, kind := range state.outputOrder {
-				if kind == "reasoning" { output = append(output, reasoningItem) } else if kind == "message" { output = append(output, map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}}) } else if kind == "tool" { output = append(output, map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"}) }
+				if kind == "reasoning" {
+					output = append(output, reasoningItem)
+				} else if kind == "message" {
+					output = append(output, map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}})
+				} else if kind == "tool" {
+					output = append(output, map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"})
+				}
 			}
-		} else if state.reasoningStarted { output = append([]any{reasoningItem}, output...) } else { output = append(output, map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"}) }
+		} else if state.reasoningStarted {
+			output = append([]any{reasoningItem}, output...)
+		} else {
+			output = append(output, map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"})
+		}
 	}
 	response := map[string]any{"id": state.id, "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": state.model, "output": output}
 	writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "response": response})

@@ -79,4 +79,3 @@ func TestTranslateNonstreamChatReasoningAlias(t *testing.T) {
 		t.Fatalf("canonical reasoning was duplicated/overwritten: %s (%v)", out, err)
 	}
 }
-

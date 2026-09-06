@@ -10,7 +10,9 @@ import (
 // encrypted state must never be included in errors or logs.
 type reasoningStateError struct{ reason string }
 
-func (e reasoningStateError) Error() string { return "reasoning state cannot be represented for this protocol" }
+func (e reasoningStateError) Error() string {
+	return "reasoning state cannot be represented for this protocol"
+}
 func (e reasoningStateError) Unwrap() error { return unsupportedFeature{"reasoning state"} }
 
 func anthropicReasoningToChatDetails(block map[string]any, index int) (map[string]any, error) {
@@ -87,15 +89,21 @@ func responsesReasoningToChatDetails(item map[string]any) []any {
 	format := "openai-responses-v1"
 	if encrypted, ok := item["encrypted_content"].(string); ok && encrypted != "" {
 		d := map[string]any{"type": "reasoning.encrypted", "data": encrypted, "format": format}
-		if id, ok := item["id"].(string); ok { d["id"] = id }
+		if id, ok := item["id"].(string); ok {
+			d["id"] = id
+		}
 		out = append(out, d)
 	}
 	for index, raw := range asSlice(item["summary"]) {
 		summary, _ := raw.(map[string]any)
 		text, _ := summary["text"].(string)
-		if text == "" { continue }
+		if text == "" {
+			continue
+		}
 		d := map[string]any{"type": "reasoning.summary", "summary": text, "format": format, "index": index}
-		if id, ok := item["id"].(string); ok { d["id"] = id }
+		if id, ok := item["id"].(string); ok {
+			d["id"] = id
+		}
 		out = append(out, d)
 	}
 	return out
@@ -103,31 +111,53 @@ func responsesReasoningToChatDetails(item map[string]any) []any {
 
 func chatReasoningDetailsToResponses(value any) ([]any, error) {
 	details, ok := value.([]any)
-	if !ok { return nil, reasoningStateError{"invalid reasoning details"} }
+	if !ok {
+		return nil, reasoningStateError{"invalid reasoning details"}
+	}
 	out := []any{}
 	byID := map[string]map[string]any{}
 	seenID := map[string]bool{}
 	for _, raw := range details {
 		d, ok := raw.(map[string]any)
-		if !ok || d["format"] != "openai-responses-v1" { return nil, reasoningStateError{"foreign reasoning format"} }
+		if !ok || d["format"] != "openai-responses-v1" {
+			return nil, reasoningStateError{"foreign reasoning format"}
+		}
 		item := map[string]any{"type": "reasoning"}
 		id, _ := d["id"].(string)
 		if id != "" {
-			if prior := byID[id]; prior != nil { item = prior } else { item["id"] = id; byID[id] = item }
+			if prior := byID[id]; prior != nil {
+				item = prior
+			} else {
+				item["id"] = id
+				byID[id] = item
+			}
 		}
 		switch d["type"] {
 		case "reasoning.encrypted":
-			data, ok := d["data"].(string); if !ok || data == "" { return nil, reasoningStateError{"invalid encrypted reasoning"} }
+			data, ok := d["data"].(string)
+			if !ok || data == "" {
+				return nil, reasoningStateError{"invalid encrypted reasoning"}
+			}
 			item["encrypted_content"] = data
-			if _, exists := item["summary"]; !exists { item["summary"] = []any{} }
+			if _, exists := item["summary"]; !exists {
+				item["summary"] = []any{}
+			}
 		case "reasoning.summary":
-			text, ok := d["summary"].(string); if !ok { return nil, reasoningStateError{"invalid reasoning summary"} }
+			text, ok := d["summary"].(string)
+			if !ok {
+				return nil, reasoningStateError{"invalid reasoning summary"}
+			}
 			summary, _ := item["summary"].([]any)
 			item["summary"] = append(summary, map[string]any{"type": "summary_text", "text": text})
 		default:
 			return nil, reasoningStateError{"unsupported reasoning detail"}
 		}
-		if id == "" { out = append(out, item) } else if !seenID[id] { out = append(out, item); seenID[id] = true }
+		if id == "" {
+			out = append(out, item)
+		} else if !seenID[id] {
+			out = append(out, item)
+			seenID[id] = true
+		}
 	}
 	return out, nil
 }

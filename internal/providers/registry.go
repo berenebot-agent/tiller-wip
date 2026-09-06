@@ -515,14 +515,14 @@ func (r *Registry) discoverCopilot(ctx context.Context, provider Instance) ([]Mo
 					MaxOutputTokens        int `json:"max_output_tokens"`
 				} `json:"limits"`
 				Supports struct {
-					ToolCalls          *bool    `json:"tool_calls"`
-					Vision             *bool    `json:"vision"`
-					StructuredOutputs  *bool    `json:"structured_outputs"`
-					ReasoningEffort    []string `json:"reasoning_effort"`
-					Thinking           *bool    `json:"thinking"`
-					AdaptiveThinking   *bool    `json:"adaptive_thinking"`
-					MaxThinkingBudget  any      `json:"max_thinking_budget"`
-					MinThinkingBudget  any      `json:"min_thinking_budget"`
+					ToolCalls         *bool    `json:"tool_calls"`
+					Vision            *bool    `json:"vision"`
+					StructuredOutputs *bool    `json:"structured_outputs"`
+					ReasoningEffort   []string `json:"reasoning_effort"`
+					Thinking          *bool    `json:"thinking"`
+					AdaptiveThinking  *bool    `json:"adaptive_thinking"`
+					MaxThinkingBudget any      `json:"max_thinking_budget"`
+					MinThinkingBudget any      `json:"min_thinking_budget"`
 				} `json:"supports"`
 			} `json:"capabilities"`
 			SupportedEndpoints []string `json:"supported_endpoints"`
