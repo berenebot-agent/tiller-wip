@@ -392,10 +392,22 @@ func parseSessionToken(token string) (selector, secret string, ok bool) {
 func formatUTC(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 
 func EqualCredential(got, want string) bool {
-	gotHash := sha256.Sum256([]byte(got))
-	wantHash := sha256.Sum256([]byte(want))
-	return subtle.ConstantTimeCompare(gotHash[:], wantHash[:]) == 1
+	h := hmac.New(sha256.New, credentialHMACKey)
+	h.Write([]byte(got))
+	gotMAC := h.Sum(nil)
+	h.Reset()
+	h.Write([]byte(want))
+	wantMAC := h.Sum(nil)
+	return subtle.ConstantTimeCompare(gotMAC, wantMAC) == 1
 }
+
+var credentialHMACKey = func() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("auth: " + err.Error())
+	}
+	return b
+}()
 
 var ErrMalformedPHC = errors.New("malformed argon2id hash")
 

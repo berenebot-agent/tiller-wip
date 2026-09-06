@@ -12,24 +12,26 @@ import (
 )
 
 type Config struct {
-	AdminUsername    string
-	AdminPassword    string
-	AdminSessionTTL  time.Duration
-	DataDir          string
-	ListenAddr       string
-	TrustedProxy     netip.Prefix
-	ModelsDevEnabled bool
-	LogLevel         string
+	AdminUsername     string
+	AdminPassword     string
+	AdminCookieSecure bool
+	AdminSessionTTL   time.Duration
+	DataDir           string
+	ListenAddr        string
+	TrustedProxy      netip.Prefix
+	ModelsDevEnabled  bool
+	LogLevel          string
 }
 
 func Load() (Config, error) {
 	c := Config{
-		AdminUsername:    os.Getenv("TILLER_ADMIN_USERNAME"),
-		AdminPassword:    os.Getenv("TILLER_ADMIN_PASSWORD"),
-		AdminSessionTTL:  30 * 24 * time.Hour,
-		DataDir:          envDefault("TILLER_DATA_DIR", "/data"),
-		ListenAddr:       envDefault("TILLER_LISTEN_ADDR", ":8080"),
-		ModelsDevEnabled: true,
+		AdminUsername:     os.Getenv("TILLER_ADMIN_USERNAME"),
+		AdminPassword:     os.Getenv("TILLER_ADMIN_PASSWORD"),
+		AdminCookieSecure: strings.EqualFold(os.Getenv("TILLER_ADMIN_COOKIE_SECURE"), "true") || os.Getenv("TILLER_ADMIN_COOKIE_SECURE") == "1",
+		AdminSessionTTL:   30 * 24 * time.Hour,
+		DataDir:           envDefault("TILLER_DATA_DIR", "/data"),
+		ListenAddr:        envDefault("TILLER_LISTEN_ADDR", ":8080"),
+		ModelsDevEnabled:  true,
 		LogLevel:         envDefault("TILLER_LOG_LEVEL", "info"),
 	}
 	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {

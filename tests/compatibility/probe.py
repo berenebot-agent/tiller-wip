@@ -117,7 +117,8 @@ wire_api = "responses"
     assert "hello" in result.stdout.lower(), result.stdout[-2000:]
 
 with tempfile.TemporaryDirectory() as opencode_home:
-    pathlib.Path(opencode_home, "opencode.json").write_text(json.dumps({
+    cfg_path = pathlib.Path(opencode_home, "opencode.json")
+    cfg_path.write_text(json.dumps({
         "$schema": "https://opencode.ai/config.json",
         "provider": {"tiller": {
             "npm": "@ai-sdk/openai-compatible",
@@ -127,6 +128,7 @@ with tempfile.TemporaryDirectory() as opencode_home:
         }},
         "model": "tiller/virtual/coding",
     }))
+    cfg_path.chmod(0o600)
     opencode_env = os.environ.copy()
     opencode_env["HOME"] = opencode_home
     result = subprocess.run(

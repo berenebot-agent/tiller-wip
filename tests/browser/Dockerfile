@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM mcr.microsoft.com/playwright:v1.55.0-noble
+FROM mcr.microsoft.com/playwright:v1.56.0-noble
 WORKDIR /tests
 COPY package.json ./
 # BuildKit RUN cache mounts: node_modules cache + the npm store are durable
