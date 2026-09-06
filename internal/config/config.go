@@ -32,7 +32,7 @@ func Load() (Config, error) {
 		DataDir:           envDefault("TILLER_DATA_DIR", "/data"),
 		ListenAddr:        envDefault("TILLER_LISTEN_ADDR", ":8080"),
 		ModelsDevEnabled:  true,
-		LogLevel:         envDefault("TILLER_LOG_LEVEL", "info"),
+		LogLevel:          envDefault("TILLER_LOG_LEVEL", "info"),
 	}
 	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {
 	case "debug", "info", "warn", "error":
