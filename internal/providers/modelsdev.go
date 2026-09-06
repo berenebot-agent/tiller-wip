@@ -105,7 +105,34 @@ var gatewayProviderTypes = map[string]bool{
 	"fireworks": true, "nvidia-nim": true, "huggingface": true,
 }
 
-// ollamaLabInference maps a recognizable model-family root (the lowercased,
+// copilotVendorLab maps a Copilot catalogue vendor label to the models.dev
+// lab holding that vendor's models. Vendors not listed here (or IDs missing
+// from the lab) simply skip enrichment — the live Copilot catalogue already
+// reports limits, supports, and reasoning metadata, so a miss is a no-op.
+var copilotVendorLab = map[string]string{
+	"openai":    "openai",
+	"anthropic": "anthropic",
+	"google":    "google",
+	"gemini":    "google",
+	"xai":       "xai",
+	"mistral":   "mistral",
+	"meta":      "meta",
+	"deepseek":  "deepseek",
+}
+
+// copilotLookup resolves a models.dev entry for a Copilot model via its
+// per-model vendor label.
+func copilotLookup(data modelsDevDataset, vendor, id string) modelsDevModel {
+	lab, ok := copilotVendorLab[strings.ToLower(strings.TrimSpace(vendor))]
+	if !ok {
+		return modelsDevModel{}
+	}
+	provider, ok := data[lab]
+	if !ok {
+		return modelsDevModel{}
+	}
+	return provider.Models[id]
+}
 // tag/namespace-stripped model name) to the canonical models.dev lab that holds
 // exact, plain-key entries for that family. It is deliberately small: only
 // families with a verified canonical lab that stores the model under its plain
@@ -179,6 +206,12 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 	if strings.HasPrefix(providerType, "ollama-") {
 		for i, model := range models {
 			out[i] = enrichModel(model, ollamaLookup(data, model.ID), providerType)
+		}
+		return out
+	}
+	if providerType == "github-copilot" {
+		for i, model := range models {
+			out[i] = enrichModel(model, copilotLookup(data, model.Vendor, model.ID), providerType)
 		}
 		return out
 	}

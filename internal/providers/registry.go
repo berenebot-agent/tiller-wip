@@ -251,6 +251,10 @@ func SortEfforts(values []string) []string {
 
 type Model struct {
 	ID, DisplayName string
+	// Vendor is the upstream vendor label (e.g. Copilot's vendor field). It
+	// is never serialized; it exists so enrichment can pick a models.dev lab
+	// per model for multi-vendor catalogues.
+	Vendor          string `json:"-"`
 	ContextLength   int
 	MaxOutputTokens int
 	NativeProtocol  Protocol
@@ -360,7 +364,7 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	case "claude":
 		models, err = r.discoverClaude(ctx, provider)
 	case "github-copilot":
-		models = githubCopilotModels()
+		models, err = r.discoverCopilot(ctx, provider)
 	case "ollama":
 		models, err = r.discoverOllama(ctx, provider)
 	case "huggingface":
@@ -488,22 +492,144 @@ func (r *Registry) discoverClaude(ctx context.Context, provider Instance) ([]Mod
 	return models, nil
 }
 
-func githubCopilotModels() []Model {
-	entries := []struct {
-		id       string
-		protocol Protocol
-	}{
-		// Codex variants route through Responses (matching the official Codex
-		// client); non-Codex GPT models stay on Chat Completions.
-		{"gpt-5.2", ProtocolChat}, {"gpt-5.2-codex", ProtocolResponses}, {"gpt-5.3-codex", ProtocolResponses}, {"gpt-5.4", ProtocolChat}, {"gpt-5.4-mini", ProtocolChat},
-		{"claude-haiku-4.5", ProtocolMessages}, {"claude-opus-4.5", ProtocolMessages}, {"claude-sonnet-4.5", ProtocolMessages}, {"claude-sonnet-4.6", ProtocolMessages}, {"claude-opus-4.6", ProtocolMessages}, {"claude-opus-4.7", ProtocolMessages},
-		{"gemini-2.5-pro", ProtocolChat}, {"gemini-3-flash-preview", ProtocolChat}, {"gemini-3.1-pro-preview", ProtocolChat}, {"grok-code-fast-1", ProtocolChat},
+// discoverCopilot discovers models for a GitHub Copilot provider from the
+// live catalogue (GET {base}/models) using the Copilot token auth path.
+// supported_endpoints drives NativeProtocol with Messages > Responses > Chat
+// precedence (Chat default when absent); embeddings entries are skipped since
+// the router has no embedding path. Failures are loud so a rejected token
+// surfaces as refresh_error instead of a stale hardcoded list.
+func (r *Registry) discoverCopilot(ctx context.Context, provider Instance) ([]Model, error) {
+	endpoint, err := appendEndpoint(provider.BaseURL, "models")
+	if err != nil {
+		return nil, err
 	}
-	models := make([]Model, 0, len(entries))
-	for _, entry := range entries {
-		models = append(models, Model{ID: entry.id, DisplayName: entry.id, NativeProtocol: entry.protocol})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	ApplyRequestAuth(req, provider)
+	var payload struct {
+		Data []struct {
+			ID, Name, Object, Vendor string
+			Capabilities             struct {
+				Type   string `json:"type"`
+				Limits struct {
+					MaxContextWindowTokens int `json:"max_context_window_tokens"`
+					MaxOutputTokens        int `json:"max_output_tokens"`
+				} `json:"limits"`
+				Supports struct {
+					ToolCalls          *bool    `json:"tool_calls"`
+					Vision             *bool    `json:"vision"`
+					StructuredOutputs  *bool    `json:"structured_outputs"`
+					ReasoningEffort    []string `json:"reasoning_effort"`
+					Thinking           *bool    `json:"thinking"`
+					AdaptiveThinking   *bool    `json:"adaptive_thinking"`
+					MaxThinkingBudget  any      `json:"max_thinking_budget"`
+					MinThinkingBudget  any      `json:"min_thinking_budget"`
+				} `json:"supports"`
+			} `json:"capabilities"`
+			SupportedEndpoints []string `json:"supported_endpoints"`
+		} `json:"data"`
 	}
-	return models
+	if err := r.doJSON(req, &payload); err != nil {
+		return nil, err
+	}
+	models := make([]Model, 0, len(payload.Data))
+	seen := make(map[string]bool, len(payload.Data))
+	for _, item := range payload.Data {
+		if item.ID == "" || seen[item.ID] {
+			continue
+		}
+		if item.Object != "" && item.Object != "model" {
+			continue
+		}
+		if item.Capabilities.Type == "embeddings" {
+			continue
+		}
+		seen[item.ID] = true
+		supports := item.Capabilities.Supports
+		var efforts []string
+		if supports.ReasoningEffort != nil {
+			efforts = append(efforts, supports.ReasoningEffort...)
+		}
+		maxBudget, hasMaxBudget := CoerceInt64(supports.MaxThinkingBudget)
+		minBudget, hasMinBudget := CoerceInt64(supports.MinThinkingBudget)
+		var opts []ReasoningOption
+		if len(efforts) > 0 {
+			opts = append(opts, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
+		}
+		if hasMinBudget || hasMaxBudget {
+			budget := ReasoningOption{Type: ReasoningOptionBudgetTokens}
+			if hasMinBudget {
+				budget.Min = &minBudget
+			}
+			if hasMaxBudget {
+				budget.Max = &maxBudget
+			}
+			opts = append(opts, budget)
+		}
+		var modes []string
+		if supports.Thinking != nil && *supports.Thinking {
+			modes = append(modes, "enabled")
+		}
+		if supports.AdaptiveThinking != nil && *supports.AdaptiveThinking {
+			modes = append(modes, "adaptive")
+		}
+		var reasoning *ReasoningCapabilities
+		if len(opts) > 0 || len(modes) > 0 {
+			reasoning = &ReasoningCapabilities{Options: opts, ThinkingModes: modes}
+		}
+		reasoningReported := supports.ReasoningEffort != nil || supports.Thinking != nil ||
+			supports.AdaptiveThinking != nil || supports.MaxThinkingBudget != nil || supports.MinThinkingBudget != nil
+		reasoningSupported := len(efforts) > 0 ||
+			(supports.Thinking != nil && *supports.Thinking) ||
+			(supports.AdaptiveThinking != nil && *supports.AdaptiveThinking) ||
+			hasMaxBudget
+		display := item.Name
+		if display == "" {
+			display = item.ID
+		}
+		model := Model{
+			ID: item.ID, DisplayName: display, Vendor: item.Vendor,
+			ContextLength:            item.Capabilities.Limits.MaxContextWindowTokens,
+			MaxOutputTokens:          item.Capabilities.Limits.MaxOutputTokens,
+			NativeProtocol:           copilotNativeProtocol(item.SupportedEndpoints),
+			SupportsTools:            supports.ToolCalls,
+			SupportsVision:           supports.Vision,
+			SupportsReasoning:        triBool(reasoningReported, reasoningSupported),
+			SupportsStructuredOutput: supports.StructuredOutputs,
+			ReasoningCapabilities:    reasoning,
+		}
+		if supports.Vision != nil && *supports.Vision {
+			model.InputModalities = []string{"text", "image"}
+		}
+		models = append(models, model)
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models, nil
+}
+
+// copilotNativeProtocol maps Copilot supported_endpoints to a native protocol
+// with Messages > Responses > Chat precedence, defaulting to Chat when the
+// model reports no endpoints.
+func copilotNativeProtocol(endpoints []string) Protocol {
+	var responses, chat bool
+	for _, e := range endpoints {
+		n := strings.ToLower(strings.Trim(strings.TrimSpace(e), "/"))
+		if n == "v1/messages" || strings.HasSuffix(n, "/v1/messages") {
+			return ProtocolMessages
+		}
+		if n == "responses" || strings.HasSuffix(n, "/responses") {
+			responses = true
+		}
+		if n == "chat/completions" || strings.HasSuffix(n, "/chat/completions") {
+			chat = true
+		}
+	}
+	if responses {
+		return ProtocolResponses
+	}
+	if chat {
+		return ProtocolChat
+	}
+	return ProtocolChat
 }
 
 // parseReasoningCapabilities selects the correct parser for a provider type
