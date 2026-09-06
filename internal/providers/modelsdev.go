@@ -86,6 +86,7 @@ var modelsDevProviderKey = map[string]string{
 	"opencode-free":      "opencode",
 	"openai":             "openai",
 	"anthropic":          "anthropic",
+	"claude-subscription": "anthropic",
 	"groq":               "groq",
 	"mistral":            "mistral",
 	"xai":                "xai",

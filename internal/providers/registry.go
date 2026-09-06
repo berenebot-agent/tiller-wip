@@ -358,7 +358,7 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	case "codex":
 		models, err = r.discoverCodex(ctx, provider)
 	case "claude":
-		models = claudeModels()
+		models, err = r.discoverClaude(ctx, provider)
 	case "github-copilot":
 		models = githubCopilotModels()
 	case "ollama":
@@ -472,13 +472,20 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 	return models, nil
 }
 
-func claudeModels() []Model {
-	ids := []string{"claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"}
-	models := make([]Model, 0, len(ids))
-	for _, modelID := range ids {
-		models = append(models, Model{ID: modelID, DisplayName: modelID, NativeProtocol: ProtocolMessages})
+// discoverClaude discovers models for a Claude subscription provider from the
+// live Anthropic Models catalogue (GET {base}/models). Auth headers (OAuth
+// bearer + beta) come from ApplyRequestAuth, and pagination/parsing is shared
+// with the API-key path. Every model is Messages-native; failures are loud so
+// a rejected bearer surfaces as refresh_error instead of a stale hardcoded list.
+func (r *Registry) discoverClaude(ctx context.Context, provider Instance) ([]Model, error) {
+	models, err := r.discoverPaged(ctx, provider, true)
+	if err != nil {
+		return nil, err
 	}
-	return models
+	for i := range models {
+		models[i].NativeProtocol = ProtocolMessages
+	}
+	return models, nil
 }
 
 func githubCopilotModels() []Model {
@@ -505,7 +512,7 @@ func githubCopilotModels() []Model {
 // supported_parameters array from the model entry (used as fallback for
 // parameter hints when the reasoning object omits them).
 func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesObj any, supportedParams []string) *ReasoningCapabilities {
-	if providerType == "anthropic" {
+	if providerType == "anthropic" || providerType == "claude-subscription" {
 		return anthropicReasoning(capabilitiesObj)
 	}
 	if reasoningObj != nil {
