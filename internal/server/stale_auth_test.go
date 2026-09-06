@@ -42,6 +42,11 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 	t.Helper()
 	var upstream401Count atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" {
+			// Codex live catalogue shape (GET {base}/models?client_version=…).
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"slug": "gpt-5.6-sol", "display_name": "gpt-5.6-sol", "supported_in_api": true}}})
+			return
+		}
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "gpt-5.6-sol"}}})
 			return
