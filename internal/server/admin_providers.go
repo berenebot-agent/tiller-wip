@@ -396,6 +396,9 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		s.oauthDeviceMu.Unlock()
 		s.oauthFlows.Cancel(providerID)
 	}
+	// Drop the per-provider refresh lock so the map does not grow without
+	// bound as providers are created and deleted.
+	s.providers.DropProviderLock(providerID)
 	w.WriteHeader(204)
 }
 

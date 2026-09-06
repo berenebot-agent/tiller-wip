@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
@@ -390,7 +391,8 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			if d, ok := providers.Lookup(target.Provider.Type); ok {
 				target.Provider.MinOutputTokens = d.MinOutputTokens
 			}
-			s.providers.HydrateOAuth(ctx, &target.Provider)
+			// OAuth hydration happens after commit (see below) so the
+			// SQLite read tx is never held across network refresh calls.
 			if nativeProtocol.Valid {
 				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
 			}
@@ -403,12 +405,18 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		if e = rows.Err(); e != nil {
 			return resolvedRoute{}, e
 		}
+		if err := tx.Commit(); err != nil {
+			return resolvedRoute{}, err
+		}
+		// Hydrate OAuth credentials outside the transaction: Current() can
+		// trigger a network token refresh, and holding a SQLite read tx
+		// across that serializes all other DB access.
+		for i := range route.Targets {
+			s.providers.HydrateOAuth(ctx, &route.Targets[i].Provider)
+		}
 		route.Virtual, route.RequestedModel = true, clientModel
 		if len(route.Targets) > 0 {
 			route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
-		}
-		if err := tx.Commit(); err != nil {
-			return resolvedRoute{}, err
 		}
 		return route, nil
 	}
@@ -427,7 +435,6 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	if d, ok := providers.Lookup(route.Provider.Type); ok {
 		route.Provider.MinOutputTokens = d.MinOutputTokens
 	}
-	s.providers.HydrateOAuth(ctx, &route.Provider)
 	if nativeProtocol.Valid {
 		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
 	}
@@ -437,8 +444,15 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	if err := tx.Commit(); err != nil {
 		return resolvedRoute{}, err
 	}
+	// OAuth hydration outside the transaction (see virtual branch above).
+	s.providers.HydrateOAuth(ctx, &route.Provider)
 	return route, nil
 }
+
+// idleTimeout is how long a successful upstream response may sit silent
+// before the router cancels it. It is the idleReader's reset interval and
+// the AfterFunc's initial deadline.
+const idleTimeout = 5 * time.Minute
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
@@ -710,7 +724,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
 					if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
 						oauthRefreshed[candidate.Provider.ID] = true
-						candidates[i].Provider = candidate.Provider
+						// Propagate the fresh credential to every candidate
+						// sharing this provider so later targets don't retry
+						// with the stale token that just 401'd.
+						for j := range candidates {
+							if candidates[j].Provider.ID == candidate.Provider.ID {
+								candidates[j].Provider = candidate.Provider
+							}
+						}
 						i--
 						continue
 					}
@@ -842,7 +863,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		return
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	idle := time.AfterFunc(5*time.Minute, cancel)
+	idle := time.AfterFunc(idleTimeout, cancel)
 	defer idle.Stop()
 	reader := &idleReader{reader: resp.Body, timer: idle}
 	usage := &usageCapture{}
@@ -919,6 +940,11 @@ func preflightResponseLimit(resp *http.Response, limit int64) error {
 		resp.Body = bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(first[:n]), resp.Body), closer: resp.Body}
 		return nil
 	}
+	// Fail fast on a declared over-limit body without buffering up to 64MiB
+	// first. Unknown-length bodies still fall through to the bounded read.
+	if resp.ContentLength > limit {
+		return errUpstreamResponseTooLarge
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return err
@@ -933,12 +959,24 @@ func preflightResponseLimit(resp *http.Response, limit int64) error {
 type idleReader struct {
 	reader io.Reader
 	timer  *time.Timer
+	mu     sync.Mutex
 }
 
 func (i *idleReader) Read(p []byte) (int, error) {
 	n, err := i.reader.Read(p)
 	if n > 0 {
-		i.timer.Reset(5 * time.Minute)
+		// Guard the timer reset against a concurrent cancel: if the timer
+		// has already fired and the cancel is in flight, Stop returns false
+		// and we drain the channel so a later Reset cannot immediately fire.
+		i.mu.Lock()
+		if !i.timer.Stop() {
+			select {
+			case <-i.timer.C:
+			default:
+			}
+		}
+		i.timer.Reset(idleTimeout)
+		i.mu.Unlock()
 	}
 	return n, err
 }

@@ -336,13 +336,29 @@ func NewRegistry() *Registry {
 // SetResponseHeaderTimeout updates the per-attempt time-to-first-header bound on
 // the shared HTTP transport. It is what keeps a stalled ordered-fallback target
 // from consuming the client's request deadline; once headers arrive, streaming
-// continues unbounded. Guarded by a mutex because the transport is shared.
+// continues unbounded. The transport is shared, so this must only be called
+// before the client is in use (at construction / config load), never
+// concurrently with live requests — guarded by a mutex because the transport is
+// shared.
 func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if t, ok := r.client.Transport.(*http.Transport); ok {
 		t.ResponseHeaderTimeout = d
 	}
+}
+
+// ResponseHeaderTimeout returns the current per-attempt time-to-first-header
+// bound. It is read at config load so the registry can be built with the
+// correct timeout from the start, avoiding a mutation of the shared transport
+// after requests are already in flight.
+func (r *Registry) ResponseHeaderTimeout() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t, ok := r.client.Transport.(*http.Transport); ok {
+		return t.ResponseHeaderTimeout
+	}
+	return 0
 }
 
 func (r *Registry) HTTPClient() *http.Client { return r.client }

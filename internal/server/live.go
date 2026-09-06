@@ -115,6 +115,9 @@ func (h *liveHub) subscribe() chan []byte {
 // unsubscribe removes a subscriber and stops the dispatcher when the last one
 // leaves. A brief overlap with a freshly-started dispatcher is harmless: both
 // only broadcast snapshots, and the old one exits on its cancelled context.
+// The overlap window is bounded by the time it takes the old dispatcher to
+// observe ctx.Done() — typically microseconds — and produces at most one
+// duplicate snapshot event, which the client reconciles idempotently.
 func (h *liveHub) unsubscribe(ch chan []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
