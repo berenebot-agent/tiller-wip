@@ -257,7 +257,7 @@ No Redis. No Postgres. No separate frontend service. No message broker. No vecto
 - **Stable clients, movable backends** — the client should know as little as possible about the real provider arrangement.
 - **Failure should be boring** — a rate-limited upstream falls through to the next target without turning into an emergency reconfiguration.
 - **Keep infrastructure small** — Go, SQLite, one container, few dependencies.
-- **Don't collect content you don't need** — Activity answers "what route did this request take?", not "what did it say?". Detailed error logging is an explicit, bounded opt-in for diagnosing failed requests and stores sensitive bodies in the database and exports.
+- **Don't collect content you don't need** — Activity answers "what route did this request take?", not "what did it say?". Activity is metadata-only by default. If the administrator explicitly enables Detailed Error Logging, failed request bodies and provider error bodies may be stored, bounded to 1 MiB, and Activity exports containing those records must be treated as sensitive.
 
 ---
 
@@ -275,7 +275,7 @@ Tiller stores its state under the configured data directory, normally `./data`. 
 
 **Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets, since anyone who can read the database file can recover your provider keys.
 
-Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity and notification records are metadata-only by default; the optional detailed error logging setting stores bounded failed request and provider error bodies for clients with logging enabled.
+Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity is metadata-only by default. If the administrator explicitly enables Detailed Error Logging, failed request bodies and provider error bodies may be stored, bounded to 1 MiB, and Activity exports containing those records must be treated as sensitive. Migration 024 clears body columns from the live database, but this is not secure erasure: SQLite pages, WAL files, snapshots, and older backups may still contain historic sensitive data and must remain protected.
 
 For anything other than local-only use: use HTTPS, put Tiller behind a trusted reverse proxy, use a strong admin password, protect the data directory and exported backups, and do not expose the control panel casually to the public internet. See [SECURITY.md](SECURITY.md).
 

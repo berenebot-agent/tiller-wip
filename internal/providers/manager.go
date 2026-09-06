@@ -100,6 +100,9 @@ func (m *Manager) loadProvider(ctx context.Context, providerID string) (Instance
 	err := m.db.QueryRowContext(ctx, `SELECT id,name,type,base_url,coalesce(credential_secret,''),enabled,protocols FROM providers WHERE id=?`, providerID).
 		Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.Credential, &p.Enabled, &protocols)
 	p.Protocols = DecodeProtocols(protocols)
+	if d, ok := Lookup(p.Type); ok {
+		p.MinOutputTokens = d.MinOutputTokens
+	}
 	m.HydrateOAuth(ctx, &p)
 	return p, err
 }
@@ -206,28 +209,40 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 		newIDs = append(newIDs, newID)
 	}
 
-	// One batched UPSERT for the entire catalogue. The DO UPDATE branch keeps
-	// the row's id stable (re-asserting the same value is a no-op) and refreshes
-	// every metadata field plus available=1 / last_seen_at. Previously this was
-	// O(N) INSERT-or-UPDATE statements inside the transaction.
+	// One batched UPSERT for the entire catalogue, chunked to stay under
+	// SQLite's variable limit (999). Each row carries 18 bound variables,
+	// so batches of 50 keep every statement well under the cap even on
+	// large catalogues (previously a single statement broke past ~55 models).
+	// The DO UPDATE branch keeps the row's id stable (re-asserting the same
+	// value is a no-op) and refreshes every metadata field plus
+	// available=1 / last_seen_at. Previously this was O(N) INSERT-or-UPDATE
+	// statements inside the transaction.
 	if len(unique) > 0 {
-		const upsertColumns = 17
-		placeholders := make([]string, 0, len(unique))
-		args := make([]any, 0, len(unique)*upsertColumns)
-		for i, model := range unique {
-			placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
-			args = append(args,
-				ids[i], providerID, model.ID, model.DisplayName,
-				nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens),
-				nullableProtocol(model.NativeProtocol),
-				nullableBool(model.SupportsTools), nullableBool(model.SupportsVision),
-				nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
-				nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
-				now, now, now, now,
-			)
-		}
-		stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
-			strings.Join(placeholders, ",") + `
+		const upsertColumns = 18
+		const upsertBatchRows = 50
+		for start := 0; start < len(unique); start += upsertBatchRows {
+			end := start + upsertBatchRows
+			if end > len(unique) {
+				end = len(unique)
+			}
+			placeholders := make([]string, 0, end-start)
+			args := make([]any, 0, (end-start)*upsertColumns)
+			for i := start; i < end; i++ {
+				model := unique[i]
+				placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
+				args = append(args,
+					ids[i], providerID, model.ID, model.DisplayName,
+					nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens),
+					nullableProtocol(model.NativeProtocol),
+					nullableBool(model.SupportsTools), nullableBool(model.SupportsVision),
+					nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
+					nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
+					nullableReasoningCapabilities(model.ReasoningCapabilities),
+					now, now, now, now,
+				)
+			}
+			stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
+				strings.Join(placeholders, ",") + `
 			ON CONFLICT(provider_id, upstream_model_id) DO UPDATE SET
 				display_name=excluded.display_name,
 				context_length=excluded.context_length,
@@ -239,11 +254,13 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				supports_structured_output=excluded.supports_structured_output,
 				input_modalities=excluded.input_modalities,
 				output_modalities=excluded.output_modalities,
+				reasoning_capabilities=excluded.reasoning_capabilities,
 				available=1,
 				last_seen_at=excluded.last_seen_at,
 				updated_at=excluded.updated_at`
-		if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
-			return err
+			if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -264,21 +281,45 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	// below. The available=1 predicate mirrors the pre-batch behaviour of only
 	// retiring rows that were previously available (0->0 is already a no-op,
 	// but avoiding the write keeps already-dead rows' updated_at stable).
+	// Stale ids are collected in Go memory and retired with chunked IN (...)
+	// updates (500 per statement) so no statement exceeds SQLite's 999
+	// variable limit, no matter how large the catalogue is.
 	if len(seen) > 0 {
-		placeholders := make([]string, 0, len(seen))
-		args := make([]any, 0, len(seen)+1)
-		args = append(args, providerID)
-		for upstream := range seen {
-			placeholders = append(placeholders, "?")
-			args = append(args, upstream)
+		rows, qerr := tx.QueryContext(ctx, `SELECT upstream_model_id FROM provider_models WHERE provider_id=? AND available=1`, providerID)
+		if qerr != nil {
+			return qerr
 		}
-		stmt := `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND upstream_model_id NOT IN (` + strings.Join(placeholders, ",") + `)`
-		// Prepend `now` to the args since the WHERE clause order is provider_id-first.
-		fullArgs := make([]any, 0, len(args)+1)
-		fullArgs = append(fullArgs, now)
-		fullArgs = append(fullArgs, args...)
-		if _, err := tx.ExecContext(ctx, stmt, fullArgs...); err != nil {
-			return err
+		var stale []string
+		for rows.Next() {
+			var upstream string
+			if serr := rows.Scan(&upstream); serr != nil {
+				rows.Close()
+				return serr
+			}
+			if !seen[upstream] {
+				stale = append(stale, upstream)
+			}
+		}
+		rows.Close()
+		if rerr := rows.Err(); rerr != nil {
+			return rerr
+		}
+		const retireBatch = 500
+		for start := 0; start < len(stale); start += retireBatch {
+			end := start + retireBatch
+			if end > len(stale) {
+				end = len(stale)
+			}
+			placeholders := make([]string, 0, end-start)
+			rargs := make([]any, 0, (end-start)+2)
+			rargs = append(rargs, now, providerID)
+			for _, u := range stale[start:end] {
+				placeholders = append(placeholders, "?")
+				rargs = append(rargs, u)
+			}
+			if _, uerr := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND upstream_model_id IN (`+strings.Join(placeholders, ",")+`)`, rargs...); uerr != nil {
+				return uerr
+			}
 		}
 	} else {
 		// Discovery returned no usable models. Retire everything for this provider.
@@ -342,6 +383,12 @@ func (m *Manager) providerLock(providerID string) *sync.Mutex {
 	return lock
 }
 
+func (m *Manager) DropProviderLock(providerID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.locks, providerID)
+}
+
 func refreshJitter(providerID string) time.Duration {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(providerID))
@@ -392,6 +439,17 @@ func nullableBool(v *bool) any {
 		return 1
 	}
 	return 0
+}
+
+func nullableReasoningCapabilities(rc *ReasoningCapabilities) any {
+	if rc == nil {
+		return nil
+	}
+	b, err := json.Marshal(rc)
+	if err != nil {
+		return nil
+	}
+	return string(b)
 }
 
 func nullableJSON(list []string) any {

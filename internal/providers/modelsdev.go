@@ -15,9 +15,12 @@ import (
 
 // models.dev is an open-source, community-maintained registry of model metadata
 // (context length, max output, capability flags, modalities). Tiller uses it as
-// a *fallback* only: provider-reported data stays the source of truth, and
-// models.dev fills in only the fields the provider left unknown. A field stays
-// unknown if neither source reports it (tri-state semantics preserved).
+// a *fallback* only: provider-reported data stays the source of truth. For
+// most fields, models.dev fills in only the fields the provider left unknown; a
+// field stays unknown if neither source reports it (tri-state semantics
+// preserved). ReasoningCapabilities is handled differently: a provider-reported
+// object is kept whole, and models.dev only fills individual mechanisms/fields
+// the provider omitted (an explicitly empty provider object is left intact).
 
 const (
 	// modelsDevCacheFile is the cache file name under the data directory.
@@ -50,6 +53,10 @@ type modelsDevModel struct {
 	StructuredOutput *bool               `json:"structured_output"`
 	Modalities       modelsDevModalities `json:"modalities"`
 	Limit            modelsDevLimit      `json:"limit"`
+	// reasoning_options is the raw options array from models.dev. Each entry
+	// is parsed individually; a malformed entry is skipped while valid siblings
+	// are retained.
+	ReasoningOptions *[]map[string]any `json:"reasoning_options"`
 }
 
 type modelsDevModalities struct {
@@ -66,29 +73,67 @@ type modelsDevLimit struct {
 // provider key. Providers not listed here are never enriched (their models.dev
 // key is unknown or ambiguous).
 var modelsDevProviderKey = map[string]string{
-	"openrouter":    "openrouter",
-	"deepseek":      "deepseek",
-	"nvidia-nim":    "nvidia",
-	"zai":           "zhipuai",
-	"gemini":        "google",
-	"alibaba-qwen":  "alibaba",
-	"fireworks":     "fireworks-ai",
-	"azure-openai":  "azure",
-	"opencode-zen":  "opencode",
-	"opencode-go":   "opencode",
-	"opencode-free": "opencode",
-	"openai":        "openai",
-	"anthropic":     "anthropic",
-	"groq":          "groq",
-	"mistral":       "mistral",
-	"xai":           "xai",
-	"cerebras":      "cerebras",
-	"perplexity":    "perplexity",
-	"minimax":       "minimax",
-	"huggingface":   "huggingface",
+	"openrouter":          "openrouter",
+	"deepseek":            "deepseek",
+	"nvidia-nim":          "nvidia",
+	"zai":                 "zhipuai",
+	"gemini":              "google",
+	"alibaba-qwen":        "alibaba",
+	"fireworks":           "fireworks-ai",
+	"azure-openai":        "azure",
+	"opencode-zen":        "opencode",
+	"opencode-go":         "opencode",
+	"opencode-free":       "opencode",
+	"openai":              "openai",
+	"anthropic":           "anthropic",
+	"claude-subscription": "anthropic",
+	"groq":                "groq",
+	"mistral":             "mistral",
+	"xai":                 "xai",
+	"cerebras":            "cerebras",
+	"perplexity":          "perplexity",
+	"minimax":             "minimax",
+	"huggingface":         "huggingface",
+	"codex-subscription":  "openai",
 }
 
-// ollamaLabInference maps a recognizable model-family root (the lowercased,
+// Gateway providers may expose a model through a compatibility layer whose
+// selector support does not necessarily match the upstream model metadata.
+var gatewayProviderTypes = map[string]bool{
+	"openrouter": true, "opencode-zen": true, "opencode-go": true,
+	"opencode-free": true, "azure-openai": true, "groq": true,
+	"fireworks": true, "nvidia-nim": true, "huggingface": true,
+}
+
+// copilotVendorLab maps a Copilot catalogue vendor label to the models.dev
+// lab holding that vendor's models. Vendors not listed here (or IDs missing
+// from the lab) simply skip enrichment — the live Copilot catalogue already
+// reports limits, supports, and reasoning metadata, so a miss is a no-op.
+var copilotVendorLab = map[string]string{
+	"openai":    "openai",
+	"anthropic": "anthropic",
+	"google":    "google",
+	"gemini":    "google",
+	"xai":       "xai",
+	"mistral":   "mistral",
+	"meta":      "meta",
+	"deepseek":  "deepseek",
+}
+
+// copilotLookup resolves a models.dev entry for a Copilot model via its
+// per-model vendor label.
+func copilotLookup(data modelsDevDataset, vendor, id string) modelsDevModel {
+	lab, ok := copilotVendorLab[strings.ToLower(strings.TrimSpace(vendor))]
+	if !ok {
+		return modelsDevModel{}
+	}
+	provider, ok := data[lab]
+	if !ok {
+		return modelsDevModel{}
+	}
+	return provider.Models[id]
+}
+
 // tag/namespace-stripped model name) to the canonical models.dev lab that holds
 // exact, plain-key entries for that family. It is deliberately small: only
 // families with a verified canonical lab that stores the model under its plain
@@ -142,8 +187,10 @@ func ollamaPlainName(id string) string {
 }
 
 // enrich merges models.dev capability metadata into the discovered models for a
-// provider. It fills in only the fields the provider left unknown and never
-// overrides a provider-reported value. It is a no-op when models.dev is disabled
+// provider. For most fields it fills in only the fields the provider left
+// unknown and never overrides a provider-reported value. ReasoningCapabilities
+// uses whole-object provider precedence with field-level gap fill. It is a
+// no-op when models.dev is disabled
 // or the dataset is unavailable. Non-Ollama providers are looked up by their
 // exact provider key + model ID; Ollama has no lab of its own, so its models are
 // resolved by plain (tag/namespace-stripped) name under an inferred canonical
@@ -159,7 +206,13 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 	out := make([]Model, len(models))
 	if strings.HasPrefix(providerType, "ollama-") {
 		for i, model := range models {
-			out[i] = enrichModel(model, ollamaLookup(data, model.ID))
+			out[i] = enrichModel(model, ollamaLookup(data, model.ID), providerType)
+		}
+		return out
+	}
+	if providerType == "github-copilot" {
+		for i, model := range models {
+			out[i] = enrichModel(model, copilotLookup(data, model.Vendor, model.ID), providerType)
 		}
 		return out
 	}
@@ -172,13 +225,60 @@ func (r *Registry) enrich(models []Model, providerType string) []Model {
 		return models
 	}
 	for i, model := range models {
-		out[i] = enrichModel(model, provider.Models[model.ID])
+		out[i] = enrichModel(model, provider.Models[model.ID], providerType)
 	}
 	return out
 }
 
+// parseModelsDevReasoningOptions converts raw models.dev reasoning_options
+// entries into normalized ReasoningOption values. Each entry is parsed
+// independently: a malformed entry is skipped while valid siblings are kept.
+// Returns nil when every non-empty entry is malformed. A non-nil result with
+// an empty Options list means the source explicitly reported an empty list,
+// which models.dev defines as no caller-controlled selector.
+func parseModelsDevReasoningOptions(raw []map[string]any) *ReasoningCapabilities {
+	if len(raw) == 0 {
+		return &ReasoningCapabilities{Options: []ReasoningOption{}}
+	}
+	var options []ReasoningOption
+	for _, entry := range raw {
+		rawType, _ := entry["type"].(string)
+		switch rawType {
+		case "effort":
+			if vals, ok := entry["values"].([]any); ok {
+				var efforts []string
+				for _, v := range vals {
+					if s, ok := v.(string); ok {
+						efforts = append(efforts, s)
+					}
+				}
+				if len(efforts) > 0 {
+					options = append(options, ReasoningOption{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)})
+				}
+			}
+		case "toggle":
+			// Retain the toggle mechanism without inventing defaults.
+			options = append(options, ReasoningOption{Type: ReasoningOptionToggle})
+		case "budget_tokens":
+			var opt ReasoningOption
+			opt.Type = ReasoningOptionBudgetTokens
+			if min, ok := CoerceInt64(entry["min"]); ok {
+				opt.Min = &min
+			}
+			if max, ok := CoerceInt64(entry["max"]); ok {
+				opt.Max = &max
+			}
+			options = append(options, opt)
+		}
+	}
+	if len(options) == 0 {
+		return nil
+	}
+	return &ReasoningCapabilities{Options: options}
+}
+
 // enrichModel fills the gaps in a single model from its models.dev entry.
-func enrichModel(model Model, md modelsDevModel) Model {
+func enrichModel(model Model, md modelsDevModel, providerType string) Model {
 	if model.ContextLength == 0 && md.Limit.Context > 0 {
 		model.ContextLength = md.Limit.Context
 	}
@@ -205,7 +305,73 @@ func enrichModel(model Model, md modelsDevModel) Model {
 	if len(model.OutputModalities) == 0 && len(md.Modalities.Output) > 0 {
 		model.OutputModalities = md.Modalities.Output
 	}
+	var mdReasoning *ReasoningCapabilities
+	if md.ReasoningOptions != nil {
+		mdReasoning = parseModelsDevReasoningOptions(*md.ReasoningOptions)
+	}
+	if model.ReasoningCapabilities == nil {
+		model.ReasoningCapabilities = mdReasoning
+	} else if mdReasoning != nil && !gatewayProviderTypes[providerType] && (model.ReasoningCapabilities.Options == nil || len(model.ReasoningCapabilities.Options) > 0) {
+		model.ReasoningCapabilities = mergeReasoningCapabilitiesFallback(model.ReasoningCapabilities, mdReasoning)
+	}
 	return model
+}
+
+// mergeReasoningCapabilitiesFallback fills missing selector mechanisms from
+// models.dev while keeping provider metadata authoritative for mechanisms it
+// already reported. An explicitly empty provider option list is left alone.
+func mergeReasoningCapabilitiesFallback(provider, fallback *ReasoningCapabilities) *ReasoningCapabilities {
+	result := *provider
+	result.Options = append([]ReasoningOption(nil), provider.Options...)
+	if provider.Options == nil && fallback.Options != nil {
+		result.Options = []ReasoningOption{}
+	}
+	present := make(map[ReasoningOptionType]bool)
+	for _, option := range result.Options {
+		present[option.Type] = true
+	}
+	for _, option := range fallback.Options {
+		if !present[option.Type] {
+			result.Options = append(result.Options, option)
+		}
+	}
+	if len(result.ThinkingModes) == 0 {
+		result.ThinkingModes = append([]string(nil), fallback.ThinkingModes...)
+	}
+	if result.DefaultEffort == "" {
+		result.DefaultEffort = fallback.DefaultEffort
+	}
+	if result.Mandatory == nil {
+		result.Mandatory = fallback.Mandatory
+	}
+	if result.DefaultEnabled == nil {
+		result.DefaultEnabled = fallback.DefaultEnabled
+	}
+	if len(result.Parameters) == 0 {
+		result.Parameters = append([]string(nil), fallback.Parameters...)
+	}
+	return &result
+}
+
+// CoerceInt64 converts a JSON number or string to int64 without going
+// through float. Returns (0, false) when the value is not a clean integer.
+func CoerceInt64(v any) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		if n >= 0 && n < float64(uint64(1)<<63) && n == float64(int64(n)) {
+			return int64(n), true
+		}
+	case string:
+		var parsed int64
+		if _, err := fmt.Sscanf(n, "%d", &parsed); err == nil && parsed >= 0 {
+			return parsed, true
+		}
+	}
+	return 0, false
 }
 
 // visionFromModalities derives the vision capability from the models.dev input

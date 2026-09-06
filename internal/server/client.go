@@ -21,10 +21,10 @@ import (
 const maxUpstreamNonStreamBytes int64 = 64 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
-// read in order to pass it through verbatim to the originating client. The
-// body is only ever written directly to the client — it is never stored in
-// the activity log (privacy guardrail). Virtual fallback paths never read
-// the body at all: they close it immediately and move on.
+// read for passthrough to the originating client. When detailed error
+// logging is enabled, the bounded body is also retained on the activity row;
+// otherwise it is written only to the client. Virtual fallback paths skip the
+// read unless detailed error logging is on.
 const maxUpstreamErrorBytes int64 = 1 << 20
 
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
@@ -36,20 +36,29 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
+	anthropic := isAnthropicRequest(r)
 	if keyType == "single" {
 		var modelName, realID, virtualID string
 		var real, virtual sql.NullString
 		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
-			inferenceError(w, 500, "server_error", "invalid_single_binding", "The Single client key is not configured correctly.", false)
+			if errors.Is(err, sql.ErrNoRows) {
+				inferenceError(w, 500, "server_error", "invalid_single_binding", "No binding configured for this API key.", false)
+			} else {
+				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+			}
 			return
 		}
 		realID, virtualID = real.String, virtual.String
 		var contextLength, maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
+		var reasoningCaps *providers.ReasoningCapabilities
 		if real.Valid {
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
+			var reasoningRaw sql.NullString
+			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw)
+			reasoningCaps = decodeReasoningCapabilities(reasoningRaw)
 		} else {
 			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
+			reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID)
 		}
 		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
 		if contextLength.Valid && contextLength.Int64 > 0 {
@@ -59,14 +68,15 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 			entry["max_output_tokens"] = maxOutputTokens.Int64
 		}
 		caps.addTo(entry)
+		addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
 		return
 	}
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output FROM (
-	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output, reasoning_capabilities, virtual_model_id FROM (
+	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output, m.reasoning_capabilities, NULL virtual_model_id FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical, `+conservativeMin("t.context_length")+`, `+conservativeMin("t.max_output_tokens")+`, `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+` FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
-) ORDER BY canonical`, identity.ID, identity.ID)
+	SELECT g.name||'/'||v.name canonical, `+conservativeMin("t.context_length")+`, `+conservativeMin("t.max_output_tokens")+`, `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+`, NULL, v.id virtual_model_id FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
+	) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
@@ -78,7 +88,9 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		var contextLength sql.NullInt64
 		var maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
-		if rows.Scan(&modelID, &contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput) == nil {
+		var reasoningRaw sql.NullString
+		var virtualID sql.NullString
+		if rows.Scan(&modelID, &contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw, &virtualID) == nil {
 			entry := map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"}
 			if contextLength.Valid && contextLength.Int64 > 0 {
 				entry["context_length"] = contextLength.Int64
@@ -87,10 +99,177 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 				entry["max_output_tokens"] = maxOutputTokens.Int64
 			}
 			caps.addTo(entry)
+			reasoningCaps := decodeReasoningCapabilities(reasoningRaw)
+			if virtualID.Valid && reasoningCaps == nil {
+				reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID.String)
+			}
+			addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
 			data = append(data, entry)
 		}
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
+}
+
+// clientModel handles model-detail lookups. A Single key has one configured
+// route, so the requested path is intentionally ignored just like it is for
+// inference requests.
+func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
+	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
+	var keyType string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT key_type FROM client_keys WHERE id=?`, identity.ID).Scan(&keyType); err != nil {
+		inferenceError(w, 500, "server_error", "database_error", "Could not load the model metadata.", false)
+		return
+	}
+	if keyType != "single" {
+		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", false)
+		return
+	}
+	var modelName, realID, virtualID string
+	var real, virtual sql.NullString
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
+		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model binding.", false)
+		return
+	}
+	realID, virtualID = real.String, virtual.String
+	var contextLength, maxOutputTokens sql.NullInt64
+	var caps modelCapabilities
+	if real.Valid {
+		var reasoningRaw sql.NullString
+		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw); err != nil {
+			inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
+			return
+		}
+		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
+		if contextLength.Valid && contextLength.Int64 > 0 {
+			entry["context_length"] = contextLength.Int64
+		}
+		if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
+			entry["max_output_tokens"] = maxOutputTokens.Int64
+		}
+		caps.addTo(entry)
+		addReasoningToCatalogueEntry(entry, decodeReasoningCapabilities(reasoningRaw), isAnthropicRequest(r))
+		writeJSON(w, 200, entry)
+		return
+	}
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput); err != nil {
+		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
+		return
+	}
+	entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
+	if contextLength.Valid && contextLength.Int64 > 0 {
+		entry["context_length"] = contextLength.Int64
+	}
+	if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
+		entry["max_output_tokens"] = maxOutputTokens.Int64
+	}
+	caps.addTo(entry)
+	addReasoningToCatalogueEntry(entry, s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID), isAnthropicRequest(r))
+	writeJSON(w, 200, entry)
+}
+
+// isAnthropicRequest returns true when the request carries an Anthropic
+// version header, signalling that the client expects Anthropic capability
+// metadata in the Tiller catalogue.
+func isAnthropicRequest(r *http.Request) bool {
+	return r.Header.Get("anthropic-version") != ""
+}
+
+// addReasoningToCatalogueEntry publishes the normalized reasoning metadata in
+// the catalogue shapes understood by OpenAI-compatible and Anthropic clients.
+func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningCapabilities, anthropic bool) {
+	if rc == nil {
+		return
+	}
+	if anthropic {
+		caps := map[string]any{}
+		var thinking map[string]any
+		for _, opt := range rc.Options {
+			switch opt.Type {
+			case providers.ReasoningOptionEffort:
+				effort := map[string]any{"supported": true}
+				for _, level := range providers.CanonicalEffortOrder() {
+					for _, value := range opt.Values {
+						if value == level {
+							effort[level] = map[string]any{"supported": true}
+							break
+						}
+					}
+				}
+				caps["effort"] = effort
+			case providers.ReasoningOptionToggle:
+				thinking = map[string]any{"supported": true}
+			}
+		}
+		if len(rc.ThinkingModes) > 0 {
+			if thinking == nil {
+				thinking = map[string]any{"supported": true}
+			}
+			types := map[string]any{}
+			for _, mode := range rc.ThinkingModes {
+				switch mode {
+				case "adaptive", "enabled":
+					types[mode] = map[string]any{"supported": true}
+				}
+			}
+			if len(types) > 0 {
+				thinking["types"] = types
+			}
+		}
+		if thinking != nil {
+			caps["thinking"] = thinking
+		}
+		if len(caps) > 0 {
+			entry["capabilities"] = caps
+		}
+		return
+	}
+
+	var effortValues []string
+	var hasEffort bool
+	var options []map[string]any
+	for _, opt := range rc.Options {
+		switch opt.Type {
+		case providers.ReasoningOptionEffort:
+			hasEffort = true
+			effortValues = opt.Values
+			options = append(options, map[string]any{"type": "effort", "values": opt.Values})
+		case providers.ReasoningOptionToggle:
+			options = append(options, map[string]any{"type": "toggle"})
+		case providers.ReasoningOptionBudgetTokens:
+			budget := map[string]any{"type": "budget_tokens"}
+			if opt.Min != nil {
+				budget["min"] = *opt.Min
+			}
+			if opt.Max != nil {
+				budget["max"] = *opt.Max
+			}
+			options = append(options, budget)
+		}
+	}
+	if len(options) > 0 {
+		entry["reasoning_options"] = options
+	}
+	if hasEffort {
+		entry["reasoning"] = map[string]any{"supported_efforts": effortValues}
+	}
+}
+
+// aggregateVirtualReasoningCapabilities computes the union of reasoning
+// selectors reported by eligible targets of a virtual model.
+func (s *Server) aggregateVirtualReasoningCapabilities(ctx context.Context, virtualModelID string) *providers.ReasoningCapabilities {
+	rows, err := s.db.SQL.QueryContext(ctx, `SELECT m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualModelID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var merged *providers.ReasoningCapabilities
+	for rows.Next() {
+		var raw sql.NullString
+		if rows.Scan(&raw) == nil {
+			merged = mergeReasoningCapabilities(merged, decodeReasoningCapabilities(raw))
+		}
+	}
+	return merged
 }
 
 // modelCapabilities holds the tri-state capability flags for a model. A flag is
@@ -138,6 +317,10 @@ type resolvedRoute struct {
 	Virtual, Available                  bool
 	Targets                             []resolvedRoute
 	RouteKind, RouteModelID, RouteModel string
+	// ReasoningCapabilities holds the normalized selector metadata for this
+	// real target. nil when unknown.
+	ReasoningCapabilities *providers.ReasoningCapabilities
+	MaxOutputTokens       sql.NullInt64
 }
 
 func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
@@ -160,9 +343,11 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		if realID.Valid {
 			route.RouteKind, route.RouteModelID = "real", realID.String
 			route.ProviderModelID = realID.String
-			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel); err != nil {
+			var reasoningRaw sql.NullString
+			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel, &reasoningRaw, &route.MaxOutputTokens); err != nil {
 				return resolvedRoute{}, err
 			}
+			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 		} else {
 			route.RouteKind, route.RouteModelID = "virtual", virtualID.String
 			if err = tx.QueryRowContext(ctx, `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, virtualID.String).Scan(&route.RouteModel); err != nil {
@@ -170,9 +355,11 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			}
 		}
 	} else {
-		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
+		var reasoningRaw sql.NullString
+		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel, &reasoningRaw, &route.MaxOutputTokens)
 		if err == nil {
 			route.RouteKind = "real"
+			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 		} else if err == sql.ErrNoRows {
 			err = tx.QueryRowContext(ctx, `SELECT v.id,g.name||'/'||v.name FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
 			if err != nil {
@@ -184,7 +371,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		}
 	}
 	if route.RouteKind == "virtual" {
-		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
+		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
 		if e != nil {
 			return resolvedRoute{}, e
 		}
@@ -194,15 +381,21 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 			var protocols string
 			var enabled, available int
 			var nativeProtocol sql.NullString
-			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available); e != nil {
+			var reasoningRaw sql.NullString
+			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available, &reasoningRaw, &target.MaxOutputTokens); e != nil {
 				return resolvedRoute{}, e
 			}
 			target.Provider.Enabled = scanBool(enabled)
 			target.Provider.Protocols = providers.DecodeProtocols(protocols)
-			s.providers.HydrateOAuth(ctx, &target.Provider)
+			if d, ok := providers.Lookup(target.Provider.Type); ok {
+				target.Provider.MinOutputTokens = d.MinOutputTokens
+			}
+			// OAuth hydration happens after commit (see below) so the
+			// SQLite read tx is never held across network refresh calls.
 			if nativeProtocol.Valid {
 				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
 			}
+			target.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 			target.Available = target.Provider.Enabled && scanBool(available)
 			target.Virtual, target.RequestedModel = true, clientModel
 			target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
@@ -211,26 +404,36 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		if e = rows.Err(); e != nil {
 			return resolvedRoute{}, e
 		}
+		if err := tx.Commit(); err != nil {
+			return resolvedRoute{}, err
+		}
+		// Hydrate OAuth credentials outside the transaction: Current() can
+		// trigger a network token refresh, and holding a SQLite read tx
+		// across that serializes all other DB access.
+		for i := range route.Targets {
+			s.providers.HydrateOAuth(ctx, &route.Targets[i].Provider)
+		}
 		route.Virtual, route.RequestedModel = true, clientModel
 		if len(route.Targets) > 0 {
 			route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
-		}
-		if err := tx.Commit(); err != nil {
-			return resolvedRoute{}, err
 		}
 		return route, nil
 	}
 	var protocols string
 	var enabled, modelAvailable int
 	var nativeProtocol sql.NullString
+	var reasoningRaw sql.NullString
 	route.ProviderModelID = route.RouteModelID
-	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, route.RouteModelID).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable)
+	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, route.RouteModelID).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable, &reasoningRaw)
 	if err != nil {
 		return resolvedRoute{}, err
 	}
+	route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
 	route.Provider.Enabled = scanBool(enabled)
 	route.Provider.Protocols = providers.DecodeProtocols(protocols)
-	s.providers.HydrateOAuth(ctx, &route.Provider)
+	if d, ok := providers.Lookup(route.Provider.Type); ok {
+		route.Provider.MinOutputTokens = d.MinOutputTokens
+	}
 	if nativeProtocol.Valid {
 		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
 	}
@@ -240,8 +443,15 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 	if err := tx.Commit(); err != nil {
 		return resolvedRoute{}, err
 	}
+	// OAuth hydration outside the transaction (see virtual branch above).
+	s.providers.HydrateOAuth(ctx, &route.Provider)
 	return route, nil
 }
+
+// idleTimeout is how long a successful upstream response may sit silent
+// before the router cancels it. It is the idleReader's reset interval and
+// the AfterFunc's initial deadline.
+const idleTimeout = 5 * time.Minute
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
@@ -267,12 +477,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row := &logRow{
 		clientKeyID:     identity.ID,
 		requestedModel:  requested,
+		routeStatus:     "unresolved",
 		protocol:        string(incoming),
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
 	logErrorBodies, _ := s.db.GetLogErrorBodies(r.Context())
 	originalBody := append([]byte(nil), body...)
+	// Extract the canonical reasoning selector once from the original request.
+	// It is recomputed for each candidate against that target's capabilities.
+	canonicalSelector := extractReasoningSelector(originalBody, incoming)
 	start := time.Now()
 	streamed := false
 	clientTracked := false
@@ -300,6 +514,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if err == sql.ErrNoRows {
 		row.httpStatus = 404
 		row.errorText = strPtr("model_not_found")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("model_not_found"))
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", incoming == providers.ProtocolMessages)
 		return
 	} else if err != nil {
@@ -308,10 +523,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		row.httpStatus = 500
 		row.errorText = strPtr("database_error")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("database_error"))
 		inferenceError(w, 500, "server_error", "database_error", "Could not resolve the model.", incoming == providers.ProtocolMessages)
 		return
 	}
 	row.exposedModel = &route.RequestedModel
+	row.routeStatus = "routed"
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
@@ -329,6 +546,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var translated bool
 	var cancel context.CancelFunc
 	protocolUnavailable := false
+	translationFailureClass := ""
+	nonTranslationFailure := false
 	terminalPreflightClass := ""
 	oauthRefreshed := make(map[string]bool)
 	for i := 0; i < len(candidates); i++ {
@@ -340,36 +559,64 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			row.httpStatus = 502
 			row.errorText = strPtr(class)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			row.fallbackReason = strPtr(class)
 			inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 			return
 		}
 		attemptStart := time.Now()
 		if !candidate.Available {
+			nonTranslationFailure = true
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
+			continue
+		}
+		if candidate.Provider.Credential != "" && (candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go") && providers.IsOpenCodeFreeModel(candidate.UpstreamModelID) {
+			// Free-tier models are served anonymously on the Zen relay: any
+			// unrecognized bearer is rejected with 401, so a keyed
+			// zen/go instance can never serve them. Fail loud with a
+			// remediation instead of burning the attempt upstream — never
+			// silently re-route to another provider.
+			if !route.Virtual {
+				row.httpStatus = 400
+				row.errorText = strPtr("free_model_requires_keyless")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless"))
+				inferenceError(w, 400, "invalid_request_error", "free_model_requires_keyless", "This is an OpenCode free-tier model and cannot be served with a credential. Configure it through an opencode-free provider instead.", incoming == providers.ProtocolMessages)
+				return
+			}
+			nonTranslationFailure = true
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
 			continue
 		}
 		target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
 		if target == "" {
 			protocolUnavailable = true
+			nonTranslationFailure = true
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
 			continue
 		}
 		translated = target != incoming
 		attemptBody := append([]byte(nil), originalBody...)
 		if translated {
-			attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID)
+			attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
 			if err != nil {
 				code := "translation_error"
 				var unsupported unsupportedFeature
 				if errors.As(err, &unsupported) {
 					code = "unsupported_feature"
 				}
-				row.httpStatus = 400
-				row.errorText = strPtr(code)
-				inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
-				return
+				if !route.Virtual {
+					row.httpStatus = 400
+					row.errorText = strPtr(code)
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(code))
+					inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
+					return
+				}
+				translationFailureClass = code
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
+				continue
 			}
+			// After translation, re-apply the canonical selector for the target.
+			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
 		} else {
 			var attemptRaw map[string]json.RawMessage
 			_ = json.Unmarshal(attemptBody, &attemptRaw)
@@ -381,13 +628,41 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if err != nil {
 				row.httpStatus = 400
 				row.errorText = strPtr("invalid_request")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
 				inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
 				return
 			}
 		}
+		if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
+			var compatible bool
+			attemptBody, compatible, err = checkMinOutputTokens(attemptBody, minOut, target)
+			if err != nil {
+				row.httpStatus = 400
+				row.errorText = strPtr("invalid_request")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
+				inferenceError(w, 400, "invalid_request_error", "invalid_request", "Could not apply minimum output tokens.", incoming == providers.ProtocolMessages)
+				return
+			}
+			if !compatible {
+				// The client explicitly requested fewer output tokens than
+				// this target's provider minimum. Never silently raise an
+				// explicit client limit: skip the target on virtual routes,
+				// fail loud on direct routes.
+				if !route.Virtual {
+					row.httpStatus = 400
+					row.errorText = strPtr("unsupported_feature")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+					inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires a higher minimum output length than requested.", incoming == providers.ProtocolMessages)
+					return
+				}
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+				continue
+			}
+		}
 		endpoint, e := providers.Endpoint(candidate.Provider, target)
 		if e != nil {
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
+			nonTranslationFailure = true
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
 			continue
 		}
 		upstreamCtx, attemptCancel := context.WithCancel(r.Context())
@@ -405,6 +680,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 		}
 		providers.ApplyRequestAuth(req, candidate.Provider)
+		copySafeFeatureHeaders(req.Header, r.Header, target)
 		if candidate.Provider.Type == "codex-subscription" {
 			req.Header.Set("session-id", row.clientRequestID)
 		}
@@ -425,7 +701,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
 				class = "upstream_timeout"
 			}
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
+			nonTranslationFailure = true
 			if r.Context().Err() != nil {
 				if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
 					class = "client_timeout"
@@ -464,11 +741,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			response.Body.Close()
 			attemptCancel()
-			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()}
+			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
 			if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 				attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
 			}
 			row.attempts = append(row.attempts, attempt)
+			nonTranslationFailure = true
 			// Stale-auth recovery: on 401/403 from an OAuth provider, force a
 			// token refresh once per request and retry the same target before
 			// falling through to normal virtual fallback. ForceOAuthRefresh
@@ -478,7 +756,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
 					if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
 						oauthRefreshed[candidate.Provider.ID] = true
-						candidates[i].Provider = candidate.Provider
+						// Propagate the fresh credential to every candidate
+						// sharing this provider so later targets don't retry
+						// with the stale token that just 401'd.
+						for j := range candidates {
+							if candidates[j].Provider.ID == candidate.Provider.ID {
+								candidates[j].Provider = candidate.Provider
+							}
+						}
 						i--
 						continue
 					}
@@ -491,6 +776,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !route.Virtual || !fallbackStatus(response.StatusCode) {
 				row.httpStatus = response.StatusCode
 				row.errorText = strPtr("upstream_error")
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
 				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 					row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 				}
@@ -528,7 +814,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				message = "The upstream provider response exceeded Tiller's non-streaming response limit."
 			}
 			terminalPreflightClass = class
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+			nonTranslationFailure = true
 			row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			if !route.Virtual || r.Context().Err() != nil {
 				row.httpStatus = 502
@@ -556,13 +843,29 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if terminalPreflightClass == "upstream_response_too_large" {
 			row.httpStatus = 502
 			row.errorText = strPtr(terminalPreflightClass)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(terminalPreflightClass))
 			inferenceError(w, 502, "api_error", terminalPreflightClass, "The upstream provider response exceeded Tiller's non-streaming response limit.", incoming == providers.ProtocolMessages)
+			return
+		}
+		if translationFailureClass != "" && !nonTranslationFailure {
+			row.httpStatus = 400
+			row.errorText = strPtr(translationFailureClass)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(translationFailureClass))
+			inferenceError(w, 400, "invalid_request_error", translationFailureClass, "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
 			return
 		}
 		if protocolUnavailable {
 			row.httpStatus = 400
 			row.errorText = strPtr("protocol_unavailable")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("protocol_unavailable"))
 			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
+			return
+		}
+		if route.Virtual && allSkippedUnsupportedFeature(row.attempts) {
+			row.httpStatus = 400
+			row.errorText = strPtr("unsupported_feature")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+			inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
 			return
 		}
 		row.httpStatus = 503
@@ -599,7 +902,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		return
 	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	idle := time.AfterFunc(5*time.Minute, cancel)
+	idle := time.AfterFunc(idleTimeout, cancel)
 	defer idle.Stop()
 	reader := &idleReader{reader: resp.Body, timer: idle}
 	usage := &usageCapture{}
@@ -676,6 +979,11 @@ func preflightResponseLimit(resp *http.Response, limit int64) error {
 		resp.Body = bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(first[:n]), resp.Body), closer: resp.Body}
 		return nil
 	}
+	// Fail fast on a declared over-limit body without buffering up to 64MiB
+	// first. Unknown-length bodies still fall through to the bounded read.
+	if resp.ContentLength > limit {
+		return errUpstreamResponseTooLarge
+	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return err
@@ -695,7 +1003,13 @@ type idleReader struct {
 func (i *idleReader) Read(p []byte) (int, error) {
 	n, err := i.reader.Read(p)
 	if n > 0 {
-		i.timer.Reset(5 * time.Minute)
+		// Simple reset. Residual boundary race, documented honestly: if the
+		// AfterFunc already fired (or is executing) concurrently with this
+		// reset, the cancel still runs and the stream ends early. Stop/drain
+		// cannot recall an in-flight callback, so no reset scheme eliminates
+		// it — the window is microseconds at exactly idleTimeout of silence
+		// and the behaviour predates this code.
+		i.timer.Reset(idleTimeout)
 	}
 	return n, err
 }
@@ -709,6 +1023,46 @@ func copySafeResponseHeaders(dst, src http.Header) {
 			}
 		}
 	}
+}
+
+func copySafeFeatureHeaders(dst, src http.Header, target providers.Protocol) {
+	var names []string
+	switch target {
+	case providers.ProtocolMessages:
+		names = []string{"anthropic-beta"}
+	case providers.ProtocolChat, providers.ProtocolResponses:
+		names = []string{"OpenAI-Beta"}
+	}
+	for _, name := range names {
+		values := headerTokens(dst.Values(name))
+		seen := make(map[string]bool, len(values))
+		for _, value := range values {
+			seen[strings.ToLower(value)] = true
+		}
+		for _, value := range headerTokens(src.Values(name)) {
+			key := strings.ToLower(value)
+			if !seen[key] {
+				values = append(values, value)
+				seen[key] = true
+			}
+		}
+		if len(values) > 0 {
+			dst.Set(name, strings.Join(values, ", "))
+		}
+	}
+}
+
+func headerTokens(values []string) []string {
+	var tokens []string
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			token = strings.TrimSpace(token)
+			if token != "" {
+				tokens = append(tokens, token)
+			}
+		}
+	}
+	return tokens
 }
 func isTimeout(err error) bool {
 	var netErr interface{ Timeout() bool }
@@ -732,6 +1086,82 @@ func compatibleProtocol(protocols []providers.Protocol, native providers.Protoco
 		}
 	}
 	return ""
+}
+
+// checkMinOutputTokens enforces a provider's minimum output length without
+// ever overriding an explicit client limit. It returns the (possibly
+// default-filled) body and whether the target is compatible:
+//   - field absent: the minimum is supplied as the default (overrides
+//     nothing) and the target is compatible;
+//   - field present and >= min: untouched, compatible;
+//   - field present and < min: incompatible — the caller skips the target
+//     (virtual) or returns a 400 (direct).
+//
+// Some upstreams reject values below a threshold (e.g. OpenCode Free
+// requires >= 16). A non-numeric field value is left untouched for the
+// upstream to validate.
+func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) (out []byte, compatible bool, err error) {
+	var field string
+	switch protocol {
+	case providers.ProtocolResponses:
+		field = "max_output_tokens"
+	case providers.ProtocolChat:
+		field = "max_tokens"
+	default:
+		return body, true, nil
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil, false, err
+	}
+	maxAny, ok := parsed[field]
+	if !ok {
+		parsed[field] = minOut
+		out, err := json.Marshal(parsed)
+		if err != nil {
+			return nil, false, err
+		}
+		return out, true, nil
+	}
+	var maxVal int64
+	integral := true
+	switch n := maxAny.(type) {
+	case int:
+		maxVal = int64(n)
+	case int64:
+		maxVal = n
+	case float64:
+		if n >= 0 && n == float64(int64(n)) {
+			maxVal = int64(n)
+		} else {
+			integral = false
+		}
+	default:
+		return body, true, nil
+	}
+	if !integral {
+		return nil, false, nil
+	}
+	if maxVal >= int64(minOut) {
+		return body, true, nil
+	}
+	return body, false, nil
+}
+
+// allSkippedUnsupportedFeature reports whether every recorded attempt was a
+// skipped min-output-incompatibility. This distinguishes "the request cannot
+// be represented by any target" (client's fault, 400) from "every target
+// failed or was unavailable" (503) on virtual routes.
+func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
+	if len(attempts) == 0 {
+		return false
+	}
+	for _, a := range attempts {
+		if a.result != "skipped" || a.failureClass != "unsupported_feature" {
+			return false
+		}
+	}
+	return true
 }
 
 func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) {

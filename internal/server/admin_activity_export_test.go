@@ -593,6 +593,11 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 	if len(header) != 27 {
 		t.Fatalf("expected 27 columns, got %d", len(header))
 	}
+	for _, h := range header {
+		if h == "warning_code" {
+			t.Fatal("warning_code column must stay removed (silent-omission decision)")
+		}
+	}
 	row := records[1]
 
 	// Every value must land under its own header. Build a header->index map and
@@ -631,10 +636,6 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		{"fallback_used", "false"},
 		{"fallback_reason", ""},
 		{"error_message", "boom"},
-		{"request_body", "the request body"},
-		{"request_body_truncated", "true"},
-		{"error_body", "the error body"},
-		{"error_body_truncated", "true"},
 		{"provider_request_id", "upstream-align"},
 		{"client_request_id", "req-align"},
 		{"route_kind", "virtual"},

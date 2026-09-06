@@ -42,11 +42,11 @@ func TestNewPKCEAndParseCallback(t *testing.T) {
 func TestFlowStoreOneActiveAndSingleUse(t *testing.T) {
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	store := NewFlowStore(func() time.Time { return now })
-	flow, err := store.Begin("provider-1")
+	flow, err := store.Begin("provider-1", "https://tiller.example.com/auth/callback")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Begin("provider-1"); !errors.Is(err, ErrFlowActive) {
+	if _, err := store.Begin("provider-1", "https://tiller.example.com/auth/callback"); !errors.Is(err, ErrFlowActive) {
 		t.Fatalf("second Begin error = %v, want ErrFlowActive", err)
 	}
 	if _, err := store.Consume("provider-1", "wrong-state"); !errors.Is(err, ErrFlowInvalid) {
@@ -55,13 +55,28 @@ func TestFlowStoreOneActiveAndSingleUse(t *testing.T) {
 	if _, err := store.Consume("provider-1", flow.PKCE.State); !errors.Is(err, ErrFlowInvalid) {
 		t.Fatalf("reused flow error = %v, want ErrFlowInvalid", err)
 	}
-	flow, err = store.Begin("provider-1")
+	flow, err = store.Begin("provider-1", "https://tiller.example.com/auth/callback")
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(flowLifetime)
 	if _, err := store.Consume("provider-1", flow.PKCE.State); !errors.Is(err, ErrFlowExpired) {
 		t.Fatalf("expired flow error = %v, want ErrFlowExpired", err)
+	}
+}
+
+func TestFlowStorePreservesRedirectURI(t *testing.T) {
+	store := NewFlowStore(nil)
+	flow, err := store.Begin("provider-1", "https://tiller.example.com/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumed, err := store.Consume("provider-1", flow.PKCE.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if consumed.RedirectURI != flow.RedirectURI {
+		t.Fatalf("redirect URI = %q, want %q", consumed.RedirectURI, flow.RedirectURI)
 	}
 }
 

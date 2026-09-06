@@ -49,7 +49,10 @@ type Server struct {
 	notifyLastSent   map[string]time.Time
 	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
-	loginLimiter *loginLimiter
+	loginLimiter         *loginLimiter
+	oauthStartLimiter    *loginLimiter
+	oauthCallbackLimiter *loginLimiter
+	backgroundCtx        context.Context
 	// lastOutcome holds the most recent request outcome per real model, keyed
 	// by "provider_name/upstream_model_id". It lives in RAM (never persisted) so
 	// it is cleared on restart. Written on each routed request; read by the
@@ -92,12 +95,13 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer)}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}}
+	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer)}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
 }
 func (s *Server) StartBackground(ctx context.Context) {
+	s.backgroundCtx = ctx
 	s.providers.StartScheduler(ctx)
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
@@ -173,6 +177,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
 	mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
+	mux.Handle("GET /v1/models/{model...}", s.requireClient(http.HandlerFunc(s.clientModel), false))
 	mux.Handle("POST /v1/chat/completions", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolChat) }), false))
 	mux.Handle("POST /v1/responses", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolResponses) }), false))
 	mux.Handle("POST /v1/messages", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolMessages) }), true))
@@ -308,13 +313,19 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 // requestClientIP returns the client address suitable for forwarding to an
 // anonymous provider. Forwarded headers are accepted only from the configured
 // trusted proxy; otherwise the direct peer address is used. When the direct
-// peer is trusted, the authoritative X-Real-IP header is preferred, and
-// X-Forwarded-For is only consulted with explicit chain semantics (walking
-// right-to-left and removing trusted hops) so a spoofable leftmost value can
-// never be trusted.
+// peer is trusted, the authoritative X-Real-IP header is preferred, and the
+// X-Forwarded-For chain is resolved by the canonical clientIP walker so the
+// two helpers can never drift.
 func (s *Server) requestClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -332,24 +343,7 @@ func (s *Server) requestClientIP(r *http.Request) string {
 			return address.String()
 		}
 	}
-	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
-	if len(parts) == 1 && strings.TrimSpace(parts[0]) == "" {
-		return host
-	}
-	addrs := make([]netip.Addr, len(parts))
-	for i, part := range parts {
-		addr, parseErr := netip.ParseAddr(strings.TrimSpace(part))
-		if parseErr != nil {
-			return host
-		}
-		addrs[i] = addr
-	}
-	for i := len(addrs) - 1; i >= 0; i-- {
-		if !s.config.TrustedProxy.Contains(addrs[i]) {
-			return addrs[i].String()
-		}
-	}
-	return addrs[0].String()
+	return clientIP(r, s.config.TrustedProxy)
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
@@ -413,19 +407,31 @@ func pagination(r *http.Request) (limit, offset int, search string) {
 	if limit > 200 {
 		limit = 200
 	}
-	_, _ = fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset)
-	if offset < 0 {
+	if _, err := fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset); err != nil || offset < 0 {
 		offset = 0
+	}
+	// Cap offset so a huge skip cannot force the database to walk the whole
+	// table. A client that needs to page deeper than this should refine its
+	// search or use the activity export.
+	const maxOffset = 10000
+	if offset > maxOffset {
+		offset = maxOffset
 	}
 	search = strings.TrimSpace(r.URL.Query().Get("search"))
 	return
 }
-func boolInt(v bool) int {
-	if v {
-		return 1
+
+// backupContentType returns a safe Content-Type for a backup download.
+// mime.TypeByExtension can return an empty string for some extensions (e.g.
+// ".db" is not always registered), so fall back to a generic binary type
+// rather than leaving the header blank.
+func backupContentType(ext string) string {
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
 	}
-	return 0
+	return "application/octet-stream"
 }
+
 func nullableString(v string) any {
 	if v == "" {
 		return nil
@@ -442,7 +448,7 @@ func (s *Server) exportBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(path)
-	w.Header().Set("Content-Type", mime.TypeByExtension(".db"))
+	w.Header().Set("Content-Type", backupContentType(".db"))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(path)))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Tiller-Secret-Material", "provider-credentials")

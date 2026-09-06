@@ -115,6 +115,9 @@ func (h *liveHub) subscribe() chan []byte {
 // unsubscribe removes a subscriber and stops the dispatcher when the last one
 // leaves. A brief overlap with a freshly-started dispatcher is harmless: both
 // only broadcast snapshots, and the old one exits on its cancelled context.
+// The overlap window is bounded by the time it takes the old dispatcher to
+// observe ctx.Done() — typically microseconds — and produces at most one
+// duplicate snapshot event, which the client reconciles idempotently.
 func (h *liveHub) unsubscribe(ch chan []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -176,11 +179,11 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 			h.broadcast("activity", delta)
 		case <-debounce.C:
 			if dirty {
-				h.broadcastSnapshot()
+				h.broadcastSnapshot(ctx)
 				dirty = false
 			}
 		case <-idle.C:
-			h.broadcastSnapshot()
+			h.broadcastSnapshot(ctx)
 			dirty = false
 		}
 	}
@@ -188,11 +191,11 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 
 // broadcastSnapshot recomputes and pushes the full envelope. It is the
 // self-healing source of truth; a dropped outcome delta is corrected here.
-func (h *liveHub) broadcastSnapshot() {
+func (h *liveHub) broadcastSnapshot(ctx context.Context) {
 	if h.snapshot == nil {
 		return
 	}
-	snap, err := h.snapshot(context.Background())
+	snap, err := h.snapshot(ctx)
 	if err != nil {
 		return
 	}

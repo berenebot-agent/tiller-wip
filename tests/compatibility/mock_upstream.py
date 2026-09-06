@@ -59,6 +59,7 @@ class Handler(BaseHTTPRequestHandler):
         if model in _failing_models:
             self.send_json({"error": {"message": "injected upstream failure", "type": "server_error"}}, 500)
             return
+        reasoning_probe = request.get("metadata", {}).get("user_id") == "reasoning-probe"
         if request.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -68,6 +69,8 @@ class Handler(BaseHTTPRequestHandler):
                 {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hello"}, "finish_reason": None}]},
                 {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
             ]
+            if reasoning_probe:
+                chunks.insert(0, {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{"index": 0, "delta": {"role": "assistant", "reasoning": "probe thinking"}, "finish_reason": None}]})
             for chunk in chunks:
                 self.wfile.write(b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n")
                 self.wfile.flush()
@@ -79,7 +82,7 @@ class Handler(BaseHTTPRequestHandler):
             "object": "chat.completion",
             "created": 1,
             "model": model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello"}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello", **({"reasoning": "probe thinking"} if reasoning_probe else {})}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         })
 

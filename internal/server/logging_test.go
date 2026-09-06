@@ -444,20 +444,28 @@ func TestProviderErrorMessageAndBodyArePassedThroughToClientButNotLogged(t *test
 		t.Fatalf("provider error was persisted in activity: status=%d payload=%v", status, activity)
 	}
 	activityRow := activity["data"].([]any)[0].(map[string]any)
-	if activityRow["error_text"] != "upstream_error" || activityRow["error_message"] != nil {
+	if activityRow["error_text"] != "upstream_error" {
 		t.Fatalf("provider error metadata = %v", activityRow)
+	}
+	// error_message should be a human-readable translation, not nil.
+	if msg, ok := activityRow["error_message"].(string); !ok || msg == "" {
+		t.Fatalf("expected human-readable error_message, got %v", activityRow)
 	}
 	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
 	if status != http.StatusOK || strings.Contains(string(mustJSON(t, attempts)), marker) {
 		t.Fatalf("provider error was persisted in attempts: status=%d payload=%v", status, attempts)
 	}
 	attemptRow := attempts["data"].([]any)[0].(map[string]any)
-	if attemptRow["failure_class"] != "http_502" || attemptRow["error_message"] != nil {
+	if attemptRow["failure_class"] != "http_502" {
 		t.Fatalf("provider attempt metadata = %v", attemptRow)
+	}
+	// Attempt error_message should be a human-readable translation.
+	if msg, ok := attemptRow["error_message"].(string); !ok || msg == "" {
+		t.Fatalf("expected human-readable attempt error_message, got %v", attemptRow)
 	}
 }
 
-func TestDetailedErrorLoggingCapturesBodies(t *testing.T) {
+func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
 	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
 	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -469,23 +477,93 @@ func TestDetailedErrorLoggingCapturesBodies(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
 	})
 	api, db, clientID, secret := loggingTestHarness(t, upstream)
-	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{"log_error_bodies": true})
-	if status != 204 {
-		t.Fatalf("enable detailed error logging: %d", status)
-	}
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": requestMarker}}})
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("provider error status = %d", resp.StatusCode)
 	}
-	var requestBody, errorBody string
+	var requestBody, errorBody *string
 	var requestTruncated, errorTruncated int
 	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=?`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(requestBody, requestMarker) || !strings.Contains(errorBody, errorMarker) || requestTruncated != 0 || errorTruncated != 0 {
-		t.Fatalf("captured bodies wrong: request=%q error=%q truncated=%d/%d", requestBody, errorBody, requestTruncated, errorTruncated)
+	if requestBody != nil || errorBody != nil || requestTruncated != 0 || errorTruncated != 0 {
+		t.Fatalf("request or provider bodies were persisted: request=%v error=%v truncated=%d/%d", requestBody, errorBody, requestTruncated, errorTruncated)
+	}
+}
+
+// TestRequestLoggingCapturesBodiesWhenEnabled is the positive counterpart to
+// TestRequestLoggingDoesNotCaptureBodies: with log_error_bodies=true, failed
+// request and upstream error bodies are persisted (bounded), and over-bound
+// bodies are truncated with the truncated flag set.
+func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
+	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
+	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
+	bigBody := strings.Repeat("x", int(maxUpstreamErrorBytes)+100)
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusBadGateway)
+		if strings.Contains(string(raw), "TRIGGER-BIG-BODY") {
+			_, _ = w.Write([]byte(bigBody))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
+	})
+	api, db, clientID, secret := loggingTestHarness(t, upstream)
+	if err := db.SetSetting(context.Background(), database.SettingLogErrorBodies, "1"); err != nil {
+		t.Fatal(err)
+	}
+	// Small-body failure: both bodies persisted verbatim, not truncated.
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": requestMarker}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var requestBody, errorBody *string
+	var requestTruncated, errorTruncated int
+	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if requestBody == nil || !strings.Contains(*requestBody, requestMarker) {
+		t.Fatalf("request body was not persisted when enabled: %v", requestBody)
+	}
+	if errorBody == nil || !strings.Contains(*errorBody, errorMarker) {
+		t.Fatalf("provider error body was not persisted when enabled: %v", errorBody)
+	}
+	if requestTruncated != 0 || errorTruncated != 0 {
+		t.Fatalf("small bodies must not be marked truncated: %d/%d", requestTruncated, errorTruncated)
+	}
+	// The activity API must expose the persisted error body.
+	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK {
+		t.Fatalf("activity: %d", status)
+	}
+	if !strings.Contains(string(mustJSON(t, activity)), errorMarker) {
+		t.Fatal("persisted error body missing from activity when enabled")
+	}
+	// Over-bound failure: body truncated with the truncated flag set.
+	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "TRIGGER-BIG-BODY"}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var bigError *string
+	var bigTruncated int
+	if err := db.SQL.QueryRow(`SELECT error_body,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&bigError, &bigTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if bigTruncated != 1 {
+		t.Fatal("over-bound error body must be marked truncated")
+	}
+	if bigError == nil || int64(len(*bigError)) > maxUpstreamErrorBytes {
+		t.Fatalf("truncated error body exceeds bound: %d", len(*bigError))
 	}
 }
 

@@ -201,6 +201,10 @@ const (
 type sessionCacheEntry struct {
 	session Session
 	expires time.Time
+	// secretHash binds the cached entry to the presented secret so a cache
+	// hit still proves knowledge of the secret. Without this, anyone
+	// presenting only the selector would hit the cache and skip verification.
+	secretHash [32]byte
 }
 
 // SessionStore persists admin sessions in the database so they survive process
@@ -296,8 +300,11 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	s.mu.Lock()
 	if entry, found := s.cache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) {
-			s.mu.Unlock()
-			return entry.session, true
+			want := sha256.Sum256([]byte(secret))
+			if subtle.ConstantTimeCompare(want[:], entry.secretHash[:]) == 1 {
+				s.mu.Unlock()
+				return entry.session, true
+			}
 		}
 		delete(s.cache, selector)
 	}
@@ -320,7 +327,7 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	}
 	session := Session{CSRFToken: csrfToken, ExpiresAt: exp}
 	s.mu.Lock()
-	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(sessionCacheTTL)}
+	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(sessionCacheTTL), secretHash: sha256.Sum256([]byte(secret))}
 	s.mu.Unlock()
 	return session, true
 }

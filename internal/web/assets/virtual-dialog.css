@@ -62,11 +62,10 @@
 .attempt-number { color: #6b8193; font: 700 10px var(--mono); }
 .attempt-route { min-width: 0; }
 .attempt-route code { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
-.attempt-route small { display: block; color: var(--muted); font-size: 10px; }
 .attempt-status { font: 700 11px var(--mono); }
-.activity-attempt-message { display: block; color: var(--muted); font-size: 11px; line-height: 1.3; white-space: normal; }
-.activity-attempt-message.is-clickable { padding: 0; border: 0; background: none; color: var(--muted); font-size: 11px; line-height: 1.3; text-align: left; cursor: pointer; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.activity-attempt-message.is-clickable:hover { color: var(--blue); text-decoration: underline; }
+.attempt-failed[data-error-key] { cursor: pointer; }
+.attempt-failed[data-error-key]:hover { background: #f8e8e7; }
+.attempt-failed[data-error-key]:hover .attempt-status { text-decoration: underline; }
 .error-dialog { width: min(560px, calc(100vw - 30px)); }
 .error-dialog > section { display: flex; flex-direction: column; }
 .error-content { padding: 18px 22px 0; }

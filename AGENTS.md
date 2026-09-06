@@ -41,6 +41,18 @@ cd /opt/tiller-router && docker compose down && docker compose up --build
 - `--build` is required — without it, Compose reuses the existing image and the user's "rebuild" intent isn't honored.
 - Do not invent a `docker build` + manual `docker run` workflow unless the user explicitly asks for one. The Compose service is the supported path.
 
+## Looking at logs
+
+The router logs JSON (slog) to stdout, captured by Docker. To diagnose a running deployment, use:
+
+```bash
+./tests/scripts/tiller-logs.sh              # last 10 min, all logs
+./tests/scripts/tiller-logs.sh 30           # last N min, all logs
+./tests/scripts/tiller-logs.sh 10 errors    # last 10 min, ERROR/WARN only
+```
+
+The script resolves the container from `docker-compose.yml`, so it stays correct if the service name changes.
+
 ## Toolchain — Go runs in Docker, never on the host
 
 - Go is intentionally **not** installed on the host. `go` is not on PATH and `go: command not found` is expected, not an error. Do not install Go on the host and do not treat the missing host Go as a problem to fix.
@@ -72,11 +84,19 @@ cd /opt/tiller-router && docker compose down && docker compose up --build
 - Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing — treat any code path that blurs it as a bug.
 - Preserve the real/virtual model permission boundary exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
 
+## Model metadata — discover, never hardcode
+
+- Never hardcode model IDs, model lists, or per-model behaviour (native protocol, capabilities, reasoning levels, context windows) in code. Catalogues and capabilities must come from live provider discovery (`Registry.Discover`) or provider-reported metadata, with models.dev as fallback-only enrichment (provider data stays authoritative).
+- Prefix/substring matching on model IDs is hardcoding by another name — do not add new ID-shape heuristics. Provider-type branching (auth headers, endpoints, discovery dispatch) is fine; per-model branching is not.
+- Narrow exception: where a provider's live discovery provably omits a compatibility fact the router needs (e.g. OpenCode Zen/Free models reporting no native protocol, OpenCode Free's minimum output tokens), an explicit, provider-scoped compatibility override is permitted — a literal model→value map or a provider-level constant, reviewed like any other provider quirk. Speculative name-shape guessing (`HasPrefix`/`Contains` on model IDs) stays prohibited; unknown models must degrade to a neutral default (e.g. the client's incoming protocol), never to a guessed value.
+- Discovery failures fail loud (surface as `refresh_error`). Never silently fall back to a stale hardcoded list.
+
 ## When to stop and ask instead of proceeding
 
 - The request would add a brand-new dependency, service, or infrastructure component that the human has not explicitly named.
 - The request would change client-facing model IDs, provider names, or virtual model names (renames are breaking — confirm intent before touching).
 - The request touches credential handling, auth, or logging in a way not explicitly covered by the security guardrails above.
+- No discovery path exists for a provider's models or capabilities — stop and present the human with options (e.g. a live endpoint to use, a user-supplied list, deferring support) instead of inventing a hardcoded catalogue.
 - You find an actual inconsistency between the docs and the current code — report it, don't resolve it silently.
 
 ## Branching and commits
@@ -112,6 +132,19 @@ Run the **minimum** tier that matches the change. Do **not** default to the full
 - **Run the full suite only when instructed, or for a significant feature/release.** Otherwise pick the smallest tier that would catch a regression in what you changed.
 
 When a change is purely frontend (`internal/web/assets/**`), the browser suite is the gate; run `./tiller-go.sh test ./...` for sanity but the UI tests are the ones that matter.
+
+### Formatting gate (every Go change, before every push)
+
+CI fails the build on unformatted Go files (`gofmt -l .` must print nothing).
+Run this locally before pushing — it uses the same pinned Go image as CI:
+
+```bash
+./tests/scripts/check-fmt.sh        # read-only check, exits 1 with the file list
+./tiller-go.sh fmt ./...            # fix, then re-run the check
+```
+
+Write Go with tabs, never spaces, and never collapse a block onto one line
+(`if x { y }`) — `gofmt` always rewrites both, and that is what keeps tripping CI.
 
 ### Test log convention (X = summary, Y = detail)
 

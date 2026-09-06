@@ -65,7 +65,7 @@ func Exchange(ctx context.Context, client *http.Client, code, redirectURI, verif
 	if hash := strings.IndexByte(code, '#'); hash >= 0 {
 		code, state = code[:hash], code[hash+1:]
 	}
-	body := map[string]string{"code": code, "state": state, "grant_type": "authorization_code", "client_id": ClientID, "redirect_uri": redirectURI, "code_verifier": verifier}
+	body := map[string]string{"code": code, "grant_type": "authorization_code", "client_id": ClientID, "redirect_uri": redirectURI, "code_verifier": verifier}
 	return tokenRequest(ctx, client, http.MethodPost, TokenURL, "application/json", body)
 }
 

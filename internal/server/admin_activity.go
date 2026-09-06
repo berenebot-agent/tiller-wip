@@ -150,8 +150,7 @@ type globalActivityView struct {
 }
 
 // listGlobalActivity returns recent request metadata across all client keys,
-// newest first, with a deterministic id secondary sort. It is read-only and
-// returns metadata plus bodies only when sensitive error logging is enabled.
+// newest first, with a deterministic id secondary sort.
 func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
@@ -276,10 +275,8 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
-// exportRealModelActivityCSV streams a CSV of activity that
-// resolved to a real model (resolved_provider + resolved_model), honouring the
-// active search filter. Scoping by resolved names keeps legacy rows and
-// virtual-routed requests visible. One inference request = one row.
+// exportRealModelActivityCSV streams a CSV of activity attributable to a real
+// model, honouring the active search filter. One inference request = one row.
 func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
 	var provider, upstream string
@@ -287,7 +284,7 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 		adminError(w, 404, "not_found", "Model not found.")
 		return
 	}
-	where, args := realAttribution(provider, upstream)
+	where, args := realAttribution(modelID, provider, upstream)
 	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
 		pattern := "%" + search + "%"
 		where += ` AND (rl.requested_model LIKE ? OR coalesce(rl.exposed_model,'') LIKE ? OR coalesce(rl.route_model,'') LIKE ? OR coalesce(rl.resolved_provider,'') LIKE ? OR CAST(rl.http_status AS TEXT) LIKE ? OR coalesce(rl.error_text,'') LIKE ? OR coalesce(rl.error_message,'') LIKE ?)`
@@ -422,7 +419,7 @@ func (s *Server) listRealModelActivity(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Model not found.")
 		return
 	}
-	where, args := realAttribution(provider, upstream)
+	where, args := realAttribution(modelID, provider, upstream)
 	s.listScopedActivity(w, r, where, args, `SELECT count(*) FROM provider_models WHERE id=?`, []any{modelID}, "Model not found.")
 }
 

@@ -44,10 +44,8 @@ func (t *inflightTracker) streaming(id string) {
 func (t *inflightTracker) end(id string, streamed bool) {
 	t.mu.Lock()
 	state := t.states[id]
-	if state.Active > 1 {
+	if state.Active > 0 {
 		state.Active--
-	} else {
-		state.Active = 0
 	}
 	if streamed && state.Streaming > 0 {
 		state.Streaming--
@@ -96,10 +94,8 @@ func (t *inflightTracker) clientStreaming(id string) {
 func (t *inflightTracker) clientEnd(id string, streamed bool) {
 	t.mu.Lock()
 	state := t.clientStates[id]
-	if state.Active > 1 {
+	if state.Active > 0 {
 		state.Active--
-	} else {
-		state.Active = 0
 	}
 	if streamed && state.Streaming > 0 {
 		state.Streaming--
@@ -141,10 +137,8 @@ func (t *inflightTracker) targetEnd(virtualID, targetID string) {
 	key := virtualID + "\x00" + targetID
 	t.mu.Lock()
 	state := t.targetStates[key]
-	if state.Active > 1 {
+	if state.Active > 0 {
 		state.Active--
-	} else {
-		state.Active = 0
 	}
 	if state.Active == 0 {
 		delete(t.targetStates, key)

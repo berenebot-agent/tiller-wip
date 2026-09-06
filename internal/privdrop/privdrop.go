@@ -56,6 +56,9 @@ func DropToRuntimeUser(dataDir string) (dropped bool, uid int, gid int, err erro
 	if err := syscall.Setuid(uid); err != nil {
 		return false, uid, gid, fmt.Errorf("setuid %d: %w", uid, err)
 	}
+	if actualUID := os.Getuid(); actualUID != uid {
+		return false, uid, gid, fmt.Errorf("setuid %d succeeded but process UID is %d", uid, actualUID)
+	}
 	return true, uid, gid, nil
 }
 
@@ -82,11 +85,12 @@ func envID(name string, fallback int) (int, error) {
 	}
 	v, err := strconv.Atoi(raw)
 	if err != nil || v <= 0 {
-		return 0, fmt.Errorf("%s must be a positive integer, got %q", name, raw)
+		return 0, fmt.Errorf("%s must be a positive non-zero integer; cannot drop privileges to root (0), got %q", name, raw)
 	}
 	return v, nil
 }
 
+// chownRecursive uses Lchown to avoid following symlinks, which could point outside the data directory.
 func chownRecursive(root string, uid, gid int) error {
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

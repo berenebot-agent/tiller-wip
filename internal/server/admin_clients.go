@@ -548,5 +548,8 @@ func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not update permissions.")
 		return
 	}
+	// Drop any cached auth identity so permission changes are visible on the
+	// next request instead of lingering until the 30s authenticator TTL.
+	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
 }
