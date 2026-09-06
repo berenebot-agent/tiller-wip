@@ -67,6 +67,43 @@ func TestLoginLimiterLockoutExpiry(t *testing.T) {
 	}
 }
 
+func TestLoginLimiterSuccessfulRequestsDoNotCountAsFailures(t *testing.T) {
+	l := newLoginLimiter(10, time.Minute, time.Minute)
+	for i := 0; i < 100; i++ {
+		if l.locked("1.2.3.4") {
+			t.Fatal("successful request was locked out")
+		}
+		l.success("1.2.3.4")
+	}
+}
+
+func TestLoginLimiterSuccessClearsFailures(t *testing.T) {
+	l := newLoginLimiter(3, time.Minute, time.Minute)
+	l.recordFailure("1.2.3.4")
+	l.recordFailure("1.2.3.4")
+	l.success("1.2.3.4")
+	if l.recordFailure("1.2.3.4") {
+		t.Fatal("success did not clear failures")
+	}
+}
+
+func TestOAuthRateLimitCheckDoesNotRecordSuccess(t *testing.T) {
+	l := newLoginLimiter(2, time.Minute, time.Minute)
+	app := &Server{config: config.Config{}, oauthCallbackLimiter: l}
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.RemoteAddr = "1.2.3.4:1234"
+	w := httptest.NewRecorder()
+	if app.oauthRateLimited(w, req, l) {
+		t.Fatal("first request should not be limited")
+	}
+	if app.oauthRateLimited(w, req, l) {
+		t.Fatal("second request should not be limited")
+	}
+	if l.locked("1.2.3.4") {
+		t.Fatal("rate-limit check recorded successful requests as failures")
+	}
+}
+
 // TestAdminLoginRateLimit verifies that repeated failed logins lock the client
 // out and that a correct credential is then rejected with 429.
 func TestAdminLoginRateLimit(t *testing.T) {

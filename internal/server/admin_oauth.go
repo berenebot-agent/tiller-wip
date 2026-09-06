@@ -27,11 +27,15 @@ func (s *Server) oauthRedirectURI(r *http.Request) string {
 
 func (s *Server) oauthRateLimited(w http.ResponseWriter, r *http.Request, limiter *loginLimiter) bool {
 	key := clientIP(r, s.config.TrustedProxy)
-	if limiter.locked(key) || limiter.recordFailure(key) {
+	if limiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
 		return true
 	}
 	return false
+}
+
+func (s *Server) recordOAuthFailure(r *http.Request, limiter *loginLimiter) bool {
+	return limiter.recordFailure(clientIP(r, s.config.TrustedProxy))
 }
 
 type oauthDeviceState struct {
@@ -68,7 +72,8 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
-	flow, err := s.oauthFlows.Begin(id)
+	redirectURI := s.oauthRedirectURI(r)
+	flow, err := s.oauthFlows.Begin(id, redirectURI)
 	if errors.Is(err, oauth.ErrFlowActive) {
 		adminError(w, 409, "oauth_flow_active", "An OAuth connection is already in progress.")
 		return
@@ -77,7 +82,6 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "oauth_start_failed", "Could not start OAuth connection.")
 		return
 	}
-	redirectURI := s.oauthRedirectURI(r)
 	authURL := ""
 	if providerType == "codex-subscription" {
 		authURL, err = codex.AuthorizationURL(redirectURI, flow.PKCE.State, flow.PKCE.Challenge)
@@ -113,6 +117,10 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		RedirectedURL string `json:"redirected_url"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
+		if s.recordOAuthFailure(r, s.oauthCallbackLimiter) {
+			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
+			return
+		}
 		adminError(w, 400, "invalid_request", err.Error())
 		return
 	}
@@ -121,23 +129,34 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		callback, err = claude.ParseCallback(input.RedirectedURL)
 	}
 	if err != nil {
+		if s.recordOAuthFailure(r, s.oauthCallbackLimiter) {
+			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
+			return
+		}
 		adminError(w, 400, "invalid_oauth_callback", "Paste the complete redirected callback URL.")
 		return
 	}
 	flow, err := s.oauthFlows.Consume(id, callback.State)
 	if err != nil {
+		if s.recordOAuthFailure(r, s.oauthCallbackLimiter) {
+			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
+			return
+		}
 		adminError(w, 400, "invalid_oauth_state", "This OAuth callback is invalid, expired, or already used.")
 		return
 	}
 	if r.Context().Err() != nil {
 		return
 	}
+	if flow.RedirectURI == "" {
+		adminError(w, 502, "oauth_exchange_failed", "OAuth connection state is invalid.")
+		return
+	}
 	var tokens oauth.TokenResponse
-	redirectURI := s.oauthRedirectURI(r)
 	if providerType == "codex-subscription" {
-		tokens, err = codex.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, redirectURI, flow.PKCE.Verifier)
+		tokens, err = codex.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, flow.RedirectURI, flow.PKCE.Verifier)
 	} else {
-		tokens, err = claude.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, redirectURI, flow.PKCE.Verifier, flow.PKCE.State)
+		tokens, err = claude.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, flow.RedirectURI, flow.PKCE.Verifier, flow.PKCE.State)
 	}
 	if err != nil {
 		adminError(w, 502, "oauth_exchange_failed", "OAuth token exchange failed.")
@@ -152,6 +171,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not save OAuth connection.")
 		return
 	}
+	s.oauthCallbackLimiter.success(clientIP(r, s.config.TrustedProxy))
 	writeJSON(w, 200, map[string]any{"status": "connected", "account_email": record.AccountEmail, "account_plan": record.AccountPlan})
 }
 

@@ -74,9 +74,10 @@ func ParseCallback(raw string) (Callback, error) {
 }
 
 type Flow struct {
-	ProviderID string
-	PKCE       PKCE
-	CreatedAt  time.Time
+	ProviderID  string
+	RedirectURI string
+	PKCE        PKCE
+	CreatedAt   time.Time
 }
 
 type FlowStore struct {
@@ -124,7 +125,7 @@ func (s *FlowStore) save() {
 	}
 }
 
-func (s *FlowStore) Begin(providerID string) (Flow, error) {
+func (s *FlowStore) Begin(providerID, redirectURI string) (Flow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
@@ -135,7 +136,7 @@ func (s *FlowStore) Begin(providerID string) (Flow, error) {
 	if err != nil {
 		return Flow{}, err
 	}
-	flow := Flow{ProviderID: providerID, PKCE: pkce, CreatedAt: now}
+	flow := Flow{ProviderID: providerID, RedirectURI: redirectURI, PKCE: pkce, CreatedAt: now}
 	s.byProvider[providerID] = flow
 	s.save()
 	return flow, nil
