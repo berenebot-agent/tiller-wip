@@ -786,6 +786,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// bounded and never persisted.
 				if upstreamErrorReadErr == nil && !translated && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
 					copySafeResponseHeaders(w.Header(), response.Header)
+					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+					w.Header().Set("X-Content-Type-Options", "nosniff")
 					upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
 					if route.UpstreamModelID != route.RequestedModel {
 						upstreamErrorBody = bytes.ReplaceAll(upstreamErrorBody, []byte(route.UpstreamModelID), []byte(route.RequestedModel))

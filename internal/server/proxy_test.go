@@ -240,6 +240,10 @@ func TestChatToResponsesOmitsEmptyAssistantTextWithToolCalls(t *testing.T) {
 	if input[2].(map[string]any)["type"] != "message" || input[2].(map[string]any)["role"] != "assistant" {
 		t.Fatalf("input[2] = %#v, want assistant message", input[2])
 	}
+	content := input[2].(map[string]any)["content"].([]any)
+	if len(content) != 1 || content[0].(map[string]any)["type"] != "output_text" {
+		t.Fatalf("input[2] content = %#v, want single output_text block", content)
+	}
 }
 
 func TestChatToResponsesRejectsUnsupportedRolesAndContentBlocks(t *testing.T) {

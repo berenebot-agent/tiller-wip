@@ -201,6 +201,7 @@ TILLER_GID=1000                                      # build-time gid for baked-
 TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy if using one
 TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
 TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
+TILLER_ADMIN_COOKIE_SECURE=false                     # force Secure on the admin cookie (use true over HTTPS)
 ```
 
 ### First steps
