@@ -1714,6 +1714,7 @@ func assistantMessageToResponsesItem(msg map[string]any) (map[string]any, error)
 	if err != nil {
 		return nil, err
 	}
+	rewriteResponsesTextRoles(parts, "output_text")
 	return map[string]any{
 		"type":    "message",
 		"role":    "assistant",
@@ -1756,6 +1757,18 @@ func chatContentToResponsesParts(value any) ([]any, error) {
 		parts = append(parts, part)
 	}
 	return parts, nil
+}
+
+// rewriteResponsesTextRoles rewrites input_text content parts to the
+// specified type. The Responses spec requires input_text on user messages
+// and output_text on assistant messages; chatContentToResponsesParts emits
+// input_text for all roles, so callers building assistant items must rewrite.
+func rewriteResponsesTextRoles(parts []any, toType string) {
+	for _, raw := range parts {
+		if block, ok := raw.(map[string]any); ok && block["type"] == "input_text" {
+			block["type"] = toType
+		}
+	}
 }
 
 type toolChoiceAction int
