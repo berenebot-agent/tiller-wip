@@ -550,293 +550,323 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	nonTranslationFailure := false
 	terminalPreflightClass := ""
 	oauthRefreshed := make(map[string]bool)
-	for i := 0; i < len(candidates); i++ {
-		candidate := candidates[i]
-		if ctxErr := r.Context().Err(); ctxErr != nil {
-			class := "client_cancelled"
-			if errors.Is(ctxErr, context.DeadlineExceeded) {
-				class = "client_timeout"
-			}
-			row.httpStatus = 502
-			row.errorText = strPtr(class)
-			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
-			row.fallbackReason = strPtr(class)
-			inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
-			return
+	cooldownSeconds := 0
+	if route.Virtual {
+		cooldownSeconds, _ = s.db.GetFallbackCooldownSeconds(r.Context())
+	}
+	skippedCooled := false
+	allAttemptedFailed := true
+	var success bool
+	for pass := 0; pass < 2 && !success; pass++ {
+		bypass := pass == 1
+		if bypass && (!skippedCooled || !allAttemptedFailed) {
+			break
 		}
-		attemptStart := time.Now()
-		if !candidate.Available {
-			nonTranslationFailure = true
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
-			continue
-		}
-		if candidate.Provider.Credential != "" && (candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go") && providers.IsOpenCodeFreeModel(candidate.UpstreamModelID) {
-			// Free-tier models are served anonymously on the Zen relay: any
-			// unrecognized bearer is rejected with 401, so a keyed
-			// zen/go instance can never serve them. Fail loud with a
-			// remediation instead of burning the attempt upstream — never
-			// silently re-route to another provider.
-			if !route.Virtual {
-				row.httpStatus = 400
-				row.errorText = strPtr("free_model_requires_keyless")
-				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless"))
-				inferenceError(w, 400, "invalid_request_error", "free_model_requires_keyless", "This is an OpenCode free-tier model and cannot be served with a credential. Configure it through an opencode-free provider instead.", incoming == providers.ProtocolMessages)
-				return
-			}
-			nonTranslationFailure = true
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
-			continue
-		}
-		target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
-		if target == "" {
-			protocolUnavailable = true
-			nonTranslationFailure = true
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
-			continue
-		}
-		translated = target != incoming
-		attemptBody := append([]byte(nil), originalBody...)
-		if translated {
-			attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
-			if err != nil {
-				code := "translation_error"
-				var unsupported unsupportedFeature
-				if errors.As(err, &unsupported) {
-					code = "unsupported_feature"
-				}
-				if !route.Virtual {
-					row.httpStatus = 400
-					row.errorText = strPtr(code)
-					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(code))
-					inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
-					return
-				}
-				translationFailureClass = code
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
-				continue
-			}
-			// After translation, re-apply the canonical selector for the target.
-			attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
-		} else {
-			var attemptRaw map[string]json.RawMessage
-			_ = json.Unmarshal(attemptBody, &attemptRaw)
-			attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
-			attemptBody, _ = json.Marshal(attemptRaw)
-		}
-		if candidate.Provider.Type == "codex-subscription" {
-			attemptBody, err = normalizeCodexRequest(attemptBody)
-			if err != nil {
-				row.httpStatus = 400
-				row.errorText = strPtr("invalid_request")
-				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
-				inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
-				return
-			}
-		}
-		if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
-			var compatible bool
-			attemptBody, compatible, err = checkMinOutputTokens(attemptBody, minOut, target)
-			if err != nil {
-				row.httpStatus = 400
-				row.errorText = strPtr("invalid_request")
-				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
-				inferenceError(w, 400, "invalid_request_error", "invalid_request", "Could not apply minimum output tokens.", incoming == providers.ProtocolMessages)
-				return
-			}
-			if !compatible {
-				// The client explicitly requested fewer output tokens than
-				// this target's provider minimum. Never silently raise an
-				// explicit client limit: skip the target on virtual routes,
-				// fail loud on direct routes.
-				if !route.Virtual {
-					row.httpStatus = 400
-					row.errorText = strPtr("unsupported_feature")
-					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
-					inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires a higher minimum output length than requested.", incoming == providers.ProtocolMessages)
-					return
-				}
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
-				continue
-			}
-		}
-		endpoint, e := providers.Endpoint(candidate.Provider, target)
-		if e != nil {
-			nonTranslationFailure = true
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
-			continue
-		}
-		upstreamCtx, attemptCancel := context.WithCancel(r.Context())
-		req, e := http.NewRequestWithContext(upstreamCtx, http.MethodPost, endpoint, bytes.NewReader(attemptBody))
-		if e != nil {
-			attemptCancel()
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Accept", "application/json, text/event-stream")
-		req.Header.Set("User-Agent", "Tiller-Router/1")
-		if candidate.Provider.Type == "opencode-free" {
-			if clientIP := s.requestClientIP(r); clientIP != "" {
-				req.Header.Set("X-Real-IP", clientIP)
-			}
-		}
-		providers.ApplyRequestAuth(req, candidate.Provider)
-		copySafeFeatureHeaders(req.Header, r.Header, target)
-		if candidate.Provider.Type == "codex-subscription" {
-			req.Header.Set("session-id", row.clientRequestID)
-		}
-		targetID := candidate.ProviderModelID
-		if targetID == "" {
-			targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
-		}
-		if route.Virtual {
-			s.inflight.targetStart(route.RouteModelID, targetID)
-		}
-		response, e := s.providers.Registry().HTTPClient().Do(req)
-		if e != nil {
-			if route.Virtual {
-				s.inflight.targetEnd(route.RouteModelID, targetID)
-			}
-			attemptCancel()
-			class := "upstream_unreachable"
-			if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
-				class = "upstream_timeout"
-			}
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
-			nonTranslationFailure = true
-			if r.Context().Err() != nil {
-				if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+		for i := 0; i < len(candidates); i++ {
+			candidate := candidates[i]
+			if ctxErr := r.Context().Err(); ctxErr != nil {
+				class := "client_cancelled"
+				if errors.Is(ctxErr, context.DeadlineExceeded) {
 					class = "client_timeout"
-				} else {
-					class = "client_cancelled"
 				}
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
+				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 				row.fallbackReason = strPtr(class)
 				inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 				return
 			}
-			if !route.Virtual {
-				row.httpStatus = 502
-				row.errorText = strPtr(class)
-				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
-				inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
-				return
+			attemptStart := time.Now()
+			if !candidate.Available {
+				nonTranslationFailure = true
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
+				continue
 			}
-			row.fallbackUsed = true
-			row.fallbackReason = strPtr(class)
-			continue
-		}
-		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			if route.Virtual {
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+			if route.Virtual && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
+				skippedCooled = true
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
+				continue
 			}
-			class := fmt.Sprintf("http_%d", response.StatusCode)
-			var upstreamErrorBody []byte
-			var upstreamErrorReadErr error
-			if !route.Virtual || logErrorBodies {
-				// Read the upstream error body for bounded passthrough to the
-				// originating client. When sensitive body logging is enabled,
-				// retain the bounded body on the failed attempt as well.
-				upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
-			}
-			response.Body.Close()
-			attemptCancel()
-			attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
-			if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
-				attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
-			}
-			row.attempts = append(row.attempts, attempt)
-			nonTranslationFailure = true
-			// Stale-auth recovery: on 401/403 from an OAuth provider, force a
-			// token refresh once per request and retry the same target before
-			// falling through to normal virtual fallback. ForceOAuthRefresh
-			// transitions auth_state on failure, so a dead refresh token surfaces
-			// as reconnect_required without further handling here.
-			if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
-				if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
-					if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
-						oauthRefreshed[candidate.Provider.ID] = true
-						// Propagate the fresh credential to every candidate
-						// sharing this provider so later targets don't retry
-						// with the stale token that just 401'd.
-						for j := range candidates {
-							if candidates[j].Provider.ID == candidate.Provider.ID {
-								candidates[j].Provider = candidate.Provider
-							}
-						}
-						i--
-						continue
-					}
-				}
-			}
-			// An upstream HTTP response is an upstream failure regardless of
-			// status. Ordered virtual routes try their next target by default;
-			// router-side failures (for example translation errors) are handled
-			// before this point and must not be hidden by fallback.
-			if !route.Virtual || !fallbackStatus(response.StatusCode) {
-				row.httpStatus = response.StatusCode
-				row.errorText = strPtr("upstream_error")
-				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
-				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
-					row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
-				}
-				// Direct (non-virtual, non-translated) routes pass through
-				// the provider's structured error body verbatim so the
-				// client sees the provider's error shape. The body is
-				// bounded and never persisted.
-				if upstreamErrorReadErr == nil && !translated && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
-					copySafeResponseHeaders(w.Header(), response.Header)
-					w.Header().Set("Content-Type", "application/json; charset=utf-8")
-					w.Header().Set("X-Content-Type-Options", "nosniff")
-					upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
-					if route.UpstreamModelID != route.RequestedModel {
-						upstreamErrorBody = bytes.ReplaceAll(upstreamErrorBody, []byte(route.UpstreamModelID), []byte(route.RequestedModel))
-					}
-					w.WriteHeader(response.StatusCode)
-					_, _ = w.Write(upstreamErrorBody)
+			if candidate.Provider.Credential != "" && (candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go") && providers.IsOpenCodeFreeModel(candidate.UpstreamModelID) {
+				// Free-tier models are served anonymously on the Zen relay: any
+				// unrecognized bearer is rejected with 401, so a keyed
+				// zen/go instance can never serve them. Fail loud with a
+				// remediation instead of burning the attempt upstream — never
+				// silently re-route to another provider.
+				if !route.Virtual {
+					row.httpStatus = 400
+					row.errorText = strPtr("free_model_requires_keyless")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless"))
+					inferenceError(w, 400, "invalid_request_error", "free_model_requires_keyless", "This is an OpenCode free-tier model and cannot be served with a credential. Configure it through an opencode-free provider instead.", incoming == providers.ProtocolMessages)
 					return
 				}
-				inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
-				return
+				nonTranslationFailure = true
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
+				continue
 			}
-			row.fallbackUsed = true
-			row.fallbackReason = strPtr(class)
-			continue
-		}
-		if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
+			target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
+			if target == "" {
+				protocolUnavailable = true
+				nonTranslationFailure = true
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
+				continue
+			}
+			translated = target != incoming
+			attemptBody := append([]byte(nil), originalBody...)
+			if translated {
+				attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
+				if err != nil {
+					code := "translation_error"
+					var unsupported unsupportedFeature
+					if errors.As(err, &unsupported) {
+						code = "unsupported_feature"
+					}
+					if !route.Virtual {
+						row.httpStatus = 400
+						row.errorText = strPtr(code)
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(code))
+						inferenceError(w, 400, "invalid_request_error", code, err.Error(), incoming == providers.ProtocolMessages)
+						return
+					}
+					translationFailureClass = code
+					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
+					continue
+				}
+				// After translation, re-apply the canonical selector for the target.
+				attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
+			} else {
+				var attemptRaw map[string]json.RawMessage
+				_ = json.Unmarshal(attemptBody, &attemptRaw)
+				attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
+				attemptBody, _ = json.Marshal(attemptRaw)
+			}
+			if candidate.Provider.Type == "codex-subscription" {
+				attemptBody, err = normalizeCodexRequest(attemptBody)
+				if err != nil {
+					row.httpStatus = 400
+					row.errorText = strPtr("invalid_request")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
+					inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
+					return
+				}
+			}
+			if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
+				var compatible bool
+				attemptBody, compatible, err = checkMinOutputTokens(attemptBody, minOut, target)
+				if err != nil {
+					row.httpStatus = 400
+					row.errorText = strPtr("invalid_request")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
+					inferenceError(w, 400, "invalid_request_error", "invalid_request", "Could not apply minimum output tokens.", incoming == providers.ProtocolMessages)
+					return
+				}
+				if !compatible {
+					// The client explicitly requested fewer output tokens than
+					// this target's provider minimum. Never silently raise an
+					// explicit client limit: skip the target on virtual routes,
+					// fail loud on direct routes.
+					if !route.Virtual {
+						row.httpStatus = 400
+						row.errorText = strPtr("unsupported_feature")
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+						inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires a higher minimum output length than requested.", incoming == providers.ProtocolMessages)
+						return
+					}
+					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+					continue
+				}
+			}
+			endpoint, e := providers.Endpoint(candidate.Provider, target)
+			if e != nil {
+				nonTranslationFailure = true
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: "invalid_upstream", latencyMs: time.Since(attemptStart).Milliseconds()})
+				continue
+			}
+			upstreamCtx, attemptCancel := context.WithCancel(r.Context())
+			req, e := http.NewRequestWithContext(upstreamCtx, http.MethodPost, endpoint, bytes.NewReader(attemptBody))
+			if e != nil {
+				attemptCancel()
+				continue
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Accept", "application/json, text/event-stream")
+			req.Header.Set("User-Agent", "Tiller-Router/1")
+			if candidate.Provider.Type == "opencode-free" {
+				if clientIP := s.requestClientIP(r); clientIP != "" {
+					req.Header.Set("X-Real-IP", clientIP)
+				}
+			}
+			providers.ApplyRequestAuth(req, candidate.Provider)
+			copySafeFeatureHeaders(req.Header, r.Header, target)
+			if candidate.Provider.Type == "codex-subscription" {
+				req.Header.Set("session-id", row.clientRequestID)
+			}
+			targetID := candidate.ProviderModelID
+			if targetID == "" {
+				targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
+			}
 			if route.Virtual {
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+				s.inflight.targetStart(route.RouteModelID, targetID)
 			}
-			response.Body.Close()
-			attemptCancel()
-			class := "upstream_read_error"
-			message := "The upstream provider could not complete the request."
-			if errors.Is(e, errUpstreamResponseTooLarge) {
-				class = "upstream_response_too_large"
-				message = "The upstream provider response exceeded Tiller's non-streaming response limit."
+			response, e := s.providers.Registry().HTTPClient().Do(req)
+			if e != nil {
+				if route.Virtual {
+					s.inflight.targetEnd(route.RouteModelID, targetID)
+				}
+				attemptCancel()
+				class := "upstream_unreachable"
+				if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
+					class = "upstream_timeout"
+				}
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
+				if route.Virtual && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
+					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
+				}
+				nonTranslationFailure = true
+				if r.Context().Err() != nil {
+					if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+						class = "client_timeout"
+					} else {
+						class = "client_cancelled"
+					}
+					row.httpStatus = 502
+					row.errorText = strPtr(class)
+					row.fallbackReason = strPtr(class)
+					inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
+					return
+				}
+				if !route.Virtual {
+					row.httpStatus = 502
+					row.errorText = strPtr(class)
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+					return
+				}
+				row.fallbackUsed = true
+				row.fallbackReason = strPtr(class)
+				continue
 			}
-			terminalPreflightClass = class
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
-			nonTranslationFailure = true
-			row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
-			if !route.Virtual || r.Context().Err() != nil {
-				row.httpStatus = 502
-				row.errorText = strPtr(class)
-				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
-				inferenceError(w, 502, "api_error", class, message, incoming == providers.ProtocolMessages)
-				return
+			if response.StatusCode < 200 || response.StatusCode >= 300 {
+				if route.Virtual {
+					s.inflight.targetEnd(route.RouteModelID, targetID)
+				}
+				class := fmt.Sprintf("http_%d", response.StatusCode)
+				var upstreamErrorBody []byte
+				var upstreamErrorReadErr error
+				if !route.Virtual || logErrorBodies {
+					// Read the upstream error body for bounded passthrough to the
+					// originating client. When sensitive body logging is enabled,
+					// retain the bounded body on the failed attempt as well.
+					upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
+				}
+				response.Body.Close()
+				attemptCancel()
+				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
+				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+					attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
+				}
+				row.attempts = append(row.attempts, attempt)
+				if route.Virtual && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
+					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
+				}
+				nonTranslationFailure = true
+				// Stale-auth recovery: on 401/403 from an OAuth provider, force a
+				// token refresh once per request and retry the same target before
+				// falling through to normal virtual fallback. ForceOAuthRefresh
+				// transitions auth_state on failure, so a dead refresh token surfaces
+				// as reconnect_required without further handling here.
+				if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
+					if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
+						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
+							oauthRefreshed[candidate.Provider.ID] = true
+							// Propagate the fresh credential to every candidate
+							// sharing this provider so later targets don't retry
+							// with the stale token that just 401'd.
+							for j := range candidates {
+								if candidates[j].Provider.ID == candidate.Provider.ID {
+									candidates[j].Provider = candidate.Provider
+								}
+							}
+							i--
+							continue
+						}
+					}
+				}
+				// An upstream HTTP response is an upstream failure regardless of
+				// status. Ordered virtual routes try their next target by default;
+				// router-side failures (for example translation errors) are handled
+				// before this point and must not be hidden by fallback.
+				if !route.Virtual || !fallbackStatus(response.StatusCode) {
+					row.httpStatus = response.StatusCode
+					row.errorText = strPtr("upstream_error")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
+					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
+					}
+					// Direct (non-virtual, non-translated) routes pass through
+					// the provider's structured error body verbatim so the
+					// client sees the provider's error shape. The body is
+					// bounded and never persisted.
+					if upstreamErrorReadErr == nil && !translated && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
+						copySafeResponseHeaders(w.Header(), response.Header)
+						w.Header().Set("Content-Type", "application/json; charset=utf-8")
+						w.Header().Set("X-Content-Type-Options", "nosniff")
+						upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
+						if route.UpstreamModelID != route.RequestedModel {
+							upstreamErrorBody = bytes.ReplaceAll(upstreamErrorBody, []byte(route.UpstreamModelID), []byte(route.RequestedModel))
+						}
+						w.WriteHeader(response.StatusCode)
+						_, _ = w.Write(upstreamErrorBody)
+						return
+					}
+					inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
+					return
+				}
+				row.fallbackUsed = true
+				row.fallbackReason = strPtr(class)
+				continue
 			}
-			row.fallbackUsed = true
-			row.fallbackReason = strPtr(class)
-			continue
+			if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
+				if route.Virtual {
+					s.inflight.targetEnd(route.RouteModelID, targetID)
+				}
+				response.Body.Close()
+				attemptCancel()
+				class := "upstream_read_error"
+				message := "The upstream provider could not complete the request."
+				if errors.Is(e, errUpstreamResponseTooLarge) {
+					class = "upstream_response_too_large"
+					message = "The upstream provider response exceeded Tiller's non-streaming response limit."
+				}
+				terminalPreflightClass = class
+				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+				if route.Virtual && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
+					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
+				}
+				nonTranslationFailure = true
+				row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+				if !route.Virtual || r.Context().Err() != nil {
+					row.httpStatus = 502
+					row.errorText = strPtr(class)
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					inferenceError(w, 502, "api_error", class, message, incoming == providers.ProtocolMessages)
+					return
+				}
+				row.fallbackUsed = true
+				row.fallbackReason = strPtr(class)
+				continue
+			}
+			route, resp, cancel = candidate, response, attemptCancel
+			if route.Virtual {
+				activeTargetID = targetID
+			}
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
+			allAttemptedFailed = false
+			success = true
+			goto routeDone
 		}
-		route, resp, cancel = candidate, response, attemptCancel
-		if route.Virtual {
-			activeTargetID = targetID
-		}
-		row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
-		break
 	}
+routeDone:
 	// Emit a single logical notification for the routing outcome (fallback or
 	// all-targets-failed). This is best-effort and never blocks or alters the
 	// client response.
@@ -1148,6 +1178,24 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 		return body, true, nil
 	}
 	return body, false, nil
+}
+
+// cooldownTrigger reports whether a failure class / HTTP status should open the
+// fallback cooldown for the target. Request-specific failures (400, 409, 422,
+// upstream_response_too_large) do not indicate target health and are excluded.
+func cooldownTrigger(class string, httpStatus int) bool {
+	switch class {
+	case "upstream_unreachable", "upstream_timeout", "upstream_read_error":
+		return true
+	}
+	switch httpStatus {
+	case 408, 429, 404, 410, 401, 403:
+		return true
+	}
+	if httpStatus >= 500 && httpStatus < 600 {
+		return true
+	}
+	return false
 }
 
 // allSkippedUnsupportedFeature reports whether every recorded attempt was a

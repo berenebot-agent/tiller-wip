@@ -26,6 +26,11 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
+	fallbackCooldown, err := s.db.GetFallbackCooldownSeconds(r.Context())
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load settings.")
+		return
+	}
 	notifications, err := s.db.GetNotificationSettings(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
@@ -36,6 +41,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"default_retention_days":                 retention,
 		"log_error_bodies":                       logErrorBodies,
 		"fallback_timeout_seconds":               fallbackTimeout,
+		"fallback_cooldown_seconds":              fallbackCooldown,
 		"notifications_enabled":                  notifications.Enabled,
 		"notifications_webhook_url":              notifications.WebhookURL,
 		"notifications_event_fallback":           notifications.EventFallback,
@@ -54,6 +60,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultRetentionDays               *int    `json:"default_retention_days"`
 		LogErrorBodies                     *bool   `json:"log_error_bodies"`
 		FallbackTimeoutSeconds             *int    `json:"fallback_timeout_seconds"`
+		FallbackCooldownSeconds            *int    `json:"fallback_cooldown_seconds"`
 		NotificationsEnabled               *bool   `json:"notifications_enabled"`
 		NotificationsWebhookURL            *string `json:"notifications_webhook_url"`
 		NotificationsEventFallback         *bool   `json:"notifications_event_fallback"`
@@ -74,6 +81,10 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.FallbackTimeoutSeconds != nil && (*input.FallbackTimeoutSeconds < 1 || *input.FallbackTimeoutSeconds > 3600) {
 		adminError(w, 400, "invalid_fallback_timeout", "Fallback timeout must be between 1 and 3600 seconds.")
+		return
+	}
+	if input.FallbackCooldownSeconds != nil && *input.FallbackCooldownSeconds < 0 {
+		adminError(w, 400, "invalid_cooldown", "Fallback cooldown must be 0 or more seconds.")
 		return
 	}
 	if input.NotificationsWebhookURL != nil && *input.NotificationsWebhookURL != "" {
@@ -99,6 +110,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		{key: database.SettingDefaultRetentionDays, value: input.DefaultRetentionDays},
 		{key: database.SettingLogErrorBodies, value: input.LogErrorBodies},
 		{key: database.SettingFallbackTimeoutSeconds, value: input.FallbackTimeoutSeconds},
+		{key: database.SettingFallbackCooldownSeconds, value: input.FallbackCooldownSeconds},
 		{key: database.SettingNotificationsEnabled, value: input.NotificationsEnabled},
 		{key: database.SettingNotificationsWebhookURL, value: input.NotificationsWebhookURL},
 		{key: database.SettingNotificationsEventFallback, value: input.NotificationsEventFallback},
@@ -128,6 +140,9 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		if u.key == database.SettingFallbackTimeoutSeconds {
 			s.providers.Registry().SetResponseHeaderTimeout(time.Duration(*input.FallbackTimeoutSeconds) * time.Second)
+		}
+		if u.key == database.SettingFallbackCooldownSeconds && *input.FallbackCooldownSeconds == 0 {
+			s.cooldown.clear()
 		}
 	}
 	w.WriteHeader(204)

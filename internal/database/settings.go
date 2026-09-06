@@ -21,6 +21,7 @@ const (
 	SettingNotificationsEventClientKeyCreated = "notifications_event_client_key_created"
 	SettingNotificationsEventClientKeyDeleted = "notifications_event_client_key_deleted"
 	SettingNotificationsEventAdminLogin       = "notifications_event_admin_login"
+	SettingFallbackCooldownSeconds            = "fallback_cooldown_seconds"
 )
 
 // GetSetting returns the raw string value for a settings key.
@@ -87,6 +88,19 @@ func (d *DB) GetLogErrorBodies(ctx context.Context) (bool, error) {
 func (d *DB) GetFallbackTimeout(ctx context.Context) (int, error) {
 	const fallback = 60
 	if v, e := d.GetInt(ctx, SettingFallbackTimeoutSeconds); e == nil {
+		return v, nil
+	} else if !errors.Is(e, sql.ErrNoRows) {
+		return 0, e
+	}
+	return fallback, nil
+}
+
+// GetFallbackCooldownSeconds returns the configured fallback cooldown in seconds,
+// with a sane default of 300 (5 minutes) if the key is missing or malformed.
+// A value of 0 disables the cooldown feature.
+func (d *DB) GetFallbackCooldownSeconds(ctx context.Context) (int, error) {
+	const fallback = 300
+	if v, e := d.GetInt(ctx, SettingFallbackCooldownSeconds); e == nil {
 		return v, nil
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return 0, e

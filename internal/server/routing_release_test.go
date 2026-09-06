@@ -72,6 +72,10 @@ func TestOrderedFallbackCoversUpstreamHTTPFailures(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
 	})
 	api, secret, canonical := notificationTestHarness(t, failing, succeeding)
+	status, _, _ := api.request(http.MethodPut, "/api/admin/settings", map[string]any{"fallback_cooldown_seconds": 0})
+	if status != http.StatusNoContent {
+		t.Fatalf("disable cooldown: %d", status)
+	}
 
 	for _, status := range []int{400, 401, 403, 404, 409, 422, 429, 500, 503} {
 		mu.Lock()

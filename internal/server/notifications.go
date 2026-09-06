@@ -355,6 +355,8 @@ func failureMessage(class string, httpStatus int) string {
 		return "timeout"
 	case "upstream_read_error":
 		return "read error"
+	case "cooldown":
+		return "cooldown"
 	case "client_timeout":
 		return "client timeout"
 	case "client_cancelled":
