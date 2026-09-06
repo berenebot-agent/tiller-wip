@@ -27,7 +27,7 @@ func Load() (Config, error) {
 	c := Config{
 		AdminUsername:     os.Getenv("TILLER_ADMIN_USERNAME"),
 		AdminPassword:     os.Getenv("TILLER_ADMIN_PASSWORD"),
-		AdminCookieSecure: strings.EqualFold(os.Getenv("TILLER_ADMIN_COOKIE_SECURE"), "true") || os.Getenv("TILLER_ADMIN_COOKIE_SECURE") == "1",
+		AdminCookieSecure: false,
 		AdminSessionTTL:   30 * 24 * time.Hour,
 		DataDir:           envDefault("TILLER_DATA_DIR", "/data"),
 		ListenAddr:        envDefault("TILLER_LISTEN_ADDR", ":8080"),
@@ -38,6 +38,13 @@ func Load() (Config, error) {
 	case "debug", "info", "warn", "error":
 	default:
 		return Config{}, fmt.Errorf("TILLER_LOG_LEVEL must be debug, info, warn, or error, got %q", c.LogLevel)
+	}
+	if raw := os.Getenv("TILLER_ADMIN_COOKIE_SECURE"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_ADMIN_COOKIE_SECURE: %w", err)
+		}
+		c.AdminCookieSecure = v
 	}
 	if raw := os.Getenv("TILLER_ADMIN_SESSION_TTL"); raw != "" {
 		v, err := time.ParseDuration(raw)

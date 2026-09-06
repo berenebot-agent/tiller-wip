@@ -13,6 +13,12 @@ services:
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
 
+      # Force the admin session cookie's Secure attribute. Set to "true" when
+      # serving the admin UI over HTTPS (behind a reverse proxy or with TLS at
+      # the edge) so the cookie is only sent over secure connections. Defaults
+      # to false; leave unset for plain-HTTP LAN access.
+      TILLER_ADMIN_COOKIE_SECURE: ${TILLER_ADMIN_COOKIE_SECURE:-false}
+
       # The app starts as root and drops to the runtime user at boot, chown'ing
       # ./data to that user first — so a fresh ./data works with no `sudo chown`
       # step. TILLER_RUN_UID/TILLER_RUN_GID select the user the app runs as
