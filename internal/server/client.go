@@ -21,10 +21,10 @@ import (
 const maxUpstreamNonStreamBytes int64 = 64 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
-// read in order to pass it through verbatim to the originating client. The
-// body is only ever written directly to the client — it is never stored in
-// the activity log (privacy guardrail). Virtual fallback paths never read
-// the body at all: they close it immediately and move on.
+// read for passthrough to the originating client. When detailed error
+// logging is enabled, the bounded body is also retained on the activity row;
+// otherwise it is written only to the client. Virtual fallback paths skip the
+// read unless detailed error logging is on.
 const maxUpstreamErrorBytes int64 = 1 << 20
 
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
@@ -861,6 +861,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
 			return
 		}
+		if route.Virtual && allSkippedUnsupportedFeature(row.attempts) {
+			row.httpStatus = 400
+			row.errorText = strPtr("unsupported_feature")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+			inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
+			return
+		}
 		row.httpStatus = 503
 		for i := len(row.attempts) - 1; i >= 0; i-- {
 			if row.attempts[i].result == "failed" && row.attempts[i].errorMessage != nil {
@@ -1139,6 +1146,22 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 		return body, true, nil
 	}
 	return body, false, nil
+}
+
+// allSkippedUnsupportedFeature reports whether every recorded attempt was a
+// skipped min-output-incompatibility. This distinguishes "the request cannot
+// be represented by any target" (client's fault, 400) from "every target
+// failed or was unavailable" (503) on virtual routes.
+func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
+	if len(attempts) == 0 {
+		return false
+	}
+	for _, a := range attempts {
+		if a.result != "skipped" || a.failureClass != "unsupported_feature" {
+			return false
+		}
+	}
+	return true
 }
 
 func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) {

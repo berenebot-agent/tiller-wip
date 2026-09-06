@@ -583,6 +583,153 @@ func TestOpenCodeFreeMinOutputTokensRejectsExplicitLowLimit(t *testing.T) {
 	}
 }
 
+// TestVirtualAllTargetsBelowMinOutputReturns400 verifies that when every
+// target of a virtual model is skipped because the client's explicit
+// max_tokens is below each provider minimum, the router returns 400
+// unsupported_feature rather than a misleading 503 virtual_model_unavailable.
+// Nothing is unavailable — the request simply cannot be represented.
+func TestVirtualAllTargetsBelowMinOutputReturns400(t *testing.T) {
+	// Each dedicated server acts as an opencode-free provider (>= 16 output
+	// tokens). They expose distinct upstream model IDs so they can both be
+	// attached as virtual targets. The -free suffix is required for the
+	// opencode-free discovery filter to accept them.
+	dedicatedA := httptest.NewServer(opusFreeHandler("llama-free"))
+	t.Cleanup(dedicatedA.Close)
+	dedicatedB := httptest.NewServer(opusFreeHandler("qwen-free"))
+	t.Cleanup(dedicatedB.Close)
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	providerModelIDs := map[string]string{}
+	for _, p := range []struct{ name, url string }{
+		{"free-provider-a", dedicatedA.URL + "/v1"},
+		{"free-provider-b", dedicatedB.URL + "/v1"},
+	} {
+		status, payload, _ := api.request("POST", "/api/admin/providers", map[string]any{
+			"name":      p.name,
+			"type":      "opencode-free",
+			"base_url":  p.url,
+			"protocols": []string{"chat", "responses"},
+		})
+		if status != 201 {
+			t.Fatalf("create provider %s: %d %v", p.name, status, payload)
+		}
+		providerID := payload["id"].(string)
+		status, payload, _ = api.request("POST", "/api/admin/providers/"+providerID+"/refresh", nil)
+		if status != 200 && status != 204 {
+			t.Fatalf("refresh %s: %d %v", p.name, status, payload)
+		}
+		status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+		if status != 200 {
+			t.Fatalf("list models %s: %d %v", p.name, status, payload)
+		}
+		for _, raw := range payload["data"].([]any) {
+			m := raw.(map[string]any)
+			if upID, ok := m["upstream_model_id"].(string); ok {
+				if id, ok := m["id"].(string); ok {
+					providerModelIDs[upID] = id
+				}
+			}
+		}
+	}
+
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "min-group"})
+	if status != 201 {
+		t.Fatalf("create group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{
+		"group_id":     groupID,
+		"name":         "min-vm",
+		"routing_mode": "ordered_fallback",
+		"targets": []any{
+			map[string]any{"provider_model_id": providerModelIDs["llama-free"], "enabled": true},
+			map[string]any{"provider_model_id": providerModelIDs["qwen-free"], "enabled": true},
+		},
+	})
+	if status != 201 {
+		t.Fatalf("create virtual: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "min-vm-client", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+	clientSecret := payload["secret"].(string)
+	status, _, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{
+		"defaults":    []any{},
+		"permissions": []any{map[string]any{"kind": "virtual", "model_id": virtualID, "enabled": true}},
+	})
+	if status != 204 {
+		t.Fatalf("permissions: %d", status)
+	}
+
+	call := func(body map[string]any) (int, map[string]any) {
+		t.Helper()
+		raw, _ := json.Marshal(body)
+		req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+clientSecret)
+		resp, err := api.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	// Every target has min 16; client asks for 8. Both targets are skipped.
+	// Expect 400 unsupported_feature, not 503 virtual_model_unavailable.
+	if status, out := call(map[string]any{
+		"model":      "min-group/min-vm",
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_tokens": 8,
+	}); status != 400 {
+		t.Fatalf("all-skipped virtual: expected 400, got %d (%v)", status, out)
+	} else if errObj, ok := out["error"].(map[string]any); !ok || errObj["code"] != "unsupported_feature" {
+		t.Fatalf("all-skipped virtual: expected unsupported_feature, got %v", out)
+	}
+
+	// A later target satisfying the request still wins (fallback preserved).
+	if status, out := call(map[string]any{
+		"model":      "min-group/min-vm",
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+		"max_tokens": 32,
+	}); status != 200 {
+		t.Fatalf("satisfied virtual: expected 200, got %d (%v)", status, out)
+	}
+}
+
+// opusFreeHandler returns an http.Handler that serves a catalogue exposing the
+// given model ID and answers chat completions — modelling an opencode-free
+// provider (MinOutputTokens: 16) for tests.
+func opusFreeHandler(modelID string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data":   []any{map[string]any{"id": modelID, "object": "model"}},
+			})
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "resp",
+			"object":  "chat.completion",
+			"model":   modelID,
+			"choices": []any{map[string]any{"message": map[string]any{"content": "ok"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1},
+		})
+	})
+}
+
 func TestCheckMinOutputTokens(t *testing.T) {
 	// Absent field: minimum supplied, compatible.
 	out, ok, err := checkMinOutputTokens([]byte(`{"model":"m"}`), 16, providers.ProtocolChat)
