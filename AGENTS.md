@@ -215,3 +215,42 @@ without re-running: read `tests/logs/<run-id>/run.log` and open the matching
 `trace.zip` + `error-context.md` per failing test). Each `run_id` is unique
 (`tiller-browser-<pid>`), so preserving a run indefinitely is just a matter
 of renaming `tests/logs/<run-id>/` aside before the next invocation.
+
+### Unified test runner
+
+For running a known set of test tiers, use `./tests/run.sh`. It runs each
+tier, writes **all** output to `tests/logs/runs/<UTC-ts>-<tiers>/`, and prints
+only a one-line-per-tier summary to stdout:
+
+```
+[tiller-router tests] 2026-09-07T18:00:00Z — unit,vet,runtime
+  unit    PASS   45.2s
+  vet     PASS    3.1s
+  runtime PASS   12.8s
+  overall PASS   61.1s
+  detail: tests/logs/runs/20260907T180000-unit,vet,runtime/
+```
+
+Flags pick tiers: `--unit --vet --browser --compat --runtime`, or `--all`.
+No flags runs the fast preset (`unit + vet + runtime`); use `--all` for
+everything. `--list` lists tiers and exits.
+
+There are **no verbosity flags** — the flag only picks tiers, never how much
+is logged. All three output levels below are **always written to disk**, so an
+agent never has to re-run just to see more. The `detail:` line in the summary
+points at the folder containing them.
+
+- **L1 — Summary** (`summary.txt`): the per-tier pass/fail + elapsed block
+  printed to stdout. On a failure, the failing tier's first error is inlined.
+  Context-cheap: this is all an agent needs to know whether anything broke.
+- **L2 — Timings** (`timings.txt`): per-tier elapsed, plus a per-test
+  breakdown for the Go unit tier (parsed from `go test -v`) and per-phase
+  lines for the browser tier.
+- **L3 — Full detail** (`full.log` + each `<tier>/out.log`): the complete
+  output of every tier, concatenated with tier headers. Open these when
+  diagnosing a failure.
+
+The older per-tier commands (`./tiller-go.sh`, `tests/browser/run.sh`, etc.)
+still work unchanged and remain the right tool for a tight edit loop (Tier A:
+run a single package or spec). Use `./tests/run.sh` when you want a known set
+of tiers with a single summary and guaranteed detail on disk.

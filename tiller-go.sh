@@ -49,9 +49,21 @@ fi
 # Log capture: always write full output to a repo-local log file under
 # tests/logs/ (gitignored, persistent across runs). The summary printed at
 # the end shows the path; on failure the first FAIL line is also inlined.
-LOG_DIR="tests/logs/tiller-go"
+#
+# When wrapped by tests/run.sh, TILLER_TEST_DIR is set: write straight to
+# <dir>/out.log so the unified runner owns the run folder. When unset, use
+# the dated per-invocation file (direct-invocation behavior is unchanged).
+if [ -n "${TILLER_TEST_DIR:-}" ]; then
+    LOG_DIR="$TILLER_TEST_DIR"
+else
+    LOG_DIR="tests/logs/tiller-go"
+fi
 mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/$(date -u +%Y%m%dT%H%M%S)-go-$(echo "$*" | tr ' /' '__').log"
+if [ -n "${TILLER_TEST_DIR:-}" ]; then
+    LOG_FILE="$LOG_DIR/out.log"
+else
+    LOG_FILE="$LOG_DIR/$(date -u +%Y%m%dT%H%M%S)-go-$(echo "$*" | tr ' /' '__').log"
+fi
 ts=$(date +%s)
 
 docker run $TTY_FLAG --rm \

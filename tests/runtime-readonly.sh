@@ -10,6 +10,14 @@
 # host networking, env-var admin credentials, builds tiller-router:dev).
 set -eu
 
+# When wrapped by tests/run.sh, capture all output to the tier's out.log so
+# the unified run folder has a complete L3 record. When run directly,
+# behavior is unchanged (stdout only, no file written).
+if [ -n "${TILLER_TEST_DIR:-}" ]; then
+    mkdir -p "$TILLER_TEST_DIR"
+    exec >"$TILLER_TEST_DIR/out.log" 2>&1
+fi
+
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 name=tiller-runtime-readonly
 password=runtime-readonly-test-password

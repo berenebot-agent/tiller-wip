@@ -27,6 +27,7 @@ set -eu
 KEEP_BROWSER=${KEEP_BROWSER:-3}
 KEEP_COMPAT=${KEEP_COMPAT:-5}
 KEEP_GO=${KEEP_GO:-10}
+KEEP_RUNS=${KEEP_RUNS:-10}
 
 logs_dir="$(CDPATH= cd -- "$(dirname "${BASH_SOURCE[0]:-$0}")/../.." && pwd)/tests/logs"
 
@@ -50,6 +51,7 @@ collect_evictions() {
 collect_evictions 'tiller-browser-*' "$KEEP_BROWSER"
 collect_evictions 'compat/*-compat.log' "$KEEP_COMPAT"
 collect_evictions 'tiller-go/*.log' "$KEEP_GO"
+collect_evictions 'runs/*' "$KEEP_RUNS"
 
 if [ "${#evict[@]}" -eq 0 ]; then
 	(return 0 2>/dev/null) || exit 0

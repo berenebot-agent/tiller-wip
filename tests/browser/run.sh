@@ -53,14 +53,23 @@ phase_timing() {
 # Prune stale runs first so interrupted runs don't accumulate on disk.
 . "$repo_dir/tests/scripts/prune-test-logs.sh"
 mkdir -p tests/logs
-run_dir="$(pwd)/tests/logs/$run_id"
+# When wrapped by tests/run.sh, TILLER_TEST_DIR points at the tier's folder
+# inside the unified run dir — use it directly and let the wrapper own
+# lifecycle + pruning. When unset, use the dated per-run dir as before.
+if [ -n "${TILLER_TEST_DIR:-}" ]; then
+    run_dir="$TILLER_TEST_DIR"
+    WRAPPED=1
+else
+    run_dir="$(pwd)/tests/logs/$run_id"
+    WRAPPED=0
+fi
 mkdir -p "$run_dir/playwright-results" "$run_dir/activity-data"
 # Capture the full run output to a per-run log file. The summary block at the
 # end prints this path; on failure the first error is also inlined. Every
 # line of the run is prefixed with the elapsed time since the run started
 # (via tests/scripts/ts-filter.py) so a single log scan tells you exactly
 # when each step happened.
-RUN_LOG="$run_dir/run.log"
+RUN_LOG="$run_dir/$(if [ "${WRAPPED:-0}" -eq 1 ]; then echo out.log; else echo run.log; fi)"
 exec > >(python3 -u tests/scripts/ts-filter.py | tee "$RUN_LOG") 2>&1
 
 case "$workers" in
@@ -78,6 +87,8 @@ stop_containers() {
 
 cleanup() {
     stop_containers
+    # wrapper (tests/run.sh) manages the run dir lifecycle + pruning
+    [ "${WRAPPED:-0}" -eq 1 ] && return 0
     rm -f "$ports_file"
     if [ -n "${run_dir:-}" ] && [ -d "$run_dir" ]; then
         # Preserve the run on failure (artifacts are still in $run_dir for

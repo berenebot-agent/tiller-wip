@@ -14,7 +14,13 @@ mkdir -p "$sdk_data_dir" "$hermes_data_dir"
 # prefixed with the elapsed time since the run started (via
 # tests/scripts/ts-filter.py, which captures its own start at process spawn)
 # so a single log scan tells you exactly when each step happened.
-LOG_FILE="tests/logs/compat/$(date -u +%Y%m%dT%H%M%S)-compat.log"
+# When wrapped by tests/run.sh, write to the tier's out.log; otherwise use
+# the dated compat log (direct-invocation behavior is unchanged).
+if [ -n "${TILLER_TEST_DIR:-}" ]; then
+    LOG_FILE="$TILLER_TEST_DIR/out.log"
+else
+    LOG_FILE="tests/logs/compat/$(date -u +%Y%m%dT%H%M%S)-compat.log"
+fi
 ts=$(date +%s)
 exec > >(python3 -u tests/scripts/ts-filter.py | tee "$LOG_FILE") 2>&1
 
