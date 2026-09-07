@@ -740,7 +740,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
-					s.cooldown.set(candidate.ProviderModelID, time.Now().Add(time.Duration(cooldownSeconds)*time.Second))
+					s.cooldown.set(candidate.ProviderModelID, attemptStart, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
 				}
 				nonTranslationFailure = true
 				if r.Context().Err() != nil {
@@ -820,7 +820,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// virtual routes and direct real-model routes never populate the
 				// shared cooldown state.
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
-					s.cooldown.set(candidate.ProviderModelID, time.Now().Add(time.Duration(cooldownSeconds)*time.Second))
+					s.cooldown.set(candidate.ProviderModelID, attemptStart, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage("upstream_error"))
 				}
 				// An upstream HTTP response is an upstream failure regardless of
 				// status. Ordered virtual routes try their next target by default;
@@ -871,7 +871,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				terminalPreflightClass = class
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
-					s.cooldown.set(candidate.ProviderModelID, time.Now().Add(time.Duration(cooldownSeconds)*time.Second))
+					s.cooldown.set(candidate.ProviderModelID, attemptStart, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
 				}
 				nonTranslationFailure = true
 				row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))

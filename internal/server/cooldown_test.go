@@ -178,7 +178,7 @@ func TestCooldownExpiryRetriesTarget(t *testing.T) {
 	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
 		t.Fatalf("lookup model-a: %v", err)
 	}
-	app.cooldown.set(modelA, time.Now().Add(-time.Millisecond))
+	app.cooldown.set(modelA, time.Now().Add(-time.Millisecond), time.Now().Add(-time.Millisecond), "", "", "", "", "")
 
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{}})
 	if resp.StatusCode != 200 {
