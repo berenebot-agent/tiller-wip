@@ -32,7 +32,10 @@ type GeneratedKey struct {
 	Fingerprint string
 }
 
-func GenerateKey() (GeneratedKey, error) {
+// GenerateKeyWithHasher generates a client key using the provided hasher.
+// The plaintext format, selector/secret lengths, fingerprint, and DB
+// representation are unchanged regardless of hasher.
+func GenerateKeyWithHasher(hasher SecretHasher) (GeneratedKey, error) {
 	selectorRaw, err := randomBytes(9)
 	if err != nil {
 		return GeneratedKey{}, err
@@ -43,7 +46,7 @@ func GenerateKey() (GeneratedKey, error) {
 	}
 	selector := base64.RawURLEncoding.EncodeToString(selectorRaw)
 	secret := base64.RawURLEncoding.EncodeToString(secretRaw)
-	phc, err := HashSecret(secret)
+	phc, err := hasher.Hash(secret)
 	if err != nil {
 		return GeneratedKey{}, err
 	}
@@ -55,7 +58,22 @@ func GenerateKey() (GeneratedKey, error) {
 	}, nil
 }
 
+// GenerateKey generates a client key using the production Argon2id hasher.
+func GenerateKey() (GeneratedKey, error) {
+	return GenerateKeyWithHasher(Argon2Hasher{})
+}
+
 func HashSecret(secret string) (string, error) {
+	return argon2idHash(secret)
+}
+
+func VerifySecret(secret, encoded string) bool {
+	return argon2idVerify(secret, encoded)
+}
+
+// argon2idHash is the canonical Argon2id implementation. Both Argon2Hasher
+// and the package-level HashSecret delegate here.
+func argon2idHash(secret string) (string, error) {
 	salt, err := randomBytes(argonSaltBytes)
 	if err != nil {
 		return "", err
@@ -65,7 +83,9 @@ func HashSecret(secret string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
 }
 
-func VerifySecret(secret, encoded string) bool {
+// argon2idVerify is the canonical Argon2id verification. Both Argon2Hasher
+// and the package-level VerifySecret delegate here.
+func argon2idVerify(secret, encoded string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {
 		return false
@@ -118,16 +138,28 @@ type ClientAuthenticator struct {
 	db      *sql.DB
 	key     []byte
 	ttl     time.Duration
+	hasher  SecretHasher
 	mu      sync.Mutex
 	entries map[[32]byte]cacheEntry
 }
 
-func NewClientAuthenticator(db *sql.DB) (*ClientAuthenticator, error) {
+// NewClientAuthenticatorWithHasher constructs a ClientAuthenticator with the
+// given hasher for client-key verification.
+func NewClientAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) (*ClientAuthenticator, error) {
 	key, err := randomBytes(32)
 	if err != nil {
 		return nil, err
 	}
-	return &ClientAuthenticator{db: db, key: key, ttl: 30 * time.Second, entries: make(map[[32]byte]cacheEntry)}, nil
+	if hasher == nil {
+		hasher = Argon2Hasher{}
+	}
+	return &ClientAuthenticator{db: db, key: key, ttl: 30 * time.Second, hasher: hasher, entries: make(map[[32]byte]cacheEntry)}, nil
+}
+
+// NewClientAuthenticator constructs a ClientAuthenticator using the production
+// Argon2id hasher. It is the production wrapper.
+func NewClientAuthenticator(db *sql.DB) (*ClientAuthenticator, error) {
+	return NewClientAuthenticatorWithHasher(db, Argon2Hasher{})
 }
 
 func (a *ClientAuthenticator) Authenticate(raw string) (ClientIdentity, bool) {
@@ -152,7 +184,7 @@ func (a *ClientAuthenticator) Authenticate(raw string) (ClientIdentity, bool) {
 	var hash string
 	err := a.db.QueryRow(`SELECT id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).
 		Scan(&identity.ID, &identity.Name, &identity.Enabled, &hash)
-	if err != nil || !identity.Enabled || !VerifySecret(secret, hash) {
+	if err != nil || !identity.Enabled || !a.hasher.Verify(secret, hash) {
 		return ClientIdentity{}, false
 	}
 	a.mu.Lock()
@@ -208,36 +240,48 @@ type sessionCacheEntry struct {
 }
 
 // SessionStore persists admin sessions in the database so they survive process
-// and container restarts. The raw session secret is never stored; only an
-// argon2id hash of it is persisted. A short-lived in-memory cache avoids
-// recomputing the argon2id hash on every request.
+// and container restarts. The raw session secret is never stored; only a hash
+// of it is persisted. A short-lived in-memory cache avoids recomputing the hash
+// on every request. The hasher is injected so tests can use a fast
+// implementation; production code uses Argon2Hasher.
 type SessionStore struct {
-	db    *sql.DB
-	ttl   time.Duration
-	mu    sync.Mutex
-	cache map[string]sessionCacheEntry
+	db     *sql.DB
+	ttl    time.Duration
+	hasher SecretHasher
+	mu     sync.Mutex
+	cache  map[string]sessionCacheEntry
 }
 
-func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (*SessionStore, error) {
+// NewSessionStoreWithHasher constructs a SessionStore with the given hasher.
+func NewSessionStoreWithHasher(db *sql.DB, username, password string, ttl time.Duration, hasher SecretHasher) (*SessionStore, error) {
 	if ttl <= 0 {
 		ttl = 30 * 24 * time.Hour
 	}
-	s := &SessionStore{db: db, ttl: ttl, cache: make(map[string]sessionCacheEntry)}
+	if hasher == nil {
+		hasher = Argon2Hasher{}
+	}
+	s := &SessionStore{db: db, ttl: ttl, hasher: hasher, cache: make(map[string]sessionCacheEntry)}
 	if err := s.syncCredential(username, password); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-// syncCredential stores an argon2id fingerprint of the admin credentials and
-// invalidates all existing sessions if the credentials changed since the last
-// start, so a material username/password change forces a fresh login.
+// NewSessionStore constructs a SessionStore using the production Argon2id
+// hasher. It is the production wrapper around NewSessionStoreWithHasher.
+func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (*SessionStore, error) {
+	return NewSessionStoreWithHasher(db, username, password, ttl, Argon2Hasher{})
+}
+
+// syncCredential stores a fingerprint of the admin credentials and invalidates
+// all existing sessions if the credentials changed since the last start, so a
+// material username/password change forces a fresh login.
 func (s *SessionStore) syncCredential(username, password string) error {
 	material := username + "\x00" + password
 	var stored string
 	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, credentialHashKey).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
-		hash, err := HashSecret(material)
+		hash, err := s.hasher.Hash(material)
 		if err != nil {
 			return err
 		}
@@ -247,13 +291,13 @@ func (s *SessionStore) syncCredential(username, password string) error {
 	if err != nil {
 		return err
 	}
-	if VerifySecret(material, stored) {
+	if s.hasher.Verify(material, stored) {
 		return nil
 	}
 	if err := s.InvalidateAll(); err != nil {
 		return err
 	}
-	hash, err := HashSecret(material)
+	hash, err := s.hasher.Hash(material)
 	if err != nil {
 		return err
 	}
@@ -276,7 +320,7 @@ func (s *SessionStore) Create() (Session, error) {
 	}
 	sel := base64.RawURLEncoding.EncodeToString(selector)
 	sec := base64.RawURLEncoding.EncodeToString(secret)
-	hash, err := HashSecret(sec)
+	hash, err := s.hasher.Hash(sec)
 	if err != nil {
 		return Session{}, err
 	}
@@ -316,7 +360,7 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		return Session{}, false
 	}
 	exp, perr := time.Parse(time.RFC3339Nano, expiresAt)
-	if perr != nil || now.After(exp) || !VerifySecret(secret, tokenHash) {
+	if perr != nil || now.After(exp) || !s.hasher.Verify(secret, tokenHash) {
 		_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
 		return Session{}, false
 	}
@@ -345,7 +389,7 @@ func (s *SessionStore) Validate(token string) (Session, bool) {
 		return Session{}, false
 	}
 	exp, err := time.Parse(time.RFC3339Nano, expiresAt)
-	if err != nil || !time.Now().Before(exp) || !VerifySecret(secret, tokenHash) {
+	if err != nil || !time.Now().Before(exp) || !s.hasher.Verify(secret, tokenHash) {
 		return Session{}, false
 	}
 	return Session{CSRFToken: csrfToken, ExpiresAt: exp}, true

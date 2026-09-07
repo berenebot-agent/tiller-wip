@@ -12,6 +12,12 @@ import (
 	"github.com/tiller-router/tiller-router/internal/id"
 )
 
+// generateClientKey generates a client key using the server's injected
+// hasher so tests can override the KDF cost.
+func (s *Server) generateClientKey() (auth.GeneratedKey, error) {
+	return auth.GenerateKeyWithHasher(s.secretHasher)
+}
+
 var clientKeyGroupPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9 _.-]{0,62}$`)
 
 func normalizeClientKeyGroup(group string) string {
@@ -160,9 +166,9 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	generated, err := auth.GenerateKey()
+	generated, err := s.generateClientKey()
 	if err != nil {
-		adminError(w, 500, "internal_error", "Could not generate client key.")
+		adminError(w, 500, "internal_error", "Could not create client key.")
 		return
 	}
 	clientID, err := id.New()
@@ -344,7 +350,7 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) rotateClientKey(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
-	generated, err := auth.GenerateKey()
+	generated, err := s.generateClientKey()
 	if err != nil {
 		adminError(w, 500, "internal_error", "Could not rotate client key.")
 		return

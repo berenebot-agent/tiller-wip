@@ -32,6 +32,7 @@ type Server struct {
 	db            *database.DB
 	clients       *auth.ClientAuthenticator
 	sessions      *auth.SessionStore
+	secretHasher  auth.SecretHasher
 	providers     *providers.Manager
 	oauthFlows    *oauth.FlowStore
 	oauthDeviceMu sync.Mutex
@@ -82,12 +83,29 @@ const (
 	clientKey       contextKey = "client"
 )
 
-func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, error) {
-	clients, err := auth.NewClientAuthenticator(db.SQL)
+type serverOption func(*serverOptions)
+
+type serverOptions struct {
+	secretHasher auth.SecretHasher
+}
+
+// withSecretHasher sets the SecretHasher for the server's authenticator and
+// session store. Unexported so only in-package tests can use it; production
+// callers get Argon2Hasher by default.
+func withSecretHasher(h auth.SecretHasher) serverOption {
+	return func(o *serverOptions) { o.secretHasher = h }
+}
+
+func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...serverOption) (*Server, error) {
+	options := serverOptions{secretHasher: auth.Argon2Hasher{}}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	clients, err := auth.NewClientAuthenticatorWithHasher(db.SQL, options.secretHasher)
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := auth.NewSessionStore(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL)
+	sessions, err := auth.NewSessionStoreWithHasher(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL, options.secretHasher)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +116,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer)}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore()}
+	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, secretHasher: options.secretHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer)}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore()}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
