@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/database"
 )
 
 func boolPtr(v bool) *bool { return &v }
@@ -191,4 +193,206 @@ func permissionAvailability(payload map[string]any, modelID string) bool {
 		}
 	}
 	return false
+}
+
+// seedSecondProvider inserts a second provider + model (provider-b / model-b)
+// into the harness DB so a virtual chain can reference two providers.
+func seedSecondProvider(t *testing.T, db *database.DB) (providerID, modelID string) {
+	t.Helper()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('provider-b','real','provider-b-id')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, "provider-b-id", "provider-b", "generic-openai", "http://127.0.0.1:1/v1", "secret-b", 1, `["chat"]`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO provider_models(id,provider_id,upstream_model_id,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "model-b-id", "provider-b-id", "model-b", 1, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	return "provider-b-id", "model-b-id"
+}
+
+// TestProviderDeletePromotesRemainingTargetToCompatibilityPrimary verifies the
+// reviewer edge case: deleting the PRIMARY (first) target of a fallback chain
+// must promote the first remaining target into the legacy
+// virtual_models.target_provider_id / target_provider_model_id compatibility
+// columns before the provider/model rows are deleted, so the ON DELETE RESTRICT
+// foreign keys do not block the delete and the virtual model stays routable.
+func TestProviderDeletePromotesRemainingTargetToCompatibilityPrimary(t *testing.T) {
+	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
+	var providerA, modelA string
+	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerA); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
+		t.Fatal(err)
+	}
+	providerB, modelB := seedSecondProvider(t, db)
+
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != http.StatusCreated {
+		t.Fatalf("create group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{
+		"group_id": groupID, "name": "fallback", "routing_mode": "ordered_fallback",
+		"targets": []any{
+			map[string]any{"provider_model_id": modelA, "enabled": true},
+			map[string]any{"provider_model_id": modelB, "enabled": true},
+		},
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create virtual: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	// Sanity: the compatibility primary is provider A (the first target).
+	var compatProvider, compatModel string
+	if err := db.SQL.QueryRow(`SELECT target_provider_id,target_provider_model_id FROM virtual_models WHERE id=?`, virtualID).Scan(&compatProvider, &compatModel); err != nil {
+		t.Fatal(err)
+	}
+	if compatProvider != providerA || compatModel != modelA {
+		t.Fatalf("compat primary before delete = %s/%s, want %s/%s", compatProvider, compatModel, providerA, modelA)
+	}
+
+	// Delete provider A (the primary). It is not terminal (B remains), so it
+	// must succeed and promote B into the compat columns.
+	status, payload, _ = api.request("DELETE", "/api/admin/providers/"+providerA, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("delete primary provider should succeed: %d %v", status, payload)
+	}
+
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM providers WHERE id=?`, providerA).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("provider A should be deleted: count=%d err=%v", count, err)
+	}
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM provider_models WHERE id=?`, modelA).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("model A should be deleted: count=%d err=%v", count, err)
+	}
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM virtual_model_targets WHERE virtual_model_id=?`, virtualID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("virtual model should have one target left: count=%d err=%v", count, err)
+	}
+	if err := db.SQL.QueryRow(`SELECT target_provider_id,target_provider_model_id FROM virtual_models WHERE id=?`, virtualID).Scan(&compatProvider, &compatModel); err != nil {
+		t.Fatal(err)
+	}
+	if compatProvider != providerB || compatModel != modelB {
+		t.Fatalf("compat primary after delete = %s/%s, want %s/%s", compatProvider, compatModel, providerB, modelB)
+	}
+}
+
+// TestProviderDeleteWithThreeTargets verifies promotion when the deleted
+// provider is the first of a three-target chain: the second target becomes the
+// new compatibility primary and the third is untouched.
+func TestProviderDeleteWithThreeTargets(t *testing.T) {
+	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
+	var providerA, modelA string
+	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerA); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
+		t.Fatal(err)
+	}
+	providerB, modelB := seedSecondProvider(t, db)
+	// Third provider + model (provider-c / model-c).
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('provider-c','real','provider-c-id')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, "provider-c-id", "provider-c", "generic-openai", "http://127.0.0.1:1/v1", "secret-c", 1, `["chat"]`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO provider_models(id,provider_id,upstream_model_id,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "model-c-id", "provider-c-id", "model-c", 1, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != http.StatusCreated {
+		t.Fatalf("create group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{
+		"group_id": groupID, "name": "fallback", "routing_mode": "ordered_fallback",
+		"targets": []any{
+			map[string]any{"provider_model_id": modelA, "enabled": true},
+			map[string]any{"provider_model_id": modelB, "enabled": true},
+			map[string]any{"provider_model_id": "model-c-id", "enabled": true},
+		},
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create virtual: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	status, payload, _ = api.request("DELETE", "/api/admin/providers/"+providerA, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("delete primary provider should succeed: %d %v", status, payload)
+	}
+
+	var compatProvider, compatModel string
+	if err := db.SQL.QueryRow(`SELECT target_provider_id,target_provider_model_id FROM virtual_models WHERE id=?`, virtualID).Scan(&compatProvider, &compatModel); err != nil {
+		t.Fatal(err)
+	}
+	if compatProvider != providerB || compatModel != modelB {
+		t.Fatalf("compat primary after delete = %s/%s, want %s/%s", compatProvider, compatModel, providerB, modelB)
+	}
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM virtual_model_targets WHERE virtual_model_id=?`, virtualID).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("virtual model should have two targets left: count=%d err=%v", count, err)
+	}
+}
+
+// TestProviderDeleteWithMultipleModelOccurrences verifies that when a chain has
+// two models from the same deleted provider, both are removed and the first
+// remaining target (from another provider) is promoted to the compatibility
+// primary.
+func TestProviderDeleteWithMultipleModelOccurrences(t *testing.T) {
+	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
+	var providerA, modelA string
+	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerA); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
+		t.Fatal(err)
+	}
+	providerB, modelB := seedSecondProvider(t, db)
+	// Second model on provider A (model-a2).
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.SQL.Exec(`INSERT INTO provider_models(id,provider_id,upstream_model_id,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, "model-a2-id", providerA, "model-a2", 1, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
+	if status != http.StatusCreated {
+		t.Fatalf("create group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{
+		"group_id": groupID, "name": "fallback", "routing_mode": "ordered_fallback",
+		"targets": []any{
+			map[string]any{"provider_model_id": modelA, "enabled": true},
+			map[string]any{"provider_model_id": modelB, "enabled": true},
+			map[string]any{"provider_model_id": "model-a2-id", "enabled": true},
+		},
+	})
+	if status != http.StatusCreated {
+		t.Fatalf("create virtual: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	status, payload, _ = api.request("DELETE", "/api/admin/providers/"+providerA, nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("delete provider with multiple model occurrences should succeed: %d %v", status, payload)
+	}
+
+	var compatProvider, compatModel string
+	if err := db.SQL.QueryRow(`SELECT target_provider_id,target_provider_model_id FROM virtual_models WHERE id=?`, virtualID).Scan(&compatProvider, &compatModel); err != nil {
+		t.Fatal(err)
+	}
+	if compatProvider != providerB || compatModel != modelB {
+		t.Fatalf("compat primary after delete = %s/%s, want %s/%s", compatProvider, compatModel, providerB, modelB)
+	}
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM virtual_model_targets WHERE virtual_model_id=?`, virtualID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("virtual model should have one target left (model-b): count=%d err=%v", count, err)
+	}
 }

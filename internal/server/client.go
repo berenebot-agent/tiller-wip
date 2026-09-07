@@ -315,6 +315,7 @@ type resolvedRoute struct {
 	UpstreamModelID, RequestedModel     string
 	NativeProtocol                      providers.Protocol
 	Virtual, Available                  bool
+	RoutingMode                         string
 	Targets                             []resolvedRoute
 	RouteKind, RouteModelID, RouteModel string
 	// ReasoningCapabilities holds the normalized selector metadata for this
@@ -371,6 +372,12 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		}
 	}
 	if route.RouteKind == "virtual" {
+		// Capture the routing mode so cooldown applies only to ordered
+		// fallback virtual models (fixed virtual routes and direct real-model
+		// routes must never populate or consult the shared cooldown state).
+		if err := tx.QueryRowContext(ctx, `SELECT routing_mode FROM virtual_models WHERE id=?`, route.RouteModelID).Scan(&route.RoutingMode); err != nil {
+			return resolvedRoute{}, err
+		}
 		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
 		if e != nil {
 			return resolvedRoute{}, e
@@ -551,7 +558,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	terminalPreflightClass := ""
 	oauthRefreshed := make(map[string]bool)
 	cooldownSeconds := 0
-	if route.Virtual {
+	if route.RoutingMode == "ordered_fallback" {
 		cooldownSeconds, _ = s.db.GetFallbackCooldownSeconds(r.Context())
 	}
 	skippedCooled := false
@@ -582,7 +589,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
 				continue
 			}
-			if route.Virtual && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
+			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
 				skippedCooled = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
 				continue
@@ -719,7 +726,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					class = "upstream_timeout"
 				}
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
-				if route.Virtual && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
+				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
 					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
 				}
 				nonTranslationFailure = true
@@ -766,15 +773,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
 				}
 				row.attempts = append(row.attempts, attempt)
-				if route.Virtual && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
-					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
-				}
 				nonTranslationFailure = true
 				// Stale-auth recovery: on 401/403 from an OAuth provider, force a
 				// token refresh once per request and retry the same target before
 				// falling through to normal virtual fallback. ForceOAuthRefresh
 				// transitions auth_state on failure, so a dead refresh token surfaces
 				// as reconnect_required without further handling here.
+				//
+				// Cooldown is recorded only AFTER this recovery path: if the refresh
+				// succeeds and the same target is retried, the retry must not see the
+				// target as cooled and skip it. If the refreshed retry still 401/403s,
+				// cooldown opens on that retry's failure. If the refresh fails, the
+				// target becomes unavailable and cooldown may open on the persistent
+				// failure.
 				if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
 					if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
 						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
@@ -791,6 +802,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 							continue
 						}
 					}
+				}
+				// Cooldown applies only to ordered-fallback virtual models. Fixed
+				// virtual routes and direct real-model routes never populate the
+				// shared cooldown state.
+				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
+					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
 				}
 				// An upstream HTTP response is an upstream failure regardless of
 				// status. Ordered virtual routes try their next target by default;
@@ -840,7 +857,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				terminalPreflightClass = class
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
-				if route.Virtual && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
+				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
 					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
 				}
 				nonTranslationFailure = true

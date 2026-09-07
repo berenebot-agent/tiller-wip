@@ -388,9 +388,33 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	// Non-terminal references can be cleared as part of deletion: the provider
 	// appears in chains that still have other targets, so removing it leaves
-	// each chain routable. Drop those target rows now.
+	// each chain routable. Drop those target rows now, and if the deleted
+	// provider was the compatibility-primary target (virtual_models
+	// target_provider_id / target_provider_model_id), promote the first
+	// remaining target into those legacy columns so the ON DELETE RESTRICT
+	// foreign keys on the provider/model rows do not block the delete.
 	for _, v := range allVirtuals {
 		if _, err = tx.ExecContext(r.Context(), `DELETE FROM virtual_model_targets WHERE virtual_model_id=? AND provider_model_id IN (SELECT id FROM provider_models WHERE provider_id=?)`, v.id, providerID); err != nil {
+			adminError(w, 500, "database_error", "Could not delete provider.")
+			return
+		}
+		// Promote the first remaining target into the legacy compatibility
+		// columns if the deleted provider was the primary. The compat columns
+		// are NOT NULL and must reference a real provider/model, so promote the
+		// first remaining target regardless of its enabled state.
+		var promotedProvider, promotedModel sql.NullString
+		err = tx.QueryRowContext(r.Context(), `SELECT p.id,m.id FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position LIMIT 1`, v.id).Scan(&promotedProvider, &promotedModel)
+		if err == sql.ErrNoRows {
+			// No remaining enabled target; leave the legacy columns as-is (the
+			// chain is now empty and will be surfaced as broken by health).
+			err = nil
+			continue
+		}
+		if err != nil {
+			adminError(w, 500, "database_error", "Could not delete provider.")
+			return
+		}
+		if _, err = tx.ExecContext(r.Context(), `UPDATE virtual_models SET target_provider_id=?,target_provider_model_id=?,updated_at=? WHERE id=?`, promotedProvider.String, promotedModel.String, database.Now(), v.id); err != nil {
 			adminError(w, 500, "database_error", "Could not delete provider.")
 			return
 		}
