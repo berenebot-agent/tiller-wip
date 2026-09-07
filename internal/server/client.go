@@ -739,10 +739,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					class = "upstream_timeout"
 				}
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
-				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
-					failedAt := time.Now()
-					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
-				}
 				nonTranslationFailure = true
 				if r.Context().Err() != nil {
 					if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
@@ -755,6 +751,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.fallbackReason = strPtr(class)
 					inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 					return
+				}
+				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
+					failedAt := time.Now()
+					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
 				}
 				if !route.Virtual {
 					row.httpStatus = 502

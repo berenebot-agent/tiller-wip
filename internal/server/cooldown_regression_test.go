@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -243,5 +245,81 @@ func TestCooldownExcludedStatusDoesNotApplyToDirectRealRoute(t *testing.T) {
 	defer mu.Unlock()
 	if aCalls != 2 {
 		t.Fatalf("direct real route must not be affected by cooldown, got %d calls to A", aCalls)
+	}
+}
+
+func TestCooldownClientCancelDoesNotCool(t *testing.T) {
+	var mu sync.Mutex
+	reached := []string{}
+	releaseA := make(chan struct{})
+	waitA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		mu.Lock()
+		reached = append(reached, "a")
+		mu.Unlock()
+		<-releaseA
+	})
+	okB := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-b"}}})
+			return
+		}
+		mu.Lock()
+		reached = append(reached, "b")
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
+	})
+	api, secret, canonical, app := cooldownTestHarness(t, waitA, okB)
+	t.Cleanup(func() { close(releaseA) })
+	app.providers.Registry().SetResponseHeaderTimeout(80 * time.Millisecond)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	body, _ := json.Marshal(map[string]any{"model": canonical, "messages": []any{}})
+	req, _ := http.NewRequestWithContext(ctx, "POST", api.base+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan struct{})
+	var resp *http.Response
+	var reqErr error
+	go func() {
+		resp, reqErr = http.DefaultClient.Do(req)
+		close(done)
+	}()
+	time.Sleep(18 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled request did not return")
+	}
+	_ = resp
+	_ = reqErr
+
+	var modelA string
+	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
+		t.Fatalf("lookup model-a: %v", err)
+	}
+	if app.cooldown.cooled(modelA, time.Now()) {
+		t.Fatal("client cancellation must not globally cool model A")
+	}
+
+	resp2, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{}})
+	if resp2.StatusCode != 200 {
+		t.Fatalf("subsequent normal request should succeed via B after non-cooling cancel, got %d", resp2.StatusCode)
+	}
+	mu.Lock()
+	got := append([]string(nil), reached...)
+	mu.Unlock()
+	countA := 0
+	for _, g := range got {
+		if g == "a" {
+			countA++
+		}
+	}
+	if countA < 2 {
+		t.Fatalf("model A must still be attempted after a cancelled request, hits=%v", got)
 	}
 }
