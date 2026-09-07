@@ -703,6 +703,17 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					req.Header.Set("X-Real-IP", clientIP)
 				}
 			}
+			if candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go" || candidate.Provider.Type == "opencode-free" {
+				// OpenCode requires a stable per-conversation session ID for
+				// routing/prompt-caching (MissingSessionID 400 otherwise).
+				// Forward a native client header when present so OpenCode,
+				// Hermes, etc. keep conversation affinity; otherwise
+				// synthesize one from the router request ID (stable across
+				// fallback attempts of the same client request).
+				session := openCodeSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID)
+				req.Header.Set("X-Opencode-Session", session)
+				req.Header.Set("X-Opencode-Client", "tiller-router")
+			}
 			providers.ApplyRequestAuth(req, candidate.Provider)
 			copySafeFeatureHeaders(req.Header, r.Header, target)
 			if candidate.Provider.Type == "codex-subscription" {
@@ -1073,6 +1084,23 @@ func copySafeResponseHeaders(dst, src http.Header) {
 			}
 		}
 	}
+}
+
+// openCodeSessionID resolves the x-opencode-session value for OpenCode
+// upstream requests: forward a client-supplied session ID when present so
+// native clients keep conversation affinity, else synthesize a stable ID
+// from the router request ID (shared across fallback attempts).
+func openCodeSessionID(clientValue, requestID string) string {
+	if v := strings.TrimSpace(clientValue); v != "" {
+		if len(v) > 128 {
+			v = v[:128]
+		}
+		return v
+	}
+	if strings.TrimSpace(requestID) == "" {
+		return "tiller-anonymous"
+	}
+	return "tiller-" + strings.TrimSpace(requestID)
 }
 
 func copySafeFeatureHeaders(dst, src http.Header, target providers.Protocol) {
