@@ -1115,8 +1115,6 @@ function patchTokenCell(cell, tokens, pct) {
     if (newNum) markChanged(newNum);
     const newCache = $('.cache-hit b', cell);
     if (newCache) markChanged(newCache);
-    const newWrap = $('.cache-hit', cell);
-    if (newWrap && pct != null && !isNaN(pct)) newWrap.classList.add(pct >= 50 ? 'is-up' : 'is-down');
     return;
   }
   if (!populated) return;
@@ -1129,11 +1127,6 @@ function patchTokenCell(cell, tokens, pct) {
   if (cacheEl && cacheEl.textContent !== cache) {
     cacheEl.textContent = cache;
     markChanged(cacheEl);
-    const cacheWrap = $('.cache-hit', cell);
-    if (cacheWrap) {
-      cacheWrap.classList.remove('is-up', 'is-down');
-      if (cache !== '') cacheWrap.classList.add(pct >= 50 ? 'is-up' : 'is-down');
-    }
   }
 }
 
