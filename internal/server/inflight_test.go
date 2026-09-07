@@ -43,11 +43,11 @@ func TestInflightTrackerClientTransitions(t *testing.T) {
 	tracker := &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, emit: func(delta inflightDelta) { deltas = append(deltas, delta) }}
 
 	tracker.clientStart("client-1", "main")
-	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1}) {
+	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, RequestedModel: "main"}) {
 		t.Fatalf("after client start = %+v", got)
 	}
 	tracker.clientStreaming("client-1")
-	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, Streaming: 1}) {
+	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, Streaming: 1, RequestedModel: "main"}) {
 		t.Fatalf("after client streaming = %+v", got)
 	}
 	tracker.clientEnd("client-1", true)
@@ -65,7 +65,7 @@ func TestInflightTrackerKeepsConcurrentClientRequests(t *testing.T) {
 	tracker.clientStart("client-1", "main")
 	tracker.clientStreaming("client-1")
 	tracker.clientEnd("client-1", true)
-	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1}) {
+	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, RequestedModel: "main"}) {
 		t.Fatalf("after first concurrent client end = %+v", got)
 	}
 	tracker.clientEnd("client-1", false)
