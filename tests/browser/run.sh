@@ -25,6 +25,23 @@ run_start=$(date +%s)
 note_phase() {
     echo "==> $1"
 }
+# Phase timing: record epoch seconds at each phase boundary so the final
+# summary can report explicit durations. phase_start is the run start; each
+# phase_name/_epoch marks the beginning of a phase.
+phase_start=$(date +%s)
+phase_name=""
+phase_epoch=$phase_start
+phase_timing() {
+    # Announce the end of the previous phase and the start of the next.
+    local now; now=$(date +%s)
+    if [ -n "$phase_name" ]; then
+        local elapsed=$((now - phase_epoch))
+        echo "    phase: $phase_name — ${elapsed}s"
+    fi
+    phase_name="$1"
+    phase_epoch=$now
+    echo "==> $1"
+}
 # Per-run scratch lives under tests/logs/ (gitignored). Holds the activity
 # router's host-mounted data dir, the extracted fixturectl binary, the run
 # log, and the Playwright artifacts (preserved on failure, auto-removed on
@@ -94,7 +111,7 @@ fixture_cid=$(docker create tiller-router-fixturectl:dev /fixturectl)
 docker cp "$fixture_cid:/fixturectl" "$run_dir/fixturectl"
 docker rm "$fixture_cid" >/dev/null
 chmod +x "$run_dir/fixturectl"
-note_phase "images built and fixturectl extracted"
+phase_timing "images built and fixturectl extracted"
 
 echo "==> Starting $workers isolated mock/router pairs"
 for i in $(seq 0 $((workers - 1))); do
@@ -133,7 +150,7 @@ docker run --rm -d --name "$run_id-router-activity" --network host \
     -e TILLER_ADMIN_PASSWORD="$password" \
     -e TILLER_LOG_LEVEL=warn \
     tiller-router:dev >/dev/null
-note_phase "containers started"
+phase_timing "containers started"
 
 # Wait for every mock/router to become ready CONCURRENTLY. All containers were
 # started above, so polling them one at a time only serializes a wait that can
@@ -184,7 +201,7 @@ if [ -n "$failed" ]; then
     echo "FAIL: never became ready:$failed" >&2
     exit 1
 fi
-note_phase "all endpoints ready"
+phase_timing "all endpoints ready"
 
 echo "==> Running Playwright browser suite"
 # Run one Playwright shard per isolated router. Each process has a normal,
@@ -244,6 +261,8 @@ echo
 echo "==> browser suite summary"
 echo "    rc:         $playwright_status"
 echo "    run log:    $RUN_LOG"
+total_elapsed=$(( $(date +%s) - phase_start ))
+echo "    total:      ${total_elapsed}s"
 if [ "$playwright_status" -ne 0 ]; then
     echo "    artifacts:  $run_dir/playwright-results/  (Playwright traces, error-context.md, screenshots)"
     # Playwright only writes per-test error-context.md / trace.zip for failing
@@ -284,4 +303,4 @@ if [ "$playwright_status" -ne 0 ]; then
     fi
     exit "$playwright_status"
 fi
-note_phase "browser suite complete"
+phase_timing "browser suite complete"

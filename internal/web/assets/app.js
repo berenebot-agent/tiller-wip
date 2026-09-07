@@ -203,6 +203,29 @@ function toggleGroup(event) {
   revealBatch();
 }
 const groupRows = (rows, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}"${row.attr || ''}>${row.html}</tr>`).join('')}`;
+function applyModelSort(models) {
+  const rows = models.map(model => ({ model, canonical: model.canonical_model_id || '', provider: model.provider_name || '', usage: state.usage?.real_models?.[model.canonical_model_id] || {} }));
+  const direction = sortState.direction === 'asc' ? 1 : -1;
+  return rows.sort((a, b) => {
+    switch (sortState.column) {
+      case 'canonical': return direction * a.canonical.localeCompare(b.canonical);
+      case 'provider': return direction * a.provider.localeCompare(b.provider);
+      case '1h': return direction * (((a.usage?.['1h']) || 0) - ((b.usage?.['1h']) || 0));
+      case '24h': return direction * (((a.usage?.['24h']) || 0) - ((b.usage?.['24h']) || 0));
+      case '7d': return direction * (((a.usage?.['7d']) || 0) - ((b.usage?.['7d']) || 0));
+      default: return 0;
+    }
+  }).map(row => row.model);
+}
+function cycleModelSort(column) {
+  if (sortState.column === column) {
+    sortState.direction = sortState.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortState.column = column;
+    sortState.direction = SORT_DEFAULTS[column] || 'asc';
+  }
+  renderModels();
+}
 function renderModels() {
   const disabledProviders = new Set(state.providers.filter(item => !item.enabled).map(item => item.id));
   const shown = state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
