@@ -1258,24 +1258,34 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 }
 
 // cooldownTrigger reports whether a failure class / HTTP status should open the
-// fallback cooldown for the target. Request-specific failures (400, 409, 422,
-// upstream_response_too_large) do not indicate target health and are excluded.
-// 403 is also excluded: providers frequently use it for request/policy-specific
-// rejection rather than target health, so one client's rejection must not
-// poison the shared cooldown for every other client and virtual model.
+// fallback cooldown for the target.
+//
+// The credential on a target is a single shared upstream key, not a per-client
+// pass-through, so an auth/quota rejection (401, 402, 403) is target health
+// and cools — hammering a target whose key is dead or out of credit just burns
+// time. 400 also cools: relays like the OpenCode free/zen tier surface
+// provider-side unavailability ("Model is unavailable", wrapped provider
+// errors) as HTTP 400, and router-side client errors (invalid JSON, request too
+// large, translation failures, free_model_requires_keyless) are rejected
+// before any upstream attempt, so an upstream 400 that survives to this point
+// is overwhelmingly a target-side signal.
+//
+// Only request-content signals stay excluded: 409 and 422 are conflict /
+// content-policy rejections of a specific request, not target health, and must
+// not hide a working model chain-wide. upstream_response_too_large is a
+// router-side guard and never reaches this helper as a status.
 func cooldownTrigger(class string, httpStatus int) bool {
 	switch class {
 	case "upstream_unreachable", "upstream_timeout", "upstream_read_error":
 		return true
 	}
-	switch httpStatus {
-	case 408, 429, 404, 410, 401:
-		return true
+	if httpStatus == 0 {
+		return false
 	}
-	if httpStatus >= 500 && httpStatus < 600 {
-		return true
+	if httpStatus == 409 || httpStatus == 422 {
+		return false
 	}
-	return false
+	return httpStatus >= 400 && httpStatus < 600
 }
 
 // allSkippedUnsupportedFeature reports whether every recorded attempt was a

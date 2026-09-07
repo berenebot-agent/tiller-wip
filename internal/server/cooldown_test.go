@@ -347,7 +347,7 @@ func TestCooldownDisabledRetriesEveryTime(t *testing.T) {
 	}
 }
 
-func TestCooldownRequestSpecificFailureDoesNotCool(t *testing.T) {
+func TestCooldownUpstream400SkipsTargetOnNextRequest(t *testing.T) {
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -377,21 +377,22 @@ func TestCooldownRequestSpecificFailureDoesNotCool(t *testing.T) {
 		t.Fatalf("first request should succeed via B, got %d", resp.StatusCode)
 	}
 
+	mu.Lock()
+	got := append([]string(nil), reached...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("first request attempt order = %v, want [a b]", got)
+	}
+
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{}})
 	if resp.StatusCode != 200 {
 		t.Fatalf("second request should succeed, got %d", resp.StatusCode)
 	}
 	mu.Lock()
-	got := append([]string(nil), reached...)
+	got = append([]string(nil), reached...)
 	mu.Unlock()
-	countA := 0
-	for _, g := range got {
-		if g == "a" {
-			countA++
-		}
-	}
-	if countA != 2 {
-		t.Fatalf("400 should not cool A, expected A tried twice, got %v", got)
+	if len(got) != 3 || got[2] != "b" {
+		t.Fatalf("400 should cool A, expected A skipped on second request, got %v", got)
 	}
 }
 
