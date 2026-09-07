@@ -31,6 +31,8 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 
 /* Client model access: compact status-first table and one routing dialog. */
 .clients-table{min-width:960px}
+.clients-table td:nth-child(1),.clients-table th:nth-child(1){max-width:240px}
+.clients-table td:nth-child(2),.clients-table th:nth-child(2){min-width:420px;width:45%}
 .clients-table th:nth-child(3),.clients-table th:nth-child(4),.clients-table th:nth-child(5),.clients-table .actions-head{width:1%;white-space:nowrap}
 .clients-table td:nth-child(3),.clients-table td:nth-child(4),.clients-table td:nth-child(5),.clients-table td:nth-child(6){white-space:nowrap}
 .key-info-cell .secret-fingerprint{display:block}
