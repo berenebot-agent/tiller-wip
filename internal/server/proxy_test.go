@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -106,7 +107,7 @@ func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
 	}
 }
 
-func TestChatToResponsesPreservesTypedMessageRolesAndOrder(t *testing.T) {
+func TestChatToResponsesFoldsSystemAndDeveloperIntoInstructions(t *testing.T) {
 	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"hello"},{"role":"system","content":[{"type":"text","text":"system rule"}]},{"role":"developer","content":[{"type":"text","text":"developer rule"}]}]}`)
 	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
 	if err != nil {
@@ -116,18 +117,20 @@ func TestChatToResponsesPreservesTypedMessageRolesAndOrder(t *testing.T) {
 	if err := json.Unmarshal(translated, &got); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := got["instructions"]; ok {
-		t.Fatalf("unexpected instructions: %#v", got["instructions"])
+	instructions, _ := got["instructions"].(string)
+	if !strings.Contains(instructions, "system rule") || !strings.Contains(instructions, "developer rule") {
+		t.Fatalf("instructions missing system/developer text: %q", instructions)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(instructions), "system rule") {
+		t.Fatalf("expected system text before developer in instructions: %q", instructions)
 	}
 	input := got["input"].([]any)
-	if len(input) != 3 {
-		t.Fatalf("input = %#v, want three messages", input)
+	if len(input) != 1 {
+		t.Fatalf("input = %#v, want one user message", input)
 	}
-	for i, role := range []string{"user", "system", "developer"} {
-		item := input[i].(map[string]any)
-		if item["type"] != "message" || item["role"] != role {
-			t.Fatalf("input[%d] = %#v, want typed %s message", i, item, role)
-		}
+	item := input[0].(map[string]any)
+	if item["type"] != "message" || item["role"] != "user" {
+		t.Fatalf("input[0] = %#v, want typed user message", item)
 	}
 }
 

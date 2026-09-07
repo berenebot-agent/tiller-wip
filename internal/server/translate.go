@@ -873,6 +873,7 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 	out := map[string]any{"model": chat["model"]}
 
 	var input []any
+	var systemParts []string
 
 	if messages := asSlice(chat["messages"]); messages != nil {
 		for _, raw := range messages {
@@ -884,11 +885,9 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 
 			switch role {
 			case "system", "developer":
-				item, err := messageToResponsesItem(msg, role)
-				if err != nil {
-					return nil, err
+				if text := responsesInstructionText(msg["content"]); text != "" {
+					systemParts = append(systemParts, text)
 				}
-				input = append(input, item)
 
 			case "user":
 				item, err := userMessageToResponsesItem(msg)
@@ -954,6 +953,15 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 		}
 	}
 
+	if len(systemParts) > 0 {
+		joined := strings.Join(systemParts, "\n\n")
+		if existing, _ := out["instructions"].(string); existing != "" {
+			out["instructions"] = joined + "\n\n" + existing
+		} else {
+			out["instructions"] = joined
+		}
+	}
+
 	out["input"] = input
 
 	// Handle tool_choice before the main key loop. The Responses relay
@@ -1002,6 +1010,33 @@ func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+// responsesInstructionText flattens a Chat system/developer message's content
+// into a single string for the Responses "instructions" field. It accepts
+// either a bare string or a content-part array (with "text" or nested
+// "content" entries), matching the canonical Responses shape.
+func responsesInstructionText(value any) string {
+	switch value := value.(type) {
+	case string:
+		return value
+	case []any:
+		parts := make([]string, 0, len(value))
+		for _, item := range value {
+			if text := responsesInstructionText(item); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	case map[string]any:
+		if text, ok := value["text"]; ok {
+			return responsesInstructionText(text)
+		}
+		if content, ok := value["content"]; ok {
+			return responsesInstructionText(content)
+		}
+	}
+	return ""
 }
 
 func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
