@@ -3,16 +3,20 @@ package server
 import "sync"
 
 type inflightState struct {
-	Active    int `json:"active"`
-	Streaming int `json:"streaming"`
+	Active         int    `json:"active"`
+	Streaming      int    `json:"streaming"`
+	RequestedModel string `json:"requested_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
 }
 
 type inflightDelta struct {
-	ID        string `json:"id,omitempty"`
-	ClientID  string `json:"client_id,omitempty"`
-	TargetID  string `json:"target_id,omitempty"`
-	Active    int    `json:"active"`
-	Streaming int    `json:"streaming"`
+	ID             string `json:"id,omitempty"`
+	ClientID       string `json:"client_id,omitempty"`
+	TargetID       string `json:"target_id,omitempty"`
+	Active         int    `json:"active"`
+	Streaming      int    `json:"streaming"`
+	RequestedModel string `json:"requested_model,omitempty"`
+	ResolvedModel  string `json:"resolved_model,omitempty"`
 }
 
 type inflightTracker struct {
@@ -73,13 +77,13 @@ func (t *inflightTracker) snapshot() map[string]inflightState {
 	return out
 }
 
-func (t *inflightTracker) clientStart(id string) {
+func (t *inflightTracker) clientStart(id, requestedModel string) {
 	t.mu.Lock()
 	state := t.clientStates[id]
 	state.Active++
 	t.clientStates[id] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{ClientID: id, Active: 1})
+	t.emit(inflightDelta{ClientID: id, Active: 1, RequestedModel: requestedModel})
 }
 
 func (t *inflightTracker) clientStreaming(id string) {
@@ -89,6 +93,18 @@ func (t *inflightTracker) clientStreaming(id string) {
 	t.clientStates[id] = state
 	t.mu.Unlock()
 	t.emit(inflightDelta{ClientID: id, Streaming: 1})
+}
+
+func (t *inflightTracker) clientResolved(id, resolvedModel string) {
+	if resolvedModel == "" {
+		return
+	}
+	t.mu.Lock()
+	state := t.clientStates[id]
+	state.ResolvedModel = resolvedModel
+	t.clientStates[id] = state
+	t.mu.Unlock()
+	t.emit(inflightDelta{ClientID: id, ResolvedModel: resolvedModel})
 }
 
 func (t *inflightTracker) clientEnd(id string, streamed bool) {

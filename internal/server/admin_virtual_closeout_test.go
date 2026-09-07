@@ -138,18 +138,34 @@ func TestVirtualAdminUsesAllEligibleTargetsForAvailabilityCapabilitiesAndDeletio
 		t.Fatalf("permission view ignored fallback availability: %d %v", status, payload)
 	}
 
-	// Target 2 is a real dependency even though the compatibility primary
-	// column points at provider A. Deletion must be rejected atomically.
+	// Target 2 is a non-terminal dependency: the virtual model has two
+	// targets, so deleting provider-b must succeed and remove provider-b's
+	// target from the chain (the spec allows deletion as long as the provider
+	// is not the LAST model in any fallback chain).
 	status, payload, _ = api.request("DELETE", "/api/admin/providers/provider-b-id", nil)
-	if status != http.StatusConflict || payload["error"].(map[string]any)["code"] != "provider_in_use" {
-		t.Fatalf("target-2 provider deletion was not blocked: %d %v", status, payload)
+	if status != http.StatusNoContent {
+		t.Fatalf("non-terminal provider deletion should succeed: %d %v", status, payload)
 	}
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM providers WHERE id='provider-b-id'`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("provider changed after rejected deletion: count=%d err=%v", count, err)
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM providers WHERE id='provider-b-id'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("provider-b should be deleted: count=%d err=%v", count, err)
 	}
+	// The virtual model should still exist, with one remaining target.
 	if err := db.SQL.QueryRow(`SELECT count(*) FROM virtual_models WHERE id=?`, virtualID).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("virtual model changed after rejected deletion: count=%d err=%v", count, err)
+		t.Fatalf("virtual model should survive non-terminal deletion: count=%d err=%v", count, err)
+	}
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM virtual_model_targets WHERE virtual_model_id=?`, virtualID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("virtual model should have one target left after non-terminal deletion: count=%d err=%v", count, err)
+	}
+
+	// Now provider-a is the last (only) target. Deleting it must be blocked.
+	status, payload, _ = api.request("DELETE", "/api/admin/providers/"+providerA, nil)
+	if status != http.StatusConflict || payload["error"].(map[string]any)["code"] != "provider_in_use" {
+		t.Fatalf("terminal provider deletion must be blocked: %d %v", status, payload)
+	}
+	var countCheck int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM providers WHERE id=?`, providerA).Scan(&countCheck); err != nil || countCheck != 1 {
+		t.Fatalf("terminal provider changed after rejected deletion: count=%d err=%v", countCheck, err)
 	}
 }
 

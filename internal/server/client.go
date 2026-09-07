@@ -532,7 +532,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
-	s.inflight.clientStart(row.clientKeyID)
+	s.inflight.clientStart(row.clientKeyID, requested)
 	clientTracked = true
 	if route.Virtual {
 		s.inflight.start(route.RouteModelID)
@@ -919,6 +919,7 @@ routeDone:
 	defer cancel()
 	row.resolvedProvider = &route.Provider.Name
 	row.resolvedModel = &route.UpstreamModelID
+	s.inflight.clientResolved(row.clientKeyID, route.Provider.Name+"/"+route.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
 	if v := resp.Header.Get("Request-Id"); v != "" {

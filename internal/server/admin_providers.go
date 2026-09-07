@@ -88,8 +88,16 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 			input.Name = "codex"
 		}
 	}
-	input.Name = strings.ToLower(strings.TrimSpace(input.Name))
+	input.Name = strings.TrimSpace(input.Name)
 	// Matches DB CHECK: name=lower(name) AND length 1..63 AND GLOB '[a-z0-9-]*' AND first/last [a-z0-9]
+	// Validate the raw input (not a lowercased copy) so an all-caps or
+	// mixed-case name surfaces a clear error instead of being silently
+	// rewritten. The rules are the storage rules; the name must already
+	// comply.
+	if input.Name != strings.ToLower(input.Name) {
+		adminError(w, 400, "invalid_provider_name", "Provider name must be lowercase: use only lowercase letters, digits, and hyphens.")
+		return
+	}
 	if len(input.Name) < 1 || len(input.Name) > 63 {
 		adminError(w, 400, "invalid_provider_name", "Provider name must be 1-63 lowercase alphanumerics/hyphens.")
 		return
@@ -347,14 +355,45 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	// virtual_model_targets is the functional source of truth. This includes
 	// references in every ordered position, not only the compatibility primary
-	// columns on virtual_models.
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE m.provider_id=?`, providerID).Scan(&refs); err != nil {
+	// columns on virtual_models. Find every virtual model that references this
+	// provider and classify whether the provider is the last target in that
+	// chain (terminal: deleting it would leave the chain with no targets).
+	terminalVirtuals, allVirtuals, err := s.providerVirtualModelRefs(r.Context(), tx, providerID)
+	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
 	}
-	if refs > 0 {
-		adminError(w, 409, "provider_in_use", "Repoint or delete dependent virtual models first.")
+	if len(terminalVirtuals) > 0 {
+		// Terminal references block deletion: at least one virtual model has
+		// this provider as its only target. Surface which chains are blocked
+		// and which could be auto-cleared so the UI can present the workflow.
+		blocked := make([]string, 0, len(terminalVirtuals))
+		for _, v := range terminalVirtuals {
+			blocked = append(blocked, v.canonical)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(409)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error": map[string]any{
+				"code":    "provider_in_use",
+				"message": "This provider is the last target in one or more virtual model fallback chains. Repoint those chains before deleting.",
+				"data": map[string]any{
+					"blocked":        blocked,
+					"referenced":     virtualModelCanonicals(allVirtuals),
+					"terminal_count": len(terminalVirtuals),
+				},
+			},
+		})
 		return
+	}
+	// Non-terminal references can be cleared as part of deletion: the provider
+	// appears in chains that still have other targets, so removing it leaves
+	// each chain routable. Drop those target rows now.
+	for _, v := range allVirtuals {
+		if _, err = tx.ExecContext(r.Context(), `DELETE FROM virtual_model_targets WHERE virtual_model_id=? AND provider_model_id IN (SELECT id FROM provider_models WHERE provider_id=?)`, v.id, providerID); err != nil {
+			adminError(w, 500, "database_error", "Could not delete provider.")
+			return
+		}
 	}
 	var name string
 	if err = tx.QueryRowContext(r.Context(), `SELECT name FROM providers WHERE id=?`, providerID).Scan(&name); err == sql.ErrNoRows {
@@ -400,6 +439,50 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	// bound as providers are created and deleted.
 	s.providers.DropProviderLock(providerID)
 	w.WriteHeader(204)
+}
+
+// providerVirtualModelRef is a virtual model that references a provider, along
+// with whether that provider is the last target in the chain (terminal).
+type providerVirtualModelRef struct {
+	id        string
+	canonical string
+	terminal  bool
+}
+
+// providerVirtualModelRefs returns the set of virtual models that reference the
+// given provider, split into terminal (the provider is the last target in the
+// chain, so deleting it would strand the chain) and the full referenced set.
+// A chain is terminal when it has exactly one target total and that target
+// belongs to this provider.
+func (s *Server) providerVirtualModelRefs(ctx context.Context, tx *sql.Tx, providerID string) ([]providerVirtualModelRef, []providerVirtualModelRef, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT v.id, g.name||'/'||v.name, (SELECT count(*) FROM virtual_model_targets WHERE virtual_model_id=v.id) AS total, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?) AS ours FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?)`, providerID, providerID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	var terminal, all []providerVirtualModelRef
+	for rows.Next() {
+		var v providerVirtualModelRef
+		var total, ours int
+		if err := rows.Scan(&v.id, &v.canonical, &total, &ours); err != nil {
+			return nil, nil, err
+		}
+		// Terminal: this provider's targets are the only targets in the chain.
+		v.terminal = ours > 0 && ours == total
+		all = append(all, v)
+		if v.terminal {
+			terminal = append(terminal, v)
+		}
+	}
+	return terminal, all, rows.Err()
+}
+
+func virtualModelCanonicals(refs []providerVirtualModelRef) []string {
+	out := make([]string, 0, len(refs))
+	for _, v := range refs {
+		out = append(out, v.canonical)
+	}
+	return out
 }
 
 type modelView struct {

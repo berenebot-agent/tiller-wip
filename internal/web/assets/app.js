@@ -2,6 +2,8 @@ import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {}, inflightClients: {}, inflightTargets: {}, loadToken: 0 };
+const sortState = { column: '1h', direction: 'desc' };
+const SORT_DEFAULTS = { canonical: 'asc', provider: 'asc', '1h': 'desc', '24h': 'desc', '7d': 'desc' };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
@@ -45,6 +47,7 @@ async function api(path, options = {}) {
     const error = new Error(payload?.error?.message || `Request failed (${response.status})`);
     error.code = payload?.error?.code;
     error.status = response.status;
+    error.data = payload;
     throw error;
   }
   return payload;
@@ -132,7 +135,28 @@ async function refreshProvider(id) { const button = $(`[data-provider-refresh="$
  function showGitHubDeviceDialog(id, result) { openEntity({ eyebrow: 'GITHUB COPILOT', title: 'Connect GitHub Copilot', submit: 'Done', fields: `<p>1. Open GitHub device sign-in.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><a class="btn btn-secondary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Open GitHub</a> <button type="button" class="btn btn-secondary" data-copy-device>Copy code</button></p><p data-oauth-status>Waiting for GitHub authorization...</p>`, onMount: form => { $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const label = $('[data-oauth-status]', form); if (label) label.textContent = status.status === 'pending' ? 'Waiting for GitHub authorization...' : status.status === 'connected' ? 'GitHub connected.' : (status.error || 'GitHub connection failed.'); if (status.status !== 'pending') { clearInterval(poll); if (status.status === 'connected') { $('#form-dialog').close(); flash('GitHub Copilot connected.'); await loadProviders(); } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
  function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><label>Redirected URL <textarea name="redirected_url" rows="3" required placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label>`, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); }}); }
 async function refreshModels(id) { const button = $(`[data-refresh-models="${CSS.escape(id)}"]`); button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); } catch (error) { flash(errorMessage(error), 'error'); } finally { await loadModels(); await loadProviders(); await loadClients(); button.disabled = false; } }
-async function deleteProvider(id) { const provider = state.providers.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${provider.name}?`, copy: 'All discovered models and their client permissions will be removed. Deletion is blocked while a virtual model references this provider.', action: 'Delete provider', typeMatch: provider.name, typeLabel: 'provider name' })) return; try { await api(`/api/admin/providers/${id}`, { method: 'DELETE' }); flash('Provider deleted.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
+async function deleteProvider(id) {
+  const provider = state.providers.find(item => item.id === id);
+  const doDelete = async () => {
+    try {
+      await api(`/api/admin/providers/${id}`, { method: 'DELETE' });
+      flash('Provider deleted.');
+      await loadProviders();
+      await loadClients();
+    } catch (error) {
+      if (error.status === 409 && error.data?.error?.data) {
+        const data = error.data.error.data;
+        if (Array.isArray(data.blocked) && data.blocked.length > 0) {
+          flash(`Cannot delete ${provider.name}: last target in ${data.blocked.length} chain(s): ${data.blocked.join(', ')}. Repoint those first.`, 'error');
+          return;
+        }
+      }
+      flash(errorMessage(error), 'error');
+    }
+  };
+  if (!await confirmAction({ title: `Delete ${provider.name}?`, copy: 'All discovered models and their client permissions will be removed. Non-terminal references in virtual model fallback chains are removed automatically; deletion is blocked while this provider is the last target in any chain.', action: 'Delete provider', typeMatch: provider.name, typeLabel: 'provider name' })) return;
+  await doDelete();
+}
 
 async function disconnectProviderOAuth(id) { const provider = state.providers.find(item => item.id === id); if (!await confirmAction({ title: `Disconnect ${provider?.name || 'provider'}?`, copy: 'This removes the OAuth connection. Provider configuration, models, and routing are preserved.', action: 'Disconnect', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/providers/${id}/oauth`, { method: 'DELETE' }); flash('Provider disconnected.'); await loadProviders(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
@@ -179,7 +203,25 @@ function toggleGroup(event) {
   revealBatch();
 }
 const groupRows = (rows, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}"${row.attr || ''}>${row.html}</tr>`).join('')}`;
-function renderModels() { const disabledProviders = new Set(state.providers.filter(item => !item.enabled).map(item => item.id)); const shown = state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available)); $('#models-empty').hidden = shown.length > 0; const byProvider = new Map(); shown.forEach(model => { if (!byProvider.has(model.provider_name)) byProvider.set(model.provider_name, []); byProvider.get(model.provider_name).push(model); }); const html = [...byProvider.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([provider, models]) => { const available = models.filter(m => m.available).length; const retired = models.length - available; const collapsed = collapsedModels.has(provider); const note = retired ? `${retired} retired` : 'provider'; const actions = `<button class="btn btn-small btn-secondary" data-refresh-models="${h(models[0].provider_id)}">Refresh models</button>`;     return groupBanner('models', provider, provider, note, `${available} available`, actions) + groupRows(models.map(model => ({ attr: ` data-model-id="${h(model.id)}"`, html: `<td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td>` })), collapsed); }).join(''); $('#models-body').innerHTML = html; $$('.group-toggle', $('#models-body')).forEach(header => header.onclick = toggleGroup); $$('[data-refresh-models]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); refreshModels(button.dataset.refreshModels); }); $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'); }); $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); }); }
+function renderModels() {
+  const disabledProviders = new Set(state.providers.filter(item => !item.enabled).map(item => item.id));
+  const shown = state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
+  $('#models-empty').hidden = shown.length > 0;
+  const rows = applyModelSort(shown);
+  const html = rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
+  $('#models-body').innerHTML = html;
+  const head = $('#models-body').parentElement.querySelector('thead');
+  if (head) {
+    $$('th', head).forEach(th => {
+      if (th.dataset && th.dataset.sort) {
+        th.classList.toggle('sort-active', th.dataset.sort === sortState.column);
+        th.onclick = () => cycleModelSort(th.dataset.sort);
+      }
+    });
+  }
+  $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'));
+  $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); });
+}
 
 async function loadVirtual(search = $('#virtual-search').value) {
   const token = ++state.loadToken;
@@ -308,6 +350,8 @@ function patchClientActivityRows() {
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !client.enabled);
     applyClientRoundel(roundel, client, state.inflightClients[client.id]);
+    const resolving = card.querySelector(`[data-resolving="${CSS.escape(client.id)}"]`);
+    if (resolving) resolving.textContent = resolvingModelText(client);
   });
 }
 
@@ -315,6 +359,14 @@ function patchClientRoundelRow(row) {
   const client = state.clients.find(item => item.id === row.dataset.clientId);
   if (!client) return;
   applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
+  const cell = row.querySelector('.resolving-model-cell');
+  if (cell) {
+    const fresh = resolvingModelCell(client);
+    const tmp = document.createElement('div');
+    tmp.innerHTML = fresh;
+    const newCell = tmp.firstElementChild;
+    cell.replaceWith(newCell);
+  }
 }
 
 const capabilityNumber = value => value ? new Intl.NumberFormat().format(value) : 'Not reported';
@@ -481,11 +533,11 @@ function openVirtualModel(model = null) { if (!state.models.length) { flash('Dis
   const options = state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id }));
   const targets = model?.targets?.length ? model.targets : [{provider_model_id:model?.target_model_id,enabled:true}];
   const makePicker = (target, row = null) => { const box = document.createElement('div'); box.className='combobox'; box.innerHTML='<input type="text" placeholder="Type a provider or model name…"><input type="hidden" name="target_model" required>'; const picker=combobox({ input:$('input[type="text"]',box), hidden:$('input[type="hidden"]',box), options, placeholder:'Type a provider or model name…' }); picker.setOptions(options); const found=options.find(item=>item.value===target?.provider_model_id)||options[0]; if(found) picker.select(options.indexOf(found)); return box; };
-  const updateControls = () => { const rows=$$('.target-row',fallback); rows.forEach((row,index)=>{ $('.target-index',row).textContent=String(index+1).padStart(2,'0'); $('[data-target-up]',row).disabled=index===0; $('[data-target-down]',row).disabled=index===rows.length-1; $('[data-target-remove]',row).disabled=rows.length===1; }); };
-  const addFallback = target => { const row=document.createElement('div'); row.className='target-row'; row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target)); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up">↑</button><button type="button" data-target-down title="Move target down">↓</button><button type="button" data-target-remove title="Remove target">×</button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
+  const updateControls = () => { const rows=$$('.target-row',fallback); rows.forEach((row,index)=>{ $('.target-index',row).textContent=String(index+1).padStart(2,'0'); $('[data-target-up]',row).disabled=index===0; $('[data-target-down]',row).disabled=index===rows.length-1; }); };
+  const addFallback = target => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up">↑</button><button type="button" data-target-down title="Move target down">↓</button><button type="button" data-target-remove title="Remove target">×</button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
   fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<5) addFallback(); else flash('The admin UI supports up to five targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
-  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); } }); }
+  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:!!row.querySelector('.target-enable input')?.checked})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); } }); }
 async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function loadClients() {
@@ -635,7 +687,6 @@ function clientCard(client) {
       <span class="client-card-name">${h(client.name)}</span>
       ${client.group ? `<span class="group-badge">${h(client.group)}</span>` : ''}
       <span class="client-card-desc">${h(client.description || 'No description')}</span>
-      <span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span>
       <span class="client-card-chevron" aria-hidden="true">▾</span>
     </button>
     <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
@@ -646,6 +697,7 @@ function clientCard(client) {
       ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
       <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
       ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
+      <div class="client-card-field"><span class="client-card-label">Resolving</span><span class="client-card-resolving" data-resolving="${h(client.id)}">${resolvingModelText(client)}</span></div>
       <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
@@ -656,11 +708,29 @@ function clientCard(client) {
     </div>
   </article>`;
 }
+function resolvingModelText(client) {
+  const inflight = state.inflightClients[client.id];
+  if (!inflight || inflight.active <= 0) return '—';
+  const req = inflight.requested_model || '';
+  const res = inflight.resolved_model || '';
+  if (req && res && req !== res) return `${req} → ${res}`;
+  return res || req || '—';
+}
+function resolvingModelCell(client) {
+  const inflight = state.inflightClients[client.id];
+  if (!inflight || inflight.active <= 0) return '<td class="resolving-model-cell">—</td>';
+  const req = inflight.requested_model ? h(inflight.requested_model) : '';
+  const res = inflight.resolved_model ? h(inflight.resolved_model) : '';
+  if (req && res && req !== res) return `<td class="resolving-model-cell resolving-model-active">${req} → ${res}</td>`;
+  if (res) return `<td class="resolving-model-cell resolving-model-active">${res}</td>`;
+  if (req) return `<td class="resolving-model-cell resolving-model-active">${req}</td>`;
+  return '<td class="resolving-model-cell">—</td>';
+}
 function clientRow(client) {
   const routeCell = client.type === 'single'
     ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
     : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td class="key-info-cell"><span class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span><small>Created ${date(client.created_at)}</small>${client.rotated_at ? `<small>Rotated ${date(client.rotated_at)}</small>` : ''}</td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
+  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td>${resolvingModelCell(client)}<td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
@@ -890,7 +960,23 @@ $('#save-permissions').onclick = async () => {
 };
 
 const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
-async function openActivity(client) { activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${client.name} activity`; $('#clear-activity').hidden = false; await loadActivity(); $('#activity-dialog').showModal(); }
+async function openActivity(client) {
+  activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = '';
+  $('#activity-search').value = '';
+  $('#activity-title').textContent = `${client.name} activity`;
+  $('#clear-activity').hidden = false;
+  const toolbar = $('.activity-toolbar', $('#activity-dialog'));
+  let info = $('#activity-client-info');
+  if (!info) {
+    info = document.createElement('div');
+    info.id = 'activity-client-info';
+    info.className = 'activity-client-info';
+    toolbar.before(info);
+  }
+  info.innerHTML = `<span class="activity-client-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span>  <span>Created ${date(client.created_at)}</span>${client.rotated_at ? `  <span>Rotated ${date(client.rotated_at)}</span>` : ''}`;
+  await loadActivity();
+  $('#activity-dialog').showModal();
+}
 async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; await loadActivity(); $('#activity-dialog').showModal(); }
 async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
 function activityAttempt(attempt, index) { const route = `${attempt.provider}/${attempt.model}`; const status = attempt.http_status ? `HTTP ${attempt.http_status}` : h(attempt.result); const cls = attempt.result === 'success' ? 'attempt-success' : attempt.result === 'failed' ? 'attempt-failed' : 'attempt-neutral'; let clickAttr = ''; let hoverAttr = ''; if (attempt.result === 'failed') { const key = ++errorDetailSeq; const parts = []; if (attempt.error_message) parts.push(attempt.error_message); if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`); if (attempt.error_body) parts.push(`Provider error body:\n${attempt.error_body}${attempt.error_body_truncated ? '\n\n[truncated]' : ''}`); if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`); if (attempt.request_body) parts.push(`Client request body:\n${attempt.request_body}${attempt.request_body_truncated ? '\n\n[truncated]' : ''}`); errorDetails.set(key, { title: `${route} · ${status}`, body: parts.join('\n\n') || '(no error details)' }); clickAttr = ` data-error-key="${key}"`; const hover = [attempt.error_message, attempt.latency_ms ? `Latency: ${attempt.latency_ms} ms` : ''].filter(Boolean).join(' · '); if (hover) hoverAttr = ` title="${h(hover)}"`; } return `<div class="activity-attempt ${cls}"${clickAttr}${hoverAttr}><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code title="${h(route)}">${h(route)}</code></span><span class="attempt-status">${status}</span></div>`; }
@@ -1082,6 +1168,13 @@ function reconcileLive() {
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
         applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
+        const cell = row.querySelector('.resolving-model-cell');
+        if (cell) {
+          const tmp = document.createElement('div');
+          tmp.innerHTML = resolvingModelCell(client);
+          const newCell = tmp.firstElementChild;
+          cell.replaceWith(newCell);
+        }
       }
       const card = $(`article.client-card[data-client-id="${CSS.escape(client.id)}"]`);
       if (card) {
@@ -1090,6 +1183,8 @@ function reconcileLive() {
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
         applyClientRoundel($('.status-roundel', card), client, state.inflightClients[client.id]);
+        const resolving = card.querySelector(`[data-resolving="${CSS.escape(client.id)}"]`);
+        if (resolving) resolving.textContent = resolvingModelText(client);
       }
     });
   }
@@ -1137,6 +1232,8 @@ live.on('activity', delta => {
     const current = state.inflightClients[delta.client_id] || { active: 0, streaming: 0 };
     current.active += delta.active || 0;
     current.streaming += delta.streaming || 0;
+    if (delta.requested_model) current.requested_model = delta.requested_model;
+    if (delta.resolved_model) current.resolved_model = delta.resolved_model;
     if (current.active <= 0 && current.streaming <= 0) delete state.inflightClients[delta.client_id];
     else state.inflightClients[delta.client_id] = current;
     if (liveViewActive('clients') && !liveDialogOpen()) {
