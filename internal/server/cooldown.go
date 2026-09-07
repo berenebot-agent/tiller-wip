@@ -82,6 +82,12 @@ func (c *cooldownStore) clear() {
 	c.until = map[string]cooldownEntry{}
 }
 
+func (c *cooldownStore) remove(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.until, id)
+}
+
 // cooldownView is the per-target cooldown state surfaced to the admin/live UI.
 type cooldownView struct {
 	ProviderModelID    string `json:"provider_model_id"`

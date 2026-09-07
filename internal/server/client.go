@@ -893,6 +893,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 			allAttemptedFailed = false
 			success = true
+			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && candidate.ProviderModelID != "" {
+				s.cooldown.remove(candidate.ProviderModelID)
+			}
 			goto routeDone
 		}
 	}
