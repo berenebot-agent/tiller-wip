@@ -146,6 +146,51 @@ Run this locally before pushing — it uses the same pinned Go image as CI:
 Write Go with tabs, never spaces, and never collapse a block onto one line
 (`if x { y }`) — `gofmt` always rewrites both, and that is what keeps tripping CI.
 
+### Test tiers (pick the cheapest tier that catches your mistake)
+
+The full suite is expensive. Most edits don't warrant it. Pick the smallest
+tier that matches the change:
+
+#### Tier A — targeted edit loop (seconds)
+
+Run only the package or browser spec relevant to the change. Use this after
+every trivial edit; a 1-second targeted test catches most mistakes that a
+2-minute integration suite would.
+
+```bash
+# Go: one package, one test
+./tiller-go.sh test ./internal/server -run TestSpecificThing
+./tiller-go.sh test ./internal/auth -run TestSessionStoreCreate
+./tiller-go.sh test -count=1 ./internal/database
+
+# Browser: one spec file (Playwright supports --grep for a named test)
+npx playwright test admin.spec.js --grep "permission edits survive filtering"
+```
+
+#### Tier B — normal pre-commit (1–2 min)
+
+```bash
+./tests/scripts/check-fmt.sh
+./tiller-go.sh test -count=1 ./...
+./tiller-go.sh vet ./...
+```
+
+For UI changes, also run the relevant browser spec(s) locally (or rely on CI).
+
+#### Tier C — full regression before merge/release (3–6 min)
+
+```bash
+./tiller-go.sh test -count=1 ./...
+./tiller-go.sh vet ./...
+./tests/browser/run.sh          # also run twice to confirm warm-cache path
+./tests/runtime-readonly.sh
+./tests/compatibility/run.sh    # when touched area affects protocols/catalogues
+```
+
+The goal is not to avoid full testing. It is to avoid running a 1–2 minute
+integration suite after every trivial source edit when a 1-second targeted
+test would catch the immediate mistake.
+
 ### Test log convention (X = summary, Y = detail)
 
 All test runners follow a two-tier logging convention so agents (or humans)
@@ -167,6 +212,6 @@ can diagnose failures without re-running:
 To inspect a failed browser run's full output and Playwright artifacts
 without re-running: read `tests/logs/<run-id>/run.log` and open the matching
 `playwright-results/` directory (each Playwright shard writes
-`trace.zip` + `error-context.md` per failed test). Each `run_id` is unique
+`trace.zip` + `error-context.md` per failing test). Each `run_id` is unique
 (`tiller-browser-<pid>`), so preserving a run indefinitely is just a matter
 of renaming `tests/logs/<run-id>/` aside before the next invocation.
