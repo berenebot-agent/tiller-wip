@@ -81,7 +81,6 @@ func (t *inflightTracker) clientStart(id, requestedModel string) {
 	t.mu.Lock()
 	state := t.clientStates[id]
 	state.Active++
-	state.RequestedModel = requestedModel
 	t.clientStates[id] = state
 	t.mu.Unlock()
 	t.emit(inflightDelta{ClientID: id, Active: 1, RequestedModel: requestedModel})

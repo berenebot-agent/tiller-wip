@@ -400,12 +400,14 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		// Promote the first remaining target into the legacy compatibility
 		// columns if the deleted provider was the primary. The compat columns
-		// are NOT NULL and must reference a real provider/model, so promote the
-		// first remaining target regardless of its enabled state.
+		// are NOT NULL and must reference a real provider/model. Because the
+		// deletion guard above blocks removing the last *eligible* target, at
+		// least one eligible target remains here; prefer it so a disabled or
+		// retired target cannot become the promoted compatibility primary.
 		var promotedProvider, promotedModel sql.NullString
-		err = tx.QueryRowContext(r.Context(), `SELECT p.id,m.id FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position LIMIT 1`, v.id).Scan(&promotedProvider, &promotedModel)
+		err = tx.QueryRowContext(r.Context(), `SELECT p.id,m.id FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1 ORDER BY t.position LIMIT 1`, v.id).Scan(&promotedProvider, &promotedModel)
 		if err == sql.ErrNoRows {
-			// No remaining enabled target; leave the legacy columns as-is (the
+			// No remaining eligible target; leave the legacy columns as-is (the
 			// chain is now empty and will be surfaced as broken by health).
 			err = nil
 			continue
@@ -474,12 +476,13 @@ type providerVirtualModelRef struct {
 }
 
 // providerVirtualModelRefs returns the set of virtual models that reference the
-// given provider, split into terminal (the provider is the last target in the
-// chain, so deleting it would strand the chain) and the full referenced set.
-// A chain is terminal when it has exactly one target total and that target
-// belongs to this provider.
+// given provider, split into terminal (the provider is the last *eligible*
+// target in the chain, so deleting it would strand the chain) and the full
+// referenced set. A chain is terminal when it has exactly one eligible target
+// and that target belongs to this provider. Disabled or unavailable targets
+// are excluded so a non-routable target can never silently take over a chain.
 func (s *Server) providerVirtualModelRefs(ctx context.Context, tx *sql.Tx, providerID string) ([]providerVirtualModelRef, []providerVirtualModelRef, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT v.id, g.name||'/'||v.name, (SELECT count(*) FROM virtual_model_targets WHERE virtual_model_id=v.id) AS total, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?) AS ours FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?)`, providerID, providerID)
+	rows, err := tx.QueryContext(ctx, `SELECT v.id, g.name||'/'||v.name, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1) AS total, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND m.provider_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1) AS ours FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?)`, providerID, providerID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -491,7 +494,8 @@ func (s *Server) providerVirtualModelRefs(ctx context.Context, tx *sql.Tx, provi
 		if err := rows.Scan(&v.id, &v.canonical, &total, &ours); err != nil {
 			return nil, nil, err
 		}
-		// Terminal: this provider's targets are the only targets in the chain.
+		// Terminal: this provider's targets are the only eligible targets in the
+		// chain, so deleting it would leave a non-routable chain.
 		v.terminal = ours > 0 && ours == total
 		all = append(all, v)
 		if v.terminal {

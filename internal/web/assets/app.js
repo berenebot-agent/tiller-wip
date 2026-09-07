@@ -373,8 +373,6 @@ function patchClientActivityRows() {
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !client.enabled);
     applyClientRoundel(roundel, client, state.inflightClients[client.id]);
-    const resolving = card.querySelector(`[data-resolving="${CSS.escape(client.id)}"]`);
-    if (resolving) resolving.textContent = resolvingModelText(client);
   });
 }
 
@@ -382,14 +380,6 @@ function patchClientRoundelRow(row) {
   const client = state.clients.find(item => item.id === row.dataset.clientId);
   if (!client) return;
   applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
-  const cell = row.querySelector('.resolving-model-cell');
-  if (cell) {
-    const fresh = resolvingModelCell(client);
-    const tmp = document.createElement('div');
-    tmp.innerHTML = fresh;
-    const newCell = tmp.firstElementChild;
-    cell.replaceWith(newCell);
-  }
 }
 
 const capabilityNumber = value => value ? new Intl.NumberFormat().format(value) : 'Not reported';
@@ -720,7 +710,6 @@ function clientCard(client) {
       ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
       <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
       ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
-      <div class="client-card-field"><span class="client-card-label">Resolving</span><span class="client-card-resolving" data-resolving="${h(client.id)}">${resolvingModelText(client)}</span></div>
       <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
@@ -731,29 +720,11 @@ function clientCard(client) {
     </div>
   </article>`;
 }
-function resolvingModelText(client) {
-  const inflight = state.inflightClients[client.id];
-  if (!inflight || inflight.active <= 0) return '—';
-  const req = inflight.requested_model || '';
-  const res = inflight.resolved_model || '';
-  if (req && res && req !== res) return `${req} → ${res}`;
-  return res || req || '—';
-}
-function resolvingModelCell(client) {
-  const inflight = state.inflightClients[client.id];
-  if (!inflight || inflight.active <= 0) return '<td class="resolving-model-cell">—</td>';
-  const req = inflight.requested_model ? h(inflight.requested_model) : '';
-  const res = inflight.resolved_model ? h(inflight.resolved_model) : '';
-  if (req && res && req !== res) return `<td class="resolving-model-cell resolving-model-active">${req} → ${res}</td>`;
-  if (res) return `<td class="resolving-model-cell resolving-model-active">${res}</td>`;
-  if (req) return `<td class="resolving-model-cell resolving-model-active">${req}</td>`;
-  return '<td class="resolving-model-cell">—</td>';
-}
 function clientRow(client) {
   const routeCell = client.type === 'single'
     ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
     : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td>${resolvingModelCell(client)}<td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
+  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
@@ -1000,7 +971,7 @@ async function openActivity(client) {
   await loadActivity();
   $('#activity-dialog').showModal();
 }
-async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; await loadActivity(); $('#activity-dialog').showModal(); }
+async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; document.getElementById('activity-client-info')?.remove(); await loadActivity(); $('#activity-dialog').showModal(); }
 async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_count > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
 function activityAttempt(attempt, index) { const route = `${attempt.provider}/${attempt.model}`; const status = attempt.http_status ? `HTTP ${attempt.http_status}` : h(attempt.result); const cls = attempt.result === 'success' ? 'attempt-success' : attempt.result === 'failed' ? 'attempt-failed' : 'attempt-neutral'; let clickAttr = ''; let hoverAttr = ''; if (attempt.result === 'failed') { const key = ++errorDetailSeq; const parts = []; if (attempt.error_message) parts.push(attempt.error_message); if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`); if (attempt.error_body) parts.push(`Provider error body:\n${attempt.error_body}${attempt.error_body_truncated ? '\n\n[truncated]' : ''}`); if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`); if (attempt.request_body) parts.push(`Client request body:\n${attempt.request_body}${attempt.request_body_truncated ? '\n\n[truncated]' : ''}`); errorDetails.set(key, { title: `${route} · ${status}`, body: parts.join('\n\n') || '(no error details)' }); clickAttr = ` data-error-key="${key}"`; const hover = [attempt.error_message, attempt.latency_ms ? `Latency: ${attempt.latency_ms} ms` : ''].filter(Boolean).join(' · '); if (hover) hoverAttr = ` title="${h(hover)}"`; } return `<div class="activity-attempt ${cls}"${clickAttr}${hoverAttr}><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code title="${h(route)}">${h(route)}</code></span><span class="attempt-status">${status}</span></div>`; }
 // Full error text for failed attempts. The complete string lives here keyed by
@@ -1191,13 +1162,6 @@ function reconcileLive() {
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
         applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
-        const cell = row.querySelector('.resolving-model-cell');
-        if (cell) {
-          const tmp = document.createElement('div');
-          tmp.innerHTML = resolvingModelCell(client);
-          const newCell = tmp.firstElementChild;
-          cell.replaceWith(newCell);
-        }
       }
       const card = $(`article.client-card[data-client-id="${CSS.escape(client.id)}"]`);
       if (card) {
@@ -1206,8 +1170,6 @@ function reconcileLive() {
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
         applyClientRoundel($('.status-roundel', card), client, state.inflightClients[client.id]);
-        const resolving = card.querySelector(`[data-resolving="${CSS.escape(client.id)}"]`);
-        if (resolving) resolving.textContent = resolvingModelText(client);
       }
     });
   }
@@ -1255,24 +1217,11 @@ live.on('activity', delta => {
     const current = state.inflightClients[delta.client_id] || { active: 0, streaming: 0 };
     current.active += delta.active || 0;
     current.streaming += delta.streaming || 0;
-    if (typeof delta.requested_model === 'string') current.requested_model = delta.requested_model;
-    if (typeof delta.resolved_model === 'string') current.resolved_model = delta.resolved_model;
     if (current.active <= 0 && current.streaming <= 0) delete state.inflightClients[delta.client_id];
     else state.inflightClients[delta.client_id] = current;
     if (liveViewActive('clients') && !liveDialogOpen()) {
       const row = $(`tr[data-client-id="${CSS.escape(delta.client_id)}"]`);
-      if (row) {
-        patchClientRoundelRow(row);
-        const cell = row.querySelector('.resolving-model-cell');
-        if (cell) {
-          const client = state.clients.find(item => item.id === delta.client_id);
-          if (client) {
-            const tmp = document.createElement('div');
-            tmp.innerHTML = resolvingModelCell(client);
-            cell.replaceWith(tmp.firstElementChild);
-          }
-        }
-      }
+      if (row) patchClientRoundelRow(row);
       const card = $(`article.client-card[data-client-id="${CSS.escape(delta.client_id)}"]`);
       if (card) {
         const client = state.clients.find(item => item.id === delta.client_id);

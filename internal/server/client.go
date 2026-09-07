@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -710,7 +712,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// Hermes, etc. keep conversation affinity; otherwise
 				// synthesize one from the router request ID (stable across
 				// fallback attempts of the same client request).
-				session := openCodeSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID)
+				session := openCodeSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID, row.clientKeyID)
 				req.Header.Set("X-Opencode-Session", session)
 				req.Header.Set("X-Opencode-Client", "tiller-router")
 			}
@@ -738,7 +740,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
-					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
+					s.cooldown.set(candidate.ProviderModelID, time.Now().Add(time.Duration(cooldownSeconds)*time.Second))
 				}
 				nonTranslationFailure = true
 				if r.Context().Err() != nil {
@@ -818,7 +820,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// virtual routes and direct real-model routes never populate the
 				// shared cooldown state.
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
-					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
+					s.cooldown.set(candidate.ProviderModelID, time.Now().Add(time.Duration(cooldownSeconds)*time.Second))
 				}
 				// An upstream HTTP response is an upstream failure regardless of
 				// status. Ordered virtual routes try their next target by default;
@@ -869,7 +871,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				terminalPreflightClass = class
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
-					s.cooldown.set(candidate.ProviderModelID, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second))
+					s.cooldown.set(candidate.ProviderModelID, time.Now().Add(time.Duration(cooldownSeconds)*time.Second))
 				}
 				nonTranslationFailure = true
 				row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1090,17 +1092,43 @@ func copySafeResponseHeaders(dst, src http.Header) {
 // upstream requests: forward a client-supplied session ID when present so
 // native clients keep conversation affinity, else synthesize a stable ID
 // from the router request ID (shared across fallback attempts).
-func openCodeSessionID(clientValue, requestID string) string {
+//
+// A client-supplied value is namespaced by the Tiller client key so two
+// different Tiller clients can never accidentally share the same OpenCode
+// conversation affinity on a shared real target. The result is a stable,
+// opaque hash of (client key, supplied session) prefixed with a truncated
+// client key fingerprint, all bounded to 128 bytes.
+func openCodeSessionID(clientValue, requestID, clientKeyID string) string {
 	if v := strings.TrimSpace(clientValue); v != "" {
-		if len(v) > 128 {
-			v = v[:128]
-		}
-		return v
+		h := sha256.Sum256([]byte(clientKeyID + "\x00" + v))
+		return "tiller-" + shortKeyID(clientKeyID) + "-" + hex.EncodeToString(h[:])[:16] + "-" + truncateSession(v)
 	}
 	if strings.TrimSpace(requestID) == "" {
 		return "tiller-anonymous"
 	}
 	return "tiller-" + strings.TrimSpace(requestID)
+}
+
+// shortKeyID returns a stable, truncated fingerprint of a client key ID, kept
+// short enough to survive the 128-byte OpenCode session cap after namespacing.
+func shortKeyID(id string) string {
+	if id == "" {
+		return "anon"
+	}
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+// truncateSession bounds the client-supplied session value so the full
+// namespaced result stays within the 128-byte upstream cap.
+func truncateSession(v string) string {
+	const budget = 40
+	if len(v) <= budget {
+		return v
+	}
+	return v[:budget]
 }
 
 func copySafeFeatureHeaders(dst, src http.Header, target providers.Protocol) {
@@ -1229,13 +1257,16 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 // cooldownTrigger reports whether a failure class / HTTP status should open the
 // fallback cooldown for the target. Request-specific failures (400, 409, 422,
 // upstream_response_too_large) do not indicate target health and are excluded.
+// 403 is also excluded: providers frequently use it for request/policy-specific
+// rejection rather than target health, so one client's rejection must not
+// poison the shared cooldown for every other client and virtual model.
 func cooldownTrigger(class string, httpStatus int) bool {
 	switch class {
 	case "upstream_unreachable", "upstream_timeout", "upstream_read_error":
 		return true
 	}
 	switch httpStatus {
-	case 408, 429, 404, 410, 401, 403:
+	case 408, 429, 404, 410, 401:
 		return true
 	}
 	if httpStatus >= 500 && httpStatus < 600 {

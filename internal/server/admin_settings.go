@@ -83,8 +83,8 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_fallback_timeout", "Fallback timeout must be between 1 and 3600 seconds.")
 		return
 	}
-	if input.FallbackCooldownSeconds != nil && *input.FallbackCooldownSeconds < 0 {
-		adminError(w, 400, "invalid_cooldown", "Fallback cooldown must be 0 or more seconds.")
+	if input.FallbackCooldownSeconds != nil && (*input.FallbackCooldownSeconds < 0 || *input.FallbackCooldownSeconds > 86400) {
+		adminError(w, 400, "invalid_cooldown", "Fallback cooldown must be between 0 and 86400 seconds (24 hours).")
 		return
 	}
 	if input.NotificationsWebhookURL != nil && *input.NotificationsWebhookURL != "" {
