@@ -156,7 +156,7 @@ func TestCooldownExpiryRetriesTarget(t *testing.T) {
 		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
 	})
-	api, secret, canonical, _ := cooldownTestHarness(t, failA, okB)
+	api, secret, canonical, app := cooldownTestHarness(t, failA, okB)
 	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{"fallback_cooldown_seconds": 1})
 	if status != 204 {
 		t.Fatalf("set cooldown: %d", status)
@@ -172,7 +172,13 @@ func TestCooldownExpiryRetriesTarget(t *testing.T) {
 		t.Fatalf("second request should skip A, got %d", resp.StatusCode)
 	}
 
-	time.Sleep(1100 * time.Millisecond)
+	// Deterministically expire the cooldown instead of waiting for real time:
+	// backdate the store entry so the next request retries A.
+	var modelA string
+	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
+		t.Fatalf("lookup model-a: %v", err)
+	}
+	app.cooldown.set(modelA, time.Now().Add(-time.Millisecond))
 
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{}})
 	if resp.StatusCode != 200 {
@@ -508,7 +514,12 @@ func TestCooldownDirectRouteUnaffected(t *testing.T) {
 func TestCooldownTimeoutOpensCooldown(t *testing.T) {
 	var mu sync.Mutex
 	reached := []string{}
-	timeoutA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// A hangs (never sends a response header) so the router's per-attempt
+	// time-to-first-header bound fires and classifies the failure as
+	// upstream_timeout, which must open cooldown. The handler blocks on a
+	// channel so the httptest server can shut down cleanly at cleanup.
+	releaseA := make(chan struct{})
+	hangA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
 			return
@@ -516,8 +527,7 @@ func TestCooldownTimeoutOpensCooldown(t *testing.T) {
 		mu.Lock()
 		reached = append(reached, "a")
 		mu.Unlock()
-		time.Sleep(2 * time.Second)
-		http.Error(w, "timeout", 500)
+		<-releaseA
 	})
 	okB := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -529,7 +539,11 @@ func TestCooldownTimeoutOpensCooldown(t *testing.T) {
 		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
 	})
-	api, secret, canonical, _ := cooldownTestHarness(t, timeoutA, okB)
+	api, secret, canonical, app := cooldownTestHarness(t, hangA, okB)
+	t.Cleanup(func() { close(releaseA) })
+	// Shorten the router's per-attempt time-to-first-header bound so the hang
+	// is classified as upstream_timeout quickly instead of waiting 60s.
+	app.providers.Registry().SetResponseHeaderTimeout(100 * time.Millisecond)
 
 	apiClient := &http.Client{Timeout: 3 * time.Second}
 	body, _ := json.Marshal(map[string]any{"model": canonical, "messages": []any{}})

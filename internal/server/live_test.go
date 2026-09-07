@@ -243,10 +243,6 @@ func TestLiveContextCancelUnsubscribes(t *testing.T) {
 }
 
 func TestLiveTerminatesWhenSessionIsRevoked(t *testing.T) {
-	previous := liveSessionCheckInterval
-	liveSessionCheckInterval = 10 * time.Millisecond
-	t.Cleanup(func() { liveSessionCheckInterval = previous })
-
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	req, _ := http.NewRequest(http.MethodGet, api.base+"/api/admin/live", nil)
 	cookie := api.client.Jar.Cookies(req.URL)[0]
