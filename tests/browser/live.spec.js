@@ -67,6 +67,15 @@ test('live refresh: transient error that recovers before timeout does not trigge
       __fireOpen() { if (this._onopen) this._onopen(); }
       __fireError() { if (this._onerror) this._onerror(); }
     };
+    // Accelerate the 5s auth-failure timer so the test does not wait for real
+    // time to prove a cleared timer stays cleared. Only the reconnect/auth
+    // timeout is fast-forwarded; the short waits below stay real so the
+    // fireError/fireOpen ordering is exercised.
+    window.__realSetTimeout = window.setTimeout;
+    window.setTimeout = (fn, ms) => {
+      if (ms === 5000) return window.__realSetTimeout(fn, 20);
+      return window.__realSetTimeout(fn, ms);
+    };
   });
   await page.goto('/live.js');
 
@@ -80,12 +89,13 @@ test('live refresh: transient error that recovers before timeout does not trigge
     document.addEventListener = addEventListener;
     stream.start();
     const source = stream.es;
-    // Simulate a transient error, then a successful reconnect 1s later.
+    // Simulate a transient error, then a successful reconnect.
     source.__fireError();
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => window.__realSetTimeout(r, 20));
     source.__fireOpen();
-    // Wait past the original 5s timeout to confirm the timer was cleared.
-    await new Promise(r => setTimeout(r, 5000));
+    // Wait past the (accelerated) original 5s timeout to confirm the timer was
+    // cleared by onopen and never fires the auth-failure callback.
+    await new Promise(r => window.__realSetTimeout(r, 50));
     return { authFailureCalls: window.__authFailureCalls };
   });
   expect(result.authFailureCalls).toBe(0);

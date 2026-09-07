@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,7 +27,6 @@ import (
 const (
 	pinnedSecret      = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	pinnedHash        = "$argon2id$v=19$m=65536,t=3,p=4$Zml4dHVyZXNhbHQxMjM0NQ$YjXl7+XuQ453GdOkihgo4QTJj8p6Wc8f7paVfT4a4ek"
-	pinnedSelector    = "MTIzNDU2Nzg5"
 	pinnedFingerprint = "AAAAAAAA"
 )
 
@@ -36,6 +37,18 @@ type fixtureOutput struct {
 	Secret      string `json:"secret"`
 	Type        string `json:"type"`
 	Fingerprint string `json:"fingerprint"`
+}
+
+// fixtureSelector derives a deterministic, per-client 12-char base64url selector
+// from the client name. The selector is the DB lookup key (UNIQUE), so sharing
+// a single pinned selector across clients would collide; the secret+hash are
+// the same pinned fixture for every client (they authenticate through the real
+// Argon2id verifier regardless of selector). Determinism keeps re-runs
+// idempotent and independent of clock/randomness.
+func fixtureSelector(name string) string {
+	sum := sha256.Sum256([]byte("fixture-selector:" + name))
+	enc := base64.RawURLEncoding.EncodeToString(sum[:])[:12]
+	return enc
 }
 
 // outputDest is the writer for fixturectl client output. Swappable in tests.
@@ -72,6 +85,7 @@ func runClient(args []string) error {
 
 	id := "browser-" + *name
 	now := database.Now()
+	selector := fixtureSelector(*name)
 
 	tx, err := db.SQL.BeginTx(ctx, nil)
 	if err != nil {
@@ -98,7 +112,7 @@ func runClient(args []string) error {
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO client_keys(id,name,description,selector,secret_hash,secret_fingerprint,enabled,logging_enabled,retention_days,key_type,key_group,created_at,rotated_at,updated_at)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, *name, "browser fixture client", pinnedSelector, pinnedHash, pinnedFingerprint,
+		id, *name, "browser fixture client", selector, pinnedHash, pinnedFingerprint,
 		1, 1, 30, *clientType, *group, now, nil, now,
 	)
 	if err != nil {
@@ -144,7 +158,7 @@ func runClient(args []string) error {
 	out := fixtureOutput{
 		ID:          id,
 		Name:        *name,
-		Secret:      "sk-tr-" + pinnedSelector + "." + pinnedSecret,
+		Secret:      "sk-tr-" + selector + "." + pinnedSecret,
 		Type:        *clientType,
 		Fingerprint: pinnedFingerprint,
 	}

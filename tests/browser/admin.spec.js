@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const {
   ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE,
-  openAdmin, adminCsrf, createProvider, createClient,
+  openAdmin, adminCsrf, createProvider, createClient, seedClient,
   mockAddModel, mockRemoveModel, refreshProviderApi
 } = require('./helpers');
 
@@ -99,7 +99,7 @@ test('mobile: Client Keys renders as cards with expandable detail and working ac
   const providerName = 'mobile-cards';
   const clientName = 'mobile-cards-client';
   await createProvider(page, csrf, providerName);
-  await createClient(page, csrf, clientName);
+  await seedClient(clientName);
   // Reload so the freshly created client appears in the (default) Client Keys view.
   await page.reload();
 
@@ -233,7 +233,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   const modelId = `${providerName}/mock-model`;
   const clientName = 'browser-perm-client';
   await createProvider(page, csrf, providerName);
-  await createClient(page, csrf, clientName);
+  await seedClient(clientName);
 
   await page.getByRole('link', { name: 'Clients' }).click();
   const clientRow = page.locator('#clients-body tr', { hasText: clientName });
@@ -537,7 +537,7 @@ test('permission bulk enable/disable applies only to current available models', 
   const canonical = id => `${providerName}/${id}`;
 
   const provider = await createProvider(page, csrf, providerName);
-  await createClient(page, csrf, clientName);
+  await seedClient(clientName);
 
   // Grow the mock upstream catalogue, then retire one model, so the provider
   // ends up with: mock-model (available), bulk-extra (available),
@@ -636,7 +636,7 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
   const canonical = id => `${providerName}/${id}`;
 
   const provider = await createProvider(page, csrf, providerName);
-  await createClient(page, csrf, clientName);
+  await seedClient(clientName);
 
   // Two AVAILABLE models so a filter can hide a subset: mock-model and reopen-extra.
   await mockAddModel(page, 'reopen-extra');
@@ -694,7 +694,7 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
   const canonical = id => `${providerName}/${id}`;
 
   const provider = await createProvider(page, csrf, providerName);
-  await createClient(page, csrf, clientName);
+  await seedClient(clientName);
 
   // Create a virtual group + model so both the Real and Virtual sections render.
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
@@ -764,7 +764,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
   const providerName = 'browser-errclear';
   const clientName = 'browser-errclear-client';
   await createProvider(page, csrf, providerName);
-  await createClient(page, csrf, clientName);
+  await seedClient(clientName);
 
   // 1. Per-client dialog: plant a sentinel error, then a successful re-load
   //    (debounced search) must clear it so no stale error lingers.
@@ -866,7 +866,7 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
   const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
   const modelId = `${providerName}/mock-model`;
-  const client = await createClient(page, csrf, clientName);
+  const client = await seedClient(clientName);
 
   // Grant the client access to the provider's model and fire one request so
   // the activity table has at least one row with a server-assigned
@@ -952,7 +952,7 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
   const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
   const modelId = `${providerName}/mock-model`;
-  const client = await createClient(page, csrf, clientName);
+  const client = await seedClient(clientName);
   const grantRes = await page.request.put(`/api/admin/client-keys/${client.id}/permissions`, {
     headers: { 'X-CSRF-Token': csrf },
     data: { defaults: [], permissions: [{ kind: 'real', model_id: realModel.id, enabled: true }] }

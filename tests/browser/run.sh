@@ -135,12 +135,21 @@ for i in $(seq 0 $((workers - 1))); do
     if [ "$workers" = 1 ] && [ -n "${TILLER_BROWSER_ROUTER_PORT:-}" ]; then router_port=$TILLER_BROWSER_ROUTER_PORT; else router_port=$(probe_port); fi
     mock_name="$run_id-mock-$i"
     router_name="$run_id-router-$i"
+    mkdir -p "$run_dir/worker-$i-data"
     echo "$i $router_port $mock_port" >> "$ports_file"
     docker run --rm -d --name "$mock_name" --network host \
         -v "$repo_dir/tests/compatibility/mock_upstream.py:/mock_upstream.py:ro" \
         -e TILLER_MOCK_PORT="$mock_port" \
         python:3.13-alpine python /mock_upstream.py >/dev/null
+    # The worker router's /data is a per-shard host mount so fixturectl (invoked
+    # by seedClient in the normal specs, against the same mount inside the
+    # browser container) can insert deterministic client fixtures without the
+    # costly Argon2 create flow. Started as root so the router's own privdrop
+    # chowns the fresh mount to its runtime user, exactly like the documented
+    # compose posture and the activity lane.
     docker run --rm -d --name "$router_name" --network host \
+        --user 0:0 \
+        -v "$run_dir/worker-$i-data:/data" \
         -e TILLER_LISTEN_ADDR="127.0.0.1:$router_port" \
         -e TILLER_ADMIN_USERNAME=admin \
         -e TILLER_ADMIN_PASSWORD="$password" \
@@ -231,6 +240,10 @@ while read -r i router_port mock_port; do
         -e PLAYWRIGHT_WORKERS=1 \
         -e TILLER_BROWSER_ADMIN_USERNAME=admin \
         -e TILLER_BROWSER_ADMIN_PASSWORD="$password" \
+        -e TILLER_FIXTURE_BIN=/usr/local/bin/fixturectl \
+        -e TILLER_FIXTURE_DB=/fixture-data/tiller-router.db \
+        -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
+        -v "$run_dir/worker-$i-data:/fixture-data:rw" \
         -v "$run_dir/playwright-results:/tests/test-results" \
         "$BROWSER_IMAGE" npx playwright test admin.spec.js live.spec.js capabilities.spec.js --shard="$((i + 1))/$workers" &
     echo "$i $!" >> "$pids_file"

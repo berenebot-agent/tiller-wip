@@ -45,7 +45,7 @@ func TestRunClientCreatesCatalogueFixture(t *testing.T) {
 	if out.Type != "catalogue" {
 		t.Errorf("type = %q", out.Type)
 	}
-	if out.Secret != "sk-tr-"+pinnedSelector+"."+pinnedSecret {
+	if out.Secret != "sk-tr-"+fixtureSelector("browser-catalogue-fixture")+"."+pinnedSecret {
 		t.Errorf("secret = %q", out.Secret)
 	}
 	if out.Fingerprint != pinnedFingerprint {
