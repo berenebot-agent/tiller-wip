@@ -6,13 +6,34 @@ const ADMIN_PASS = process.env.TILLER_BROWSER_ADMIN_PASSWORD || 'browser-test-pa
 const MOCK_BASE = process.env.TILLER_BROWSER_MOCK_BASE_URL || 'http://127.0.0.1:18081/v1';
 const MOCK_CONTROL_BASE = MOCK_BASE.replace(/\/v1$/, '');
 
-async function login(page) {
+// openAdmin assumes the page is already authenticated via storageState. It
+// navigates to the admin root and waits for the Clients heading.
+async function openAdmin(page) {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
+}
+
+// loginFresh performs a full login from an unauthenticated state. Use this only
+// when login/session behaviour is part of the assertion. It creates a fresh
+// browser context without the authenticated cookie so the test genuinely
+// exercises the login UI.
+async function loginFresh(browser) {
+  const context = await browser.newContext({ storageState: undefined, baseURL: process.env.TILLER_BROWSER_BASE_URL });
+  const page = await context.newPage();
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
   await page.getByLabel('Administrator').fill(ADMIN_USER);
   await page.getByLabel('Password').fill(ADMIN_PASS);
   await page.getByRole('button', { name: 'Enter control panel' }).click();
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
+  return { context, page };
+}
+
+// login is retained for tests that need the authenticated state on a page
+// object passed in by the test (which already has storageState). It navigates
+// and asserts the Clients heading is visible.
+async function login(page) {
+  await openAdmin(page);
 }
 async function adminCsrf(page) { const res = await page.request.get('/api/admin/session'); expect(res.ok()).toBeTruthy(); return (await res.json()).csrf_token; }
 async function createProvider(page, csrf, name) { const res = await page.request.post('/api/admin/providers', { headers: { 'X-CSRF-Token': csrf }, data: { name, type: 'generic-openai', base_url: MOCK_BASE } }); expect(res.status()).toBe(201); const body = await res.json(); expect(body.refresh_error).toBeFalsy(); return body; }
@@ -37,4 +58,4 @@ function seedActivity(clientId, rows, opts = {}) {
   execFileSync(bin, args, { stdio: 'pipe' });
 }
 
-module.exports = { ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE, login, adminCsrf, createProvider, createClient, mockAddModel, mockRemoveModel, mockFailModel, mockOkModel, refreshProviderApi, clearActivity, seedActivity };
+module.exports = { ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE, login, openAdmin, loginFresh, adminCsrf, createProvider, createClient, mockAddModel, mockRemoveModel, mockFailModel, mockOkModel, refreshProviderApi, clearActivity, seedActivity };

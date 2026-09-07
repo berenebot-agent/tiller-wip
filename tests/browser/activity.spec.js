@@ -1,5 +1,5 @@
 const { test, expect } = require('@playwright/test');
-const { login, adminCsrf, createProvider, createClient, clearActivity, mockAddModel, mockFailModel, seedActivity } = require('./helpers');
+const { openAdmin, adminCsrf, createProvider, createClient, clearActivity, mockAddModel, mockFailModel, seedActivity } = require('./helpers');
 
 // E2E: prove real inference lands in Activity. Only this test makes real proxy
 // calls (a handful). Pagination/search/volume are covered by the seeded tests
@@ -7,7 +7,7 @@ const { login, adminCsrf, createProvider, createClient, clearActivity, mockAddMo
 // milliseconds instead of ~300 ms per proxy call.
 test('activity records real inference: success, upstream failure, and ordered fallback', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   await clearActivity(page, csrf);
 
@@ -106,7 +106,7 @@ test('activity records real inference: success, upstream failure, and ordered fa
 // with 55 real proxy calls.
 test('global activity renders across clients, searches, and pages', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   await clearActivity(page, csrf);
   const client1Name = 'activity-client-one';
@@ -144,7 +144,7 @@ test('global activity renders across clients, searches, and pages', async ({ pag
 // states.
 test('activity pagination handles empty results and the exact-page boundary', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   await clearActivity(page, csrf);
   const clientA = await createClient(page, csrf, 'boundary-empty-client');

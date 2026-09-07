@@ -1,6 +1,6 @@
 const { test, expect } = require('@playwright/test');
 const {
-  login, adminCsrf, createProvider,
+  openAdmin, adminCsrf, createProvider,
   mockFailModel, mockOkModel
 } = require('./helpers');
 
@@ -195,7 +195,7 @@ test('live refresh: sustained error with 200 session does not trigger auth failu
 // .tok .tok. Drive the live view end-to-end with a real virtual model.
 test('live refresh: token cell stays non-nested when usage appears', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'live-tok';
@@ -268,7 +268,7 @@ test('live refresh: token cell stays non-nested when usage appears', async ({ pa
 // assert aria-label/title are non-empty for whatever class is shown.
 test('live refresh: neutral tooltip refresh without class change', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'live-tooltip';
@@ -343,7 +343,7 @@ test('live refresh: neutral tooltip refresh without class change', async ({ page
 });
 test('live refresh: resolution icon and token counter update without navigation', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'live-refresh';
@@ -418,7 +418,7 @@ test('live refresh: resolution icon and token counter update without navigation'
 
 test('live refresh: DOM writes pause while a dialog is open and reconcile on close', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'live-dialog';

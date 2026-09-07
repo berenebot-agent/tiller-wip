@@ -1,4 +1,5 @@
 const { defineConfig } = require('@playwright/test');
+const { STORAGE_PATH } = require('./global-setup');
 
 module.exports = defineConfig({
   testDir: '.',
@@ -9,8 +10,13 @@ module.exports = defineConfig({
   retries: 0,
   workers: Number(process.env.PLAYWRIGHT_WORKERS || 1),
   fullyParallel: true,
+  // Authenticate once per process via globalSetup, then reuse the cookie state
+  // for normal tests. loginFresh() tests bypass this with an unauthenticated
+  // context.
+  globalSetup: require.resolve('./global-setup.js'),
   use: {
     baseURL: process.env.TILLER_BROWSER_BASE_URL || 'http://127.0.0.1:18080',
+    storageState: STORAGE_PATH,
     trace: 'retain-on-failure',
     // Grant clipboard so the secret-copy test can both write and read the OS
     // clipboard. Without `clipboard-read`, navigator.clipboard.readText()

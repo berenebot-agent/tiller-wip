@@ -1,5 +1,5 @@
 const { test, expect } = require('@playwright/test');
-const { login } = require('./helpers');
+const { openAdmin } = require('./helpers');
 
 const response = (data) => ({ data, limit: 200, offset: 0 });
 
@@ -56,7 +56,7 @@ test('real capabilities dialog renders normalized reasoning metadata and tri-sta
 async function openRealFixture(page, model) {
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.addInitScript(() => { window.EventSource = class { addEventListener() {} close() {} }; });
-  await login(page);
+  await openAdmin(page);
   await mockCatalogue(page, { providers: [{ id: 'provider-capability', name: 'forge', enabled: true }], models: [model] });
   await page.getByRole('link', { name: 'Real Models' }).click();
   const row = page.locator(`#models-body tr[data-model-id="${model.id}"]`);
@@ -86,7 +86,7 @@ test('thinking modes remain configurable when selector options are empty', async
 
 test('virtual capabilities dialog leads with aggregate, preserves target metadata, and wraps on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await login(page);
+  await openAdmin(page);
   await mockCatalogue(page, {
     providers: [{ id: 'provider-capability', name: 'forge', enabled: true }],
     models: [],

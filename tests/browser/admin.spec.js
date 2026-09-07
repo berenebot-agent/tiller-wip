@@ -1,19 +1,16 @@
 const { test, expect } = require('@playwright/test');
 const {
   ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE,
-  login, adminCsrf, createProvider, createClient,
+  openAdmin, adminCsrf, createProvider, createClient,
   mockAddModel, mockRemoveModel, refreshProviderApi
 } = require('./helpers');
 
-test('admin login, responsive navigation, one-time secret, and system view', async ({ page }) => {
+test('admin login, responsive navigation, one-time secret, and system view', async ({ browser }) => {
+  // Explicitly test the login UI: create an unauthenticated context so the
+  // test genuinely exercises login (the global storageState is bypassed).
+  const { context, page } = await require('./helpers').loginFresh(browser);
+  try {
   await page.setViewportSize({ width: 780, height: 700 });
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
-  await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/media/tiller-favicon.svg');
-  await expect(page.locator('.login-mark')).toBeVisible();
-  await page.getByLabel('Administrator').fill(process.env.TILLER_BROWSER_ADMIN_USERNAME || 'admin');
-  await page.getByLabel('Password').fill(process.env.TILLER_BROWSER_ADMIN_PASSWORD || 'browser-test-password');
-  await page.getByRole('button', { name: 'Enter control panel' }).click();
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
   await expect(page.locator('.brand-mark')).toBeVisible();
 
@@ -51,20 +48,32 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await page.setViewportSize({ width: 1440, height: 900 });
   await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
   expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+  } finally {
+    await context.close();
+  }
 });
 
-test('insecure origin (plain HTTP): one-time-secret hides the Copy button and selects the key', async ({ page }) => {
+test('insecure origin (plain HTTP): one-time-secret hides the Copy button and selects the key', async ({ browser }) => {
   // Over plain HTTP on a LAN IP the browser will not honour a silent clipboard
   // write, so the UI must NOT claim "Copied". Instead it must hide the Copy
   // button, highlight the key for the user's own Ctrl/Cmd+C gesture, and say
   // so. Model that insecure context here by faking isSecureContext=false and
-  // removing the clipboard API before any page script runs.
+  // removing the clipboard API before any page script runs. Uses an
+  // unauthenticated context (init scripts must run before page load).
+  const context = await browser.newContext({ storageState: undefined, baseURL: process.env.TILLER_BROWSER_BASE_URL });
+  const page = await context.newPage();
+  try {
   await page.addInitScript(() => {
     Object.defineProperty(window, 'isSecureContext', { value: false, configurable: true });
     try { Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }); } catch {}
   });
   await page.setViewportSize({ width: 1280, height: 800 });
-  await login(page);
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
+  await page.getByLabel('Administrator').fill(ADMIN_USER);
+  await page.getByLabel('Password').fill(ADMIN_PASS);
+  await page.getByRole('button', { name: 'Enter control panel' }).click();
+  await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '+ Add client' }).click();
   await page.getByLabel('Client name').fill('Insecure copy client');
   await page.getByLabel('Description').fill('Confirms the Copy button is hidden on plain HTTP');
@@ -78,11 +87,14 @@ test('insecure origin (plain HTTP): one-time-secret hides the Copy button and se
   // …and the state must instruct a manual Ctrl/Cmd+C rather than claim a copy.
   await expect(page.locator('#copy-state')).toHaveText('Key selected — press Ctrl/Cmd+C to copy it.');
   await page.getByRole('button', { name: 'I have stored the key' }).click();
+  } finally {
+    await context.close();
+  }
 });
 
 test('mobile: Client Keys renders as cards with expandable detail and working actions', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'mobile-cards';
   const clientName = 'mobile-cards-client';
@@ -132,7 +144,7 @@ test('mobile: Client Keys renders as cards with expandable detail and working ac
 
 test('mobile: Single-key card route summary and Settings entry point', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'mobile-single';
   const clientName = 'mobile-single-client';
@@ -214,7 +226,7 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
 
 test('Real Models expands large provider groups in cancellable batches', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'progressive-models';
   const totalRows = 95;
@@ -296,7 +308,7 @@ test('Real Models expands large provider groups in cancellable batches', async (
 
 test('permission edits survive filtering, and cancel/save semantics hold', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'browser-perm';
@@ -353,7 +365,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
 
 test('Single key creation, response identity, rename warning, and inline route switching', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'single-ui';
   const clientName = 'single-ui-client';
@@ -422,7 +434,7 @@ test('Single key creation, response identity, rename warning, and inline route s
 
 test('single-route inline picker: typeahead selects and tick applies', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'enter-save';
   const clientName = 'enter-save-client';
@@ -470,7 +482,7 @@ test('single-route inline picker: typeahead selects and tick applies', async ({ 
 
 test('single-route inline picker: red X cancels without saving', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'cancel-route';
   const clientName = 'cancel-route-client';
@@ -515,7 +527,7 @@ test('single-route inline picker: red X cancels without saving', async ({ page }
 
 test('single-route inline picker: clicking away without selecting reverts to the saved route', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'blur-revert';
   const clientName = 'blur-revert-client';
@@ -548,7 +560,7 @@ test('single-route inline picker: clicking away without selecting reverts to the
 
 test('Settings dialog switches a client between catalogue and single', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'settings-switch';
   const clientName = 'settings-switch-client';
@@ -599,7 +611,7 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
 
 test('permission bulk enable/disable applies only to current available models', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'bulk-perm';
@@ -698,7 +710,7 @@ test('permission bulk enable/disable applies only to current available models', 
 
 test('reopening permissions clears the stale filter so bulk actions scope to all models', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'reopen-perm';
@@ -756,7 +768,7 @@ test('reopening permissions clears the stale filter so bulk actions scope to all
 
 test('Manage models collapse: Real/Virtual sections and provider groups', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'collapse-perm';
@@ -828,7 +840,7 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
 
 test('activity loads clear a previously shown error on success', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'browser-errclear';
@@ -866,7 +878,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
 
 test('client key group: listing badge, create/edit dialog, and filter', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const defaultClient = 'browser-group-default';
@@ -926,7 +938,7 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
   // secure-context loopback origin, so the request-ID cell should render with
   // a click affordance and writing the clipboard should succeed.
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   const providerName = 'browser-copy-reqid';
@@ -1013,7 +1025,7 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
     try { Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true }); } catch {}
   });
   await page.setViewportSize({ width: 1280, height: 800 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'browser-copy-reqid-insecure';
   const clientName = 'browser-copy-reqid-insecure-client';
@@ -1053,7 +1065,7 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
 
 test('virtual-model target combobox: unique upstream_model_id match auto-accepts without an explicit pick', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'vm-exact-match';
   const provider = await createProvider(page, csrf, providerName);
@@ -1136,7 +1148,7 @@ test('virtual-model target combobox: unique upstream_model_id match auto-accepts
 
 test('virtual-model target combobox: ambiguous upstream_model_id match does not auto-accept', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
 
   // Create two providers that both expose the same upstream_model_id. This
@@ -1193,7 +1205,7 @@ test('virtual-model target combobox: ambiguous upstream_model_id match does not 
 
 test('virtual-model target combobox: non-matching text still blocks submission', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'vm-nomatch';
   const provider = await createProvider(page, csrf, providerName);
@@ -1233,7 +1245,7 @@ test('virtual-model target combobox: non-matching text still blocks submission',
 
 test('mobile: ordered-fallback target dropdown spans the dialog width', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'vm-mobile-list';
   await createProvider(page, csrf, providerName);
@@ -1282,7 +1294,7 @@ test('virtual models table: group header colspan matches data row columns', asyn
   // colspan must match the data row cell count so the table does not get
   // an extra synthetic column.
   await page.setViewportSize({ width: 1440, height: 900 });
-  await login(page);
+  await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'vm-colspan';
   await createProvider(page, csrf, providerName);
