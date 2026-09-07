@@ -263,6 +263,13 @@ const RESOLUTION_ICONS = {
 function resolutionStatus(target) {
   const key = target.provider_model_id || target.target_model_id;
   const legacyKey = `${target.provider_name}/${target.upstream_model_id}`;
+  const cooling = state.usage?.target_cooldown?.[key] || state.usage?.target_cooldown?.[legacyKey];
+  if (cooling) {
+    const label = cooling.origin_error_class
+      ? `${cooling.provider}/${cooling.model} failed: ${cooling.origin_error_class}${cooling.origin_error_message ? ` — ${cooling.origin_error_message}` : ''} (in cooldown)`
+      : `${cooling.provider}/${cooling.model} failed (in cooldown)`;
+    return ['bad', label];
+  }
   const last = state.usage?.target_last_outcome?.[key]
             || state.usage?.target_last_outcome?.[legacyKey];
   if (last?.at) {
@@ -1213,7 +1220,7 @@ live.on('outcome', payload => {
 
 live.on('snapshot', payload => {
   if (!state.usage) state.usage = {};
-  ['target_last_outcome', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
+  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
   if (payload.modules?.inflight !== undefined) state.inflight = payload.modules.inflight || {};

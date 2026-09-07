@@ -11,6 +11,7 @@ import (
 // (the failing request's client request id and error) so the admin UI can
 // explain why a target is currently cooled without a DB lookup.
 type cooldownEntry struct {
+	providerModelID    string
 	until              time.Time
 	startedAt          time.Time
 	provider           string
@@ -46,6 +47,7 @@ func (c *cooldownStore) set(id string, startedAt, until time.Time, provider, mod
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.until[id] = cooldownEntry{
+		providerModelID:    id,
 		startedAt:          startedAt,
 		until:              until,
 		provider:           provider,
@@ -78,6 +80,38 @@ func (c *cooldownStore) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.until = map[string]cooldownEntry{}
+}
+
+// cooldownView is the per-target cooldown state surfaced to the admin/live UI.
+type cooldownView struct {
+	ProviderModelID    string `json:"provider_model_id"`
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	UntilAt            string `json:"until_at"`
+	OriginErrorClass   string `json:"origin_error_class"`
+	OriginErrorMessage string `json:"origin_error_message"`
+}
+
+// snapshot returns a copy of all currently-cooling cooldown windows keyed by
+// provider_model_id. Expired windows are omitted.
+func (c *cooldownStore) snapshot(now time.Time) map[string]cooldownView {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]cooldownView, len(c.until))
+	for _, e := range c.until {
+		if !now.Before(e.until) {
+			continue
+		}
+		out[e.providerModelID] = cooldownView{
+			ProviderModelID:    e.providerModelID,
+			Provider:           e.provider,
+			Model:              e.model,
+			UntilAt:            e.until.Format(time.RFC3339Nano),
+			OriginErrorClass:   e.originErrorClass,
+			OriginErrorMessage: e.originErrorMessage,
+		}
+	}
+	return out
 }
 
 // cooldownStatus reports the live cooldown state for the provider/model given

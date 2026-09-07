@@ -92,6 +92,7 @@ func (h *liveHub) emitOutcome(delta map[string]lastOutcome) {
 type liveSnapshot struct {
 	GeneratedAt       string                            `json:"generated_at"`
 	TargetLastOutcome map[string]lastOutcome            `json:"target_last_outcome"`
+	TargetCooldown    map[string]cooldownView           `json:"target_cooldown"`
 	TargetHealth      map[string]targetResolutionHealth `json:"target_health"`
 	VirtualModels     map[string]usageWindows           `json:"virtual_models"`
 	ClientKeys        map[string]usageWindows           `json:"client_keys"`

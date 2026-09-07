@@ -34,6 +34,7 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		"client_keys":         snap.ClientKeys,
 		"virtual_models":      snap.VirtualModels,
 		"target_health":       snap.TargetHealth,
+		"target_cooldown":     snap.TargetCooldown,
 		"real_models":         snap.RealModels,
 		"client_cache":        snap.ClientCache,
 		"virtual_cache":       snap.VirtualCache,
@@ -82,6 +83,7 @@ func (s *Server) buildUsageSnapshot(ctx context.Context) (liveSnapshot, error) {
 	return liveSnapshot{
 		GeneratedAt:       now.Format(time.RFC3339Nano),
 		TargetLastOutcome: s.lastOutcomeSnapshot(),
+		TargetCooldown:    s.cooldown.snapshot(now),
 		TargetHealth:      targetHealth,
 		VirtualModels:     virtualModels,
 		ClientKeys:        clientKeys,
