@@ -58,4 +58,28 @@ function seedActivity(clientId, rows, opts = {}) {
   execFileSync(bin, args, { stdio: 'pipe' });
 }
 
-module.exports = { ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE, login, openAdmin, loginFresh, adminCsrf, createProvider, createClient, mockAddModel, mockRemoveModel, mockFailModel, mockOkModel, refreshProviderApi, clearActivity, seedActivity };
+// seedClient creates a deterministic client fixture via fixturectl instead of
+// going through the real (Argon2-costly) /api/admin/client-keys create flow.
+// Returns { id, secret, name, type, fingerprint }. Use this for tests that
+// merely need a client to exist (permissions, activity, routing, group UI,
+// virtual-model behaviour, settings unrelated to key creation). Tests that
+// exercise key creation/rotation/clipboard must use the real createClient.
+// Only available in test containers where fixturectl is mounted
+// (TILLER_FIXTURE_BIN/TILLER_FIXTURE_DB).
+function seedClient(name, opts = {}) {
+  const bin = process.env.TILLER_FIXTURE_BIN;
+  const db = process.env.TILLER_FIXTURE_DB;
+  if (!bin || !db) throw new Error('seedClient requires the fixturectl wiring from tests/browser/run.sh (TILLER_FIXTURE_BIN/TILLER_FIXTURE_DB)');
+  const args = ['client', '--db', db, '--name', name, '--type', opts.type || 'catalogue'];
+  if (opts.group) args.push('--group', opts.group);
+  if (opts.type === 'single') {
+    if (!opts.targetID) throw new Error('seedClient single requires opts.targetID');
+    args.push('--target-kind', opts.targetKind || 'real');
+    args.push('--target-id', opts.targetID);
+    if (opts.singleModel) args.push('--single-model', opts.singleModel);
+  }
+  const out = execFileSync(bin, args, { stdio: 'pipe' });
+  return JSON.parse(out.toString('utf8'));
+}
+
+module.exports = { ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE, login, openAdmin, loginFresh, adminCsrf, createProvider, createClient, mockAddModel, mockRemoveModel, mockFailModel, mockOkModel, refreshProviderApi, clearActivity, seedActivity, seedClient };

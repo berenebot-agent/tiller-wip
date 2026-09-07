@@ -44,6 +44,34 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Prebuild router test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: tiller-router:dev
+          cache-from: type=gha,scope=browser-router
+          cache-to: type=gha,scope=browser-router,mode=max
+      - name: Prebuild browser runner image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tests/browser/Dockerfile
+          load: true
+          tags: tiller-router-browser-tests:dev
+          cache-from: type=gha,scope=browser-playwright
+          cache-to: type=gha,scope=browser-playwright,mode=max
+      - name: Prebuild fixturectl image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tests/fixturectl/Dockerfile
+          load: true
+          tags: tiller-router-fixturectl:dev
+          cache-from: type=gha,scope=browser-fixturectl
+          cache-to: type=gha,scope=browser-fixturectl,mode=max
       - name: Run browser checks
         run: ./tests/browser/run.sh
       - name: Run read-only runtime checks

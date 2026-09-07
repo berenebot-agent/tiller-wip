@@ -34,7 +34,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: fixturectl activity --db <path> --client <id> [options]")
+		fmt.Fprintln(os.Stderr, "usage: fixturectl <activity|client> [options]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -43,8 +43,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "fixturectl: "+err.Error())
 			os.Exit(1)
 		}
+	case "client":
+		if err := runClient(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "fixturectl: "+err.Error())
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "fixturectl: unknown subcommand %q (expected activity)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "fixturectl: unknown subcommand %q (expected activity or client)\n", os.Args[1])
 		os.Exit(2)
 	}
 }

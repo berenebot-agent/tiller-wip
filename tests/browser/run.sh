@@ -13,6 +13,10 @@
 #   TILLER_BROWSER_WORKERS       admin shards (default 3); one activity lane is added
 #   TILLER_BROWSER_BASE_URL  base URL for playwright (default http://127.0.0.1:18080)
 #   TILLER_BROWSER_MOCK_BASE_URL  mock upstream /v1 base (default http://127.0.0.1:18081/v1)
+#   TILLER_BROWSER_REBUILD=1  force-rebuild the browser + fixturectl images
+#                               (set after changing the browser Dockerfile, package
+#                               deps, copied JS, fixturectl code, or router code if
+#                               reusing a previously built router image).
 
 set -eu
 
@@ -102,11 +106,24 @@ export DOCKER_BUILDKIT=1
 
 . "$repo_dir/tests/scripts/build-router.sh"
 
-echo "==> Building tiller-router-browser-tests:dev (cached)"
-docker build --pull=false -t tiller-router-browser-tests:dev "$repo_dir/tests/browser"
+# Skip the browser + fixturectl builds when the image already exists, so a
+# second local run reuses the prepared image instead of rebuilding. Set
+# TILLER_BROWSER_REBUILD=1 to force a rebuild after changing the Dockerfile,
+# package deps, copied JS, fixturectl code, or router code (if reusing a
+# previously built router image).
+if [ "${TILLER_BROWSER_REBUILD:-0}" = "1" ] || ! docker image inspect tiller-router-browser-tests:dev >/dev/null 2>&1; then
+    echo "==> Building tiller-router-browser-tests:dev"
+    docker build --pull=false -t tiller-router-browser-tests:dev "$repo_dir/tests/browser"
+else
+    echo "==> tiller-router-browser-tests:dev (cached, skip build; set TILLER_BROWSER_REBUILD=1 to force)"
+fi
 
-echo "==> Building fixturectl (cached) and extracting the binary"
-docker build --pull=false -q -t tiller-router-fixturectl:dev -f "$repo_dir/tests/fixturectl/Dockerfile" "$repo_dir" >/dev/null
+if [ "${TILLER_BROWSER_REBUILD:-0}" = "1" ] || ! docker image inspect tiller-router-fixturectl:dev >/dev/null 2>&1; then
+    echo "==> Building fixturectl"
+    docker build --pull=false -q -t tiller-router-fixturectl:dev -f "$repo_dir/tests/fixturectl/Dockerfile" "$repo_dir" >/dev/null
+else
+    echo "==> tiller-router-fixturectl:dev (cached, skip build)"
+fi
 fixture_cid=$(docker create tiller-router-fixturectl:dev /fixturectl)
 docker cp "$fixture_cid:/fixturectl" "$run_dir/fixturectl"
 docker rm "$fixture_cid" >/dev/null
