@@ -32,7 +32,7 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 /* Client model access: compact status-first table and one routing dialog. */
 .clients-table{max-width:100%}
 .clients-table td:nth-child(1),.clients-table th:nth-child(1){max-width:clamp(160px, 16vw, 260px);overflow:hidden;text-overflow:ellipsis}
-.clients-table td:nth-child(2),.clients-table th:nth-child(2){min-width:clamp(280px, 28vw, 500px);width:42%}
+.clients-table td:nth-child(2),.clients-table th:nth-child(2){min-width:clamp(260px, 22vw, 380px);width:32%}
 .clients-table th:nth-child(3),.clients-table th:nth-child(4),.clients-table th:nth-child(5),.clients-table .actions-head{width:1%;white-space:nowrap}
 .clients-table td:nth-child(3),.clients-table td:nth-child(4),.clients-table td:nth-child(5),.clients-table td:nth-child(6){white-space:nowrap}
 .key-info-cell .secret-fingerprint{display:block}
