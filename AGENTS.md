@@ -98,6 +98,7 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 - The request touches credential handling, auth, or logging in a way not explicitly covered by the security guardrails above.
 - No discovery path exists for a provider's models or capabilities — stop and present the human with options (e.g. a live endpoint to use, a user-supplied list, deferring support) instead of inventing a hardcoded catalogue.
 - You find an actual inconsistency between the docs and the current code — report it, don't resolve it silently.
+- You intend to run any test tier (unit, browser, compat, runtime) and the user has not explicitly authorised it for the current change — ask upfront, before coding starts, rather than pausing mid-change.
 
 ## Branching and commits
 
@@ -110,11 +111,15 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 
 ## Testing expectations
 
-- Any change to routing, permissions, or auth should be verified against existing tests (unit, browser, or compatibility — pick the smallest tier that would catch a regression), not just against a new test you wrote for the change.
+**Default: do not run tests.** The human drives when tests run. Tests in this repo are slow and the user pays for each invocation.
 
-### How to test — pick the right route (default by change size)
+- Do **not** run any test tier on your own initiative — not unit, not browser, not compatibility, not runtime — for any change size.
+- If you believe tests should be run for a task, surface that **upfront, before you start coding**. Propose the smallest tier you'd run and wait for an explicit go-ahead. Do not pause mid-change to ask.
+- `gofmt` and `go vet` are **not** tests — running the formatting gate (`./tests/scripts/check-fmt.sh`) and `./tiller-go.sh vet ./...` is fine to do automatically. Everything under `tests/` is gated.
 
-Run the **minimum** tier that matches the change. Do **not** default to the full suite — the heavy tiers are slow. The test packages (all with warm Docker caches):
+### How to test — tier reference (for whoever is running)
+
+If the human has authorised tests for this change, run the smallest tier that would catch a regression. The tiers below are a reference for that decision; they are **not** instructions for the agent to run. The test packages (all with warm Docker caches):
 
 | Tier | Command | Approx time | What it verifies |
 |---|---|---|---|
@@ -124,14 +129,12 @@ Run the **minimum** tier that matches the change. Do **not** default to the full
 | Compatibility probes | `./tests/compatibility/run.sh` | ~2–4 min | Real OpenAI/Anthropic SDKs + Codex/OpenCode/Claude-Code CLI + Hermes agent + router restart |
 | Runtime read-only / security | `./tests/runtime-readonly.sh` | ~30–60s | Read-only rootfs, caps-drop, backup export under deployment settings |
 
-**Sensible default by change type:**
+**When the human has approved a run, sensible tier by change type (for reference):**
 
-- **Minor UX change** (copy, spacing, a label, a CSS tweak, purely presentational markup): **no tests required.** Just confirm the page still renders (sanity) — run the browser suite only if you changed interactive behaviour (handlers, dialogs, navigation).
-- **Minor function change** (small backend/behavioural fix): run **`./tiller-go.sh test ./...`** (and `vet` for Go changes) only. Do not run the browser or compatibility suites unless the change touches the admin UI or a routing/protocol/provider path.
-- **Major feature change, or a change that spans backend + UI / routing / providers / auth**: run the Go tests **and** the browser suite; add `tests/compatibility/run.sh` if the change affects provider protocols, client-facing catalogues, or model resolution, and `tests/runtime-readonly.sh` if it touches deployment/security (volumes, caps, read-only, backup, auth).
-- **Run the full suite only when instructed, or for a significant feature/release.** Otherwise pick the smallest tier that would catch a regression in what you changed.
-
-When a change is purely frontend (`internal/web/assets/**`), the browser suite is the gate; run `./tiller-go.sh test ./...` for sanity but the UI tests are the ones that matter.
+- **Minor UX change** (copy, spacing, a label, a CSS tweak, purely presentational markup): no tests required.
+- **Minor function change** (small backend/behavioural fix): `./tiller-go.sh test ./...` (and `vet` for Go changes) only.
+- **Major feature change, or a change that spans backend + UI / routing / providers / auth**: Go tests **and** the browser suite; add `tests/compatibility/run.sh` if the change affects provider protocols, client-facing catalogues, or model resolution, and `tests/runtime-readonly.sh` if it touches deployment/security (volumes, caps, read-only, backup, auth).
+- **Full suite** only for a significant feature/release.
 
 ### Formatting gate (every Go change, before every push)
 
@@ -153,9 +156,7 @@ tier that matches the change:
 
 #### Tier A — targeted edit loop (seconds)
 
-Run only the package or browser spec relevant to the change. Use this after
-every trivial edit; a 1-second targeted test catches most mistakes that a
-2-minute integration suite would.
+For the human's reference, and for you when explicitly authorised. Run only the package or browser spec relevant to the change. A 1-second targeted run catches most mistakes that a 2-minute integration suite would.
 
 ```bash
 # Go: one package, one test
@@ -168,6 +169,8 @@ npx playwright test admin.spec.js --grep "permission edits survive filtering"
 ```
 
 #### Tier B — normal pre-commit (1–2 min)
+
+When authorised, the standard pre-commit bundle is:
 
 ```bash
 ./tests/scripts/check-fmt.sh
