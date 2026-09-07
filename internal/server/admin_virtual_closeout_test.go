@@ -144,6 +144,9 @@ func TestVirtualAdminUsesAllEligibleTargetsForAvailabilityCapabilitiesAndDeletio
 	// targets, so deleting provider-b must succeed and remove provider-b's
 	// target from the chain (the spec allows deletion as long as the provider
 	// is not the LAST model in any fallback chain).
+	if _, err := db.SQL.Exec(`UPDATE providers SET enabled=1 WHERE id=?`, providerA); err != nil {
+		t.Fatal(err)
+	}
 	status, payload, _ = api.request("DELETE", "/api/admin/providers/provider-b-id", nil)
 	if status != http.StatusNoContent {
 		t.Fatalf("non-terminal provider deletion should succeed: %d %v", status, payload)

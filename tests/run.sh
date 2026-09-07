@@ -74,7 +74,7 @@ for t in "${ALL_TIERS[@]}"; do
 done
 
 # --- run id + folder ------------------------------------------------------
-TS=$(date -u +%Y%m%dT%H%M%S)
+TS=$(date -u +%Y%m%dT%H%M%S)-$$
 TIER_LABEL=$(IFS=,; echo "${SELECTED[*]}")
 RUN_DIR="tests/logs/runs/${TS}-${TIER_LABEL}"
 

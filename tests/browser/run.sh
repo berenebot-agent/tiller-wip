@@ -57,7 +57,7 @@ mkdir -p tests/logs
 # inside the unified run dir — use it directly and let the wrapper own
 # lifecycle + pruning. When unset, use the dated per-run dir as before.
 if [ -n "${TILLER_TEST_DIR:-}" ]; then
-    run_dir="$TILLER_TEST_DIR"
+    run_dir=$(cd "$TILLER_TEST_DIR" 2>/dev/null && pwd || echo "$TILLER_TEST_DIR")
     WRAPPED=1
 else
     run_dir="$(pwd)/tests/logs/$run_id"
