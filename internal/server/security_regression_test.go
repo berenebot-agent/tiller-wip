@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -117,12 +116,8 @@ func newSecurityTestServer(t *testing.T, cfg config.Config) (*Server, *database.
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(cfg, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
 	t.Cleanup(func() { db.Close() })
+	app := newTestServer(t, cfg, db)
 	return app, db
 }
 

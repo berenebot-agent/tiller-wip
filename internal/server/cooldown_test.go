@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -31,10 +30,7 @@ func cooldownTestHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc) (*
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
@@ -650,10 +646,7 @@ func TestCooldownRestartClearsState(t *testing.T) {
 		t.Fatalf("second request should skip A, got %v", got)
 	}
 
-	newApp, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8082"}, app.db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	newApp := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8082"}, app.db)
 	newRouter := httptest.NewServer(newApp.Handler())
 	t.Cleanup(newRouter.Close)
 
@@ -661,7 +654,7 @@ func TestCooldownRestartClearsState(t *testing.T) {
 	req, _ := http.NewRequest("POST", newRouter.URL+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Content-Type", "application/json")
-	resp, err = http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

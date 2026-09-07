@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -22,7 +20,7 @@ func TestClientKeyGroup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
