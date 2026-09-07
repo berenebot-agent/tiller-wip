@@ -29,12 +29,21 @@ import (
 // Fan-out shares one marshalled []byte per event across all subscribers.
 
 const (
-	liveOutcomeBuffer    = 64
+	liveOutcomeBuffer = 64
+	// Production debounce/idle intervals for the live dispatcher.
 	liveDebounceInterval = 2 * time.Second
 	liveIdleInterval     = 5 * time.Second
 )
 
 var liveSessionCheckInterval = time.Minute
+
+// liveTimings holds the dispatcher's timing values. Production defaults are
+// the package-level constants; tests construct a hub with shortened values.
+type liveTimings struct {
+	debounce     time.Duration
+	idle         time.Duration
+	sessionCheck time.Duration
+}
 
 // liveHub holds the subscriber set and the outcome delta channel. The
 // dispatcher goroutine lifecycle is driven by subscribe/unsubscribe.
@@ -44,6 +53,7 @@ type liveHub struct {
 	outcomeCh  chan map[string]lastOutcome
 	activityCh chan inflightDelta
 	cancel     context.CancelFunc
+	timings    liveTimings
 	// snapshot recomputes the full usage/health envelope. It is bound to the
 	// owning Server so the dispatcher and the /api/admin/usage endpoint share
 	// one source of truth.
@@ -147,17 +157,18 @@ func (h *liveHub) broadcast(event string, payload any) {
 }
 
 // dispatcher is the single owner of the aggregate recompute. It broadcasts an
-// outcome delta immediately, then coalesces the full snapshot behind a 2s
-// debounce under load and a 5s idle ticker otherwise.
+// outcome delta immediately, then coalesces the full snapshot behind the
+// configured debounce under load and the idle ticker otherwise.
 func (h *liveHub) dispatcher(ctx context.Context) {
-	debounce := time.NewTimer(liveDebounceInterval)
+	t := h.timings
+	debounce := time.NewTimer(t.debounce)
 	if !debounce.Stop() {
 		select {
 		case <-debounce.C:
 		default:
 		}
 	}
-	idle := time.NewTicker(liveIdleInterval)
+	idle := time.NewTicker(t.idle)
 	defer idle.Stop()
 	defer debounce.Stop()
 	dirty := false
@@ -174,7 +185,7 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 				default:
 				}
 			}
-			debounce.Reset(liveDebounceInterval)
+			debounce.Reset(t.debounce)
 		case delta := <-h.activityCh:
 			h.broadcast("activity", delta)
 		case <-debounce.C:
@@ -222,7 +233,7 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := r.Context().Value(adminSessionKey).(auth.Session)
-	validate := time.NewTicker(liveSessionCheckInterval)
+	validate := time.NewTicker(s.liveHub.timings.sessionCheck)
 	defer validate.Stop()
 	expires := time.NewTimer(time.Until(session.ExpiresAt))
 	defer expires.Stop()

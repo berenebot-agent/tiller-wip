@@ -105,7 +105,9 @@ func TestLiveStreamsOutcomeAndSnapshot(t *testing.T) {
 		}
 	}
 
-	// The debounced snapshot follows within the debounce window.
+	// The debounced snapshot follows within the debounce window. Use a bounded
+	// wait that comfortably exceeds the production 2s debounce but fails loud
+	// if the dispatcher is not coalescing correctly.
 	deadline := time.Now().Add(4 * time.Second)
 	for {
 		event, data = readSSE(t, reader)
@@ -185,7 +187,7 @@ func TestLiveBroadcastFanout(t *testing.T) {
 }
 
 func TestLiveOutcomeIsDroppedWithoutSubscribers(t *testing.T) {
-	h := &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer)}
+	h := &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), timings: liveTimings{debounce: 10 * time.Millisecond, idle: 10 * time.Millisecond, sessionCheck: time.Millisecond}}
 	h.emitOutcome(map[string]lastOutcome{"pm": {IsSuccess: true}})
 
 	select {

@@ -606,10 +606,15 @@ func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
 }
 
 func TestNotificationFailureDoesNotFailInference(t *testing.T) {
-	// Webhook that responds slowly to prove delivery never blocks the response.
+	// Webhook that blocks until released, to prove delivery never blocks the
+	// response. The handler closes `started` when it begins handling, then
+	// waits for `release` before returning 200.
+	started := make(chan struct{})
+	release := make(chan struct{})
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
-		w.WriteHeader(200)
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer webhook.Close()
 
@@ -623,15 +628,18 @@ func TestNotificationFailureDoesNotFailInference(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
 	}
-	start := time.Now()
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
-	elapsed := time.Since(start)
 	if resp.StatusCode != 200 {
 		t.Fatalf("request should succeed despite webhook hang, got %d", resp.StatusCode)
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("notification delivery materially delayed the response: %v", elapsed)
+	// The webhook must have started (delivery fired) while the response was
+	// already returned.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhook was not invoked after inference response returned")
 	}
+	close(release)
 }
 
 func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *database.DB, *httptest.Server) {
