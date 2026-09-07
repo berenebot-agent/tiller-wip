@@ -356,8 +356,9 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	// virtual_model_targets is the functional source of truth. This includes
 	// references in every ordered position, not only the compatibility primary
 	// columns on virtual_models. Find every virtual model that references this
-	// provider and classify whether the provider is the last target in that
-	// chain (terminal: deleting it would leave the chain with no targets).
+	// provider and classify whether another provider has an eligible target
+	// that can take over (non-terminal) or not (terminal: deleting it would
+	// strand the chain or dangle the legacy compatibility columns).
 	terminalVirtuals, allVirtuals, err := s.providerVirtualModelRefs(r.Context(), tx, providerID)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
@@ -400,9 +401,9 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		// Promote the first remaining target into the legacy compatibility
 		// columns if the deleted provider was the primary. The compat columns
-		// are NOT NULL and must reference a real provider/model. Because the
-		// deletion guard above blocks removing the last *eligible* target, at
-		// least one eligible target remains here; prefer it so a disabled or
+		// are NOT NULL and must reference a real provider/model. The deletion
+		// guard above guarantees another provider owns an eligible takeover
+		// target, so at least one remains here; prefer it so a disabled or
 		// retired target cannot become the promoted compatibility primary.
 		var promotedProvider, promotedModel sql.NullString
 		err = tx.QueryRowContext(r.Context(), `SELECT p.id,m.id FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1 ORDER BY t.position LIMIT 1`, v.id).Scan(&promotedProvider, &promotedModel)
@@ -476,13 +477,16 @@ type providerVirtualModelRef struct {
 }
 
 // providerVirtualModelRefs returns the set of virtual models that reference the
-// given provider, split into terminal (the provider is the last *eligible*
-// target in the chain, so deleting it would strand the chain) and the full
-// referenced set. A chain is terminal when it has exactly one eligible target
-// and that target belongs to this provider. Disabled or unavailable targets
-// are excluded so a non-routable target can never silently take over a chain.
+// given provider, split into terminal (no other provider has an eligible
+// takeover target, so deleting it would strand the chain) and the full
+// referenced set. A chain is terminal unless some other provider owns at
+// least one enabled, available target whose provider is enabled. The
+// deleted provider's own eligibility is irrelevant: an unavailable or
+// disabled provider contributes zero eligible targets but still owns
+// target rows and legacy compatibility-primary columns that must not be
+// left dangling.
 func (s *Server) providerVirtualModelRefs(ctx context.Context, tx *sql.Tx, providerID string) ([]providerVirtualModelRef, []providerVirtualModelRef, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT v.id, g.name||'/'||v.name, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1) AS total, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND m.provider_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1) AS ours FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?)`, providerID, providerID)
+	rows, err := tx.QueryContext(ctx, `SELECT v.id, g.name||'/'||v.name, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1 AND m.provider_id<>?) AS takeover FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?)`, providerID, providerID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -490,13 +494,14 @@ func (s *Server) providerVirtualModelRefs(ctx context.Context, tx *sql.Tx, provi
 	var terminal, all []providerVirtualModelRef
 	for rows.Next() {
 		var v providerVirtualModelRef
-		var total, ours int
-		if err := rows.Scan(&v.id, &v.canonical, &total, &ours); err != nil {
+		var takeover int
+		if err := rows.Scan(&v.id, &v.canonical, &takeover); err != nil {
 			return nil, nil, err
 		}
-		// Terminal: this provider's targets are the only eligible targets in the
-		// chain, so deleting it would leave a non-routable chain.
-		v.terminal = ours > 0 && ours == total
+		// Terminal: no other provider has an eligible target that can take
+		// over, so deleting this provider would leave a non-routable chain
+		// (or legacy compatibility columns dangling at the deleted rows).
+		v.terminal = takeover == 0
 		all = append(all, v)
 		if v.terminal {
 			terminal = append(terminal, v)

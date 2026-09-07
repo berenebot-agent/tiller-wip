@@ -740,7 +740,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
-					s.cooldown.set(candidate.ProviderModelID, attemptStart, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
+					failedAt := time.Now()
+					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
 				}
 				nonTranslationFailure = true
 				if r.Context().Err() != nil {
@@ -820,7 +821,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// virtual routes and direct real-model routes never populate the
 				// shared cooldown state.
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
-					s.cooldown.set(candidate.ProviderModelID, attemptStart, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage("upstream_error"))
+					failedAt := time.Now()
+					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage("upstream_error"))
 				}
 				// An upstream HTTP response is an upstream failure regardless of
 				// status. Ordered virtual routes try their next target by default;
@@ -871,7 +873,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				terminalPreflightClass = class
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) {
-					s.cooldown.set(candidate.ProviderModelID, attemptStart, attemptStart.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
+					failedAt := time.Now()
+					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
 				}
 				nonTranslationFailure = true
 				row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1270,9 +1273,11 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 // before any upstream attempt, so an upstream 400 that survives to this point
 // is overwhelmingly a target-side signal.
 //
-// Only request-content signals stay excluded: 409 and 422 are conflict /
-// content-policy rejections of a specific request, not target health, and must
-// not hide a working model chain-wide. upstream_response_too_large is a
+// Only request-specific signals stay excluded: 409, 422, 405, 413 and 415
+// commonly reflect the individual request (conflict, validation, wrong
+// method, oversized payload, unsupported media) rather than the health or
+// availability of the upstream model, and must not hide a working model
+// chain-wide for other clients. upstream_response_too_large is a
 // router-side guard and never reaches this helper as a status.
 func cooldownTrigger(class string, httpStatus int) bool {
 	switch class {
@@ -1282,7 +1287,8 @@ func cooldownTrigger(class string, httpStatus int) bool {
 	if httpStatus == 0 {
 		return false
 	}
-	if httpStatus == 409 || httpStatus == 422 {
+	switch httpStatus {
+	case 405, 409, 413, 415, 422:
 		return false
 	}
 	return httpStatus >= 400 && httpStatus < 600
