@@ -419,6 +419,12 @@ func (s *SessionStore) InvalidateAll() error {
 	return err
 }
 
+// ParseSessionToken splits a session token into its selector and secret
+// components. Exported for use by tests in external packages.
+func ParseSessionToken(token string) (selector, secret string, ok bool) {
+	return parseSessionToken(token)
+}
+
 func parseSessionToken(token string) (selector, secret string, ok bool) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
