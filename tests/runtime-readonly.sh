@@ -65,7 +65,7 @@ docker run --rm -d --name "$name" --network host \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$port" \
     -e TILLER_DATA_DIR=/data \
     -e TILLER_TRUSTED_PROXY=127.0.0.0/8 \
-    tiller-router:dev >/dev/null
+    "$ROUTER_IMAGE" >/dev/null
 
 echo "==> Waiting for readiness"
 ready=0
@@ -168,7 +168,7 @@ docker run --rm -d --name "$dc" --network host \
     -e TILLER_ADMIN_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:18082" \
     -e TILLER_DATA_DIR=/data \
-    tiller-router:dev >/dev/null
+    "$ROUTER_IMAGE" >/dev/null
 ready=0
 i=0
 while [ "$i" -lt 60 ]; do
@@ -208,7 +208,7 @@ docker run --rm -d --name "$pc" --network host \
     -e TILLER_ADMIN_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:18083" \
     -e TILLER_DATA_DIR=/data \
-    tiller-router:dev >/dev/null
+    "$ROUTER_IMAGE" >/dev/null
 probe_ready=0
 i=0
 while [ "$i" -lt 60 ]; do

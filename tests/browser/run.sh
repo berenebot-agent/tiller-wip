@@ -105,26 +105,25 @@ stop_containers
 export DOCKER_BUILDKIT=1
 
 . "$repo_dir/tests/scripts/build-router.sh"
+. "$repo_dir/tests/scripts/image-hashes.sh"
 
-# Skip the browser + fixturectl builds when the image already exists, so a
-# second local run reuses the prepared image instead of rebuilding. Set
-# TILLER_BROWSER_REBUILD=1 to force a rebuild after changing the Dockerfile,
-# package deps, copied JS, fixturectl code, or router code (if reusing a
-# previously built router image).
-if [ "${TILLER_BROWSER_REBUILD:-0}" = "1" ] || ! docker image inspect tiller-router-browser-tests:dev >/dev/null 2>&1; then
-    echo "==> Building tiller-router-browser-tests:dev"
-    docker build --pull=false -t tiller-router-browser-tests:dev "$repo_dir/tests/browser"
+# Build the browser + fixturectl images with content-derived tags so a code
+# change always triggers a rebuild and an unchanged codebase always reuses the
+# prepared image. Set TILLER_BROWSER_REBUILD=1 to force a rebuild regardless.
+if [ "${TILLER_BROWSER_REBUILD:-0}" = "1" ] || ! docker image inspect "$BROWSER_IMAGE" >/dev/null 2>&1; then
+    echo "==> Building $BROWSER_IMAGE"
+    docker build --pull=false -t "$BROWSER_IMAGE" "$repo_dir/tests/browser"
 else
-    echo "==> tiller-router-browser-tests:dev (cached, skip build; set TILLER_BROWSER_REBUILD=1 to force)"
+    echo "==> $BROWSER_IMAGE (cached, skip build; set TILLER_BROWSER_REBUILD=1 to force)"
 fi
 
-if [ "${TILLER_BROWSER_REBUILD:-0}" = "1" ] || ! docker image inspect tiller-router-fixturectl:dev >/dev/null 2>&1; then
-    echo "==> Building fixturectl"
-    docker build --pull=false -q -t tiller-router-fixturectl:dev -f "$repo_dir/tests/fixturectl/Dockerfile" "$repo_dir" >/dev/null
+if [ "${TILLER_BROWSER_REBUILD:-0}" = "1" ] || ! docker image inspect "$FIXTURE_IMAGE" >/dev/null 2>&1; then
+    echo "==> Building $FIXTURE_IMAGE"
+    docker build --pull=false -q -t "$FIXTURE_IMAGE" -f "$repo_dir/tests/fixturectl/Dockerfile" "$repo_dir" >/dev/null
 else
-    echo "==> tiller-router-fixturectl:dev (cached, skip build)"
+    echo "==> $FIXTURE_IMAGE (cached, skip build)"
 fi
-fixture_cid=$(docker create tiller-router-fixturectl:dev /fixturectl)
+fixture_cid=$(docker create "$FIXTURE_IMAGE" /fixturectl)
 docker cp "$fixture_cid:/fixturectl" "$run_dir/fixturectl"
 docker rm "$fixture_cid" >/dev/null
 chmod +x "$run_dir/fixturectl"
@@ -146,7 +145,7 @@ for i in $(seq 0 $((workers - 1))); do
         -e TILLER_ADMIN_USERNAME=admin \
         -e TILLER_ADMIN_PASSWORD="$password" \
         -e TILLER_LOG_LEVEL=warn \
-        tiller-router:dev >/dev/null
+        "$ROUTER_IMAGE" >/dev/null
 done
 
 activity_mock_port=$(probe_port)
@@ -166,7 +165,7 @@ docker run --rm -d --name "$run_id-router-activity" --network host \
     -e TILLER_ADMIN_USERNAME=admin \
     -e TILLER_ADMIN_PASSWORD="$password" \
     -e TILLER_LOG_LEVEL=warn \
-    tiller-router:dev >/dev/null
+    "$ROUTER_IMAGE" >/dev/null
 phase_timing "containers started"
 
 # Wait for every mock/router to become ready CONCURRENTLY. All containers were
@@ -233,7 +232,7 @@ while read -r i router_port mock_port; do
         -e TILLER_BROWSER_ADMIN_USERNAME=admin \
         -e TILLER_BROWSER_ADMIN_PASSWORD="$password" \
         -v "$run_dir/playwright-results:/tests/test-results" \
-        tiller-router-browser-tests:dev npx playwright test admin.spec.js live.spec.js capabilities.spec.js --shard="$((i + 1))/$workers" &
+        "$BROWSER_IMAGE" npx playwright test admin.spec.js live.spec.js capabilities.spec.js --shard="$((i + 1))/$workers" &
     echo "$i $!" >> "$pids_file"
 done < "$ports_file"
 
@@ -248,7 +247,7 @@ docker run --rm --network host \
     -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
     -v "$run_dir/activity-data:/fixture-data:rw" \
     -v "$run_dir/playwright-results:/tests/test-results" \
-    tiller-router-browser-tests:dev npx playwright test activity.spec.js &
+    "$BROWSER_IMAGE" npx playwright test activity.spec.js &
 activity_pid=$!
 
 playwright_status=0
