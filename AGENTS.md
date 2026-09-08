@@ -1,21 +1,19 @@
 # AGENTS.md — Tiller Router
 
-Guardrails for any coding agent working in this repository. This file does not restate the spec — it tells you how to behave around it.
+Guardrails for any coding agent working in this repository. This file describes how the repo works and the coding rules to follow — it is not a specification document and does not restate the design.
 
 ## Source of truth
 
-- `tiller-router-v1-specification.md` is the reference spec. It is **no longer frozen**: in live dev it may be amended with explicit human sign-off, and diverging implementation (a planned change, not an accident) is acceptable when the human is driving it.
-- `tiller-router-roadmap-v2-core.md` describes deferred core work (active phases plus a Deferred Backlog). `tiller-router-roadmap-saas-multiuser.md` describes deferred multi-user/SaaS work. These are a backlog of ideas, not commitments.
-- If the two documents conflict, or a request conflicts with an approved change, ask rather than silently picking one — but do not treat the spec/roadmap as an impassable wall in live dev.
+- Decisions live in code, in commit history, and in conversation with the human driving the change. If a request conflicts with existing code, surface the conflict and ask before proceeding — but do not treat the current implementation as an impassable wall in live dev.
 
 ## Scope discipline
 
-- Before writing code for a new feature, check whether it's in the V1 spec's functional scope (§3), in §27 Non-Goals, or in the roadmaps' anti-roadmap. A non-goal or roadmap item is fine to build in live dev **with explicit human sign-off**, but never silently and never "just to see."
+- Before writing code for a new feature, confirm the scope with the human driving the change. Anything deferred is fine to build in live dev with explicit human sign-off, but never silently and never "just to see."
 - Adding a brand-new dependency, service, or infrastructure component (Redis, Postgres, message queues, vector DBs, Kubernetes, etc.) still requires an explicit, named request from a human.
-- Do not "clean up" the roadmap's phase ordering or scope on your own initiative. Roadmap sequencing is a human decision.
+- Do not "clean up" the deferred-work backlog's phase ordering or scope on your own initiative. Backlog sequencing is a human decision.
 - If a task requires touching something explicitly marked deferred (e.g. credential encryption or provider-health infrastructure) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
 
-## Deployment model — non-negotiable
+## Deployment model
 
 - Everything runs as a single Docker Compose service under `/opt/tiller-router/`.
 - Bind mounts only. **Never** introduce a Docker named volume.
@@ -23,6 +21,37 @@ Guardrails for any coding agent working in this repository. This file does not r
 - No Kubernetes artifacts of any kind (manifests, Helm, operators). This is Compose-only.
 - Don't add anything that requires a host-published port when a reverse-proxy Docker network is in use.
 - Don't require Docker socket access or privileged mode.
+
+**Out-of-box posture (default, adoption-first):** the default compose runs via an **in-process root-then-drop** (image has no baked-in `USER`, so the container starts as root; `internal/privdrop`, wired into `cmd/tiller-router`, `chown -R`s the data bind mount to `TILLER_RUN_UID`/`TILLER_RUN_GID` and then sheds privileges before the database is opened — pure Go, no shell entrypoint, no `su-exec`, works on the `scratch` image). This is what makes `docker compose up` work with a fresh `./data` dir — no manual `chmod`/ownership step needed. So out of the box the container is root at boot for the ownership fix, then non-root for the app. The default compose also ships `read_only` + `/tmp` tmpfs + `no-new-privileges`, which are compatible with the drop (only `./data` and `/tmp` are written, no setuid binaries are exec'd).
+
+**Hardenable, not required:** the stricter posture adds `cap_drop: ALL` plus a strict non-root `user:` (commented block in `docker-compose.yml`). Those two are opt-in because they conflict with the drop: `cap_drop ALL` removes the chown/setuid capabilities the boot fix needs, and a strict `user:` skips the boot chown entirely (fresh root-owned `./data` then fails loud with `ErrDataDirUnwritable` + remediation). The image supports the strict flags — the drop cleanly no-ops when already non-root. This is an explicit product decision (Ben, 2026-09-02): **adoption first**, hardening opt-in.
+
+- `AGENTS.md` / docs must not treat the strict non-root posture as a hard rule the default build violates. The default is deliberately relaxed for adoption; the advanced compose documents how to harden.
+
+## Rebuilding the main container
+
+When the user asks to "rebuild the main container" (or equivalently "rebuild the image" / "restart with the latest code"), the canonical command is:
+
+```bash
+cd /opt/tiller-router && docker compose down && docker compose up --build
+```
+
+- Always `down` before `up --build` so a stale container isn't left holding the old image's anonymous volumes / healthcheck state, and so the rebuild actually replaces the running process.
+- Run from `/home/ben/projects/tiller-router/` (the deployed repo location — this is the dev branch, not a separate `/opt/tiller-router/` checkout), unless the user says otherwise.
+- `--build` is required — without it, Compose reuses the existing image and the user's "rebuild" intent isn't honored.
+- Do not invent a `docker build` + manual `docker run` workflow unless the user explicitly asks for one. The Compose service is the supported path.
+
+## Looking at logs
+
+The router logs JSON (slog) to stdout, captured by Docker. To diagnose a running deployment, use:
+
+```bash
+./tests/scripts/tiller-logs.sh              # last 10 min, all logs
+./tests/scripts/tiller-logs.sh 30           # last N min, all logs
+./tests/scripts/tiller-logs.sh 10 errors    # last 10 min, ERROR/WARN only
+```
+
+The script resolves the container from `docker-compose.yml`, so it stays correct if the service name changes.
 
 ## Toolchain — Go runs in Docker, never on the host
 
@@ -46,30 +75,51 @@ Guardrails for any coding agent working in this repository. This file does not r
 - Never re-display, log, or expose provider credentials or client API keys in plaintext after creation — including in error messages, stack traces, and debug output.
 - Client API keys are hash-only at rest, using a memory-hard KDF (argon2id preferred). Never swap in a fast hash (SHA-256, MD5, etc.) for "simplicity" or test convenience — including in tests, unless the test explicitly mocks the hashing layer.
 - Never log prompt or response bodies, tool arguments, or reasoning content — not even at debug/trace level, not even temporarily "to help debug."
-- Backup/export files contain recoverable provider credentials until credential encryption at rest ships (roadmap). Any code that touches export/download must not weaken or bypass the admin-auth gate on that endpoint.
+- Backup/export files contain recoverable provider credentials until credential encryption at rest ships (deferred). Any code that touches export/download must not weaken or bypass the admin-auth gate on that endpoint.
 - Treat any new admin-facing endpoint as requiring authentication by default. If you're unsure whether a new route needs auth, it needs auth.
 
 ## Behavioral guardrails for routing logic
 
 - Ordered fallback is allowed only for an explicitly configured virtual model and only before client-visible output begins. It must follow the stored target order and remain visible in Activity; every upstream non-2xx/read/connect failure is eligible unless the router itself failed or the client request was cancelled/expired. Direct real-model requests, hidden health-based rerouting, retries of the same target, and post-output stream splicing remain forbidden.
-- Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing throughout the spec — treat any code path that blurs it as a bug.
-- Preserve the real/virtual model permission boundary described in the spec exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
+- Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing — treat any code path that blurs it as a bug.
+- Preserve the real/virtual model permission boundary exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
+
+## Model metadata — discover, never hardcode
+
+- Never hardcode model IDs, model lists, or per-model behaviour (native protocol, capabilities, reasoning levels, context windows) in code. Catalogues and capabilities must come from live provider discovery (`Registry.Discover`) or provider-reported metadata, with models.dev as fallback-only enrichment (provider data stays authoritative).
+- Prefix/substring matching on model IDs is hardcoding by another name — do not add new ID-shape heuristics. Provider-type branching (auth headers, endpoints, discovery dispatch) is fine; per-model branching is not.
+- Narrow exception: where a provider's live discovery provably omits a compatibility fact the router needs (e.g. OpenCode Zen/Free models reporting no native protocol, OpenCode Free's minimum output tokens), an explicit, provider-scoped compatibility override is permitted — a literal model→value map or a provider-level constant, reviewed like any other provider quirk. Speculative name-shape guessing (`HasPrefix`/`Contains` on model IDs) stays prohibited; unknown models must degrade to a neutral default (e.g. the client's incoming protocol), never to a guessed value.
+- Discovery failures fail loud (surface as `refresh_error`). Never silently fall back to a stale hardcoded list.
 
 ## When to stop and ask instead of proceeding
 
 - The request would add a brand-new dependency, service, or infrastructure component that the human has not explicitly named.
 - The request would change client-facing model IDs, provider names, or virtual model names (renames are breaking — confirm intent before touching).
 - The request touches credential handling, auth, or logging in a way not explicitly covered by the security guardrails above.
-- You find an actual inconsistency between the spec and the roadmap, or between either document and the current code — report it, don't resolve it silently.
+- No discovery path exists for a provider's models or capabilities — stop and present the human with options (e.g. a live endpoint to use, a user-supplied list, deferring support) instead of inventing a hardcoded catalogue.
+- You find an actual inconsistency between the docs and the current code — report it, don't resolve it silently.
+- You intend to run any test tier (unit, browser, compat, runtime) and the user has not explicitly authorised it for the current change — ask upfront, before coding starts, rather than pausing mid-change.
+
+## Branching and commits
+
+- After completing a change, ask the human whether to commit on the current branch (and
+  handle the branch/PR later) or create a new branch and open a PR now.
+- For small, low-risk changes that are part of a larger in-progress task, committing in
+  place is often fine — the branch/PR can come after.
+- Do not create a branch or PR unless the human has indicated one is wanted for this
+  change.
 
 ## Testing expectations
 
-- Any change to routing, permissions, or auth should be checked against the relevant V1 Acceptance Test in §28 before being considered done, not just against a new unit test you wrote for the change.
-- §28.4 (virtual routing hides the real target) and §28.5 (immediate remap, no restart) are the two tests most likely to silently regress — re-verify both after any change to virtual model resolution or provider/model mapping.
+**Default: do not run tests.** The human drives when tests run. Tests in this repo are slow and the user pays for each invocation.
 
-### How to test — pick the right route (default by change size)
+- Do **not** run any test tier on your own initiative — not unit, not browser, not compatibility, not runtime — for any change size.
+- If you believe tests should be run for a task, surface that **upfront, before you start coding**. Propose the smallest tier you'd run and wait for an explicit go-ahead. Do not pause mid-change to ask.
+- `gofmt` and `go vet` are **not** tests — running the formatting gate (`./tests/scripts/check-fmt.sh`) and `./tiller-go.sh vet ./...` is fine to do automatically. Everything under `tests/` is gated.
 
-Run the **minimum** tier that matches the change. Do **not** default to the full suite — the heavy tiers are slow. The test packages (all with warm Docker caches):
+### How to test — tier reference (for whoever is running)
+
+If the human has authorised tests for this change, run the smallest tier that would catch a regression. The tiers below are a reference for that decision; they are **not** instructions for the agent to run. The test packages (all with warm Docker caches):
 
 | Tier | Command | Approx time | What it verifies |
 |---|---|---|---|
@@ -79,11 +129,131 @@ Run the **minimum** tier that matches the change. Do **not** default to the full
 | Compatibility probes | `./tests/compatibility/run.sh` | ~2–4 min | Real OpenAI/Anthropic SDKs + Codex/OpenCode/Claude-Code CLI + Hermes agent + router restart |
 | Runtime read-only / security | `./tests/runtime-readonly.sh` | ~30–60s | Read-only rootfs, caps-drop, backup export under deployment settings |
 
-**Sensible default by change type:**
+**When the human has approved a run, sensible tier by change type (for reference):**
 
-- **Minor UX change** (copy, spacing, a label, a CSS tweak, purely presentational markup): **no tests required.** Just confirm the page still renders (sanity) — run the browser suite only if you changed interactive behaviour (handlers, dialogs, navigation).
-- **Minor function change** (small backend/behavioural fix): run **`./tiller-go.sh test ./...`** (and `vet` for Go changes) only. Do not run the browser or compatibility suites unless the change touches the admin UI or a routing/protocol/provider path.
-- **Major feature change, or a change that spans backend + UI / routing / providers / auth**: run the Go tests **and** the browser suite; add `tests/compatibility/run.sh` if the change affects provider protocols, client-facing catalogues, or model resolution, and `tests/runtime-readonly.sh` if it touches deployment/security (volumes, caps, read-only, backup, auth).
-- **Run the full suite only when instructed, or for a significant feature/release.** Otherwise pick the smallest tier that would catch a regression in what you changed.
+- **Minor UX change** (copy, spacing, a label, a CSS tweak, purely presentational markup): no tests required.
+- **Minor function change** (small backend/behavioural fix): `./tiller-go.sh test ./...` (and `vet` for Go changes) only.
+- **Major feature change, or a change that spans backend + UI / routing / providers / auth**: Go tests **and** the browser suite; add `tests/compatibility/run.sh` if the change affects provider protocols, client-facing catalogues, or model resolution, and `tests/runtime-readonly.sh` if it touches deployment/security (volumes, caps, read-only, backup, auth).
+- **Full suite** only for a significant feature/release.
 
-When a change is purely frontend (`internal/web/assets/**`), the browser suite is the gate; run `./tiller-go.sh test ./...` for sanity but the UI tests are the ones that matter.
+### Formatting gate (every Go change, before every push)
+
+CI fails the build on unformatted Go files (`gofmt -l .` must print nothing).
+Run this locally before pushing — it uses the same pinned Go image as CI:
+
+```bash
+./tests/scripts/check-fmt.sh        # read-only check, exits 1 with the file list
+./tiller-go.sh fmt ./...            # fix, then re-run the check
+```
+
+Write Go with tabs, never spaces, and never collapse a block onto one line
+(`if x { y }`) — `gofmt` always rewrites both, and that is what keeps tripping CI.
+
+### Test tiers (pick the cheapest tier that catches your mistake)
+
+The full suite is expensive. Most edits don't warrant it. Pick the smallest
+tier that matches the change:
+
+#### Tier A — targeted edit loop (seconds)
+
+For the human's reference, and for you when explicitly authorised. Run only the package or browser spec relevant to the change. A 1-second targeted run catches most mistakes that a 2-minute integration suite would.
+
+```bash
+# Go: one package, one test
+./tiller-go.sh test ./internal/server -run TestSpecificThing
+./tiller-go.sh test ./internal/auth -run TestSessionStoreCreate
+./tiller-go.sh test -count=1 ./internal/database
+
+# Browser: one spec file (Playwright supports --grep for a named test)
+npx playwright test admin.spec.js --grep "permission edits survive filtering"
+```
+
+#### Tier B — normal pre-commit (1–2 min)
+
+When authorised, the standard pre-commit bundle is:
+
+```bash
+./tests/scripts/check-fmt.sh
+./tiller-go.sh test -count=1 ./...
+./tiller-go.sh vet ./...
+```
+
+For UI changes, also run the relevant browser spec(s) locally (or rely on CI).
+
+#### Tier C — full regression before merge/release (3–6 min)
+
+```bash
+./tiller-go.sh test -count=1 ./...
+./tiller-go.sh vet ./...
+./tests/browser/run.sh          # also run twice to confirm warm-cache path
+./tests/runtime-readonly.sh
+./tests/compatibility/run.sh    # when touched area affects protocols/catalogues
+```
+
+The goal is not to avoid full testing. It is to avoid running a 1–2 minute
+integration suite after every trivial source edit when a 1-second targeted
+test would catch the immediate mistake.
+
+### Test log convention (X = summary, Y = detail)
+
+All test runners follow a two-tier logging convention so agents (or humans)
+can diagnose failures without re-running:
+
+- **X (Summary)** — always printed to stdout, regardless of pass/fail.
+  Includes exit code, elapsed time, and the path to the detailed log. On
+  failure, also prints the first error message inline.
+- **Y (Detail)** — always written to a per-run log file containing the full
+  stdout+stderr. Default location is repo-local and gitignored
+  (`tests/logs/`):
+
+| Runner | Y (detail) path |
+|---|---|
+| `./tiller-go.sh ...` | `tests/logs/tiller-go/<UTC-ts>-go-*.log` |
+| `./tests/browser/run.sh` | `tests/logs/<run-id>/run.log`; Playwright traces/screenshots in `tests/logs/<run-id>/playwright-results/` (preserved on failure, auto-removed on success) |
+| `./tests/compatibility/run.sh` | `tests/logs/compat/<UTC-ts>-compat.log` |
+
+To inspect a failed browser run's full output and Playwright artifacts
+without re-running: read `tests/logs/<run-id>/run.log` and open the matching
+`playwright-results/` directory (each Playwright shard writes
+`trace.zip` + `error-context.md` per failing test). Each `run_id` is unique
+(`tiller-browser-<pid>`), so preserving a run indefinitely is just a matter
+of renaming `tests/logs/<run-id>/` aside before the next invocation.
+
+### Unified test runner
+
+For running a known set of test tiers, use `./tests/run.sh`. It runs each
+tier, writes **all** output to `tests/logs/runs/<UTC-ts>-<tiers>/`, and prints
+only a one-line-per-tier summary to stdout:
+
+```
+[tiller-router tests] 2026-09-07T18:00:00Z — unit,vet,runtime
+  unit    PASS   45.2s
+  vet     PASS    3.1s
+  runtime PASS   12.8s
+  overall PASS   61.1s
+  detail: tests/logs/runs/20260907T180000-unit,vet,runtime/
+```
+
+Flags pick tiers: `--unit --vet --browser --compat --runtime`, or `--all`.
+No flags runs the fast preset (`unit + vet + runtime`); use `--all` for
+everything. `--list` lists tiers and exits.
+
+There are **no verbosity flags** — the flag only picks tiers, never how much
+is logged. All three output levels below are **always written to disk**, so an
+agent never has to re-run just to see more. The `detail:` line in the summary
+points at the folder containing them.
+
+- **L1 — Summary** (`summary.txt`): the per-tier pass/fail + elapsed block
+  printed to stdout. On a failure, the failing tier's first error is inlined.
+  Context-cheap: this is all an agent needs to know whether anything broke.
+- **L2 — Timings** (`timings.txt`): per-tier elapsed, plus a per-test
+  breakdown for the Go unit tier (parsed from `go test -v`) and per-phase
+  lines for the browser tier.
+- **L3 — Full detail** (`full.log` + each `<tier>/out.log`): the complete
+  output of every tier, concatenated with tier headers. Open these when
+  diagnosing a failure.
+
+The older per-tier commands (`./tiller-go.sh`, `tests/browser/run.sh`, etc.)
+still work unchanged and remain the right tool for a tight edit loop (Tier A:
+run a single package or spec). Use `./tests/run.sh` when you want a known set
+of tiers with a single summary and guaranteed detail on disk.

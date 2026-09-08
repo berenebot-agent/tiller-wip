@@ -345,6 +345,8 @@ func failureMessage(class string, httpStatus int) string {
 		return "unavailable"
 	case "protocol_unavailable":
 		return "protocol not supported"
+	case "free_model_requires_keyless":
+		return "requires keyless provider"
 	case "invalid_upstream":
 		return "invalid upstream"
 	case "upstream_unreachable":
@@ -353,6 +355,8 @@ func failureMessage(class string, httpStatus int) string {
 		return "timeout"
 	case "upstream_read_error":
 		return "read error"
+	case "cooldown":
+		return "cooldown"
 	case "client_timeout":
 		return "client timeout"
 	case "client_cancelled":

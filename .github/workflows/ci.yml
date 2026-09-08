@@ -23,7 +23,14 @@ jobs:
           cache: true
       - name: Check formatting
         shell: bash
-        run: test -z "$(gofmt -l .)"
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$unformatted"
+            echo "Fix locally with: ./tiller-go.sh fmt ./... (then re-run ./tests/scripts/check-fmt.sh)"
+            exit 1
+          fi
       - name: Test
         run: go test ./...
       - name: Vet
@@ -33,7 +40,6 @@ jobs:
 
   container-regressions:
     name: Browser and runtime checks
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/release/'))
     runs-on: ubuntu-latest
     steps:
       - name: Check out source

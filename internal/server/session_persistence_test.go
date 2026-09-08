@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -26,10 +24,7 @@ func TestAdminSessionSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: dir, ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: dir, ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	api := &testAPI{t: t, base: router.URL, client: &http.Client{Jar: jar}}
 	status, payload, _ := api.request("POST", "/api/admin/session", map[string]any{"username": "admin", "password": "correct horse"})
@@ -49,10 +44,7 @@ func TestAdminSessionSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db2.Close()
-	app2, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: dir, ListenAddr: ":8080"}, db2, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	app2 := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: dir, ListenAddr: ":8080"}, db2)
 	router2 := httptest.NewServer(app2.Handler())
 	defer router2.Close()
 	api2 := &testAPI{t: t, base: router2.URL, client: &http.Client{Jar: jar}}

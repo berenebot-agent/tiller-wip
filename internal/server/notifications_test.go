@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -37,10 +36,7 @@ func notificationTestHarness(t *testing.T, failUpstream, okUpstream http.Handler
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
@@ -68,7 +64,7 @@ func notificationTestHarness(t *testing.T, failUpstream, okUpstream http.Handler
 			modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
 		}
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "notify client"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "notify client", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -477,7 +473,7 @@ func TestAdminEventNotifications(t *testing.T) {
 	}
 
 	// Create a client key -> notification.
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "alert-key", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -535,7 +531,7 @@ func TestAdminEventToggleRespected(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
 	}
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "silent-key", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -592,10 +588,10 @@ func TestSendExampleNotificationsToNtfy(t *testing.T) {
 // protocol-mismatched) are not "attempted" and must not inflate the count.
 func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
 	attempts := []requestAttempt{
-		{provider: "a", model: "m", result: "skipped", failureClass: "unavailable"},
-		{provider: "b", model: "m", result: "failed", failureClass: "http_500"},
-		{provider: "c", model: "m", result: "skipped", failureClass: "protocol_unavailable"},
-		{provider: "d", model: "m", result: "success"},
+		{providerModelID: "pm-a", provider: "a", model: "m", result: "skipped", failureClass: "unavailable"},
+		{providerModelID: "pm-b", provider: "b", model: "m", result: "failed", failureClass: "http_500"},
+		{providerModelID: "pm-c", provider: "c", model: "m", result: "skipped", failureClass: "protocol_unavailable"},
+		{providerModelID: "pm-d", provider: "d", model: "m", result: "success"},
 	}
 	if got := attemptCount(attempts); got != 2 {
 		t.Fatalf("attemptCount = %d, want 2 (only real upstream attempts)", got)
@@ -603,17 +599,22 @@ func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
 	if hasFailedAttempt(attempts) != true {
 		t.Fatal("hasFailedAttempt should be true with one failed attempt")
 	}
-	allSkipped := []requestAttempt{{provider: "a", model: "m", result: "skipped", failureClass: "unavailable"}}
+	allSkipped := []requestAttempt{{providerModelID: "pm-a", provider: "a", model: "m", result: "skipped", failureClass: "unavailable"}}
 	if hasFailedAttempt(allSkipped) {
 		t.Fatal("hasFailedAttempt must be false when targets were only skipped")
 	}
 }
 
 func TestNotificationFailureDoesNotFailInference(t *testing.T) {
-	// Webhook that responds slowly to prove delivery never blocks the response.
+	// Webhook that blocks until released, to prove delivery never blocks the
+	// response. The handler closes `started` when it begins handling, then
+	// waits for `release` before returning 200.
+	started := make(chan struct{})
+	release := make(chan struct{})
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(2 * time.Second)
-		w.WriteHeader(200)
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer webhook.Close()
 
@@ -627,15 +628,18 @@ func TestNotificationFailureDoesNotFailInference(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
 	}
-	start := time.Now()
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
-	elapsed := time.Since(start)
 	if resp.StatusCode != 200 {
 		t.Fatalf("request should succeed despite webhook hang, got %d", resp.StatusCode)
 	}
-	if elapsed > 2*time.Second {
-		t.Fatalf("notification delivery materially delayed the response: %v", elapsed)
+	// The webhook must have started (delivery fired) while the response was
+	// already returned.
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("webhook was not invoked after inference response returned")
 	}
+	close(release)
 }
 
 func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *database.DB, *httptest.Server) {
@@ -647,11 +651,7 @@ func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		webhook.Close()
-		t.Fatal(err)
-	}
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	t.Cleanup(webhook.Close)
 	for key, value := range map[string]string{
 		database.SettingNotificationsEnabled:         "true",

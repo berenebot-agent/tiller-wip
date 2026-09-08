@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +20,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	buildversion "github.com/tiller-router/tiller-router/internal/version"
 	webassets "github.com/tiller-router/tiller-router/internal/web"
 )
@@ -28,13 +28,17 @@ import (
 const sessionCookie = "tiller_admin_session"
 
 type Server struct {
-	config    config.Config
-	db        *database.DB
-	clients   *auth.ClientAuthenticator
-	sessions  *auth.SessionStore
-	providers *providers.Manager
-	logger    *slog.Logger
-	assets    http.Handler
+	config        config.Config
+	db            *database.DB
+	clients       *auth.ClientAuthenticator
+	sessions      *auth.SessionStore
+	secretHasher  auth.SecretHasher
+	providers     *providers.Manager
+	oauthFlows    *oauth.FlowStore
+	oauthDeviceMu sync.Mutex
+	oauthDevices  map[string]*oauthDeviceState
+	logger        *slog.Logger
+	assets        http.Handler
 	// notifyClient is a dedicated HTTP client for best-effort outbound webhook
 	// notifications. It has a short timeout so a slow webhook can never
 	// materially delay an inference request.
@@ -46,7 +50,30 @@ type Server struct {
 	notifyLastSent   map[string]time.Time
 	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
-	loginLimiter *loginLimiter
+	loginLimiter         *loginLimiter
+	oauthStartLimiter    *loginLimiter
+	oauthCallbackLimiter *loginLimiter
+	backgroundCtx        context.Context
+	// lastOutcome holds the most recent request outcome per real model, keyed
+	// by "provider_name/upstream_model_id". It lives in RAM (never persisted) so
+	// it is cleared on restart. Written on each routed request; read by the
+	// admin usage endpoint to drive the per-target resolution dots.
+	lastOutcomeMu sync.RWMutex
+	lastOutcome   map[string]lastOutcome
+	// live is the SSE hub that pushes outcome deltas and usage snapshots to
+	// connected admin tabs. Lazily started on first subscriber, stopped at zero.
+	liveHub  *liveHub
+	inflight *inflightTracker
+	// cooldown holds the in-memory per-target fallback cooldown state keyed by
+	// provider_model_id. It lives in RAM only and is cleared on restart.
+	cooldown *cooldownStore
+}
+
+// lastOutcome is the most recent request result for a single real model.
+type lastOutcome struct {
+	At        string `json:"at"`         // RFC3339Nano timestamp; empty = never
+	Status    int    `json:"status"`     // HTTP status of the last request
+	IsSuccess bool   `json:"is_success"` // whether that status was 2xx
 }
 
 type contextKey string
@@ -56,12 +83,29 @@ const (
 	clientKey       contextKey = "client"
 )
 
-func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, error) {
-	clients, err := auth.NewClientAuthenticator(db.SQL)
+type serverOption func(*serverOptions)
+
+type serverOptions struct {
+	secretHasher auth.SecretHasher
+}
+
+// withSecretHasher sets the SecretHasher for the server's authenticator and
+// session store. Unexported so only in-package tests can use it; production
+// callers get Argon2Hasher by default.
+func withSecretHasher(h auth.SecretHasher) serverOption {
+	return func(o *serverOptions) { o.secretHasher = h }
+}
+
+func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...serverOption) (*Server, error) {
+	options := serverOptions{secretHasher: auth.Argon2Hasher{}}
+	for _, opt := range opts {
+		opt(&options)
+	}
+	clients, err := auth.NewClientAuthenticatorWithHasher(db.SQL, options.secretHasher)
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := auth.NewSessionStore(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL)
+	sessions, err := auth.NewSessionStoreWithHasher(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL, options.secretHasher)
 	if err != nil {
 		return nil, err
 	}
@@ -72,10 +116,13 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger) (*Server, erro
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	return &Server{config: cfg, db: db, clients: clients, sessions: sessions, providers: providers.NewManager(db.SQL, registry), logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute)}, nil
+	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, secretHasher: options.secretHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore()}
+	s.inflight.emit = s.liveHub.emitActivity
+	s.liveHub.snapshot = s.buildUsageSnapshot
+	return s, nil
 }
-
 func (s *Server) StartBackground(ctx context.Context) {
+	s.backgroundCtx = ctx
 	s.providers.StartScheduler(ctx)
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
@@ -99,7 +146,7 @@ func (s *Server) startLogPruner(ctx context.Context) {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health/live", s.live)
+	mux.HandleFunc("GET /health/live", s.liveHealth)
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.HandleFunc("GET /health/version", s.versionHealth)
 	mux.HandleFunc("POST /api/admin/session", s.login)
@@ -111,6 +158,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.updateProvider)))
 	mux.Handle("DELETE /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.deleteProvider)))
 	mux.Handle("PUT /api/admin/providers/{id}/credential", s.requireAdmin(http.HandlerFunc(s.replaceProviderCredential)))
+	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireAdmin(http.HandlerFunc(s.startProviderOAuth)))
+	mux.Handle("POST /api/admin/providers/{id}/oauth/callback", s.requireAdmin(http.HandlerFunc(s.completeProviderOAuth)))
+	mux.Handle("GET /api/admin/providers/{id}/oauth/status", s.requireAdmin(http.HandlerFunc(s.providerOAuthStatus)))
+	mux.Handle("DELETE /api/admin/providers/{id}/oauth", s.requireAdmin(http.HandlerFunc(s.disconnectProviderOAuth)))
+
 	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireAdmin(http.HandlerFunc(s.refreshProvider)))
 	mux.Handle("GET /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.listProviderModels)))
 	mux.Handle("GET /api/admin/models", s.requireAdmin(http.HandlerFunc(s.listAllModels)))
@@ -140,11 +192,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.updateSettings)))
 	mux.Handle("POST /api/admin/notifications/test", s.requireAdmin(http.HandlerFunc(s.sendTestNotification)))
 	mux.Handle("GET /api/admin/usage", s.requireAdmin(http.HandlerFunc(s.usage)))
+	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
 	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))
+	mux.Handle("GET /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.cooldownStatus)))
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
 	mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
+	mux.Handle("GET /v1/models/{model...}", s.requireClient(http.HandlerFunc(s.clientModel), false))
 	mux.Handle("POST /v1/chat/completions", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolChat) }), false))
 	mux.Handle("POST /v1/responses", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolResponses) }), false))
 	mux.Handle("POST /v1/messages", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolMessages) }), true))
@@ -152,7 +207,7 @@ func (s *Server) Handler() http.Handler {
 	return s.securityHeaders(s.requestLog(mux))
 }
 
-func (s *Server) live(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) liveHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "live"})
 }
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
@@ -204,7 +259,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 // server-side sliding expiry, so active use extends the session across browser
 // reopen rather than the cookie expiring 30 days after login.
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.secureRequest(r) || s.config.AdminCookieSecure, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
 }
 
 func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +270,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		s.sessions.Delete(cookie.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: s.secureRequest(r), SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: s.secureRequest(r) || s.config.AdminCookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -280,6 +335,39 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+// requestClientIP returns the client address suitable for forwarding to an
+// anonymous provider. Forwarded headers are accepted only from the configured
+// trusted proxy; otherwise the direct peer address is used. When the direct
+// peer is trusted, the authoritative X-Real-IP header is preferred, and the
+// X-Forwarded-For chain is resolved by the canonical clientIP walker so the
+// two helpers can never drift.
+func (s *Server) requestClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if host == "" {
+		return ""
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !s.config.TrustedProxy.IsValid() || !s.config.TrustedProxy.Contains(peer) {
+		return host
+	}
+	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); value != "" {
+		if address, err := netip.ParseAddr(value); err == nil {
+			return address.String()
+		}
+	}
+	return clientIP(r, s.config.TrustedProxy)
+}
+
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -294,6 +382,9 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
+		if strings.HasPrefix(r.URL.Path, "/health/") {
+			return
+		}
 		s.logger.Info("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
 	})
 }
@@ -338,19 +429,31 @@ func pagination(r *http.Request) (limit, offset int, search string) {
 	if limit > 200 {
 		limit = 200
 	}
-	_, _ = fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset)
-	if offset < 0 {
+	if _, err := fmt.Sscanf(r.URL.Query().Get("offset"), "%d", &offset); err != nil || offset < 0 {
 		offset = 0
+	}
+	// Cap offset so a huge skip cannot force the database to walk the whole
+	// table. A client that needs to page deeper than this should refine its
+	// search or use the activity export.
+	const maxOffset = 10000
+	if offset > maxOffset {
+		offset = maxOffset
 	}
 	search = strings.TrimSpace(r.URL.Query().Get("search"))
 	return
 }
-func boolInt(v bool) int {
-	if v {
-		return 1
+
+// backupContentType returns a safe Content-Type for a backup download.
+// mime.TypeByExtension can return an empty string for some extensions (e.g.
+// ".db" is not always registered), so fall back to a generic binary type
+// rather than leaving the header blank.
+func backupContentType(ext string) string {
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
 	}
-	return 0
+	return "application/octet-stream"
 }
+
 func nullableString(v string) any {
 	if v == "" {
 		return nil
@@ -367,11 +470,9 @@ func (s *Server) exportBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer os.Remove(path)
-	w.Header().Set("Content-Type", mime.TypeByExtension(".db"))
+	w.Header().Set("Content-Type", backupContentType(".db"))
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filepath.Base(path)))
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Tiller-Secret-Material", "provider-credentials")
 	http.ServeFile(w, r, path)
 }
-
-var _ = sql.ErrNoRows

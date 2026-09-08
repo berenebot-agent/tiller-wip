@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -38,6 +37,43 @@ func TestClientIPTrustBoundary(t *testing.T) {
 			r.Header.Set("X-Forwarded-For", tt.forwarded)
 			if got := clientIP(r, tt.trusted); got != tt.want {
 				t.Fatalf("clientIP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequestClientIPTrustBoundary(t *testing.T) {
+	trusted := netip.MustParsePrefix("172.18.0.0/16")
+	trustedV6 := netip.MustParsePrefix("2001:db8::/32")
+	tests := []struct {
+		name, remote, realIP, forwarded string
+		trusted                         netip.Prefix
+		want                            string
+	}{
+		{name: "trust disabled ignores headers", remote: "172.18.0.4:8080", forwarded: "198.51.100.7", realIP: "198.51.100.7", trusted: netip.Prefix{}, want: "172.18.0.4"},
+		{name: "untrusted peer ignores fake XFF", remote: "192.0.2.8:8080", forwarded: "198.51.100.7", trusted: trusted, want: "192.0.2.8"},
+		{name: "untrusted peer ignores fake X-Real-IP", remote: "192.0.2.8:8080", realIP: "198.51.100.7", trusted: trusted, want: "192.0.2.8"},
+		{name: "trusted proxy prefers X-Real-IP", remote: "172.18.0.4:8080", realIP: "198.51.100.7", forwarded: "203.0.113.55", trusted: trusted, want: "198.51.100.7"},
+		{name: "trusted proxy ignores malicious leftmost XFF", remote: "172.18.0.4:8080", forwarded: "1.2.3.4, 203.0.113.55", trusted: trusted, want: "203.0.113.55"},
+		{name: "trusted chain walks right to left", remote: "172.18.0.4:8080", forwarded: "198.51.100.7, 172.18.0.9, 172.18.0.10", trusted: trusted, want: "198.51.100.7"},
+		{name: "malformed XFF falls back direct", remote: "172.18.0.4:8080", forwarded: "198.51.100.7, not-an-ip", trusted: trusted, want: "172.18.0.4"},
+		{name: "empty XFF falls back direct", remote: "172.18.0.4:8080", forwarded: "", trusted: trusted, want: "172.18.0.4"},
+		{name: "IPv6 trusted proxy with IPv6 client", remote: "[2001:db8::1]:8080", forwarded: "2001:db8::1234", trusted: trustedV6, want: "2001:db8::1234"},
+		{name: "IPv6 trusted proxy returns rightmost untrusted hop", remote: "[2001:db8::1]:8080", forwarded: "203.0.113.9, 2001:db8::1234", trusted: trustedV6, want: "203.0.113.9"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: tt.trusted})
+			r := httptest.NewRequest(http.MethodPost, "http://router.test/v1/chat/completions", nil)
+			r.RemoteAddr = tt.remote
+			if tt.realIP != "" {
+				r.Header.Set("X-Real-IP", tt.realIP)
+			}
+			if tt.forwarded != "" {
+				r.Header.Set("X-Forwarded-For", tt.forwarded)
+			}
+			if got := app.requestClientIP(r); got != tt.want {
+				t.Fatalf("requestClientIP() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -80,12 +116,8 @@ func newSecurityTestServer(t *testing.T, cfg config.Config) (*Server, *database.
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, err := New(cfg, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
 	t.Cleanup(func() { db.Close() })
+	app := newTestServer(t, cfg, db)
 	return app, db
 }
 

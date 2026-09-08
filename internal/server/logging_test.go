@@ -5,11 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,14 +27,11 @@ func loggingTestHarness(t *testing.T, upstream http.HandlerFunc) (*testAPI, *dat
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
-	api := &testAPI{t: t, base: router.URL, client: &http.Client{Jar: jar}}
+	api := &testAPI{t: t, base: router.URL, client: &http.Client{Jar: jar}, server: app}
 	status, payload, _ := api.request("POST", "/api/admin/session", map[string]any{"username": "admin", "password": "correct horse"})
 	if status != 200 {
 		t.Fatalf("login: %d %v", status, payload)
@@ -59,7 +56,7 @@ func loggingTestHarness(t *testing.T, upstream http.HandlerFunc) (*testAPI, *dat
 	if modelID == "" {
 		t.Fatal("mock upstream did not expose model-a")
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "test client", "description": "logging"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "test client", "description": "logging", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
@@ -96,6 +93,24 @@ func mockUpstream(t *testing.T) http.HandlerFunc {
 		}
 		w.Header().Set("Request-Id", "upstream-req-123")
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "response-1", "object": "chat.completion", "model": "model-a", "choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}}, "usage": map[string]any{"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}})
+	})
+}
+
+func mockJSONUpstream(t *testing.T) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "response-1", "object": "chat.completion", "model": "model-a",
+			"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+		})
 	})
 }
 
@@ -192,6 +207,9 @@ func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("stream status %d", resp.StatusCode)
 	}
+	if !strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("stream content type = %q", resp.Header.Get("Content-Type"))
+	}
 	// A guessed/disabled model logs a failure with error_text populated.
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/nope", "messages": []any{map[string]any{"role": "user", "content": "x"}}})
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -225,6 +243,27 @@ func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
 	}
 	if stream["cache_read_input_tokens"] == nil || stream["cache_read_input_tokens"] != float64(3) {
 		t.Fatalf("streaming prompt-cache tokens not captured (expected cache_read=3): %v", stream)
+	}
+}
+
+func TestRequestLoggingStreamRequestWithJSONResponseIsNotStreaming(t *testing.T) {
+	api, _, clientID, secret := loggingTestHarness(t, mockJSONUpstream(t))
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{
+		"model": "provider-a/model-a", "stream": true, "messages": []any{},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("JSON response was returned as SSE")
+	}
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK {
+		t.Fatalf("activity: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["streaming"] != false {
+		t.Fatalf("streaming metadata = %v, want false", data)
 	}
 }
 
@@ -315,6 +354,266 @@ func TestWriteLogBestEffort(t *testing.T) {
 	}
 }
 
+// TestWriteLogTransactionPersistsLogAndAttempt verifies the single-transaction
+// Activity write: one routed request produces exactly one request_logs row and
+// one request_attempts row for its single attempt.
+func TestWriteLogTransactionPersistsLogAndAttempt(t *testing.T) {
+	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("request status %d", resp.StatusCode)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != 200 || len(payload["data"].([]any)) != 1 {
+		t.Fatalf("expected 1 request log, got status=%d payload=%v", status, payload)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != 200 {
+		t.Fatalf("attempts: %d %v", status, payload)
+	}
+	attempts := payload["data"].([]any)
+	if len(attempts) != 1 {
+		t.Fatalf("expected 1 attempt row, got %d: %v", len(attempts), payload)
+	}
+	row := attempts[0].(map[string]any)
+	if row["attempt_number"] != float64(1) || row["provider"] != "provider-a" || row["model"] != "model-a" || row["result"] != "success" {
+		t.Fatalf("attempt row wrong: %v", row)
+	}
+}
+
+// TestWriteLogTransactionPersistsAllFallbackAttempts verifies that an ordered
+// fallback request persists every recorded attempt (the failed first target and
+// the succeeding second one) alongside its single request log row.
+func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
+	api, secret, canonical := notificationTestHarness(t, failUpstream(t), okUpstream(t))
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("fallback request should succeed, got %d", resp.StatusCode)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+	status, payload, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != 200 {
+		t.Fatalf("attempts: %d %v", status, payload)
+	}
+	attempts := payload["data"].([]any)
+	if len(attempts) != 2 {
+		t.Fatalf("expected 2 attempt rows for the fallback, got %d: %v", len(attempts), payload)
+	}
+	first := attempts[0].(map[string]any)
+	if first["attempt_number"] != float64(1) || first["provider"] != "provider-a" || first["result"] != "failed" {
+		t.Fatalf("first (failed) attempt wrong: %v", first)
+	}
+	second := attempts[1].(map[string]any)
+	if second["attempt_number"] != float64(2) || second["provider"] != "provider-b" || second["result"] != "success" {
+		t.Fatalf("second (succeeding) attempt wrong: %v", second)
+	}
+}
+
+func TestProviderErrorMessageAndBodyArePassedThroughToClientButNotLogged(t *testing.T) {
+	// Direct (non-virtual, non-translated) routes pass through the
+	// provider's structured error body to the originating client so it
+	// sees the provider's error shape. The body is bounded and never
+	// stored in the activity log (privacy guardrail).
+	const marker = "PROVIDER-ERROR-SECRET-MARKER"
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": marker}, "body": marker})
+	})
+	api, _, clientID, secret := loggingTestHarness(t, upstream)
+	resp, payload := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{}})
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	}
+	if !strings.Contains(string(mustJSON(t, payload)), marker) {
+		t.Fatalf("provider error was not passed through to client: %v", payload)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+
+	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK || strings.Contains(string(mustJSON(t, activity)), marker) {
+		t.Fatalf("provider error was persisted in activity: status=%d payload=%v", status, activity)
+	}
+	activityRow := activity["data"].([]any)[0].(map[string]any)
+	if activityRow["error_text"] != "upstream_error" {
+		t.Fatalf("provider error metadata = %v", activityRow)
+	}
+	// error_message should be a human-readable translation, not nil.
+	if msg, ok := activityRow["error_message"].(string); !ok || msg == "" {
+		t.Fatalf("expected human-readable error_message, got %v", activityRow)
+	}
+	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != http.StatusOK || strings.Contains(string(mustJSON(t, attempts)), marker) {
+		t.Fatalf("provider error was persisted in attempts: status=%d payload=%v", status, attempts)
+	}
+	attemptRow := attempts["data"].([]any)[0].(map[string]any)
+	if attemptRow["failure_class"] != "http_502" {
+		t.Fatalf("provider attempt metadata = %v", attemptRow)
+	}
+	// Attempt error_message should be a human-readable translation.
+	if msg, ok := attemptRow["error_message"].(string); !ok || msg == "" {
+		t.Fatalf("expected human-readable attempt error_message, got %v", attemptRow)
+	}
+}
+
+func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
+	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
+	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
+	})
+	api, db, clientID, secret := loggingTestHarness(t, upstream)
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": requestMarker}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var requestBody, errorBody *string
+	var requestTruncated, errorTruncated int
+	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=?`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if requestBody != nil || errorBody != nil || requestTruncated != 0 || errorTruncated != 0 {
+		t.Fatalf("request or provider bodies were persisted: request=%v error=%v truncated=%d/%d", requestBody, errorBody, requestTruncated, errorTruncated)
+	}
+}
+
+// TestRequestLoggingCapturesBodiesWhenEnabled is the positive counterpart to
+// TestRequestLoggingDoesNotCaptureBodies: with log_error_bodies=true, failed
+// request and upstream error bodies are persisted (bounded), and over-bound
+// bodies are truncated with the truncated flag set.
+func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
+	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
+	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
+	bigBody := strings.Repeat("x", int(maxUpstreamErrorBytes)+100)
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		raw, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusBadGateway)
+		if strings.Contains(string(raw), "TRIGGER-BIG-BODY") {
+			_, _ = w.Write([]byte(bigBody))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
+	})
+	api, db, clientID, secret := loggingTestHarness(t, upstream)
+	if err := db.SetSetting(context.Background(), database.SettingLogErrorBodies, "1"); err != nil {
+		t.Fatal(err)
+	}
+	// Small-body failure: both bodies persisted verbatim, not truncated.
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": requestMarker}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var requestBody, errorBody *string
+	var requestTruncated, errorTruncated int
+	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if requestBody == nil || !strings.Contains(*requestBody, requestMarker) {
+		t.Fatalf("request body was not persisted when enabled: %v", requestBody)
+	}
+	if errorBody == nil || !strings.Contains(*errorBody, errorMarker) {
+		t.Fatalf("provider error body was not persisted when enabled: %v", errorBody)
+	}
+	if requestTruncated != 0 || errorTruncated != 0 {
+		t.Fatalf("small bodies must not be marked truncated: %d/%d", requestTruncated, errorTruncated)
+	}
+	// The activity API must expose the persisted error body.
+	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK {
+		t.Fatalf("activity: %d", status)
+	}
+	if !strings.Contains(string(mustJSON(t, activity)), errorMarker) {
+		t.Fatal("persisted error body missing from activity when enabled")
+	}
+	// Over-bound failure: body truncated with the truncated flag set.
+	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "TRIGGER-BIG-BODY"}}})
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("provider error status = %d", resp.StatusCode)
+	}
+	var bigError *string
+	var bigTruncated int
+	if err := db.SQL.QueryRow(`SELECT error_body,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&bigError, &bigTruncated); err != nil {
+		t.Fatal(err)
+	}
+	if bigTruncated != 1 {
+		t.Fatal("over-bound error body must be marked truncated")
+	}
+	if bigError == nil || int64(len(*bigError)) > maxUpstreamErrorBytes {
+		t.Fatalf("truncated error body exceeds bound: %d", len(*bigError))
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+// TestWriteLogTransactionFailureLeavesNoPartialRow verifies the all-or-nothing
+// property of the single-transaction write: when the request_logs INSERT fails
+// (here a primary-key collision), the transaction rolls back and no
+// request_attempts row leaks for that request.
+func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
+	_, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('dup-req',?,'provider-a/model-a','chat',0,200,1,'dup-req',?)`, clientID, now); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{db: db}
+	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "dup-req", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: now, attempts: []requestAttempt{{providerModelID: "pm-a", provider: "provider-a", model: "model-a", result: "success", httpStatus: 200, latencyMs: 1}}})
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_attempts WHERE request_log_id='dup-req'`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("failed transaction left attempt rows: count=%d err=%v", count, err)
+	}
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='dup-req'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("request_logs rows for dup-req = %d, want 1 (no duplicate): err=%v", count, err)
+	}
+}
+
+// TestInferenceUnaffectedWhenActivityPersistenceFails verifies the best-effort
+// contract under a real write failure: dropping the Activity tables makes the
+// deferred writeLog INSERT fail, but the inference request still returns 200
+// with a request id. writeLog never fails the request.
+func TestInferenceUnaffectedWhenActivityPersistenceFails(t *testing.T) {
+	api, db, _, secret := loggingTestHarness(t, mockUpstream(t))
+	if _, err := db.SQL.Exec(`DROP TABLE request_attempts`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`DROP TABLE request_logs`); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "still works"}}})
+	if resp.StatusCode != 200 {
+		t.Fatalf("inference must be unaffected by Activity persistence failure, got %d", resp.StatusCode)
+	}
+	if resp.Header.Get("X-Tiller-Request-Id") == "" {
+		t.Fatal("no X-Tiller-Request-Id on response")
+	}
+}
+
 func TestActivitySearchAndClear(t *testing.T) {
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	for i := 0; i < 3; i++ {
@@ -347,7 +646,7 @@ func TestClientKeyCreationCopiesLoggingDefaults(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("update settings: %d", status)
 	}
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "copied", "description": "defaults"})
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "copied", "description": "defaults", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}

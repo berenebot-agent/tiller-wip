@@ -11,6 +11,7 @@ from openai import OpenAI
 
 
 BASE = os.environ.get("TILLER_COMPAT_BASE_URL", "http://127.0.0.1:18080")
+MOCK_BASE = os.environ.get("TILLER_COMPAT_MOCK_BASE_URL", "http://127.0.0.1:18081/v1")
 ADMIN_USER = os.environ.get("TILLER_COMPAT_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ["TILLER_COMPAT_ADMIN_PASSWORD"]
 
@@ -32,7 +33,7 @@ def admin(method, path, body=None, csrf=None):
 
 _, session = admin("POST", "/api/admin/session", {"username": ADMIN_USER, "password": ADMIN_PASSWORD})
 csrf = session["csrf_token"]
-_, provider = admin("POST", "/api/admin/providers", {"name": "compat", "type": "generic-openai", "base_url": "http://127.0.0.1:18081/v1", "protocols": ["chat", "responses", "messages"]}, csrf)
+_, provider = admin("POST", "/api/admin/providers", {"name": "compat", "type": "generic-openai", "base_url": MOCK_BASE, "protocols": ["chat", "responses", "messages"]}, csrf)
 provider_id = provider["id"]
 _, model_page = admin("GET", f"/api/admin/providers/{provider_id}/models")
 model_id = model_page["data"][0]["id"]
@@ -61,6 +62,34 @@ assert message.model == "virtual/coding" and message.content[0].text == "hello"
 with anthropic.messages.stream(model="virtual/coding", max_tokens=32, messages=[{"role": "user", "content": "hello"}]) as stream:
     assert "".join(stream.text_stream) == "hello"
 
+# Force protocol conversion through a Chat-only provider and use the SDK
+# accumulators, which validate block indices and the final response shape.
+_, reasoning_provider = admin("POST", "/api/admin/providers", {"name": "reasoning-compat", "type": "generic-openai", "base_url": MOCK_BASE, "protocols": ["chat"]}, csrf)
+_, reasoning_models = admin("GET", f"/api/admin/providers/{reasoning_provider['id']}/models")
+_, reasoning_key = admin("POST", "/api/admin/client-keys", {"name": "Reasoning SDK compatibility"}, csrf)
+admin("PUT", f"/api/admin/client-keys/{reasoning_key['id']}/permissions", {"defaults": [], "permissions": [{"kind": "real", "model_id": reasoning_models["data"][0]["id"], "enabled": True}]}, csrf)
+reasoning_openai = OpenAI(base_url=BASE + "/v1", api_key=reasoning_key["secret"])
+reasoning_anthropic = Anthropic(base_url=BASE, api_key=reasoning_key["secret"])
+reasoning_model = "reasoning-compat/mock-model"
+reasoning_metadata = {"user_id": "reasoning-probe"}
+
+with reasoning_anthropic.messages.stream(model=reasoning_model, max_tokens=4096, messages=[{"role": "user", "content": "hello"}], metadata=reasoning_metadata) as stream:
+    final_message = stream.get_final_message()
+assert [block.type for block in final_message.content] == ["thinking", "text"]
+assert final_message.content[0].thinking == "probe thinking"
+assert final_message.content[1].text == "hello"
+
+with reasoning_openai.responses.stream(model=reasoning_model, input="hello", metadata=reasoning_metadata) as stream:
+    final_response = stream.get_final_response()
+assert final_response.output_text == "hello"
+assert "".join(part.text for item in final_response.output if item.type == "reasoning" for part in item.summary) == "probe thinking"
+
+message = reasoning_anthropic.messages.create(model=reasoning_model, max_tokens=4096, messages=[{"role": "user", "content": "hello"}], metadata=reasoning_metadata)
+assert message.content[0].type == "thinking" and message.content[0].thinking == "probe thinking"
+response = reasoning_openai.responses.create(model=reasoning_model, input="hello", metadata=reasoning_metadata)
+assert "".join(part.text for item in response.output if item.type == "reasoning" for part in item.summary) == "probe thinking"
+print("cross-protocol reasoning SDK probes passed")
+
 with tempfile.TemporaryDirectory() as codex_home:
     pathlib.Path(codex_home, "config.toml").write_text(f'''model = "virtual/coding"
 model_provider = "tiller"
@@ -88,7 +117,8 @@ wire_api = "responses"
     assert "hello" in result.stdout.lower(), result.stdout[-2000:]
 
 with tempfile.TemporaryDirectory() as opencode_home:
-    pathlib.Path(opencode_home, "opencode.json").write_text(json.dumps({
+    cfg_path = pathlib.Path(opencode_home, "opencode.json")
+    cfg_path.write_text(json.dumps({
         "$schema": "https://opencode.ai/config.json",
         "provider": {"tiller": {
             "npm": "@ai-sdk/openai-compatible",
@@ -98,6 +128,7 @@ with tempfile.TemporaryDirectory() as opencode_home:
         }},
         "model": "tiller/virtual/coding",
     }))
+    cfg_path.chmod(0o600)
     opencode_env = os.environ.copy()
     opencode_env["HOME"] = opencode_home
     result = subprocess.run(

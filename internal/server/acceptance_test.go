@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -27,6 +26,7 @@ type testAPI struct {
 	base   string
 	client *http.Client
 	csrf   string
+	server *Server
 }
 
 func (a *testAPI) request(method, path string, body any) (int, map[string]any, http.Header) {
@@ -149,7 +149,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,13 +182,13 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 		m := raw.(map[string]any)
 		modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Hermes test", "description": "acceptance"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Hermes test", "description": "acceptance", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}
 	clientID := payload["id"].(string)
 	clientSecret := payload["secret"].(string)
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Isolated client", "description": "feeder acceptance"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "Isolated client", "description": "feeder acceptance", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create second key: %d %v", status, payload)
 	}
@@ -406,11 +406,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restoredApp, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: restoreDir, ListenAddr: ":8080"}, restoredDB, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		restoredDB.Close()
-		t.Fatal(err)
-	}
+	restoredApp := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: restoreDir, ListenAddr: ":8080"}, restoredDB)
 	restoredServer := httptest.NewServer(restoredApp.Handler())
 	restoredReq, _ := http.NewRequest(http.MethodGet, restoredServer.URL+"/v1/models", nil)
 	restoredReq.Header.Set("Authorization", "Bearer "+newSecret)
@@ -506,7 +502,7 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,7 +529,7 @@ func TestCatalogueSurfacesCapabilities(t *testing.T) {
 		m := raw.(map[string]any)
 		modelIDs[m["upstream_model_id"].(string)] = m["id"].(string)
 	}
-	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "cap client"})
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "cap client", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create key: %d %v", status, payload)
 	}

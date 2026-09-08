@@ -36,9 +36,34 @@ func newLoginLimiter(max int, window, lockout time.Duration) *loginLimiter {
 	}
 }
 
-// locked reports whether the client is currently locked out. A lockout that has
-// expired is cleared so the next attempt starts fresh. Entries that are merely
-// counting failures (never locked out) are left untouched.
+// maxLimiterEntries is a true hard bound on the limiter map so spoofed
+// X-Forwarded-For values (usable by anyone behind the trusted proxy) cannot
+// grow memory without bound. When exceeded, expired entries are purged; if
+// still over budget, one non-locked-out counting entry is dropped (fail-open
+// for that IP, which only resets its failure streak). If every entry is an
+// active lockout and nothing can be safely evicted, the new entry is refused
+// and the caller proceeds unlocked (fail-open) rather than growing the map.
+const maxLimiterEntries = 4096
+
+// purge removes expired lockouts and stale counting windows. Callers must
+// hold l.mu.
+func (l *loginLimiter) purge(now time.Time) {
+	for key, f := range l.failures {
+		if !f.until.IsZero() {
+			if !now.Before(f.until) {
+				delete(l.failures, key)
+			}
+			continue
+		}
+		if now.Sub(f.first) > l.window {
+			delete(l.failures, key)
+		}
+	}
+}
+
+// locked reports whether the client is currently locked out. A lockout that
+// has expired is cleared so the next attempt starts fresh. Entries that are
+// merely counting failures (never locked out) are left untouched.
 func (l *loginLimiter) locked(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -64,6 +89,27 @@ func (l *loginLimiter) recordFailure(key string) bool {
 	now := time.Now()
 	f, ok := l.failures[key]
 	if !ok {
+		if len(l.failures) >= maxLimiterEntries {
+			l.purge(now)
+			if len(l.failures) >= maxLimiterEntries {
+				// Still over budget: evict one non-locked-out counting
+				// entry (fail-open for that IP only). Active lockouts are
+				// never evicted so brute-force protection holds. If every
+				// entry is an active lockout, refuse the insert and let
+				// this attempt through rather than growing the map.
+				evicted := false
+				for k, v := range l.failures {
+					if v.until.IsZero() {
+						delete(l.failures, k)
+						evicted = true
+						break
+					}
+				}
+				if !evicted {
+					return false
+				}
+			}
+		}
 		l.failures[key] = &loginFailure{count: 1, first: now}
 		return false
 	}
@@ -107,7 +153,9 @@ func peerIP(r *http.Request) string {
 // explicitly configured trusted-proxy prefix. Every forwarded hop must parse
 // as an IP; malformed chains are rejected and the direct peer is retained.
 // Traversing right-to-left stops at the first address outside the trusted
-// proxy range, which is the standard proxy-chain trust boundary.
+// proxy range, which is the standard proxy-chain trust boundary. This is the
+// canonical X-Forwarded-For walker: Server.requestClientIP delegates to it
+// after its X-Real-IP preference check, so the two can never drift.
 func clientIP(r *http.Request, trustedProxy netip.Prefix) string {
 	direct := peerIP(r)
 	if !trustedProxy.IsValid() {

@@ -33,14 +33,22 @@ RUN mkdir -p /out/data && chmod 0700 /out/data
 RUN mkdir -p /out/tmp && chmod 1777 /out/tmp
 
 FROM scratch
+# The image defaults to running as root at boot so Tiller's in-process
+# privilege drop (internal/privdrop, wired into main) can chown a fresh
+# root-owned ./data bind mount and then shed privileges to the runtime user.
+# No root-then-drop shell entrypoint is needed — the drop is pure Go and works
+# on scratch. Hardened deployments override with `user:` in compose; the image
+# also honors the TILLER_UID/TILLER_GID build args for image-level ownership.
 ARG TILLER_UID=65532
 ARG TILLER_GID=65532
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/licenses /licenses
 COPY --from=build --chmod=1777 /out/tmp /tmp
 COPY --from=build --chown=${TILLER_UID}:${TILLER_GID} /out/data /data
-COPY --from=build --chown=${TILLER_UID}:${TILLER_GID} /out/tiller-router /tiller-router
-USER ${TILLER_UID}:${TILLER_GID}
+# The binary is exec-only: root-owned, world read+exec, not writable. This
+# still works for the root-at-boot drop because root can exec it; the
+# runtime user after the drop does not need to overwrite it.
+COPY --from=build --chown=0:0 --chmod=0555 /out/tiller-router /tiller-router
 EXPOSE 8080
 ENTRYPOINT ["/tiller-router"]
 CMD ["serve"]

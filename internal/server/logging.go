@@ -1,20 +1,19 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
 
 // logRow is the metadata captured for a single routed request. It is built up
 // as the request progresses and written once, synchronously, before the
-// handler returns. Only metadata is ever stored — never prompt/response bodies,
-// tool arguments, reasoning content, or credentials.
+// handler returns.
 type logRow struct {
 	clientKeyID              string
 	requestedModel           string
@@ -35,16 +34,36 @@ type logRow struct {
 	providerRequestID        *string
 	clientRequestID          string
 	errorText                *string
+	errorMessage             *string
 	fallbackUsed             bool
 	fallbackReason           *string
 	attempts                 []requestAttempt
+	routeStatus              string
+	requestBody              *string
+	requestBodyTruncated     bool
+	errorBody                *string
+	errorBodyTruncated       bool
 	createdAt                string
 }
 
 type requestAttempt struct {
-	provider, model, result, failureClass string
-	httpStatus                            int
-	latencyMs                             int64
+	providerModelID, provider, model, result, failureClass string
+	httpStatus                                             int
+	latencyMs                                              int64
+	errorMessage                                           *string
+	errorBody                                              *string
+	errorBodyTruncated                                     bool
+}
+
+const maxLoggedBodyBytes = 1 << 20
+
+func loggedBody(body []byte) (*string, bool) {
+	truncated := len(body) > maxLoggedBodyBytes
+	if truncated {
+		body = body[:maxLoggedBodyBytes]
+	}
+	value := string(body)
+	return &value, truncated
 }
 
 // writeLog persists a request log row. It is best-effort: a failed insert logs
@@ -54,6 +73,11 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if row == nil {
 		return
 	}
+	routeStatus := row.routeStatus
+	if routeStatus == "" {
+		routeStatus = "legacy"
+	}
+	s.recordLastOutcome(row)
 	var enabled int
 	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
 		return
@@ -67,14 +91,63 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 			s.logger.Warn("request logged as success without a resolved target", "client_request_id", row.clientRequestID, "requested_model", row.requestedModel, "http_status", row.httpStatus)
 		}
 	}
-	_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, max(1, len(row.attempts)), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt)
+	// One transaction per logical request: the request_logs row and all of its
+	// attempt rows commit together or not at all, so a single SQLite fsync (the
+	// implicit-transaction commit) covers the whole write instead of 1+N.
+	tx, err := s.db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback() // no-op after a successful Commit
+	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, routeStatus, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, row.requestBody, boolInt(row.requestBodyTruncated), row.errorBody, boolInt(row.errorBodyTruncated), attemptCount(row.attempts), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
+		return
+	}
 	for i, attempt := range row.attempts {
 		attemptID, err := id.New()
 		if err != nil {
 			continue
 		}
-		_, _ = s.db.SQL.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.latencyMs, row.createdAt)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.errorMessage, attempt.errorBody, boolInt(attempt.errorBodyTruncated), attempt.latencyMs, row.createdAt); err != nil {
+			return
+		}
+	}
+	_ = tx.Commit()
+}
+
+// recordLastOutcome updates operational target status from actual attempts.
+// Skipped targets were not called and therefore do not receive an outcome.
+func (s *Server) recordLastOutcome(row *logRow) {
+	if len(row.attempts) == 0 {
+		return
+	}
+	s.lastOutcomeMu.Lock()
+	if s.lastOutcome == nil {
+		s.lastOutcome = map[string]lastOutcome{}
+	}
+	recordedAt := database.Now()
+	delta := make(map[string]lastOutcome, len(row.attempts))
+	for _, attempt := range row.attempts {
+		if attempt.providerModelID == "" {
+			continue
+		}
+		switch attempt.result {
+		case "success":
+			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
+			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
+		case "failed":
+			// Preserve zero: a network failure has no HTTP response, even if a
+			// later fallback succeeds and sets the logical row status to 2xx.
+			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+		}
+	}
+	s.lastOutcomeMu.Unlock()
+	// Push the changed outcomes to live subscribers. Non-blocking: a full
+	// buffer drops the delta, which the next snapshot self-heals. Never blocks
+	// the inference path.
+	if len(delta) > 0 && s.liveHub != nil {
+		s.liveHub.emitOutcome(delta)
 	}
 }
 
@@ -219,9 +292,28 @@ func intVal(v any) (*int64, bool) {
 // rewriteModelBytes replaces the upstream model identifier in a non-streaming
 // JSON body with the client-facing requested model.
 func rewriteModelBytes(body []byte, upstream, requested string) []byte {
-	body = bytes.ReplaceAll(body, []byte(`"model":"`+upstream+`"`), []byte(`"model":"`+requested+`"`))
-	body = bytes.ReplaceAll(body, []byte(`"model": "`+upstream+`"`), []byte(`"model": "`+requested+`"`))
-	return body
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(body, &object); err != nil {
+		return body
+	}
+	model, ok := object["model"]
+	if !ok {
+		return body
+	}
+	var value string
+	if err := json.Unmarshal(model, &value); err != nil || value != upstream {
+		return body
+	}
+	replacement, err := json.Marshal(requested)
+	if err != nil {
+		return body
+	}
+	object["model"] = replacement
+	result, err := json.Marshal(object)
+	if err != nil {
+		return body
+	}
+	return result
 }
 
 // newRequestID generates the router-owned request ID returned to the client.

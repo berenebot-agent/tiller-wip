@@ -72,6 +72,10 @@ func TestOrderedFallbackCoversUpstreamHTTPFailures(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
 	})
 	api, secret, canonical := notificationTestHarness(t, failing, succeeding)
+	status, _, _ := api.request(http.MethodPut, "/api/admin/settings", map[string]any{"fallback_cooldown_seconds": 0})
+	if status != http.StatusNoContent {
+		t.Fatalf("disable cooldown: %d", status)
+	}
 
 	for _, status := range []int{400, 401, 403, 404, 409, 422, 429, 500, 503} {
 		mu.Lock()
@@ -89,6 +93,41 @@ func TestOrderedFallbackCoversUpstreamHTTPFailures(t *testing.T) {
 		if len(got) != 2 || got[0] != "a" || got[1] != "b" {
 			t.Fatalf("status %d attempt order = %v, want [a b]", status, got)
 		}
+	}
+}
+
+func TestOrderedFallbackDoesNotWaitForStalledErrorBody(t *testing.T) {
+	first := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	})
+	second := okUpstream(t)
+	api, secret, canonical := notificationTestHarness(t, first, second)
+
+	body, _ := json.Marshal(map[string]any{"model": canonical, "messages": []any{}})
+	req, _ := http.NewRequest(http.MethodPost, api.base+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan *http.Response, 1)
+	go func() {
+		resp, err := api.client.Do(req)
+		if err == nil {
+			done <- resp
+		}
+	}()
+	select {
+	case resp := <-done:
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("stalled error body prevented fallback: status=%d", resp.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("fallback waited for stalled provider error body")
 	}
 }
 
@@ -193,7 +232,7 @@ func TestDirectRealRequestDoesNotInheritVirtualFallback(t *testing.T) {
 			modelID = model["id"].(string)
 		}
 	}
-	status, keyPayload, _ := api.request(http.MethodPost, "/api/admin/client-keys", map[string]any{"name": "direct client"})
+	status, keyPayload, _ := api.request(http.MethodPost, "/api/admin/client-keys", map[string]any{"name": "direct client", "type": "catalogue"})
 	if status != http.StatusCreated {
 		t.Fatalf("create direct client: %d %v", status, keyPayload)
 	}
