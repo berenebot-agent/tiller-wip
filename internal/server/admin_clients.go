@@ -210,7 +210,10 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT ?,'virtual',id,0,?,? FROM virtual_models`, clientID, now, now)
 	}
-	if err != nil || tx.Commit() != nil {
+	if err == nil {
+		err = s.clients.InvalidateWith(clientID, tx.Commit)
+	}
+	if err != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")
 		} else {
@@ -336,7 +339,10 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	if err == nil && (keyType == "single" || bindingSupplied) {
 		err = upsertSingleBinding(tx, clientID, modelName, targetType, targetID, now)
 	}
-	if err != nil || tx.Commit() != nil {
+	if err == nil {
+		err = s.clients.InvalidateWith(clientID, tx.Commit)
+	}
+	if err != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")
 		} else {
@@ -344,7 +350,6 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
 }
 
@@ -356,7 +361,12 @@ func (s *Server) rotateClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := database.Now()
-	result, err := s.db.SQL.ExecContext(r.Context(), `UPDATE client_keys SET selector=?,secret_hash=?,secret_fingerprint=?,rotated_at=?,updated_at=? WHERE id=?`, generated.Selector, generated.Hash, generated.Fingerprint, now, now, clientID)
+	var result sql.Result
+	err = s.clients.InvalidateWith(clientID, func() error {
+		var updateErr error
+		result, updateErr = s.db.SQL.ExecContext(r.Context(), `UPDATE client_keys SET selector=?,secret_hash=?,secret_fingerprint=?,rotated_at=?,updated_at=? WHERE id=?`, generated.Selector, generated.Hash, generated.Fingerprint, now, now, clientID)
+		return updateErr
+	})
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not rotate client key.")
 		return
@@ -366,7 +376,6 @@ func (s *Server) rotateClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
-	s.clients.Invalidate(clientID)
 	writeJSON(w, 200, map[string]any{"id": clientID, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. The previous key is already invalid and this one cannot be displayed again."})
 }
 
@@ -380,7 +389,12 @@ func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not delete client key.")
 		return
 	}
-	result, err := s.db.SQL.ExecContext(r.Context(), `DELETE FROM client_keys WHERE id=?`, clientID)
+	var result sql.Result
+	err := s.clients.InvalidateWith(clientID, func() error {
+		var deleteErr error
+		result, deleteErr = s.db.SQL.ExecContext(r.Context(), `DELETE FROM client_keys WHERE id=?`, clientID)
+		return deleteErr
+	})
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete client key.")
 		return
@@ -390,7 +404,6 @@ func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
-	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
 	s.notifyAdminEvent(eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
 }
@@ -593,12 +606,9 @@ func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if err := s.clients.InvalidateWith(clientID, tx.Commit); err != nil {
 		adminError(w, 500, "database_error", "Could not update permissions.")
 		return
 	}
-	// Drop any cached auth identity so permission changes are visible on the
-	// next request instead of lingering until the 30s authenticator TTL.
-	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
 }

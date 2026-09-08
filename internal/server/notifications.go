@@ -107,7 +107,7 @@ func (s *Server) notifyAdminEvent(event, message string) {
 		Message:   message,
 	}
 	cfg, err := s.db.GetNotificationSettingsBatch(context.Background())
-	if err != nil {
+	if err != nil || !cfg.Enabled || cfg.WebhookURL == "" || !notificationEventEnabled(event, cfg) {
 		return
 	}
 	go s.deliverNotification(event, payload, cfg)
@@ -148,19 +148,7 @@ func (s *Server) deliverNotification(event string, payload notificationPayload, 
 	if !cfg.Enabled || cfg.WebhookURL == "" {
 		return
 	}
-	if event == eventFallback && !cfg.EventFallback {
-		return
-	}
-	if event == eventAllFailed && !cfg.EventAllFailed {
-		return
-	}
-	if event == eventClientKeyCreated && !cfg.EventClientKeyCreated {
-		return
-	}
-	if event == eventClientKeyDeleted && !cfg.EventClientKeyDeleted {
-		return
-	}
-	if event == eventAdminLogin && !cfg.EventAdminLogin {
+	if !notificationEventEnabled(event, cfg) {
 		return
 	}
 	// Throttle repeat notifications for the same event + model within the
@@ -230,6 +218,23 @@ func (s *Server) deliverNotification(event string, payload notificationPayload, 
 	}
 }
 
+func notificationEventEnabled(event string, cfg database.NotificationSettings) bool {
+	switch event {
+	case eventFallback:
+		return cfg.EventFallback
+	case eventAllFailed:
+		return cfg.EventAllFailed
+	case eventClientKeyCreated:
+		return cfg.EventClientKeyCreated
+	case eventClientKeyDeleted:
+		return cfg.EventClientKeyDeleted
+	case eventAdminLogin:
+		return cfg.EventAdminLogin
+	default:
+		return true
+	}
+}
+
 func notificationErrorClass(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
@@ -249,7 +254,7 @@ func (s *Server) buildNotificationPayload(event string, row *logRow, route resol
 	p := notificationPayload{
 		Event:          event,
 		Timestamp:      row.createdAt,
-		ClientKey:      s.clientKeyName(context.Background(), row.clientKeyID),
+		ClientKey:      row.clientName,
 		RequestedModel: row.requestedModel,
 		VirtualModel:   route.RouteModel,
 		AttemptCount:   attemptCount(row.attempts),
@@ -377,14 +382,6 @@ func failureMessage(class string, httpStatus int) string {
 	default:
 		return class
 	}
-}
-
-// clientKeyName resolves a client key's display name. It is best-effort; an
-// empty name is acceptable in a notification payload.
-func (s *Server) clientKeyName(ctx context.Context, id string) string {
-	var name string
-	_ = s.db.SQL.QueryRowContext(ctx, `SELECT name FROM client_keys WHERE id=?`, id).Scan(&name)
-	return name
 }
 
 // sendTestNotification sends a harmless "Tiller test notification" to the

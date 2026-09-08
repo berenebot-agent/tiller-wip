@@ -209,8 +209,13 @@ type activityExportRow struct {
 // returns one row per inference request ordered newest-first. It is shared by
 // the client-key and virtual-model CSV export handlers so the column set cannot
 // drift between them.
-func (s *Server) queryActivityExport(ctx context.Context, where string, args []any) (*sql.Rows, error) {
-	return s.db.SQL.QueryContext(ctx, `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id),rl.fallback_used,rl.fallback_reason,rl.created_at,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` ORDER BY rl.created_at DESC, rl.id DESC`, args...)
+func (s *Server) queryActivityExport(ctx context.Context, where string, args []any, beforeCreated, beforeID string) (*sql.Rows, error) {
+	if beforeCreated != "" {
+		where += ` AND (rl.created_at < ? OR (rl.created_at = ? AND rl.id < ?))`
+		args = append(args, beforeCreated, beforeCreated, beforeID)
+	}
+	args = append(args, activityExportBatchSize)
+	return s.db.SQL.QueryContext(ctx, `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id),rl.fallback_used,rl.fallback_reason,rl.created_at,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ?`, args...)
 }
 
 // exportClientActivityCSV streams a CSV of the client key's
@@ -230,12 +235,12 @@ func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request)
 		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
-	rows, err := s.queryActivityExport(r.Context(), where, args)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not export activity.")
+	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(name)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", where, args); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
+		}
 		return
 	}
-	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(name)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
 // exportVirtualActivityCSV streams a CSV of activity attributable
@@ -256,12 +261,9 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
-	rows, err := s.queryActivityExport(r.Context(), where, args)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not export activity.")
-		return
+	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", where, args); err != nil && s.logger != nil {
+		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
-	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
 // exportRealModelActivityCSV streams a CSV of activity attributable to a real
@@ -280,77 +282,105 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
-	rows, err := s.queryActivityExport(r.Context(), where, args)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not export activity.")
-		return
+	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(provider+"/"+upstream)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", where, args); err != nil && s.logger != nil {
+		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
-	writeActivityCSV(w, r, "tiller-"+sanitizeFilename(provider+"/"+upstream)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", rows)
 }
 
 // writeActivityCSV streams the export rows as a UTF-8 CSV attachment. Only
 // metadata is written; unknown values stay blank. A BOM is prepended so Excel
 // detects UTF-8 correctly.
-func writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, rows *sql.Rows) {
-	defer rows.Close()
+const activityExportBatchSize = 256
+
+func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filename, where string, args []any) error {
+	rows, err := s.queryActivityExport(r.Context(), where, append([]any(nil), args...), "", "")
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not export activity.")
+		return err
+	}
+	defer func() { _ = rows.Close() }()
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte("\xEF\xBB\xBF"))
-	cw := csv.NewWriter(w)
-	write := func(record []string) bool {
-		if err := cw.Write(record); err != nil {
-			return false
-		}
-		return cw.Error() == nil
+	if _, err := w.Write([]byte("\xEF\xBB\xBF")); err != nil {
+		return err
 	}
-	if !write([]string{
+	cw := csv.NewWriter(w)
+	write := func(record []string) error {
+		if err := cw.Write(record); err != nil {
+			return err
+		}
+		return cw.Error()
+	}
+	if err := write([]string{
 		"timestamp", "client_key", "client_requested_model", "client_exposed_model",
 		"virtual_model", "bound_target", "final_provider", "final_model", "protocol",
 		"streaming", "http_status", "latency_ms", "input_tokens", "output_tokens",
 		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message", "request_body", "request_body_truncated", "error_body", "error_body_truncated",
 		"provider_request_id", "client_request_id", "route_kind",
-	}) {
-		return
+	}); err != nil {
+		return err
 	}
-	for rowNumber := 0; rows.Next(); rowNumber++ {
-		if r.Context().Err() != nil {
-			return
-		}
-		var row activityExportRow
-		if err := scanActivityRow(rows.Scan, &row.activityView, true, nil, &row.ClientName); err != nil {
-			return
-		}
-		virtualModel := ""
-		if row.RouteKind != nil && *row.RouteKind == "virtual" && row.RouteModel != nil {
-			virtualModel = *row.RouteModel
-		}
-		boundTarget := strPtrOrEmpty(row.RouteModel)
-		if !write([]string{
-			row.CreatedAt, neutralizeCSVField(row.ClientName), neutralizeCSVField(row.RequestedModel),
-			neutralizeCSVField(strPtrOrEmpty(row.ExposedModel)), neutralizeCSVField(virtualModel),
-			neutralizeCSVField(boundTarget), neutralizeCSVField(strPtrOrEmpty(row.ResolvedProvider)),
-			neutralizeCSVField(strPtrOrEmpty(row.ResolvedModel)), row.Protocol,
-			strconv.FormatBool(row.Streaming), strconv.Itoa(row.HTTPStatus), strconv.FormatInt(row.LatencyMs, 10),
-			int64PtrOrEmpty(row.InputTokens), int64PtrOrEmpty(row.OutputTokens), int64PtrOrEmpty(row.CacheReadInputTokens),
-			int64PtrOrEmpty(row.CacheCreationInputTokens), strconv.Itoa(row.AttemptCount), strconv.FormatBool(row.FallbackUsed),
-			strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
-			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)), strconv.FormatBool(row.RequestBodyTruncated),
-			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)), strconv.FormatBool(row.ErrorBodyTruncated),
-			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID, strPtrOrEmpty(row.RouteKind),
-		}) {
-			return
-		}
-		if rowNumber%64 == 0 {
-			cw.Flush()
-			if cw.Error() != nil {
-				return
+	beforeCreated, beforeID := "", ""
+	for {
+		count := 0
+		for rows.Next() {
+			if err := r.Context().Err(); err != nil {
+				rows.Close()
+				return err
 			}
+			var row activityExportRow
+			if err := scanActivityRow(rows.Scan, &row.activityView, true, nil, &row.ClientName); err != nil {
+				rows.Close()
+				return err
+			}
+			virtualModel := ""
+			if row.RouteKind != nil && *row.RouteKind == "virtual" && row.RouteModel != nil {
+				virtualModel = *row.RouteModel
+			}
+			if err := write([]string{
+				row.CreatedAt, neutralizeCSVField(row.ClientName), neutralizeCSVField(row.RequestedModel),
+				neutralizeCSVField(strPtrOrEmpty(row.ExposedModel)), neutralizeCSVField(virtualModel),
+				neutralizeCSVField(strPtrOrEmpty(row.RouteModel)), neutralizeCSVField(strPtrOrEmpty(row.ResolvedProvider)),
+				neutralizeCSVField(strPtrOrEmpty(row.ResolvedModel)), row.Protocol,
+				strconv.FormatBool(row.Streaming), strconv.Itoa(row.HTTPStatus), strconv.FormatInt(row.LatencyMs, 10),
+				int64PtrOrEmpty(row.InputTokens), int64PtrOrEmpty(row.OutputTokens), int64PtrOrEmpty(row.CacheReadInputTokens),
+				int64PtrOrEmpty(row.CacheCreationInputTokens), strconv.Itoa(row.AttemptCount), strconv.FormatBool(row.FallbackUsed),
+				strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
+				neutralizeCSVField(strPtrOrEmpty(row.RequestBody)), strconv.FormatBool(row.RequestBodyTruncated),
+				neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)), strconv.FormatBool(row.ErrorBodyTruncated),
+				neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID, strPtrOrEmpty(row.RouteKind),
+			}); err != nil {
+				rows.Close()
+				return err
+			}
+			beforeCreated, beforeID = row.CreatedAt, row.ID
+			count++
+			if count%64 == 0 {
+				cw.Flush()
+				if err := cw.Error(); err != nil {
+					rows.Close()
+					return err
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		if count < activityExportBatchSize {
+			break
+		}
+		rows, err = s.queryActivityExport(r.Context(), where, append([]any(nil), args...), beforeCreated, beforeID)
+		if err != nil {
+			return err
 		}
 	}
 	cw.Flush()
-	_ = cw.Error()
-	_ = rows.Err()
+	return cw.Error()
 }
 
 // listScopedActivity returns metadata for requests matching the given WHERE

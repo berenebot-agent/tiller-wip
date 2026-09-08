@@ -466,7 +466,7 @@ func (r *Registry) fetchModelsDev(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := r.client.Do(req)
+	resp, err := r.HTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}

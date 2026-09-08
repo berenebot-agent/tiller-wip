@@ -57,11 +57,18 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		var reasoningCaps *providers.ReasoningCapabilities
 		if real.Valid {
 			var reasoningRaw sql.NullString
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw)
+			if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw); err != nil {
+				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+				return
+			}
 			reasoningCaps = decodeReasoningCapabilities(reasoningRaw)
 		} else {
-			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
-			reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID)
+			aggregated, err := s.loadVirtualCapabilities(r.Context(), []string{virtualID})
+			if err != nil {
+				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+				return
+			}
+			contextLength, maxOutputTokens, caps, reasoningCaps = catalogueCapabilityFields(aggregated[virtualID])
 		}
 		entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
@@ -70,7 +77,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output, reasoning_capabilities, virtual_model_id FROM (
 	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output, m.reasoning_capabilities, NULL virtual_model_id FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
 	UNION ALL
-	SELECT g.name||'/'||v.name canonical, `+conservativeMin("t.context_length")+`, `+conservativeMin("t.max_output_tokens")+`, `+triStateAND("t.supports_tools")+`, `+triStateAND("t.supports_vision")+`, `+triStateAND("t.supports_reasoning")+`, `+triStateAND("t.supports_structured_output")+`, NULL, v.id virtual_model_id FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id JOIN (SELECT x.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output FROM virtual_model_targets x JOIN provider_models m ON m.id=x.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE x.enabled=1 AND m.available=1 AND p.enabled=1) t ON t.virtual_model_id=v.id WHERE x.client_key_id=? AND x.enabled=1 GROUP BY v.id
+	SELECT g.name||'/'||v.name canonical, NULL, NULL, NULL, NULL, NULL, NULL, NULL, v.id virtual_model_id FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)
 	) ORDER BY canonical`, identity.ID, identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
@@ -85,9 +92,12 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	catalogueRows := []catalogueRow{}
 	for rows.Next() {
 		var row catalogueRow
-		if err := rows.Scan(&row.modelID, &row.contextLength, &row.maxOutputTokens, &row.caps.Tools, &row.caps.Vision, &row.caps.Reasoning, &row.caps.StructuredOutput, &row.reasoningRaw, &row.virtualID); err == nil {
-			catalogueRows = append(catalogueRows, row)
+		if err := rows.Scan(&row.modelID, &row.contextLength, &row.maxOutputTokens, &row.caps.Tools, &row.caps.Vision, &row.caps.Reasoning, &row.caps.StructuredOutput, &row.reasoningRaw, &row.virtualID); err != nil {
+			rows.Close()
+			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+			return
 		}
+		catalogueRows = append(catalogueRows, row)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
@@ -98,42 +108,22 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
-	reasoning := map[string]*providers.ReasoningCapabilities{}
 	virtualIDs := make([]string, 0)
 	for _, row := range catalogueRows {
 		if row.virtualID.Valid {
 			virtualIDs = append(virtualIDs, row.virtualID.String)
 		}
 	}
-	if len(virtualIDs) > 0 {
-		placeholders := strings.TrimRight(strings.Repeat("?,", len(virtualIDs)), ",")
-		reasoningRows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.virtual_model_id,m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id IN (`+placeholders+`) AND t.enabled=1 AND m.available=1 AND p.enabled=1`, stringSliceToAny(virtualIDs)...)
-		if err != nil {
-			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-			return
-		}
-		for reasoningRows.Next() {
-			var virtualID string
-			var raw sql.NullString
-			if err := reasoningRows.Scan(&virtualID, &raw); err == nil {
-				reasoning[virtualID] = mergeReasoningCapabilities(reasoning[virtualID], decodeReasoningCapabilities(raw))
-			}
-		}
-		if err := reasoningRows.Err(); err != nil {
-			reasoningRows.Close()
-			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-			return
-		}
-		if err := reasoningRows.Close(); err != nil {
-			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-			return
-		}
+	aggregated, err := s.loadVirtualCapabilities(r.Context(), virtualIDs)
+	if err != nil {
+		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+		return
 	}
 	data := []map[string]any{}
 	for _, row := range catalogueRows {
 		reasoningCaps := decodeReasoningCapabilities(row.reasoningRaw)
-		if row.virtualID.Valid && reasoningCaps == nil {
-			reasoningCaps = reasoning[row.virtualID.String]
+		if row.virtualID.Valid {
+			row.contextLength, row.maxOutputTokens, row.caps, reasoningCaps = catalogueCapabilityFields(aggregated[row.virtualID.String])
 		}
 		data = append(data, buildCatalogueEntry(row.modelID, row.contextLength, row.maxOutputTokens, row.caps, reasoningCaps, anthropic))
 	}
@@ -173,11 +163,13 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, entry)
 		return
 	}
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput); err != nil {
+	aggregated, err := s.loadVirtualCapabilities(r.Context(), []string{virtualID})
+	if err != nil {
 		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 		return
 	}
-	entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID), isAnthropicRequest(r))
+	contextLength, maxOutputTokens, caps, reasoningCaps := catalogueCapabilityFields(aggregated[virtualID])
+	entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, reasoningCaps, isAnthropicRequest(r))
 	writeJSON(w, 200, entry)
 }
 
@@ -268,25 +260,68 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	}
 }
 
-// aggregateVirtualReasoningCapabilities computes the union of reasoning
-// selectors reported by eligible targets of a virtual model.
-func (s *Server) aggregateVirtualReasoningCapabilities(ctx context.Context, virtualModelID string) *providers.ReasoningCapabilities {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualModelID)
+func (s *Server) loadVirtualCapabilities(ctx context.Context, virtualModelIDs []string) (map[string]aggregatedVirtualCapabilities, error) {
+	result := make(map[string]aggregatedVirtualCapabilities, len(virtualModelIDs))
+	if len(virtualModelIDs) == 0 {
+		return result, nil
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(virtualModelIDs)), ",")
+	rows, err := s.db.SQL.QueryContext(ctx, `SELECT t.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id IN (`+placeholders+`) AND t.enabled=1 AND m.available=1 AND p.enabled=1`, stringSliceToAny(virtualModelIDs)...)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer rows.Close()
-	var merged *providers.ReasoningCapabilities
+	targets := make(map[string][]virtualTargetCapabilities, len(virtualModelIDs))
 	for rows.Next() {
-		var raw sql.NullString
-		if rows.Scan(&raw) == nil {
-			merged = mergeReasoningCapabilities(merged, decodeReasoningCapabilities(raw))
+		var virtualID string
+		var contextLength, maxOutputTokens, tools, vision, reasoning, structured sql.NullInt64
+		var reasoningRaw sql.NullString
+		if err := rows.Scan(&virtualID, &contextLength, &maxOutputTokens, &tools, &vision, &reasoning, &structured, &reasoningRaw); err != nil {
+			return nil, err
 		}
+		targets[virtualID] = append(targets[virtualID], virtualTargetCapabilities{
+			ContextLength: nullInt64Ptr(contextLength), MaxOutputTokens: nullInt64Ptr(maxOutputTokens),
+			SupportsTools: triBoolFromInt(tools), SupportsVision: triBoolFromInt(vision),
+			SupportsReasoning: triBoolFromInt(reasoning), SupportsStructuredOutput: triBoolFromInt(structured),
+			ReasoningCapabilities: decodeReasoningCapabilities(reasoningRaw),
+		})
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, virtualID := range virtualModelIDs {
+		result[virtualID] = aggregateVirtualCapabilities(targets[virtualID])
+	}
+	return result, nil
+}
+
+func nullInt64Ptr(value sql.NullInt64) *int64 {
+	if !value.Valid {
 		return nil
 	}
-	return merged
+	return &value.Int64
+}
+
+func catalogueCapabilityFields(aggregated aggregatedVirtualCapabilities) (sql.NullInt64, sql.NullInt64, modelCapabilities, *providers.ReasoningCapabilities) {
+	toNullInt := func(value *int64) sql.NullInt64 {
+		if value == nil {
+			return sql.NullInt64{}
+		}
+		return sql.NullInt64{Int64: *value, Valid: true}
+	}
+	toCapability := func(value *bool) sql.NullInt64 {
+		if value == nil {
+			return sql.NullInt64{}
+		}
+		if *value {
+			return sql.NullInt64{Int64: 1, Valid: true}
+		}
+		return sql.NullInt64{Int64: 0, Valid: true}
+	}
+	return toNullInt(aggregated.ContextLength), toNullInt(aggregated.MaxOutputTokens), modelCapabilities{
+		Tools: toCapability(aggregated.SupportsTools), Vision: toCapability(aggregated.SupportsVision),
+		Reasoning: toCapability(aggregated.SupportsReasoning), StructuredOutput: toCapability(aggregated.SupportsStructuredOutput),
+	}, aggregated.ReasoningCapabilities
 }
 
 func stringSliceToAny(values []string) []any {
@@ -330,21 +365,6 @@ func (c modelCapabilities) addTo(entry map[string]any) {
 	if c.StructuredOutput.Valid {
 		entry["supports_structured_output"] = c.StructuredOutput.Int64
 	}
-}
-
-// triStateAND builds a SQLite expression computing the conservative AND of a
-// tri-state capability column across a group: any 0 -> 0; else any NULL ->
-// NULL; else 1. An empty group yields NULL (unknown).
-func triStateAND(col string) string {
-	return `CASE WHEN COUNT(*)=0 THEN NULL WHEN COUNT(CASE WHEN ` + col + `=0 THEN 1 END)>0 THEN 0 WHEN COUNT(CASE WHEN ` + col + ` IS NULL THEN 1 END)>0 THEN NULL ELSE 1 END`
-}
-
-// conservativeMin advertises a numeric limit only when every eligible target
-// reports a positive value. A missing value must keep the aggregate unknown:
-// assuming the minimum of the known subset could overstate an unreported
-// target's safe limit.
-func conservativeMin(col string) string {
-	return `CASE WHEN COUNT(*)=0 OR COUNT(` + col + `)<>COUNT(*) OR MIN(` + col + `)<=0 THEN NULL ELSE MIN(` + col + `) END`
 }
 
 type resolvedRoute struct {
@@ -521,6 +541,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// deferred best-effort insert that never fails the request.
 	row := &logRow{
 		clientKeyID:     identity.ID,
+		clientName:      identity.Name,
 		requestedModel:  requested,
 		routeStatus:     "unresolved",
 		protocol:        string(incoming),
@@ -590,7 +611,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	var selected resolvedRoute
 	var target providers.Protocol
 	var idle *time.Timer
-	var attemptTimedOut atomic.Bool
+	var attemptTimedOut *atomic.Bool
 	var translated bool
 	var cancel context.CancelFunc
 	protocolUnavailable := false
@@ -806,25 +827,24 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
-			attemptTimedOut.Store(false)
+			timedOut := &atomic.Bool{}
+			attemptTimedOut = timedOut
 			idle = time.AfterFunc(idleTimeout, func() {
-				attemptTimedOut.Store(true)
+				timedOut.Store(true)
 				attemptCancel()
 			})
 			idleBody := response.Body
 			response.Body = bufferedReadCloser{Reader: &idleReader{reader: idleBody, timer: idle}, closer: idleBody}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				idle.Stop()
 				if route.Virtual {
 					s.inflight.targetEnd(route.RouteModelID, targetID)
 				}
 				class := fmt.Sprintf("http_%d", response.StatusCode)
 				var upstreamErrorBody []byte
 				var upstreamErrorReadErr error
-				if !route.Virtual || logErrorBodies {
-					// Read the upstream error body for bounded passthrough to the
-					// originating client. When sensitive body logging is enabled,
-					// retain the bounded body on the failed attempt as well.
+				if logErrorBodies {
+					// Body content is retained only by opt-in detailed error logging
+					// and is never passed through to the client.
 					upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
 				}
 				response.Body.Close()
@@ -936,9 +956,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: selected.ProviderModelID, provider: selected.Provider.Name, model: selected.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 			allAttemptedFailed = false
 			success = true
-			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && selected.ProviderModelID != "" {
-				s.cooldown.remove(selected.ProviderModelID)
-			}
 			goto routeDone
 		}
 	}
@@ -993,6 +1010,11 @@ routeDone:
 		return
 	}
 	defer cancel()
+	clearSelectedCooldown := func() {
+		if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && selected.ProviderModelID != "" {
+			s.cooldown.remove(selected.ProviderModelID)
+		}
+	}
 	row.resolvedProvider = &selected.Provider.Name
 	row.resolvedModel = &selected.UpstreamModelID
 	s.inflight.clientResolved(row.clientKeyID, selected.Provider.Name+"/"+selected.UpstreamModelID)
@@ -1008,7 +1030,8 @@ routeDone:
 	reader := resp.Body
 	usage := &usageCapture{}
 	if translated {
-		if isStreamingResponse(resp) {
+		streamingResponse := isStreamingResponse(resp)
+		if streamingResponse {
 			streamed = true
 			row.streaming = true
 			if route.Virtual {
@@ -1020,10 +1043,20 @@ routeDone:
 		row.httpStatus = resp.StatusCode
 		if err := translateResponse(w, reader, incoming, target, selected, usage); err != nil {
 			idle.Stop()
+			class := "translation_error"
+			if attemptTimedOut.Load() {
+				class = "upstream_timeout"
+			}
 			row.httpStatus = 502
-			row.errorText = strPtr("translation_error")
-			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("translation_error"))
+			row.errorText = strPtr(class)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+			markLastAttemptFailed(row, class)
+			if streamingResponse {
+				writeStreamFailure(w, incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+			}
 			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
+		} else {
+			clearSelectedCooldown()
 		}
 		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
 		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
@@ -1038,7 +1071,19 @@ routeDone:
 		s.inflight.clientStreaming(row.clientKeyID)
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
-		rewriteSSE(w, reader, selected.UpstreamModelID, selected.RequestedModel, usage)
+		if err := rewriteSSE(w, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
+			class := "upstream_read_error"
+			if attemptTimedOut.Load() {
+				class = "upstream_timeout"
+			}
+			row.httpStatus = 502
+			row.errorText = strPtr(class)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+			markLastAttemptFailed(row, class)
+			writeStreamFailure(w, incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+		} else {
+			clearSelectedCooldown()
+		}
 		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
 		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 		return
@@ -1046,9 +1091,14 @@ routeDone:
 	// Non-streaming JSON body: read fully to extract usage, then rewrite.
 	body, err = io.ReadAll(reader)
 	if err != nil {
+		class := "upstream_read_error"
+		if attemptTimedOut.Load() {
+			class = "upstream_timeout"
+		}
 		row.httpStatus = 502
-		row.errorText = strPtr("upstream_read_error")
-		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_read_error"))
+		row.errorText = strPtr(class)
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+		markLastAttemptFailed(row, class)
 		return
 	}
 	extractUsage(body, usage)
@@ -1056,7 +1106,18 @@ routeDone:
 	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 	w.WriteHeader(resp.StatusCode)
 	row.httpStatus = resp.StatusCode
-	_, _ = w.Write(rewriteModelBytes(body, route.UpstreamModelID, route.RequestedModel))
+	_, _ = w.Write(rewriteModelBytes(body, selected.UpstreamModelID, selected.RequestedModel))
+	clearSelectedCooldown()
+}
+
+func markLastAttemptFailed(row *logRow, class string) {
+	if len(row.attempts) == 0 {
+		return
+	}
+	attempt := &row.attempts[len(row.attempts)-1]
+	attempt.result = "failed"
+	attempt.failureClass = class
+	attempt.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 }
 
 type bufferedReadCloser struct {
@@ -1346,7 +1407,7 @@ func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
 	return true
 }
 
-func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) {
+func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
 	reader := bufio.NewReader(r)
 	flusher, _ := w.(http.Flusher)
 	for {
@@ -1357,7 +1418,7 @@ func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, 
 			fragment, err = reader.ReadSlice('\n')
 			line = append(line, fragment...)
 			if len(line) > maxSSELineBytes {
-				return
+				return errors.New("SSE line exceeds limit")
 			}
 			if err != bufio.ErrBufferFull {
 				break
@@ -1392,11 +1453,14 @@ func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, 
 				flusher.Flush()
 			}
 			if done {
-				return
+				return nil
 			}
 		}
 		if err != nil {
-			return
+			if err == io.EOF {
+				return nil
+			}
+			return err
 		}
 	}
 }

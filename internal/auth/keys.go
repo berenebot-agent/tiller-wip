@@ -218,6 +218,23 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 func (a *ClientAuthenticator) Invalidate(clientID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	a.invalidateLocked(clientID)
+}
+
+// InvalidateWith publishes a client mutation while cache publication is
+// excluded, so verification begun against the old database state cannot
+// authorize after the mutation commits.
+func (a *ClientAuthenticator) InvalidateWith(clientID string, publish func() error) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := publish(); err != nil {
+		return err
+	}
+	a.invalidateLocked(clientID)
+	return nil
+}
+
+func (a *ClientAuthenticator) invalidateLocked(clientID string) {
 	atomic.AddUint64(&a.rev, 1)
 	for key, entry := range a.entries {
 		if entry.identity.ID == clientID {
@@ -385,8 +402,11 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		return Session{}, false
 	}
 	exp, perr := time.Parse(time.RFC3339Nano, expiresAt)
-	if perr != nil || now.After(exp) || !s.hasher.Verify(secret, tokenHash) {
-		_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
+	if perr != nil || now.After(exp) {
+		s.revoke(selector)
+		return Session{}, false
+	}
+	if !s.hasher.Verify(secret, tokenHash) {
 		return Session{}, false
 	}
 	// Sliding expiry: extend when more than half the lifetime has elapsed.
@@ -428,8 +448,12 @@ func (s *SessionStore) Delete(token string) {
 	if !ok {
 		return
 	}
-	_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
+	s.revoke(selector)
+}
+
+func (s *SessionStore) revoke(selector string) {
 	s.mu.Lock()
+	_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
 	atomic.AddUint64(&s.rev, 1)
 	delete(s.cache, selector)
 	s.mu.Unlock()
@@ -441,8 +465,8 @@ func (s *SessionStore) CheckCSRF(session Session, token string) bool {
 
 // InvalidateAll revokes every admin session, e.g. after a credential change.
 func (s *SessionStore) InvalidateAll() error {
-	_, err := s.db.Exec(`DELETE FROM admin_sessions`)
 	s.mu.Lock()
+	_, err := s.db.Exec(`DELETE FROM admin_sessions`)
 	atomic.AddUint64(&s.rev, 1)
 	s.cache = make(map[string]sessionCacheEntry)
 	s.mu.Unlock()

@@ -1230,7 +1230,12 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 				captureStreamUsage(payload, target, usage)
 				deltas, done := canonicalDeltas(event.Name, payload, target, state)
 				for _, delta := range deltas {
-					writeTranslatedEvent(w, incoming, state, delta)
+					if delta.Kind == "error" {
+						return errors.New("upstream stream reported failure")
+					}
+					if err := writeTranslatedEvent(w, incoming, state, delta); err != nil {
+						return err
+					}
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -1258,7 +1263,23 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 	}
 }
 
-const maxAccumulatedTextBytes = 8 * 1024 * 1024
+func writeStreamFailure(w io.Writer, protocol providers.Protocol, code, id, model string) {
+	message := "The upstream stream could not be completed."
+	switch protocol {
+	case providers.ProtocolMessages:
+		writeSSE(w, "error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": message}})
+	case providers.ProtocolResponses:
+		writeSSE(w, "response.failed", map[string]any{"type": "response.failed", "response": map[string]any{"id": id, "object": "response", "status": "failed", "model": model, "output": []any{}, "error": map[string]any{"code": code, "message": message}}})
+	default:
+		writeSSE(w, "", map[string]any{"error": map[string]any{"type": "server_error", "code": code, "message": message}})
+	}
+}
+
+const (
+	maxAccumulatedTextBytes         = 8 * 1024 * 1024
+	maxAccumulatedToolArgumentBytes = 8 * 1024 * 1024
+	maxStreamToolCalls              = 128
+)
 
 type streamState struct {
 	id, model                                                  string
@@ -1269,12 +1290,14 @@ type streamState struct {
 	reasoningAccumulated                                       strings.Builder
 	nextIndex                                                  int
 	reasoningIndex, messageIndex, toolIndex                    int
-	outputOrder                                                []string
+	outputOrder                                                []streamOutput
 	extraOutputs                                               map[int]any
 	activeKind                                                 string
 	activeIndex                                                int
-	currentToolID                                              string
-	toolCalls                                                  map[string]*toolCallState
+	toolCalls                                                  []*toolCallState
+	toolAliases                                                map[string]*toolCallState
+	toolArgumentBytes                                          int
+	messagesToolsWritten                                       bool
 	inputTokens                                                int64
 	outputTokens                                               int64
 	hasInputTokens                                             bool
@@ -1284,21 +1307,20 @@ type toolCallState struct {
 	callID    string
 	name      string
 	arguments strings.Builder
+	itemID    string
 	index     int
+	ordinal   int
 }
 
-func toolByIndex(calls map[string]*toolCallState, n int) *toolCallState {
-	for _, call := range calls {
-		if call.index == n {
-			return call
-		}
-	}
-	return nil
+type streamOutput struct {
+	kind string
+	tool *toolCallState
 }
 
 type canonicalDelta struct {
 	Kind, Text, CallID, Name, Arguments, Finish string
 	UpstreamIndex                               int
+	HasUpstreamIndex                            bool
 	ItemID                                      string
 	Usage                                       any
 	Detail                                      map[string]any
@@ -1347,7 +1369,7 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				if value, ok := coerceInt64(call["index"]); ok {
 					upstreamIndex = int(value)
 				}
-				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: upstreamIndex, CallID: strField(call["id"]), Name: strField(fn["name"]), Arguments: strField(fn["arguments"])})
+				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: upstreamIndex, HasUpstreamIndex: true, CallID: strField(call["id"]), Name: strField(fn["name"]), Arguments: strField(fn["arguments"])})
 			}
 			if finish, ok := choice["finish_reason"].(string); ok && finish != "" {
 				out = append(out, canonicalDelta{Kind: "finish", Finish: finish})
@@ -1371,7 +1393,7 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			}
 		case "content_block_start":
 			if block, ok := payload["content_block"].(map[string]any); ok && block["type"] == "tool_use" {
-				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), CallID: strField(block["id"]), Name: strField(block["name"])})
+				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), HasUpstreamIndex: true, CallID: strField(block["id"]), Name: strField(block["name"])})
 			}
 		case "content_block_delta":
 			if delta, ok := payload["delta"].(map[string]any); ok {
@@ -1382,7 +1404,7 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 					out = append(out, canonicalDelta{Kind: "reasoning", Text: thinking})
 				}
 				if partial, ok := delta["partial_json"].(string); ok {
-					out = append(out, canonicalDelta{Kind: "tool", Arguments: partial})
+					out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), HasUpstreamIndex: true, Arguments: partial})
 				}
 			}
 		case "message_delta":
@@ -1413,10 +1435,12 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		out = append(out, canonicalDelta{Kind: "reasoning", Text: fmt.Sprint(payload["delta"])})
 	case "response.function_call_arguments.delta":
-		out = append(out, canonicalDelta{Kind: "tool", CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"])})
+		index, hasIndex := coerceInt64(payload["output_index"])
+		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"])})
 	case "response.output_item.added":
 		if item, ok := payload["item"].(map[string]any); ok && item["type"] == "function_call" {
-			out = append(out, canonicalDelta{Kind: "tool", CallID: strField(item["call_id"]), ItemID: strField(item["id"]), Name: strField(item["name"])})
+			index, hasIndex := coerceInt64(payload["output_index"])
+			out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(item["call_id"]), ItemID: strField(item["id"]), Name: strField(item["name"])})
 		}
 	case "response.failed", "response.incomplete", "error":
 		return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
@@ -1435,7 +1459,7 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 	return out, false
 }
 
-func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *streamState, delta canonicalDelta) {
+func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *streamState, delta canonicalDelta) error {
 	if incoming == providers.ProtocolChat {
 		payload := map[string]any{"id": state.id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": state.model}
 		choice := map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": nil}
@@ -1450,11 +1474,15 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		case "reasoning":
 			d["reasoning_content"] = delta.Text
 		case "tool":
-			d["tool_calls"] = []any{map[string]any{"index": 0, "id": emptyNil(delta.CallID), "type": "function", "function": map[string]any{"name": emptyNil(delta.Name), "arguments": delta.Arguments}}}
+			call, err := state.applyToolDelta(delta)
+			if err != nil {
+				return err
+			}
+			d["tool_calls"] = []any{map[string]any{"index": call.ordinal, "id": emptyNil(delta.CallID), "type": "function", "function": map[string]any{"name": emptyNil(delta.Name), "arguments": delta.Arguments}}}
 		case "finish":
 			choice["finish_reason"] = normalizeFinish(delta.Finish)
 		case "error":
-			return
+			return errors.New("upstream stream reported failure")
 		}
 		payload["choices"] = []any{choice}
 		if delta.Kind == "usage" {
@@ -1462,7 +1490,7 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			payload["usage"] = chatUsage(delta.Usage)
 		}
 		writeSSE(w, "", payload)
-		return
+		return nil
 	}
 	if incoming == providers.ProtocolMessages {
 		if !state.started {
@@ -1491,16 +1519,8 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			}
 			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": delta.Text}})
 		case "tool":
-			if state.activeKind != "tool" || (delta.CallID != "" && delta.CallID != state.currentToolID) {
-				closeMessagesBlock(w, state)
-				state.currentToolID = delta.CallID
-				state.activeIndex = state.nextIndex
-				state.nextIndex++
-				writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": state.activeIndex, "content_block": map[string]any{"type": "tool_use", "id": delta.CallID, "name": delta.Name, "input": map[string]any{}}})
-				state.activeKind = "tool"
-			}
-			if delta.Arguments != "" {
-				writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": delta.Arguments}})
+			if _, err := state.applyToolDelta(delta); err != nil {
+				return err
 			}
 		case "usage":
 			if u, ok := delta.Usage.(map[string]any); ok {
@@ -1515,6 +1535,18 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			}
 		case "finish":
 			closeMessagesBlock(w, state)
+			if !state.messagesToolsWritten {
+				for _, call := range state.toolCalls {
+					index := state.nextIndex
+					state.nextIndex++
+					writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "tool_use", "id": call.callID, "name": call.name, "input": map[string]any{}}})
+					if call.arguments.Len() > 0 {
+						writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": call.arguments.String()}})
+					}
+					writeSSE(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+				}
+				state.messagesToolsWritten = true
+			}
 			usage := map[string]any{"input_tokens": 0, "output_tokens": 0}
 			if state.hasInputTokens {
 				usage["input_tokens"] = state.inputTokens
@@ -1524,9 +1556,9 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			}
 			writeSSE(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": normalizeAnthropicFinish(delta.Finish), "stop_sequence": nil}, "usage": usage})
 		case "error":
-			return
+			return errors.New("upstream stream reported failure")
 		}
-		return
+		return nil
 	}
 	if !state.started {
 		response := map[string]any{"id": state.id, "object": "response", "created_at": time.Now().Unix(), "status": "in_progress", "model": state.model, "output": []any{}}
@@ -1535,79 +1567,106 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 	}
 	switch delta.Kind {
 	case "error":
-		return
+		return errors.New("upstream stream reported failure")
 	case "text":
 		if state.contentStarted == false {
 			state.outputIndex = state.nextIndex
 			state.messageIndex = state.outputIndex
 			state.nextIndex++
-			state.outputOrder = append(state.outputOrder, "message")
+			state.outputOrder = append(state.outputOrder, streamOutput{kind: "message"})
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
 			writeSSE(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "output_index": state.outputIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 			state.contentStarted = true
 		}
-		if remaining := maxAccumulatedTextBytes - state.accumulatedBytes; remaining > 0 {
-			text := delta.Text
-			if len(text) > remaining {
-				text = text[:remaining]
-			}
-			state.accumulated.WriteString(text)
-			state.accumulatedBytes += len(text)
+		if len(delta.Text) > maxAccumulatedTextBytes-state.accumulatedBytes {
+			return errors.New("translated stream text exceeds limit")
 		}
+		state.accumulated.WriteString(delta.Text)
+		state.accumulatedBytes += len(delta.Text)
 		writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": state.messageIndex, "item_id": "msg_" + state.id, "content_index": 0, "delta": delta.Text})
 	case "reasoning":
 		if !state.reasoningStarted {
 			state.outputIndex = state.nextIndex
 			state.reasoningIndex = state.outputIndex
 			state.nextIndex++
-			state.outputOrder = append(state.outputOrder, "reasoning")
+			state.outputOrder = append(state.outputOrder, streamOutput{kind: "reasoning"})
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "in_progress", "summary": []any{}}})
 			writeSSE(w, "response.reasoning_summary_part.added", map[string]any{"type": "response.reasoning_summary_part.added", "output_index": state.outputIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""}})
 			state.reasoningStarted = true
 		}
-		if remaining := maxAccumulatedTextBytes - state.reasoningAccumulated.Len(); remaining > 0 {
-			text := delta.Text
-			if len(text) > remaining {
-				text = text[:remaining]
-			}
-			state.reasoningAccumulated.WriteString(text)
+		if len(delta.Text) > maxAccumulatedTextBytes-state.reasoningAccumulated.Len() {
+			return errors.New("translated stream reasoning exceeds limit")
 		}
+		state.reasoningAccumulated.WriteString(delta.Text)
 		writeSSE(w, "response.reasoning_summary_text.delta", map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": state.reasoningIndex, "item_id": "rs_" + state.id, "summary_index": 0, "delta": delta.Text})
 	case "tool":
-		key := delta.ItemID
-		if key == "" {
-			key = delta.CallID
+		call, err := state.applyToolDelta(delta)
+		if err != nil {
+			return err
 		}
-		if key == "" {
-			key = fmt.Sprintf("idx:%d", delta.UpstreamIndex)
-		}
-		call := state.toolCalls[key]
-		if call == nil {
-			call = &toolCallState{callID: delta.CallID, name: delta.Name, index: state.nextIndex}
-			if state.toolCalls == nil {
-				state.toolCalls = map[string]*toolCallState{}
-			}
-			state.toolCalls[key] = call
+		if call.index < 0 {
 			state.outputIndex = state.nextIndex
+			call.index = state.nextIndex
 			state.nextIndex++
-			state.outputOrder = append(state.outputOrder, "tool")
+			state.outputOrder = append(state.outputOrder, streamOutput{kind: "tool", tool: call})
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": call.index, "item": map[string]any{"type": "function_call", "call_id": delta.CallID, "name": delta.Name, "arguments": ""}})
 		}
-		if delta.Name != "" {
-			call.name = delta.Name
-		}
-		if delta.CallID != "" {
-			call.callID = delta.CallID
-		}
 		if delta.Arguments != "" {
-			remaining := maxAccumulatedTextBytes - call.arguments.Len()
-			if len(delta.Arguments) > remaining {
-				return
-			}
-			call.arguments.WriteString(delta.Arguments)
-			writeSSE(w, "response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "output_index": call.index, "item_id": call.callID, "call_id": call.callID, "delta": delta.Arguments})
+			writeSSE(w, "response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "output_index": call.index, "item_id": call.itemID, "call_id": call.callID, "delta": delta.Arguments})
 		}
 	}
+	return nil
+}
+
+func (state *streamState) applyToolDelta(delta canonicalDelta) (*toolCallState, error) {
+	aliases := []string{}
+	if delta.ItemID != "" {
+		aliases = append(aliases, "item:"+delta.ItemID)
+	}
+	if delta.CallID != "" {
+		aliases = append(aliases, "call:"+delta.CallID)
+	}
+	if delta.HasUpstreamIndex {
+		aliases = append(aliases, fmt.Sprintf("index:%d", delta.UpstreamIndex))
+	}
+	var call *toolCallState
+	for _, alias := range aliases {
+		if existing := state.toolAliases[alias]; existing != nil {
+			call = existing
+			break
+		}
+	}
+	if call == nil {
+		if len(state.toolCalls) >= maxStreamToolCalls {
+			return nil, errors.New("translated stream has too many tool calls")
+		}
+		call = &toolCallState{index: -1, ordinal: len(state.toolCalls)}
+		state.toolCalls = append(state.toolCalls, call)
+	}
+	if state.toolAliases == nil {
+		state.toolAliases = make(map[string]*toolCallState)
+	}
+	for _, alias := range aliases {
+		state.toolAliases[alias] = call
+	}
+	if delta.CallID != "" {
+		call.callID = delta.CallID
+	}
+	if delta.ItemID != "" {
+		call.itemID = delta.ItemID
+	}
+	if call.itemID == "" {
+		call.itemID = call.callID
+	}
+	if delta.Name != "" {
+		call.name = delta.Name
+	}
+	if len(delta.Arguments) > maxAccumulatedToolArgumentBytes-state.toolArgumentBytes {
+		return nil, errors.New("translated stream tool arguments exceed limit")
+	}
+	call.arguments.WriteString(delta.Arguments)
+	state.toolArgumentBytes += len(delta.Arguments)
+	return call, nil
 }
 
 func closeMessagesBlock(w io.Writer, state *streamState) {
@@ -1650,8 +1709,8 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		return
 	}
 	if incoming == providers.ProtocolMessages {
-		if !state.started {
-			writeTranslatedEvent(w, incoming, state, canonicalDelta{Kind: "finish", Finish: "stop"})
+		if !state.started || (!state.messagesToolsWritten && len(state.toolCalls) > 0) {
+			_ = writeTranslatedEvent(w, incoming, state, canonicalDelta{Kind: "finish", Finish: "stop"})
 		} else {
 			closeMessagesBlock(w, state)
 		}
@@ -1667,7 +1726,7 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 	if len(state.toolCalls) > 0 {
 		for _, call := range state.toolCalls {
 			args := call.arguments.String()
-			writeSSE(w, "response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "output_index": call.index, "item_id": call.callID, "call_id": call.callID, "arguments": args})
+			writeSSE(w, "response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "output_index": call.index, "item_id": call.itemID, "call_id": call.callID, "arguments": args})
 			writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": call.index, "item": map[string]any{"type": "function_call", "call_id": call.callID, "name": call.name, "arguments": args, "status": "completed"}})
 		}
 	}
@@ -1683,18 +1742,13 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		reasoningItem := map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": state.reasoningAccumulated.String()}}}
 		if len(state.outputOrder) > 1 {
 			output = nil
-			toolIdx := 0
-			for _, kind := range state.outputOrder {
-				if kind == "reasoning" {
+			for _, item := range state.outputOrder {
+				if item.kind == "reasoning" {
 					output = append(output, reasoningItem)
-				} else if kind == "message" {
+				} else if item.kind == "message" {
 					output = append(output, map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}})
-				} else if kind == "tool" {
-					call := toolByIndex(state.toolCalls, toolIdx)
-					toolIdx++
-					if call != nil {
-						output = append(output, map[string]any{"type": "function_call", "call_id": call.callID, "name": call.name, "arguments": call.arguments.String(), "status": "completed"})
-					}
+				} else if item.kind == "tool" && item.tool != nil {
+					output = append(output, map[string]any{"type": "function_call", "call_id": item.tool.callID, "name": item.tool.name, "arguments": item.tool.arguments.String(), "status": "completed"})
 				}
 			}
 		} else if state.reasoningStarted {

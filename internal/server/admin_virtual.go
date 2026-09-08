@@ -255,14 +255,27 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not list virtual models.")
 		return
 	}
-	defer rows.Close()
 	data := []virtualModelView{}
 	for rows.Next() {
 		var v virtualModelView
-		if rows.Scan(&v.ID, &v.GroupID, &v.GroupName, &v.Name, &v.CanonicalModelID, &v.RoutingMode, &v.CreatedAt, &v.UpdatedAt) != nil {
+		if err := rows.Scan(&v.ID, &v.GroupID, &v.GroupName, &v.Name, &v.CanonicalModelID, &v.RoutingMode, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			rows.Close()
 			adminError(w, 500, "database_error", "Could not list virtual models.")
 			return
 		}
+		data = append(data, v)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		adminError(w, 500, "database_error", "Could not list virtual models.")
+		return
+	}
+	if err := rows.Close(); err != nil {
+		adminError(w, 500, "database_error", "Could not list virtual models.")
+		return
+	}
+	for i := range data {
+		v := &data[i]
 		v.Targets, err = s.virtualTargets(r, v.ID)
 		if err != nil {
 			adminError(w, 500, "database_error", "Could not list virtual models.")
@@ -294,11 +307,6 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 		v.SupportsReasoning = aggregated.SupportsReasoning
 		v.SupportsStructuredOutput = aggregated.SupportsStructuredOutput
 		v.ReasoningCapabilities = aggregated.ReasoningCapabilities
-		data = append(data, v)
-	}
-	if err := rows.Err(); err != nil {
-		adminError(w, 500, "database_error", "Could not list virtual models.")
-		return
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
