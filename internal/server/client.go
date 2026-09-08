@@ -649,11 +649,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !candidate.Available {
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
+				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
 			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
 				skippedCooled = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
+				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
 			if candidate.Provider.Credential != "" && (candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go") && providers.IsOpenCodeFreeModel(candidate.UpstreamModelID) {
@@ -671,6 +673,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
+				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
 			target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
@@ -678,6 +681,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				protocolUnavailable = true
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
+				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
 			translated = target != incoming
@@ -833,6 +837,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					class = "upstream_timeout"
 				}
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
+				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				nonTranslationFailure = true
 				if r.Context().Err() != nil {
 					if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
@@ -893,6 +898,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				idle.Stop()
 				row.attempts = append(row.attempts, attempt)
+				s.logAttempt(row, attempt)
 				nonTranslationFailure = true
 				// Stale-auth recovery: on 401/403 from an OAuth provider, force a
 				// token refresh once per request and retry the same target before
@@ -972,6 +978,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				nonTranslationFailure = true
 				row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				if !route.Virtual || r.Context().Err() != nil {
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
@@ -1515,5 +1522,30 @@ func rewriteModel(value any, upstream, requested string) {
 		for _, item := range v {
 			rewriteModel(item, upstream, requested)
 		}
+	}
+}
+
+func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
+	if s.logger == nil {
+		return
+	}
+	var errorMsg string
+	if attempt.errorMessage != nil {
+		errorMsg = *attempt.errorMessage
+	}
+	attrs := []any{
+		"client_request_id", row.clientRequestID,
+		"requested_model", row.requestedModel,
+		"provider", attempt.provider,
+		"model", attempt.model,
+		"http_status", attempt.httpStatus,
+		"failure_class", attempt.failureClass,
+		"latency_ms", attempt.latencyMs,
+		"error", errorMsg,
+	}
+	if attempt.result == "failed" {
+		s.logger.Warn("provider request failed", attrs...)
+	} else {
+		s.logger.Debug("provider request skipped", attrs...)
 	}
 }
