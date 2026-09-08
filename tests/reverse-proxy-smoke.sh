@@ -36,6 +36,8 @@ docker network create "$network_name" >/dev/null
 trusted_proxy=$(docker network inspect -f '{{(index .IPAM.Config 0).Subnet}}' "$network_name")
 docker run --rm -v "$data_dir:/d" --user root alpine chown 65532:65532 /d
 
+. "$repo_dir/tests/scripts/build-router.sh"
+
 docker run --rm -d --name "$router_name" --network "$network_name" --network-alias router \
 	-v "$data_dir:/data" \
 	-e TILLER_ADMIN_USERNAME=admin \
@@ -45,7 +47,7 @@ docker run --rm -d --name "$router_name" --network "$network_name" --network-ali
 	-e TILLER_TRUST_PROXY_HEADERS=true \
 	-e TILLER_TRUSTED_PROXY="$trusted_proxy" \
 	-e TILLER_MODELS_DEV_ENABLED=false \
-	tiller-router:dev >/dev/null
+	"$ROUTER_IMAGE" >/dev/null
 
 docker run --rm -d --name "$proxy_name" --network "$network_name" --network-alias proxy \
 	-p "127.0.0.1:$proxy_port:8443" \
