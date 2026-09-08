@@ -42,7 +42,7 @@ Two client key types cover the two ways tools talk to an LLM API:
 
 ### Single — one key, one route
 
-Exposes one stable model identity — usually something simple like `main` — bound to any real or virtual model. The key itself defines the route; the model string the client sends cannot escape that binding. Change the route from the control panel and the next request follows it.
+Exposes one stable model identity — usually something simple like `main` — bound to any real or virtual model. The key itself defines the route; and whichever model the client requests will be routed to thed provider and model you select in Tiller. Change the route from the web interface and the next request follows it.
 
 ### Catalogue — a controlled model list
 
@@ -68,7 +68,7 @@ Configure the ordered target list in the control panel:
   <img src="assets/media/screenshots/auto_fallback.png" width="420" alt="Editing a virtual model's ordered fallback list">
 </p>
 
-**Ordered fallback:** if an upstream attempt fails before client-visible output begins, Tiller may try the next configured target. Once output has started, it never splices another model into the response. There is no hidden health-based or random routing — the order you configure is the order Tiller uses.
+**Ordered fallback:** if an upstream attempt fails before client-visible output begins, Tiller may try the next configured target — the order you configure is the order Tiller uses.
 
 Each attempt is visible in Activity, including the fallback — the client gets a valid response and never knows there was a failure:
 
@@ -81,12 +81,11 @@ Each attempt is visible in Activity, including the fallback — the client gets 
 ## Features
 
 - **Steering** — fast web control panel; single and catalogue client keys; real and virtual models in one route selector; immediate route changes; stable client-facing identities.
-- **Providers & models** — multiple named instances; credentials entered once; automatic catalogue discovery; manual/periodic refresh; retired models preserved rather than silently remapped; context/capability metadata.
-- **Routing** — fixed virtual routes; ordered fallback; configurable fallback timeout; no silent fallback on direct real-model calls; no response-stream splicing after output begins; client cancellation propagates upstream.
+- **Providers & models** — credentials entered once, use accross your tools.
+- **Routing** — fixed virtual routes; ordered fallback; configurable fallback timeout.
 - **Client API** — `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, covering the common OpenAI and Anthropic surfaces with safe protocol translation.
-- **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks). Client request bodies and provider error responses are never retained unless you turn on detailed error logging. Retention controlled per client key.
-- **Notifications** — optional best-effort webhooks for fallback, all-targets-failed, key created/deleted, admin login. Metadata-only, never blocks inference.
-- **Operations** — persistent admin sessions; key rotation; SQLite backup export; health endpoints; single Docker container; embedded UI; read-only rootfs; non-root runtime user.
+- **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks).
+- **Notifications** — optional webhooks for fallback, all-targets-failed, key created/deleted, admin login.
 
 ---
 
@@ -134,8 +133,6 @@ Provider support varies because upstream APIs vary. The beta should be treated a
 
 ## Install
 
-Requires Docker and Docker Compose.
-
 ### Option 1 — Prebuilt image (recommended)
 
 1. **Prepare a directory:**
@@ -161,7 +158,7 @@ Requires Docker and Docker Compose.
        restart: unless-stopped
    ```
 
-   That's the whole setup — there is no data-directory step. Docker creates `./data` automatically on first `up`, and the container fixes its ownership itself at boot (starts as root, hands `./data` to the runtime user, drops privileges before serving — default `65532:65532`, or your own uid:gid via `TILLER_RUN_UID`/`TILLER_RUN_GID`, see below).
+   
 
 3. **Start Tiller:**
 
@@ -169,9 +166,9 @@ Requires Docker and Docker Compose.
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy.
+   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY
 
-> **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall. The stream is in-process and single-instance by design — it does not span multiple Tiller containers.
+> **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall.
 
 ### Option 2 — Build from source
 
@@ -201,16 +198,16 @@ TILLER_GID=1000                                      # build-time gid for baked-
 TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy if using one
 TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
 TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
-TILLER_ADMIN_COOKIE_SECURE=false                     # force Secure on the admin cookie (use true over HTTPS)
+TILLER_ADMIN_COOKIE_SECURE=true                     # force Secure on the admin cookie (auto set to true if https used)
 ```
 
 ### First steps
 
 1. **Add a provider** — in **Providers**, `+ Add provider`. Choose the type, name the instance, add its API credential. Tiller discovers the model catalogue where supported.
 
-2. **Create a route** — use a real model directly, or create a virtual model such as `main/coding` with one or more ordered targets.
+2. **Create a client key** — for the simplest setup: `Type: Single`, `Client model: main`, `Route: main/coding`. Tiller shows the client secret once.
 
-3. **Create a client key** — for the simplest setup: `Type: Single`, `Client model: main`, `Route: main/coding`. Tiller shows the client secret once.
+3. **OPTIONAL*** - Create a virtual model - if you want to map different model names or have a fallback chain in case of failure.
 
 4. **Point your tool at Tiller** — for an OpenAI-compatible client: `Base URL: http://localhost:8080/v1`, `API key: <your Tiller client key>`, `Model: main`.
 
@@ -244,14 +241,6 @@ With a Single key, `main` can be redirected from the control panel without chang
 
 ---
 
-## Architecture
-
-Tiller is intentionally small: a Go HTTP server (client API, provider adapters, protocol translation, route/fallback resolver, admin API, embedded control-panel assets) over SQLite (providers, model catalogue, virtual routes, client keys, sessions, settings, Activity).
-
-No Redis. No Postgres. No separate frontend service. No message broker. No vector database. The normal deployment is one container with one bind-mounted data directory.
-
----
-
 ## Design principles
 
 - **Steerable over clever** — if you configure `A → B → C`, Tiller won't decide it prefers `C → A → B` based on an opaque score.
@@ -262,21 +251,13 @@ No Redis. No Postgres. No separate frontend service. No message broker. No vecto
 
 ---
 
-## What Tiller is not
-
-Tiller is deliberately **not** an agent framework, LLM marketplace, billing platform, prompt-management suite, vector database, model benchmarking service, automatic "AI chooses the best AI" engine, multi-tenant SaaS control plane, or an attempt to reproduce every feature of a general-purpose LLM gateway.
-
-It is a focused router for people who want to **control their own clients, providers and routes from one place**.
-
----
-
 ## Data and security
 
 Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material.
 
-**Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets, since anyone who can read the database file can recover your provider keys.
+**Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets.
 
-Client API-key secrets are shown once and stored in hashed form for authentication. Provider credentials necessarily remain recoverable by Tiller so it can authenticate upstream requests. Activity is metadata-only by default. If the administrator explicitly enables Detailed Error Logging, failed request bodies and provider error bodies may be stored, bounded to 1 MiB, and Activity exports containing those records must be treated as sensitive. Migration 024 clears body columns from the live database, but this is not secure erasure: SQLite pages, WAL files, snapshots, and older backups may still contain historic sensitive data and must remain protected.
+Client API-key secrets are shown once and stored in hashed form for authentication. Activity is metadata-only by default. If you explicitly enable Detailed Error Logging, failed request bodies and provider error bodies may be stored, bounded to 1 MiB, and Activity exports containing those records must be treated as sensitive.
 
 For anything other than local-only use: use HTTPS, put Tiller behind a trusted reverse proxy, use a strong admin password, protect the data directory and exported backups, and do not expose the control panel casually to the public internet. See [SECURITY.md](SECURITY.md).
 
