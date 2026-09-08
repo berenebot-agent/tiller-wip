@@ -485,8 +485,9 @@ function positionComboboxList(list, input, minWidth) {
   }
   const spaceBelow = vvBottom - box.bottom - 8;
   const spaceAbove = box.top - vvTop - 8;
-  const openUp = spaceBelow < 80;
-  const maxH = Math.max(80, Math.min(360, openUp ? spaceAbove : spaceBelow));
+  const openUp = spaceBelow < 200 && spaceAbove > spaceBelow;
+  const avail = openUp ? spaceAbove : spaceBelow;
+  const maxH = Math.max(80, Math.min(360, avail));
   list.style.maxHeight = `${maxH}px`;
   list.style.left = `${left}px`;
   list.style.width = `${width}px`;
