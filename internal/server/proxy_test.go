@@ -710,6 +710,304 @@ func TestVirtualAllTargetsBelowMinOutputReturns400(t *testing.T) {
 	}
 }
 
+// recordingChatUpstream serves a catalogue with the given model IDs, records
+// every chat-completions request body, and answers with minimal content.
+func recordingChatUpstream(modelIDs []string, seen *[]string, mu *sync.Mutex) http.HandlerFunc {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			data := []any{}
+			for _, id := range modelIDs {
+				data = append(data, map[string]any{"id": id, "object": "model"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		*seen = append(*seen, string(body))
+		mu.Unlock()
+		var input map[string]any
+		_ = json.Unmarshal(body, &input)
+		model, _ := input["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":      "resp",
+			"object":  "chat.completion",
+			"model":   model,
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1},
+		})
+	})
+}
+
+func postChat(t *testing.T, api *testAPI, secret, model string, extra map[string]any) (int, map[string]any) {
+	t.Helper()
+	body := map[string]any{
+		"model":    model,
+		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	raw, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := api.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp.StatusCode, out
+}
+
+// TestPlainChatDefaultDisableReachesUpstream verifies B2 end to end: a plain
+// Chat request to a disablable target arrives upstream with an explicit
+// disable, while explicit client selectors and unknown caps pass through.
+func TestPlainChatDefaultDisableReachesUpstream(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	api, db, _, clientSecret := loggingTestHarness(t, recordingChatUpstream([]string{"model-a"}, &seen, &mu))
+
+	setCaps := func(caps string) {
+		t.Helper()
+		if _, err := db.SQL.Exec(`UPDATE provider_models SET reasoning_capabilities=? WHERE upstream_model_id='model-a'`, caps); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lastSeen := func() string {
+		t.Helper()
+		mu.Lock()
+		defer mu.Unlock()
+		if len(seen) == 0 {
+			t.Fatal("upstream saw no requests")
+		}
+		return seen[len(seen)-1]
+	}
+
+	// Disablable target: plain chat gains reasoning_effort:none.
+	setCaps(`{"options":[{"type":"effort","values":["none","low","high"]}]}`)
+	if status, _ := postChat(t, api, clientSecret, "provider-a/model-a", nil); status != 200 {
+		t.Fatalf("plain chat: status %d", status)
+	}
+	if got := lastSeen(); !strings.Contains(got, `"reasoning_effort":"none"`) {
+		t.Fatalf("plain chat missing injected disable: %s", got)
+	}
+
+	// Explicit client selector wins and is never overwritten with none.
+	if status, _ := postChat(t, api, clientSecret, "provider-a/model-a", map[string]any{"reasoning_effort": "high"}); status != 200 {
+		t.Fatalf("explicit effort: status %d", status)
+	}
+	if got := lastSeen(); !strings.Contains(got, `"reasoning_effort":"high"`) || strings.Contains(got, `"none"`) {
+		t.Fatalf("explicit selector not preserved: %s", got)
+	}
+
+	// Unknown caps: body passes through with no invented selector.
+	if _, err := db.SQL.Exec(`UPDATE provider_models SET reasoning_capabilities=NULL WHERE upstream_model_id='model-a'`); err != nil {
+		t.Fatal(err)
+	}
+	if status, _ := postChat(t, api, clientSecret, "provider-a/model-a", nil); status != 200 {
+		t.Fatalf("unknown caps: status %d", status)
+	}
+	if got := lastSeen(); strings.Contains(got, "reasoning") {
+		t.Fatalf("unknown caps must not gain a selector: %s", got)
+	}
+}
+
+// TestMandatoryReasoningSkipsVirtualTarget verifies B2 honesty: a mandatory-
+// reasoning target cannot serve plain chat, so a virtual route falls through
+// to the next target, and a direct request fails loud with
+// unsupported_feature instead of returning empty content.
+func TestMandatoryReasoningSkipsVirtualTarget(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	api, db, _, _ := loggingTestHarness(t, recordingChatUpstream([]string{"model-a", "model-b"}, &seen, &mu))
+
+	if _, err := db.SQL.Exec(`UPDATE provider_models SET reasoning_capabilities=? WHERE upstream_model_id='model-a'`, `{"options":[{"type":"effort","values":["none","low","high"]}]}`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`UPDATE provider_models SET reasoning_capabilities=? WHERE upstream_model_id='model-b'`, `{"options":[{"type":"effort","values":["high"]}],"mandatory":true}`); err != nil {
+		t.Fatal(err)
+	}
+	var modelAID, modelBID string
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelAID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-b'`).Scan(&modelBID); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "reason-vg"})
+	if status != 201 {
+		t.Fatalf("create group: %d %v", status, payload)
+	}
+	groupID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{
+		"group_id":     groupID,
+		"name":         "reason-vm",
+		"routing_mode": "ordered_fallback",
+		"targets": []any{
+			map[string]any{"provider_model_id": modelBID, "enabled": true},
+			map[string]any{"provider_model_id": modelAID, "enabled": true},
+		},
+	})
+	if status != 201 {
+		t.Fatalf("create virtual: %d %v", status, payload)
+	}
+	virtualID := payload["id"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "reason-vm-client", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	vmClientID := payload["id"].(string)
+	vmSecret := payload["secret"].(string)
+	status, _, _ = api.request("PUT", "/api/admin/client-keys/"+vmClientID+"/permissions", map[string]any{
+		"defaults":    []any{},
+		"permissions": []any{map[string]any{"kind": "virtual", "model_id": virtualID, "enabled": true}},
+	})
+	if status != 204 {
+		t.Fatalf("permissions: %d", status)
+	}
+
+	// Mandatory first target is skipped; the disablable second target serves.
+	mu.Lock()
+	seen = nil
+	mu.Unlock()
+	if status, out := postChat(t, api, vmSecret, "reason-vg/reason-vm", nil); status != 200 {
+		t.Fatalf("virtual fallback: expected 200, got %d (%v)", status, out)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("expected exactly one upstream call (mandatory skipped), got %d: %v", len(seen), seen)
+	}
+	if strings.Contains(seen[0], `"model":"model-b"`) {
+		t.Fatalf("mandatory target must be skipped, but upstream saw: %s", seen[0])
+	}
+	if !strings.Contains(seen[0], `"model":"model-a"`) {
+		t.Fatalf("fallback target not reached upstream: %s", seen[0])
+	}
+	if !strings.Contains(seen[0], `"reasoning_effort":"none"`) {
+		t.Fatalf("fallback target missing injected disable: %s", seen[0])
+	}
+
+	// Direct request to the mandatory model fails loud, never hits upstream.
+	before := len(seen)
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "direct-client", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create direct key: %d %v", status, payload)
+	}
+	directID := payload["id"].(string)
+	directSecret := payload["secret"].(string)
+	status, _, _ = api.request("PUT", "/api/admin/client-keys/"+directID+"/permissions", map[string]any{
+		"defaults":    []any{},
+		"permissions": []any{map[string]any{"kind": "real", "model_id": modelBID, "enabled": true}},
+	})
+	if status != 204 {
+		t.Fatalf("direct permissions: %d", status)
+	}
+	if status, out := postChat(t, api, directSecret, "provider-a/model-b", nil); status != 400 {
+		t.Fatalf("direct mandatory: expected 400, got %d (%v)", status, out)
+	} else if errObj, ok := out["error"].(map[string]any); !ok || errObj["code"] != "unsupported_feature" {
+		t.Fatalf("direct mandatory: expected unsupported_feature, got %v", out)
+	}
+	if len(seen) != before {
+		t.Fatalf("direct mandatory must not reach upstream")
+	}
+}
+
+// TestExplicitSelectorSameProtocolChatValidated covers B3a: an explicit
+// reasoning selector on a same-protocol Chat target is checked against that
+// target's capabilities — advertised efforts are forwarded verbatim,
+// unadvertised efforts are stripped, and unknown capabilities are never
+// assumed to accept the value (selector stripped, provider default applies).
+func TestExplicitSelectorSameProtocolChatValidated(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	api, db, _, clientSecret := loggingTestHarness(t, recordingChatUpstream([]string{"model-a"}, &seen, &mu))
+
+	setCaps := func(caps string) {
+		t.Helper()
+		if _, err := db.SQL.Exec(`UPDATE provider_models SET reasoning_capabilities=? WHERE upstream_model_id='model-a'`, caps); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lastSeen := func() string {
+		t.Helper()
+		mu.Lock()
+		defer mu.Unlock()
+		if len(seen) == 0 {
+			t.Fatal("upstream saw no requests")
+		}
+		return seen[len(seen)-1]
+	}
+
+	// Known caps advertising minimal: forwarded verbatim.
+	setCaps(`{"options":[{"type":"effort","values":["minimal","low","medium","high","xhigh"]}]}`)
+	if status, _ := postChat(t, api, clientSecret, "provider-a/model-a", map[string]any{"reasoning_effort": "minimal"}); status != 200 {
+		t.Fatalf("advertised minimal: status %d", status)
+	}
+	if got := lastSeen(); !strings.Contains(got, `"reasoning_effort":"minimal"`) {
+		t.Fatalf("advertised effort was not forwarded: %s", got)
+	}
+
+	// Known caps without minimal: unadvertised effort stripped.
+	setCaps(`{"options":[{"type":"effort","values":["low","medium","high","xhigh"]}]}`)
+	if status, _ := postChat(t, api, clientSecret, "provider-a/model-a", map[string]any{"reasoning_effort": "minimal"}); status != 200 {
+		t.Fatalf("unadvertised minimal: status %d", status)
+	}
+	if got := lastSeen(); strings.Contains(got, "reasoning") {
+		t.Fatalf("unadvertised effort must be stripped, got: %s", got)
+	}
+
+	// Unknown caps: selector stripped (B3a) — no assumed acceptance.
+	if _, err := db.SQL.Exec(`UPDATE provider_models SET reasoning_capabilities=NULL WHERE upstream_model_id='model-a'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, effort := range []string{"minimal", "high"} {
+		if status, _ := postChat(t, api, clientSecret, "provider-a/model-a", map[string]any{"reasoning_effort": effort}); status != 200 {
+			t.Fatalf("unknown caps effort %s: status %d", effort, status)
+		}
+		if got := lastSeen(); strings.Contains(got, "reasoning") {
+			t.Fatalf("unknown caps must not receive effort %s: %s", effort, got)
+		}
+	}
+
+	// A non-selector field like reasoning.exclude must survive the strip.
+	raw, _ := json.Marshal(map[string]any{
+		"model":     "provider-a/model-a",
+		"messages":  []any{map[string]any{"role": "user", "content": "hi"}},
+		"reasoning": map[string]any{"exclude": true},
+	})
+	req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+clientSecret)
+	resp, err := api.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got := lastSeen(); !strings.Contains(got, `"exclude":true`) {
+		t.Fatalf("non-selector reasoning field must be preserved: %s", got)
+	}
+
+	// Explicit selector never triggers B2's default-disable injection.
+	setCaps(`{"options":[{"type":"effort","values":["none","low","high"]}]}`)
+	if status, _ := postChat(t, api, clientSecret, "provider-a/model-a", map[string]any{"reasoning_effort": "high"}); status != 200 {
+		t.Fatalf("explicit high: status %d", status)
+	}
+	if got := lastSeen(); !strings.Contains(got, `"reasoning_effort":"high"`) || strings.Contains(got, `"none"`) {
+		t.Fatalf("explicit selector must not be overwritten by default-disable: %s", got)
+	}
+}
+
 // opusFreeHandler returns an http.Handler that serves a catalogue exposing the
 // given model ID and answers chat completions — modelling an opencode-free
 // provider (MinOutputTokens: 16) for tests.

@@ -708,6 +708,40 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				_ = json.Unmarshal(attemptBody, &attemptRaw)
 				attemptRaw["model"], _ = json.Marshal(candidate.UpstreamModelID)
 				attemptBody, _ = json.Marshal(attemptRaw)
+				// B3: plain-chat default-disable. A Chat client that sent no
+				// reasoning selector gets an explicit disable when the Chat
+				// target advertises one, so a reasoning-default upstream cannot
+				// return a reasoning-only response with empty content.
+				// Mandatory-reasoning targets cannot serve plain chat: skip on
+				// virtual routes (fallback), fail loud on direct routes.
+				if !canonicalSelector.Present && incoming == providers.ProtocolChat && target == providers.ProtocolChat {
+					if isMandatoryReasoning(candidate.ReasoningCapabilities) {
+						if !route.Virtual {
+							row.httpStatus = 400
+							row.errorText = strPtr("unsupported_feature")
+							row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+							inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires reasoning and cannot serve a plain non-reasoning request.", incoming == providers.ProtocolMessages)
+							return
+						}
+						row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+						continue
+					}
+					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
+						attemptBody = disabled
+					}
+				}
+				// B3a: an explicit selector on a same-protocol Chat target is
+				// validated against that target's capabilities, matching the
+				// translated path. Unknown capabilities (caps==nil) are never
+				// assumed to accept an effort value: the selector is stripped
+				// so the provider default applies instead of a possible 400.
+				if canonicalSelector.Present && incoming == providers.ProtocolChat && target == providers.ProtocolChat {
+					if candidate.ReasoningCapabilities == nil {
+						attemptBody = stripReasoningSelector(attemptBody, target)
+					} else {
+						attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
+					}
+				}
 			}
 			if candidate.Provider.Type == "codex-subscription" {
 				attemptBody, err = normalizeCodexRequest(attemptBody)

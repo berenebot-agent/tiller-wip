@@ -235,6 +235,38 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 	return result
 }
 
+// isMandatoryReasoning reports whether the target requires reasoning and
+// therefore cannot serve a plain non-reasoning request. The mapper must not
+// send a disable value (effort:none / enabled:false) to such targets.
+func isMandatoryReasoning(caps *providers.ReasoningCapabilities) bool {
+	return caps != nil && caps.Mandatory != nil && *caps.Mandatory
+}
+
+// injectChatDisable applies the implicit plain-chat default-disable for B2:
+// a Chat client that sent no reasoning selector gets an explicit disable
+// when the Chat target advertises a representable disable mechanism.
+// Unknown capabilities (caps==nil) are left untouched so the provider
+// default is preserved; mandatory targets are never disabled by the caller.
+func injectChatDisable(body []byte, caps *providers.ReasoningCapabilities) ([]byte, bool) {
+	if caps == nil || isMandatoryReasoning(caps) {
+		return body, false
+	}
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body, false
+	}
+	opts := providers.ExtractReasoningOptions(caps)
+	sel := reasoningSelector{Present: true, Effort: "none"}
+	if !applyChatReasoning(source, sel, "", opts, caps, false) {
+		return body, false
+	}
+	result, err := json.Marshal(source)
+	if err != nil {
+		return body, false
+	}
+	return result, true
+}
+
 // stripReasoningSelector removes recognized reasoning selector fields from a
 // request body so that a target known not to support reasoning receives a
 // clean request. Non-selector fields (e.g. OpenRouter's reasoning.exclude,
