@@ -147,6 +147,30 @@ func (m *Manager) HydrateOAuth(ctx context.Context, p *Instance) error {
 	return nil
 }
 
+// providerModelInsertColumns is the column list shared by the catalogue upsert
+// and single-row manual inserts. available is a literal 1 in
+// providerModelInsertPlaceholders, so the bound-variable count is
+// providerModelInsertArgs (19), not 20.
+const providerModelInsertColumns = "id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,origin,available,first_seen_at,last_seen_at,created_at,updated_at"
+
+const providerModelInsertPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)"
+
+const providerModelInsertArgs = 19
+
+// providerModelArgs returns the bound values for providerModelInsertColumns.
+func providerModelArgs(modelID, providerID string, model Model, origin, now string) []any {
+	return []any{
+		modelID, providerID, model.ID, model.DisplayName,
+		nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens),
+		nullableProtocol(model.NativeProtocol),
+		nullableBool(model.SupportsTools), nullableBool(model.SupportsVision),
+		nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
+		nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
+		nullableReasoningCapabilities(model.ReasoningCapabilities),
+		origin, now, now, now, now,
+	}
+}
+
 func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models []Model) error {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -210,7 +234,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	}
 
 	// One batched UPSERT for the entire catalogue, chunked to stay under
-	// SQLite's variable limit (999). Each row carries 18 bound variables,
+	// SQLite's variable limit (999). Each row carries 19 bound variables,
 	// so batches of 50 keep every statement well under the cap even on
 	// large catalogues (previously a single statement broke past ~55 models).
 	// The DO UPDATE branch keeps the row's id stable (re-asserting the same
@@ -218,7 +242,6 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	// available=1 / last_seen_at. Previously this was O(N) INSERT-or-UPDATE
 	// statements inside the transaction.
 	if len(unique) > 0 {
-		const upsertColumns = 18
 		const upsertBatchRows = 50
 		for start := 0; start < len(unique); start += upsertBatchRows {
 			end := start + upsertBatchRows
@@ -226,22 +249,12 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				end = len(unique)
 			}
 			placeholders := make([]string, 0, end-start)
-			args := make([]any, 0, (end-start)*upsertColumns)
+			args := make([]any, 0, (end-start)*providerModelInsertArgs)
 			for i := start; i < end; i++ {
-				model := unique[i]
-				placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
-				args = append(args,
-					ids[i], providerID, model.ID, model.DisplayName,
-					nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens),
-					nullableProtocol(model.NativeProtocol),
-					nullableBool(model.SupportsTools), nullableBool(model.SupportsVision),
-					nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
-					nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
-					nullableReasoningCapabilities(model.ReasoningCapabilities),
-					now, now, now, now,
-				)
+				placeholders = append(placeholders, providerModelInsertPlaceholders)
+				args = append(args, providerModelArgs(ids[i], providerID, unique[i], "discovered", now)...)
 			}
-			stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
+			stmt := `INSERT INTO provider_models(` + providerModelInsertColumns + `) VALUES ` +
 				strings.Join(placeholders, ",") + `
 			ON CONFLICT(provider_id, upstream_model_id) DO UPDATE SET
 				display_name=excluded.display_name,
@@ -257,7 +270,8 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				reasoning_capabilities=excluded.reasoning_capabilities,
 				available=1,
 				last_seen_at=excluded.last_seen_at,
-				updated_at=excluded.updated_at`
+				updated_at=excluded.updated_at,
+				origin=excluded.origin`
 			if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 				return err
 			}
@@ -285,7 +299,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	// updates (500 per statement) so no statement exceeds SQLite's 999
 	// variable limit, no matter how large the catalogue is.
 	if len(seen) > 0 {
-		rows, qerr := tx.QueryContext(ctx, `SELECT upstream_model_id FROM provider_models WHERE provider_id=? AND available=1`, providerID)
+		rows, qerr := tx.QueryContext(ctx, `SELECT upstream_model_id FROM provider_models WHERE provider_id=? AND available=1 AND origin='discovered'`, providerID)
 		if qerr != nil {
 			return qerr
 		}
@@ -317,13 +331,14 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				placeholders = append(placeholders, "?")
 				rargs = append(rargs, u)
 			}
-			if _, uerr := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND upstream_model_id IN (`+strings.Join(placeholders, ",")+`)`, rargs...); uerr != nil {
+			if _, uerr := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND origin='discovered' AND upstream_model_id IN (`+strings.Join(placeholders, ",")+`)`, rargs...); uerr != nil {
 				return uerr
 			}
 		}
 	} else {
-		// Discovery returned no usable models. Retire everything for this provider.
-		if _, err := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1`, now, providerID); err != nil {
+		// Discovery returned no usable models. Retire everything discovered for
+		// this provider, but never manual rows.
+		if _, err := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND origin='discovered'`, now, providerID); err != nil {
 			return err
 		}
 	}
@@ -333,6 +348,107 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 		return err
 	}
 	return tx.Commit()
+}
+
+// ErrManualModelExists is returned when a manual model would duplicate an
+// existing (provider_id, upstream_model_id) row.
+var ErrManualModelExists = errors.New("model already exists for provider")
+
+// manualModelProbeTimeout bounds the best-effort live discovery probe run when
+// resolving metadata for a manual model, so a slow or unreachable upstream
+// cannot stall the admin request indefinitely.
+const manualModelProbeTimeout = 30 * time.Second
+
+// ManualModelInput carries the admin-supplied fields for a manual model. Nil
+// pointers and empty strings mean "detect"; non-empty values override whatever
+// detection finds.
+type ManualModelInput struct {
+	UpstreamModelID string
+	DisplayName     string
+	ContextLength   *int64
+	MaxOutputTokens *int64
+	NativeProtocol  Protocol
+}
+
+// ResolveManualModel builds the best available metadata for upstreamID against
+// a provider without persisting anything. Live provider discovery is the
+// primary source; models.dev fills any gaps (provider data stays authoritative).
+// Probe failures are non-fatal: the result degrades to models.dev or unknown.
+func (m *Manager) ResolveManualModel(ctx context.Context, providerID, upstreamID string) (Model, error) {
+	provider, err := m.loadProvider(ctx, providerID)
+	if err != nil {
+		return Model{}, err
+	}
+	model := Model{ID: upstreamID}
+	probeCtx, cancel := context.WithTimeout(ctx, manualModelProbeTimeout)
+	discovered, discoverErr := m.registry.Discover(probeCtx, provider)
+	cancel()
+	if discoverErr == nil {
+		for _, candidate := range discovered {
+			if candidate.ID == upstreamID {
+				model = candidate
+				break
+			}
+		}
+	}
+	if enriched := m.registry.enrich([]Model{model}, provider.Type); len(enriched) == 1 {
+		model = enriched[0]
+	}
+	model.ID = upstreamID
+	return model, nil
+}
+
+// AddManualModel resolves metadata for a manual model, applies the admin's
+// explicit overrides, and persists it with origin='manual'. Manual rows are
+// exempt from catalogue retirement until discovery later returns the same id,
+// at which point the normal upsert adopts the row as 'discovered'.
+func (m *Manager) AddManualModel(ctx context.Context, providerID string, in ManualModelInput) (string, error) {
+	model, err := m.ResolveManualModel(ctx, providerID, in.UpstreamModelID)
+	if err != nil {
+		return "", err
+	}
+	if in.DisplayName != "" {
+		model.DisplayName = in.DisplayName
+	}
+	if in.ContextLength != nil {
+		model.ContextLength = int(*in.ContextLength)
+	}
+	if in.MaxOutputTokens != nil {
+		model.MaxOutputTokens = int(*in.MaxOutputTokens)
+	}
+	if in.NativeProtocol != "" {
+		model.NativeProtocol = in.NativeProtocol
+	}
+	if model.DisplayName == "" {
+		model.DisplayName = in.UpstreamModelID
+	}
+
+	modelID, err := id.New()
+	if err != nil {
+		return "", err
+	}
+	now := database.Now()
+	tx, err := m.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `INSERT INTO provider_models(`+providerModelInsertColumns+`) VALUES `+providerModelInsertPlaceholders+` ON CONFLICT(provider_id, upstream_model_id) DO NOTHING`, providerModelArgs(modelID, providerID, model, "manual", now)...)
+	if err != nil {
+		return "", err
+	}
+	if n, _ := result.RowsAffected(); n == 0 {
+		return "", ErrManualModelExists
+	}
+	// Seed default permissions for every client key, mirroring applyCatalogue.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at)
+		SELECT c.id,'real',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=?`, modelID, now, now, providerID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return modelID, nil
 }
 
 func (m *Manager) StartScheduler(ctx context.Context) {

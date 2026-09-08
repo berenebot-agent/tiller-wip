@@ -357,18 +357,19 @@ func NewRegistry() *Registry {
 	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, modelsDevEnabled: true}
 }
 
-// SetResponseHeaderTimeout updates the per-attempt time-to-first-header bound on
-// the shared HTTP transport. It is what keeps a stalled ordered-fallback target
-// from consuming the client's request deadline; once headers arrive, streaming
-// continues unbounded. The transport is shared, so this must only be called
-// before the client is in use (at construction / config load), never
-// concurrently with live requests — guarded by a mutex because the transport is
-// shared.
+// SetResponseHeaderTimeout updates the per-attempt time-to-first-header bound by
+// publishing a new client/transport pair. Published clients are immutable so
+// active requests can continue using the retired transport safely.
 func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if t, ok := r.client.Transport.(*http.Transport); ok {
-		t.ResponseHeaderTimeout = d
+		clone := t.Clone()
+		clone.ResponseHeaderTimeout = d
+		replacement := *r.client
+		replacement.Transport = clone
+		r.client = &replacement
+		t.CloseIdleConnections()
 	}
 }
 
@@ -385,11 +386,19 @@ func (r *Registry) ResponseHeaderTimeout() time.Duration {
 	return 0
 }
 
-func (r *Registry) HTTPClient() *http.Client { return r.client }
+func (r *Registry) HTTPClient() *http.Client {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.client
+}
 
 // SetHTTPClient replaces the registry's HTTP client. Intended for tests that
 // need to route OAuth and upstream requests to mock servers.
-func (r *Registry) SetHTTPClient(client *http.Client) { r.client = client }
+func (r *Registry) SetHTTPClient(client *http.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.client = client
+}
 
 func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, error) {
 	d, ok := Lookup(provider.Type)
@@ -455,7 +464,7 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		return nil, err
 	}
 	ApplyRequestAuth(req, provider)
-	resp, err := r.client.Do(req)
+	resp, err := r.HTTPClient().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -832,7 +841,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 		if anthropic {
 			req.Header.Set("anthropic-version", "2023-06-01")
 		}
-		resp, err := r.client.Do(req)
+		resp, err := r.HTTPClient().Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -1057,7 +1066,7 @@ func (r *Registry) discoverCloudflare(ctx context.Context, provider Instance) ([
 }
 
 func (r *Registry) doJSON(req *http.Request, target any) error {
-	resp, err := r.client.Do(req)
+	resp, err := r.HTTPClient().Do(req)
 	if err != nil {
 		return err
 	}

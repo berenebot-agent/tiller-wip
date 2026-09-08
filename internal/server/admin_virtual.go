@@ -255,27 +255,37 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not list virtual models.")
 		return
 	}
-	defer rows.Close()
 	data := []virtualModelView{}
 	for rows.Next() {
 		var v virtualModelView
-		if rows.Scan(&v.ID, &v.GroupID, &v.GroupName, &v.Name, &v.CanonicalModelID, &v.RoutingMode, &v.CreatedAt, &v.UpdatedAt) != nil {
+		if err := rows.Scan(&v.ID, &v.GroupID, &v.GroupName, &v.Name, &v.CanonicalModelID, &v.RoutingMode, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			rows.Close()
 			adminError(w, 500, "database_error", "Could not list virtual models.")
 			return
 		}
+		data = append(data, v)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		adminError(w, 500, "database_error", "Could not list virtual models.")
+		return
+	}
+	if err := rows.Close(); err != nil {
+		adminError(w, 500, "database_error", "Could not list virtual models.")
+		return
+	}
+	for i := range data {
+		v := &data[i]
 		v.Targets, err = s.virtualTargets(r, v.ID)
 		if err != nil {
 			adminError(w, 500, "database_error", "Could not list virtual models.")
 			return
 		}
 		eligible := eligibleVirtualTargets(v.Targets)
-		var tools, vision, reasoning, structured []*bool
+		capabilities := make([]virtualTargetCapabilities, 0, len(eligible))
 		for _, target := range eligible {
 			v.Available = true
-			tools = append(tools, target.SupportsTools)
-			vision = append(vision, target.SupportsVision)
-			reasoning = append(reasoning, target.SupportsReasoning)
-			structured = append(structured, target.SupportsStructuredOutput)
+			capabilities = append(capabilities, virtualTargetCapability(target))
 		}
 		// These legacy fields remain in the DTO for compatibility. They are
 		// populated from the first ordered v2 target, but never drive any
@@ -284,25 +294,19 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 			primary := v.Targets[0]
 			v.TargetProviderID, v.TargetProviderName, v.TargetModelID, v.TargetUpstreamModelID = primary.ProviderID, primary.ProviderName, primary.ProviderModelID, primary.UpstreamModelID
 		}
-		v.ContextLength = aggregateVirtualNumeric(v.Targets, func(target virtualTargetView) *int64 { return target.ContextLength })
-		v.MaxOutputTokens = aggregateVirtualNumeric(v.Targets, func(target virtualTargetView) *int64 { return target.MaxOutputTokens })
+		aggregated := aggregateVirtualCapabilities(capabilities)
+		v.ContextLength = aggregated.ContextLength
+		v.MaxOutputTokens = aggregated.MaxOutputTokens
 		for _, target := range v.Targets {
 			if target.Warning != "" {
 				v.Warning = target.Warning
 			}
 		}
-		v.SupportsTools = triStateANDBool(tools)
-		v.SupportsVision = triStateANDBool(vision)
-		v.SupportsReasoning = triStateANDBool(reasoning)
-		v.SupportsStructuredOutput = triStateANDBool(structured)
-		v.ReasoningCapabilities = aggregateVirtualReasoning(v.Targets, func(target virtualTargetView) *providers.ReasoningCapabilities {
-			return target.ReasoningCapabilities
-		})
-		data = append(data, v)
-	}
-	if err := rows.Err(); err != nil {
-		adminError(w, 500, "database_error", "Could not list virtual models.")
-		return
+		v.SupportsTools = aggregated.SupportsTools
+		v.SupportsVision = aggregated.SupportsVision
+		v.SupportsReasoning = aggregated.SupportsReasoning
+		v.SupportsStructuredOutput = aggregated.SupportsStructuredOutput
+		v.ReasoningCapabilities = aggregated.ReasoningCapabilities
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }

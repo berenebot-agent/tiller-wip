@@ -96,6 +96,7 @@ func TestEveryAdministrativeRouteRequiresAuthentication(t *testing.T) {
 		{http.MethodGet, "/api/admin/models/id/activity"}, {http.MethodGet, "/api/admin/models/id/activity/export"},
 		{http.MethodGet, "/api/admin/settings"}, {http.MethodPut, "/api/admin/settings"}, {http.MethodPost, "/api/admin/notifications/test"},
 		{http.MethodGet, "/api/admin/usage"}, {http.MethodGet, "/api/admin/activity"}, {http.MethodGet, "/api/admin/activity/id/attempts"},
+		{http.MethodGet, "/api/admin/cooldown"}, {http.MethodDelete, "/api/admin/cooldown"},
 		{http.MethodGet, "/api/admin/health"}, {http.MethodGet, "/api/admin/backup/export"},
 	}
 	for _, route := range routes {

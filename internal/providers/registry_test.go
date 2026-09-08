@@ -44,8 +44,14 @@ func TestSetResponseHeaderTimeout(t *testing.T) {
 		t.Fatalf("default ResponseHeaderTimeout = %v, want 60s", transport.ResponseHeaderTimeout)
 	}
 	r.SetResponseHeaderTimeout(120 * time.Second)
-	if transport.ResponseHeaderTimeout != 120*time.Second {
-		t.Fatalf("ResponseHeaderTimeout after set = %v, want 120s", transport.ResponseHeaderTimeout)
+	// The setter clones and swaps the transport rather than mutating in place,
+	// so the published client must be re-read to observe the new value.
+	updated, ok := r.HTTPClient().Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("registry transport is not *http.Transport")
+	}
+	if updated.ResponseHeaderTimeout != 120*time.Second {
+		t.Fatalf("ResponseHeaderTimeout after set = %v, want 120s", updated.ResponseHeaderTimeout)
 	}
 }
 

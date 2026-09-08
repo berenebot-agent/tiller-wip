@@ -36,6 +36,9 @@
   gap: 3px;
 }
 
+.combobox-wrap { min-width: 0; }
+.target-error { display: block; margin-top: 3px; color: var(--red); font: 700 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+
 .route-table td:first-child .meta-line { display: block; }
 
 .attempt-sequence {

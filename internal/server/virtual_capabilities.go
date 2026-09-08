@@ -22,43 +22,114 @@ func eligibleVirtualTargets(targets []virtualTargetView) []virtualTargetView {
 	return eligible
 }
 
-// aggregateVirtualNumeric returns the minimum safe positive value across the
-// currently eligible targets. A missing or non-positive value on any eligible
-// target makes the result unknown: advertising a larger limit could cause the
-// request to fail on that target.
-func aggregateVirtualNumeric(targets []virtualTargetView, value func(virtualTargetView) *int64) *int64 {
-	eligible := eligibleVirtualTargets(targets)
-	if len(eligible) == 0 {
-		return nil
-	}
-	var minimum int64
-	for i, target := range eligible {
-		candidate := value(target)
-		if candidate == nil || *candidate <= 0 {
-			return nil
-		}
-		if i == 0 || *candidate < minimum {
-			minimum = *candidate
-		}
-	}
-	return &minimum
+type virtualTargetCapabilities struct {
+	ContextLength            *int64
+	MaxOutputTokens          *int64
+	SupportsTools            *bool
+	SupportsVision           *bool
+	SupportsReasoning        *bool
+	SupportsStructuredOutput *bool
+	ReasoningCapabilities    *providers.ReasoningCapabilities
 }
 
-// aggregateVirtualReasoning computes the router-supported superset of reasoning
-// capabilities across the currently eligible virtual targets. The superset
-// intentionally describes selectors accepted by the router, not a guarantee that
-// every fallback target honors every selection.
-func aggregateVirtualReasoning(targets []virtualTargetView, caps func(virtualTargetView) *providers.ReasoningCapabilities) *providers.ReasoningCapabilities {
-	eligible := eligibleVirtualTargets(targets)
-	if len(eligible) == 0 {
+type aggregatedVirtualCapabilities struct {
+	ContextLength            *int64
+	MaxOutputTokens          *int64
+	SupportsTools            *bool
+	SupportsVision           *bool
+	SupportsReasoning        *bool
+	SupportsStructuredOutput *bool
+	ReasoningCapabilities    *providers.ReasoningCapabilities
+}
+
+func aggregateVirtualCapabilities(targets []virtualTargetCapabilities) aggregatedVirtualCapabilities {
+	result := aggregatedVirtualCapabilities{}
+	if len(targets) == 0 {
+		return result
+	}
+	var contextLength, maxOutputTokens int64
+	contextKnown, maxOutputKnown := true, true
+	for _, target := range targets {
+		if target.ContextLength == nil || *target.ContextLength <= 0 {
+			contextKnown = false
+		} else if contextKnown && (result.ContextLength == nil || *target.ContextLength < contextLength) {
+			contextLength = *target.ContextLength
+			result.ContextLength = &contextLength
+		}
+		if target.MaxOutputTokens == nil || *target.MaxOutputTokens <= 0 {
+			maxOutputKnown = false
+		} else if maxOutputKnown && (result.MaxOutputTokens == nil || *target.MaxOutputTokens < maxOutputTokens) {
+			maxOutputTokens = *target.MaxOutputTokens
+			result.MaxOutputTokens = &maxOutputTokens
+		}
+	}
+	if !contextKnown {
+		result.ContextLength = nil
+	}
+	if !maxOutputKnown {
+		result.MaxOutputTokens = nil
+	}
+	result.SupportsTools = aggregateVirtualBool(targets, func(target virtualTargetCapabilities) *bool { return target.SupportsTools })
+	result.SupportsVision = aggregateVirtualBool(targets, func(target virtualTargetCapabilities) *bool { return target.SupportsVision })
+	result.SupportsReasoning = aggregateVirtualBool(targets, func(target virtualTargetCapabilities) *bool { return target.SupportsReasoning })
+	result.SupportsStructuredOutput = aggregateVirtualBool(targets, func(target virtualTargetCapabilities) *bool { return target.SupportsStructuredOutput })
+	for _, target := range targets {
+		result.ReasoningCapabilities = mergeReasoningCapabilities(result.ReasoningCapabilities, target.ReasoningCapabilities)
+	}
+	return result
+}
+
+func aggregateVirtualBool(targets []virtualTargetCapabilities, value func(virtualTargetCapabilities) *bool) *bool {
+	unknown := false
+	for _, target := range targets {
+		flag := value(target)
+		if flag == nil {
+			unknown = true
+		} else if !*flag {
+			result := false
+			return &result
+		}
+	}
+	if unknown {
 		return nil
 	}
-	var merged *providers.ReasoningCapabilities
-	for _, target := range eligible {
-		c := caps(target)
-		merged = mergeReasoningCapabilities(merged, c)
+	result := true
+	return &result
+}
+
+func virtualTargetCapability(target virtualTargetView) virtualTargetCapabilities {
+	return virtualTargetCapabilities{
+		ContextLength: target.ContextLength, MaxOutputTokens: target.MaxOutputTokens,
+		SupportsTools: target.SupportsTools, SupportsVision: target.SupportsVision,
+		SupportsReasoning: target.SupportsReasoning, SupportsStructuredOutput: target.SupportsStructuredOutput,
+		ReasoningCapabilities: target.ReasoningCapabilities,
 	}
-	return merged
+}
+
+func aggregateVirtualNumeric(targets []virtualTargetView, value func(virtualTargetView) *int64) *int64 {
+	eligible := eligibleVirtualTargets(targets)
+	capabilities := make([]virtualTargetCapabilities, 0, len(eligible))
+	for _, target := range eligible {
+		capability := virtualTargetCapability(target)
+		if value != nil {
+			capability.ContextLength = value(target)
+		}
+		capabilities = append(capabilities, capability)
+	}
+	return aggregateVirtualCapabilities(capabilities).ContextLength
+}
+
+func aggregateVirtualReasoning(targets []virtualTargetView, caps func(virtualTargetView) *providers.ReasoningCapabilities) *providers.ReasoningCapabilities {
+	eligible := eligibleVirtualTargets(targets)
+	capabilities := make([]virtualTargetCapabilities, 0, len(eligible))
+	for _, target := range eligible {
+		capability := virtualTargetCapability(target)
+		if caps != nil {
+			capability.ReasoningCapabilities = caps(target)
+		}
+		capabilities = append(capabilities, capability)
+	}
+	return aggregateVirtualCapabilities(capabilities).ReasoningCapabilities
 }
 
 // mergeReasoningCapabilities combines two capability sets into a superset. nil

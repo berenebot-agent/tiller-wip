@@ -50,10 +50,12 @@ type Server struct {
 	notifyLastSent   map[string]time.Time
 	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
-	loginLimiter         *loginLimiter
-	oauthStartLimiter    *loginLimiter
-	oauthCallbackLimiter *loginLimiter
-	backgroundCtx        context.Context
+	loginLimiter          *loginLimiter
+	clientSelectorLimiter *loginLimiter
+	clientAddressLimiter  *loginLimiter
+	oauthStartLimiter     *loginLimiter
+	oauthCallbackLimiter  *loginLimiter
+	backgroundCtx         context.Context
 	// lastOutcome holds the most recent request outcome per real model, keyed
 	// by "provider_name/upstream_model_id". It lives in RAM (never persisted) so
 	// it is cleared on restart. Written on each routed request; read by the
@@ -116,7 +118,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, secretHasher: options.secretHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore()}
+	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, secretHasher: options.secretHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore()}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
@@ -164,7 +166,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/admin/providers/{id}/oauth", s.requireAdmin(http.HandlerFunc(s.disconnectProviderOAuth)))
 
 	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireAdmin(http.HandlerFunc(s.refreshProvider)))
+	mux.Handle("POST /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.addManualModel)))
 	mux.Handle("GET /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.listProviderModels)))
+	mux.Handle("GET /api/admin/providers/{id}/models/lookup", s.requireAdmin(http.HandlerFunc(s.lookupManualModel)))
+	mux.Handle("DELETE /api/admin/models/{id}", s.requireAdmin(http.HandlerFunc(s.deleteManualModel)))
 	mux.Handle("GET /api/admin/models", s.requireAdmin(http.HandlerFunc(s.listAllModels)))
 	mux.Handle("GET /api/admin/virtual-groups", s.requireAdmin(http.HandlerFunc(s.listVirtualGroups)))
 	mux.Handle("POST /api/admin/virtual-groups", s.requireAdmin(http.HandlerFunc(s.createVirtualGroup)))
@@ -196,6 +201,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))
 	mux.Handle("GET /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.cooldownStatus)))
+	mux.Handle("DELETE /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.clearCooldown)))
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
 	mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
@@ -302,11 +308,31 @@ func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
 		if raw == "" && anthropic {
 			raw = r.Header.Get("x-api-key")
 		}
-		identity, ok := s.clients.Authenticate(raw)
-		if !ok {
+		selector, _, parsed := auth.ParseKey(raw)
+		address := s.requestClientIP(r)
+		if !parsed || s.clientSelectorLimiter.locked(selector) || s.clientAddressLimiter.locked(address) {
 			inferenceError(w, 401, "authentication_error", "invalid_api_key", "Invalid API key.", anthropic)
 			return
 		}
+		identity, ok, available := s.clients.AuthenticateContext(r.Context(), raw)
+		if !available {
+			w.Header().Set("Retry-After", "1")
+			inferenceError(w, http.StatusTooManyRequests, "rate_limited", "authentication_temporarily_unavailable", "Authentication temporarily unavailable.", anthropic)
+			return
+		}
+		if !ok {
+			locked := s.clientSelectorLimiter.recordFailure(selector)
+			locked = s.clientAddressLimiter.recordFailure(address) || locked
+			if locked {
+				w.Header().Set("Retry-After", "60")
+				inferenceError(w, http.StatusTooManyRequests, "rate_limited", "authentication_rate_limited", "Too many failed authentication attempts. Try again later.", anthropic)
+				return
+			}
+			inferenceError(w, 401, "authentication_error", "invalid_api_key", "Invalid API key.", anthropic)
+			return
+		}
+		s.clientSelectorLimiter.success(selector)
+		s.clientAddressLimiter.success(address)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientKey, identity)))
 	})
 }

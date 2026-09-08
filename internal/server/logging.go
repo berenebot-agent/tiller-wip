@@ -16,6 +16,7 @@ import (
 // handler returns.
 type logRow struct {
 	clientKeyID              string
+	clientName               string
 	requestedModel           string
 	exposedModel             *string
 	routeKind                *string

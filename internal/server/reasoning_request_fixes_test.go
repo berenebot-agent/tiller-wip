@@ -149,3 +149,68 @@ func TestReasoningRequestFixes_NativeBodyIsBytePreserving(t *testing.T) {
 		t.Fatalf("native request changed: %s, err=%v", result, err)
 	}
 }
+
+// TestPlainChatDefaultDisableInjectsNoneWhenSupported verifies B2: a target
+// advertising effort "none" gets an explicit reasoning_effort:none for a
+// plain-chat request body.
+func TestPlainChatDefaultDisableInjectsNoneWhenSupported(t *testing.T) {
+	caps := &providers.ReasoningCapabilities{
+		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "high"}}},
+	}
+	out, ok := injectChatDisable([]byte(`{"model":"m","messages":[]}`), caps)
+	if !ok {
+		t.Fatal("expected disable injection for none-capable target")
+	}
+	if !strings.Contains(string(out), `"reasoning_effort":"none"`) {
+		t.Fatalf("disable not injected: %s", out)
+	}
+}
+
+// TestPlainChatDefaultDisableFallsBackToToggle verifies B2 toggle-only
+// targets get reasoning.enabled:false instead of effort:none.
+func TestPlainChatDefaultDisableFallsBackToToggle(t *testing.T) {
+	caps := &providers.ReasoningCapabilities{
+		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}},
+	}
+	out, ok := injectChatDisable([]byte(`{"model":"m"}`), caps)
+	if !ok {
+		t.Fatal("expected disable injection for toggle-only target")
+	}
+	if !strings.Contains(string(out), `"enabled":false`) || strings.Contains(string(out), "reasoning_effort") {
+		t.Fatalf("toggle disable malformed: %s", out)
+	}
+}
+
+func TestPlainChatDefaultDisableLeavesUnknownAndMandatoryAlone(t *testing.T) {
+	body := []byte(`{"model":"m"}`)
+	// Unknown capabilities: preserve provider default, never invent a selector.
+	if out, ok := injectChatDisable(body, nil); ok || string(out) != string(body) {
+		t.Fatalf("unknown caps must pass through unchanged: %s ok=%v", out, ok)
+	}
+	// Mandatory reasoning: the caller skips the target instead of disabling.
+	mandatory := true
+	caps := &providers.ReasoningCapabilities{
+		Mandatory: &mandatory,
+		Options:   []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "high"}}},
+	}
+	if !isMandatoryReasoning(caps) {
+		t.Fatal("mandatory target not detected")
+	}
+	if out, ok := injectChatDisable(body, caps); ok || string(out) != string(body) {
+		t.Fatalf("mandatory caps must not be disabled: %s ok=%v", out, ok)
+	}
+	// Known caps with no disable mechanism: provider default preserved.
+	empty := &providers.ReasoningCapabilities{
+		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}},
+	}
+	if out, ok := injectChatDisable(body, empty); ok || string(out) != string(body) {
+		t.Fatalf("non-disablable caps must pass through unchanged: %s ok=%v", out, ok)
+	}
+	// Invalid JSON: safe no-op.
+	bad := []byte(`{invalid`)
+	if out, ok := injectChatDisable(bad, &providers.ReasoningCapabilities{
+		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}},
+	}); ok || string(out) != string(bad) {
+		t.Fatalf("invalid body must pass through unchanged: %s ok=%v", out, ok)
+	}
+}

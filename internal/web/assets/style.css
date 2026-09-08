@@ -155,3 +155,4 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
   .reasoning-heading{align-items:flex-start;flex-direction:column;gap:3px}
   .reasoning-heading strong{text-align:left}
 }
+.detect-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:-4px}

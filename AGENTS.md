@@ -74,13 +74,13 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 
 - Never re-display, log, or expose provider credentials or client API keys in plaintext after creation — including in error messages, stack traces, and debug output.
 - Client API keys are hash-only at rest, using a memory-hard KDF (argon2id preferred). Never swap in a fast hash (SHA-256, MD5, etc.) for "simplicity" or test convenience — including in tests, unless the test explicitly mocks the hashing layer.
-- Never log prompt or response bodies, tool arguments, or reasoning content — not even at debug/trace level, not even temporarily "to help debug."
+- Never log prompt or response bodies, tool arguments, or reasoning content in default logging — not even at debug/trace level, not even temporarily "to help debug." The sole exception is the opt-in Detailed Error Logging setting (default off, bounded to 1 MiB, admin-gated), which stores failed request bodies and provider error bodies as documented in SECURITY.md. Any code that writes body content must be gated behind that setting and must never weaken the admin-auth gate on Activity/export endpoints.
 - Backup/export files contain recoverable provider credentials until credential encryption at rest ships (deferred). Any code that touches export/download must not weaken or bypass the admin-auth gate on that endpoint.
 - Treat any new admin-facing endpoint as requiring authentication by default. If you're unsure whether a new route needs auth, it needs auth.
 
 ## Behavioral guardrails for routing logic
 
-- Ordered fallback is allowed only for an explicitly configured virtual model and only before client-visible output begins. It must follow the stored target order and remain visible in Activity; every upstream non-2xx/read/connect failure is eligible unless the router itself failed or the client request was cancelled/expired. Direct real-model requests, hidden health-based rerouting, retries of the same target, and post-output stream splicing remain forbidden.
+- Ordered fallback is allowed only for an explicitly configured virtual model and only before client-visible output begins. It must follow the stored target order and remain visible in Activity; every upstream non-2xx/read/connect failure is eligible unless the router itself failed or the client request was cancelled/expired. Direct real-model requests, hidden health-based rerouting, retries of the same target within a single pass, and post-output stream splicing remain forbidden. The ordered-fallback bypass pass (Pass 2, cooldown ignored) may retry targets that already failed in Pass 1 — that duplication is intentional per docs/archive/roadmap_fallback_cooldown.md and is not a "retry of the same target" violation.
 - Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing — treat any code path that blurs it as a bug.
 - Preserve the real/virtual model permission boundary exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
 

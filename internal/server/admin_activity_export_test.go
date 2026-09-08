@@ -345,6 +345,60 @@ func TestRealModelActivityIncludesLegacyAndVirtualRoutedRows(t *testing.T) {
 	}
 }
 
+// TestRealModelActivityIncludesFailedAttempts verifies that a virtual request
+// whose fallback chain failed is still attributable to every target it actually
+// attempted. The parent row has NULL resolved_provider/resolved_model (the
+// cooldown origin), so without the request_attempts join the very request that
+// opened a target's cooldown would be missing from that target's activity.
+// A skipped (cooldown/unavailable) attempt must NOT attribute: the target was
+// never contacted.
+func TestRealModelActivityIncludesFailedAttempts(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	modelID := realModelID(t, api)
+	now := time.Now().UTC()
+	failedAt := now.Add(-3 * time.Minute).Format(time.RFC3339Nano)
+	skippedAt := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
+
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,error_text,attempt_count,fallback_used,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"row-failed", clientID, "main/virtual", "main/virtual", "virtual", "some-virtual-id", "main/virtual", nil, nil, "chat", 0, 502, 10, "upstream_read_error", 1, 1, "row-failed", failedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"a-failed", "row-failed", 1, "provider-a", "model-a", "failed", 0, "upstream_read_error", 5, failedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,error_text,attempt_count,fallback_used,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"row-skipped", clientID, "main/virtual", "main/virtual", "virtual", "some-virtual-id", "main/virtual", nil, nil, "chat", 0, 503, 10, "virtual_model_unavailable", 1, 1, "row-skipped", skippedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"a-skipped", "row-skipped", 1, "provider-a", "model-a", "skipped", nil, "cooldown", 0, skippedAt); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("GET", "/api/admin/models/"+modelID+"/activity", nil)
+	if status != 200 {
+		t.Fatalf("list: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-failed" {
+		t.Fatalf("failed attempt not attributed to real model (and skipped must not be): %v", data)
+	}
+
+	status, body := getCSV(t, api, "/api/admin/models/"+modelID+"/activity/export")
+	if status != 200 {
+		t.Fatalf("export: %d", status)
+	}
+	records, err := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[1][0] != failedAt {
+		t.Fatalf("expected header + failed row in export, got %v", records)
+	}
+}
+
 // TestVirtualModelActivityIncludesLegacyRows verifies a legacy row (route_kind
 // NULL) that requested the virtual model by canonical name still appears.
 func TestVirtualModelActivityIncludesLegacyRows(t *testing.T) {
@@ -465,6 +519,32 @@ func TestWriteLogInvariant(t *testing.T) {
 	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "req-ok", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, resolvedProvider: strPtr("provider-a"), resolvedModel: strPtr("model-a"), createdAt: database.Now()})
 	if strings.Contains(buf.String(), "resolved") {
 		t.Fatalf("unexpected warning for resolved 2xx row: %q", buf.String())
+	}
+}
+
+// TestLogAttemptCooldownSkipIsInfo verifies that a cooldown skip is visible at
+// the default (Info) level and carries the origin of the failure that opened
+// the cooldown, while other skips stay at Debug.
+func TestLogAttemptCooldownSkipIsInfo(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	s := &Server{logger: logger, cooldown: newCooldownStore()}
+	now := time.Now()
+	s.cooldown.set("pm-1", now, now.Add(time.Minute), "provider-a", "model-a", "origin-req", "http_429", "HTTP 429: Too Many Requests")
+
+	s.logAttempt(&logRow{clientRequestID: "req-1", requestedModel: "main/virtual"}, requestAttempt{provider: "provider-a", model: "model-a", result: "skipped", failureClass: "cooldown"})
+	if !strings.Contains(buf.String(), "provider request skipped") {
+		t.Fatalf("cooldown skip not logged at Info: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "origin-req") {
+		t.Fatalf("cooldown origin missing from log: %q", buf.String())
+	}
+
+	// A non-cooldown skip remains Debug and is absent at Info level.
+	buf.Reset()
+	s.logAttempt(&logRow{clientRequestID: "req-2", requestedModel: "main/virtual"}, requestAttempt{provider: "provider-a", model: "model-b", result: "skipped", failureClass: "unavailable"})
+	if buf.String() != "" {
+		t.Fatalf("non-cooldown skip should stay at Debug, got: %q", buf.String())
 	}
 }
 

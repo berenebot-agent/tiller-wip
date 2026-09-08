@@ -192,19 +192,24 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 	if !selector.Present {
 		return body
 	}
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body
+	}
 	opts := providers.ExtractReasoningOptions(caps)
 	unknownSupport := caps == nil
-	// A translated body no longer contains the source protocol's selector. For
-	// known capabilities, start from a clean target body and materialize every
-	// supported part of the canonical selector below. This also keeps native
-	// requests deterministic while preserving non-selector fields.
+	changed := false
 	if !unknownSupport {
-		body = stripReasoningSelector(body, target)
+		changed = stripReasoningSelectorMap(source, target)
 	}
 
 	// If target explicitly doesn't support reasoning, omit the selector.
 	if !unknownSupport && !opts.SupportsEffort && !opts.SupportsBudget && !opts.SupportsToggle && !opts.SupportsAdaptive && !opts.SupportsEnabled {
-		return body
+		if !changed {
+			return body
+		}
+		result, _ := json.Marshal(source)
+		return result
 	}
 
 	mode := selector.Mode
@@ -217,13 +222,49 @@ func applyReasoningSelector(body []byte, selector reasoningSelector, target prov
 	}
 	switch target {
 	case providers.ProtocolChat:
-		body = applyChatReasoning(body, selector, mode, opts, caps, unknownSupport)
+		changed = applyChatReasoning(source, selector, mode, opts, caps, unknownSupport) || changed
 	case providers.ProtocolResponses:
-		body = applyResponsesReasoning(body, selector, mode, opts, unknownSupport)
+		changed = applyResponsesReasoning(source, selector, mode, opts, unknownSupport) || changed
 	case providers.ProtocolMessages:
-		body = applyMessagesReasoning(body, selector, mode, opts, unknownSupport)
+		changed = applyMessagesReasoning(source, selector, mode, opts, unknownSupport) || changed
 	}
-	return body
+	if !changed {
+		return body
+	}
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// isMandatoryReasoning reports whether the target requires reasoning and
+// therefore cannot serve a plain non-reasoning request. The mapper must not
+// send a disable value (effort:none / enabled:false) to such targets.
+func isMandatoryReasoning(caps *providers.ReasoningCapabilities) bool {
+	return caps != nil && caps.Mandatory != nil && *caps.Mandatory
+}
+
+// injectChatDisable applies the implicit plain-chat default-disable for B2:
+// a Chat client that sent no reasoning selector gets an explicit disable
+// when the Chat target advertises a representable disable mechanism.
+// Unknown capabilities (caps==nil) are left untouched so the provider
+// default is preserved; mandatory targets are never disabled by the caller.
+func injectChatDisable(body []byte, caps *providers.ReasoningCapabilities) ([]byte, bool) {
+	if caps == nil || isMandatoryReasoning(caps) {
+		return body, false
+	}
+	var source map[string]any
+	if err := json.Unmarshal(body, &source); err != nil {
+		return body, false
+	}
+	opts := providers.ExtractReasoningOptions(caps)
+	sel := reasoningSelector{Present: true, Effort: "none"}
+	if !applyChatReasoning(source, sel, "", opts, caps, false) {
+		return body, false
+	}
+	result, err := json.Marshal(source)
+	if err != nil {
+		return body, false
+	}
+	return result, true
 }
 
 // stripReasoningSelector removes recognized reasoning selector fields from a
@@ -235,6 +276,17 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 	if err := json.Unmarshal(body, &source); err != nil {
 		return body
 	}
+	if !stripReasoningSelectorMap(source, target) {
+		return body
+	}
+	result, _ := json.Marshal(source)
+	return result
+}
+
+// stripReasoningSelectorMap removes recognized reasoning selector fields from
+// a parsed request body in place, returning whether anything changed.
+// Non-selector fields (e.g. OpenRouter's reasoning.exclude) are preserved.
+func stripReasoningSelectorMap(source map[string]any, target providers.Protocol) bool {
 	changed := false
 	switch target {
 	case providers.ProtocolChat:
@@ -310,11 +362,7 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 			}
 		}
 	}
-	if !changed {
-		return body
-	}
-	result, _ := json.Marshal(source)
-	return result
+	return changed
 }
 
 // applyChatReasoning maps a selector onto a Chat Completions request.
@@ -322,113 +370,133 @@ func stripReasoningSelector(body []byte, target providers.Protocol) []byte {
 // wins over all other selector parts; when it cannot be represented, the
 // complete contradictory selector is omitted and the provider's default is
 // used.
-func applyChatReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, caps *providers.ReasoningCapabilities, unknownSupport bool) []byte {
+func applyChatReasoning(source map[string]any, selector reasoningSelector, mode string, opts providers.ReasoningOptions, caps *providers.ReasoningCapabilities, unknownSupport bool) bool {
 	disabled := mode == "disabled" || selector.Effort == "none"
 	if disabled {
 		// Chat's standard disable selector is reasoning_effort:none. When
 		// capabilities are unknown, use the portable effort:none representation
 		// rather than the non-standard nested enabled field.
 		if effortIsSupported("none", opts) || unknownSupport {
-			return setChatEffort(body, "none")
+			setChatEffort(source, "none")
+			return true
 		}
 		if opts.SupportsToggle {
-			return setChatEnabled(body, false)
+			setChatEnabled(source, false)
+			return true
 		}
-		return body
+		return false
 	}
+	changed := false
 	if mode == "enabled" {
 		if opts.SupportsToggle {
-			body = setChatEnabled(body, true)
+			setChatEnabled(source, true)
+			changed = true
 		} else if caps != nil && caps.DefaultEffort != "" && !(caps.Mandatory != nil && *caps.Mandatory && caps.DefaultEffort == "none") && effortIsSupported(caps.DefaultEffort, opts) {
-			body = setChatEffort(body, caps.DefaultEffort)
+			setChatEffort(source, caps.DefaultEffort)
+			changed = true
 		}
 	} else if mode == "adaptive" && unknownSupport {
-		body = setChatMode(body, "adaptive")
+		setChatMode(source, "adaptive")
+		changed = true
 	}
 	if selector.Effort != "" && selector.Effort != "none" && (effortIsSupported(selector.Effort, opts) || unknownSupport) {
-		body = setChatEffort(body, selector.Effort)
+		setChatEffort(source, selector.Effort)
+		changed = true
 	}
 	if selector.BudgetTokens != nil && (budgetIsSupported(*selector.BudgetTokens, opts) || unknownSupport) {
-		body = setChatBudget(body, *selector.BudgetTokens)
+		setChatBudget(source, *selector.BudgetTokens)
+		changed = true
 	}
-	return body
+	return changed
 }
 
 // applyResponsesReasoning maps a selector onto a Responses request.
-func applyResponsesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) []byte {
+func applyResponsesReasoning(source map[string]any, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) bool {
 	disabled := mode == "disabled" || selector.Effort == "none"
 	if disabled {
 		// Responses has no standard reasoning.enabled selector. When
 		// capabilities are unknown, use the portable effort:none representation.
 		if effortIsSupported("none", opts) || unknownSupport {
-			return setResponsesEffort(body, "none")
+			setResponsesEffort(source, "none")
+			return true
 		}
 		if opts.SupportsToggle {
-			return setResponsesEnabled(body, false)
+			setResponsesEnabled(source, false)
+			return true
 		}
-		return body
+		return false
 	}
+	changed := false
 	if mode == "enabled" && opts.SupportsToggle {
-		body = setResponsesEnabled(body, true)
+		setResponsesEnabled(source, true)
+		changed = true
 	} else if mode == "adaptive" && unknownSupport {
-		body = setResponsesMode(body, "adaptive")
+		setResponsesMode(source, "adaptive")
+		changed = true
 	}
 	if selector.Effort != "" && selector.Effort != "none" && (effortIsSupported(selector.Effort, opts) || unknownSupport) {
-		body = setResponsesEffort(body, selector.Effort)
+		setResponsesEffort(source, selector.Effort)
+		changed = true
 	}
 	// Responses has no verified numeric reasoning-budget field. Do not invent
 	// reasoning.max_tokens, even when the source protocol had a token budget.
-	return body
+	return changed
 }
 
 // applyMessagesReasoning maps a selector onto a Messages request.
 // Mode (enabled/disabled/adaptive) is applied when representable. An explicit
 // disable wins over all other selector parts; if it is not representable, the
 // complete contradictory selector is omitted.
-func applyMessagesReasoning(body []byte, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) []byte {
+func applyMessagesReasoning(source map[string]any, selector reasoningSelector, mode string, opts providers.ReasoningOptions, unknownSupport bool) bool {
 	disabled := mode == "disabled" || selector.Effort == "none"
 	if disabled && (opts.SupportsDisable || unknownSupport) {
-		return setMessagesThinkingType(body, "disabled")
+		setMessagesThinkingType(source, "disabled")
+		return true
 	}
 	if disabled {
-		return body
+		return false
 	}
 	// A positive effort, budget, or explicit enabled mode implies enabled thinking.
 	positiveEffort := selector.Effort != "" && selector.Effort != "none"
 	if mode == "" && (positiveEffort || selector.BudgetTokens != nil) {
 		mode = "enabled"
 	}
+	changed := false
 	switch mode {
 	case "adaptive":
 		if opts.SupportsAdaptive || unknownSupport {
-			body = setMessagesThinkingType(body, "adaptive")
+			setMessagesThinkingType(source, "adaptive")
+			changed = true
 		}
 	case "enabled":
 		if opts.SupportsAdaptive {
-			body = setMessagesThinkingType(body, "adaptive")
+			setMessagesThinkingType(source, "adaptive")
+			changed = true
 		} else if opts.SupportsEnabled || opts.SupportsToggle || opts.SupportsBudget || unknownSupport {
 			budget := messagesDefaultBudget(opts)
 			if selector.BudgetTokens != nil {
 				budget = *selector.BudgetTokens
 			}
 			// Don't emit a budget that would exceed the caller's explicit output cap.
-			if !messagesBudgetFitsOutput(body, budget) {
-				return body
+			if !messagesBudgetFitsOutput(source, budget) {
+				return changed
 			}
-			body = setMessagesThinkingType(body, "enabled")
+			setMessagesThinkingType(source, "enabled")
+			changed = true
 			if selector.BudgetTokens != nil {
-				body = setMessagesBudget(body, *selector.BudgetTokens)
+				setMessagesBudget(source, *selector.BudgetTokens)
 			} else {
-				body = setMessagesBudget(body, budget)
+				setMessagesBudget(source, budget)
 			}
 		}
 	}
 	if selector.Effort != "" && selector.Effort != "none" {
 		if effortIsSupported(selector.Effort, opts) || unknownSupport || mode == "enabled" {
-			body = setMessagesEffort(body, selector.Effort)
+			setMessagesEffort(source, selector.Effort)
+			changed = true
 		}
 	}
-	return body
+	return changed
 }
 
 // matchesEffort returns true when the target explicitly advertises the given
@@ -462,54 +530,32 @@ func budgetIsSupported(budget int64, opts providers.ReasoningOptions) bool {
 }
 
 // setChatEffort sets reasoning_effort on a Chat Completions body.
-func setChatEffort(body []byte, effort string) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setChatEffort(source map[string]any, effort string) {
 	source["reasoning_effort"] = effort
-	result, _ := json.Marshal(source)
-	return result
 }
 
-func setChatEnabled(body []byte, enabled bool) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setChatEnabled(source map[string]any, enabled bool) {
 	reasoning, _ := source["reasoning"].(map[string]any)
 	if reasoning == nil {
 		reasoning = map[string]any{}
 	}
 	reasoning["enabled"] = enabled
 	source["reasoning"] = reasoning
-	result, _ := json.Marshal(source)
-	return result
 }
 
-func setChatMode(body []byte, mode string) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setChatMode(source map[string]any, mode string) {
 	reasoning, _ := source["reasoning"].(map[string]any)
 	if reasoning == nil {
 		reasoning = map[string]any{}
 	}
 	reasoning["mode"] = mode
 	source["reasoning"] = reasoning
-	result, _ := json.Marshal(source)
-	return result
 }
 
 // setChatBudget sets reasoning.max_tokens on a Chat Completions body.
 const maxJavaScriptSafeInteger = int64(1<<53 - 1)
 
-func setChatBudget(body []byte, budget int64) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setChatBudget(source map[string]any, budget int64) {
 	reasoning, _ := source["reasoning"].(map[string]any)
 	if reasoning == nil {
 		reasoning = map[string]any{}
@@ -520,106 +566,68 @@ func setChatBudget(body []byte, budget int64) []byte {
 		reasoning["max_tokens"] = budget
 	}
 	source["reasoning"] = reasoning
-	result, _ := json.Marshal(source)
-	return result
 }
 
 // setResponsesEffort sets reasoning.effort on a Responses body.
-func setResponsesEffort(body []byte, effort string) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setResponsesEffort(source map[string]any, effort string) {
 	reasoning, _ := source["reasoning"].(map[string]any)
 	if reasoning == nil {
 		reasoning = map[string]any{}
 	}
 	reasoning["effort"] = effort
 	source["reasoning"] = reasoning
-	result, _ := json.Marshal(source)
-	return result
 }
 
-func setResponsesEnabled(body []byte, enabled bool) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setResponsesEnabled(source map[string]any, enabled bool) {
 	reasoning, _ := source["reasoning"].(map[string]any)
 	if reasoning == nil {
 		reasoning = map[string]any{}
 	}
 	reasoning["enabled"] = enabled
 	source["reasoning"] = reasoning
-	result, _ := json.Marshal(source)
-	return result
 }
 
-func setResponsesMode(body []byte, mode string) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setResponsesMode(source map[string]any, mode string) {
 	reasoning, _ := source["reasoning"].(map[string]any)
 	if reasoning == nil {
 		reasoning = map[string]any{}
 	}
 	reasoning["mode"] = mode
 	source["reasoning"] = reasoning
-	result, _ := json.Marshal(source)
-	return result
 }
 
 // setMessagesEffort sets output_config.effort on a Messages body.
-func setMessagesEffort(body []byte, effort string) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setMessagesEffort(source map[string]any, effort string) {
 	outputConfig, _ := source["output_config"].(map[string]any)
 	if outputConfig == nil {
 		outputConfig = map[string]any{}
 	}
 	outputConfig["effort"] = effort
 	source["output_config"] = outputConfig
-	result, _ := json.Marshal(source)
-	return result
 }
 
 // setMessagesDisabled sets thinking.type = disabled on a Messages body.
-func setMessagesDisabled(body []byte) []byte {
-	return setMessagesThinkingType(body, "disabled")
+func setMessagesDisabled(source map[string]any) {
+	setMessagesThinkingType(source, "disabled")
 }
 
-func setMessagesThinkingType(body []byte, thinkingType string) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setMessagesThinkingType(source map[string]any, thinkingType string) {
 	thinking, _ := source["thinking"].(map[string]any)
 	if thinking == nil {
 		thinking = map[string]any{}
 	}
 	thinking["type"] = thinkingType
 	source["thinking"] = thinking
-	result, _ := json.Marshal(source)
-	return result
 }
 
 // setMessagesBudget sets thinking.budget_tokens on a Messages body.
-func setMessagesBudget(body []byte, budget int64) []byte {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return body
-	}
+func setMessagesBudget(source map[string]any, budget int64) {
 	thinking, _ := source["thinking"].(map[string]any)
 	if thinking == nil {
 		thinking = map[string]any{}
 	}
 	thinking["budget_tokens"] = budget
 	source["thinking"] = thinking
-	result, _ := json.Marshal(source)
-	return result
 }
 
 // messagesDefaultBudget returns a safe budget_tokens value for a target that
@@ -635,11 +643,7 @@ func messagesDefaultBudget(opts providers.ReasoningOptions) int64 {
 
 // messagesBudgetFitsOutput prevents a required thinking budget from exceeding
 // the caller's explicit output cap. The cap is never raised to accommodate it.
-func messagesBudgetFitsOutput(body []byte, budget int64) bool {
-	var source map[string]any
-	if err := json.Unmarshal(body, &source); err != nil {
-		return false
-	}
+func messagesBudgetFitsOutput(source map[string]any, budget int64) bool {
 	if cap, ok := coerceInt64(source["max_tokens"]); ok {
 		return cap > 0 && budget < cap
 	}
@@ -1245,6 +1249,7 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 		event, err := readSSEEvent(reader)
 		data := event.Data
 		if string(data) == "[DONE]" {
+			state.completed = true
 			writeStreamDone(w, incoming, state)
 			if flusher != nil {
 				flusher.Flush()
@@ -1257,12 +1262,18 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 				captureStreamUsage(payload, target, usage)
 				deltas, done := canonicalDeltas(event.Name, payload, target, state)
 				for _, delta := range deltas {
-					writeTranslatedEvent(w, incoming, state, delta)
+					if delta.Kind == "error" {
+						return errors.New("upstream stream reported failure")
+					}
+					if err := writeTranslatedEvent(w, incoming, state, delta); err != nil {
+						return err
+					}
 					if flusher != nil {
 						flusher.Flush()
 					}
 				}
 				if done {
+					state.completed = true
 					writeStreamDone(w, incoming, state)
 					if flusher != nil {
 						flusher.Flush()
@@ -1272,42 +1283,77 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 			}
 		}
 		if err != nil {
-			if err == io.EOF {
+			if err == io.EOF && state.completed {
 				writeStreamDone(w, incoming, state)
 				return nil
+			}
+			if err == io.EOF {
+				return errors.New("upstream stream ended before completion")
 			}
 			return err
 		}
 	}
 }
 
-const maxAccumulatedTextBytes = 8 * 1024 * 1024
+func writeStreamFailure(w io.Writer, protocol providers.Protocol, code, id, model string) {
+	message := "The upstream stream could not be completed."
+	switch protocol {
+	case providers.ProtocolMessages:
+		writeSSE(w, "error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": message}})
+	case providers.ProtocolResponses:
+		writeSSE(w, "response.failed", map[string]any{"type": "response.failed", "response": map[string]any{"id": id, "object": "response", "status": "failed", "model": model, "output": []any{}, "error": map[string]any{"code": code, "message": message}}})
+	default:
+		writeSSE(w, "", map[string]any{"error": map[string]any{"type": "server_error", "code": code, "message": message}})
+	}
+}
+
+const (
+	maxAccumulatedTextBytes         = 8 * 1024 * 1024
+	maxAccumulatedToolArgumentBytes = 8 * 1024 * 1024
+	maxStreamToolCalls              = 128
+)
 
 type streamState struct {
-	id, model                                       string
-	started, contentStarted, reasoningStarted, done bool
-	outputIndex                                     int
-	accumulated                                     strings.Builder
-	accumulatedBytes                                int
-	reasoningAccumulated                            strings.Builder
-	nextIndex                                       int
-	reasoningIndex, messageIndex, toolIndex         int
-	outputOrder                                     []string
-	extraOutputs                                    map[int]any
-	activeKind                                      string
-	activeIndex                                     int
-	currentToolID                                   string
-	currentToolIndex                                int
-	toolName                                        string
-	toolArguments                                   strings.Builder
-	toolStarted                                     bool
-	inputTokens                                     int64
-	outputTokens                                    int64
-	hasInputTokens                                  bool
-	hasOutputTokens                                 bool
+	id, model                                                  string
+	started, contentStarted, reasoningStarted, done, completed bool
+	outputIndex                                                int
+	accumulated                                                strings.Builder
+	accumulatedBytes                                           int
+	reasoningAccumulated                                       strings.Builder
+	nextIndex                                                  int
+	reasoningIndex, messageIndex, toolIndex                    int
+	outputOrder                                                []streamOutput
+	extraOutputs                                               map[int]any
+	activeKind                                                 string
+	activeIndex                                                int
+	toolCalls                                                  []*toolCallState
+	toolAliases                                                map[string]*toolCallState
+	toolArgumentBytes                                          int
+	messagesToolsWritten                                       bool
+	inputTokens                                                int64
+	outputTokens                                               int64
+	hasInputTokens                                             bool
+	hasOutputTokens                                            bool
 }
+type toolCallState struct {
+	callID    string
+	name      string
+	arguments strings.Builder
+	itemID    string
+	index     int
+	ordinal   int
+}
+
+type streamOutput struct {
+	kind string
+	tool *toolCallState
+}
+
 type canonicalDelta struct {
 	Kind, Text, CallID, Name, Arguments, Finish string
+	UpstreamIndex                               int
+	HasUpstreamIndex                            bool
+	ItemID                                      string
 	Usage                                       any
 	Detail                                      map[string]any
 }
@@ -1317,6 +1363,18 @@ type sseEvent struct {
 	Data  []byte
 	ID    string
 	Retry *int
+}
+
+func strField(v any) string {
+	value, _ := v.(string)
+	return value
+}
+
+func coerceOrDefault(v any, fallback int64) int64 {
+	if value, ok := coerceInt64(v); ok {
+		return value
+	}
+	return fallback
 }
 
 func canonicalDeltas(event string, payload map[string]any, target providers.Protocol, state *streamState) ([]canonicalDelta, bool) {
@@ -1336,10 +1394,14 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			} else if text, ok := delta["reasoning"].(string); ok && text != "" {
 				out = append(out, canonicalDelta{Kind: "reasoning", Text: text})
 			}
-			for _, callRaw := range asSlice(delta["tool_calls"]) {
+			for index, callRaw := range asSlice(delta["tool_calls"]) {
 				call, _ := callRaw.(map[string]any)
 				fn, _ := call["function"].(map[string]any)
-				out = append(out, canonicalDelta{Kind: "tool", CallID: fmt.Sprint(call["id"]), Name: fmt.Sprint(fn["name"]), Arguments: fmt.Sprint(fn["arguments"])})
+				upstreamIndex := index
+				if value, ok := coerceInt64(call["index"]); ok {
+					upstreamIndex = int(value)
+				}
+				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: upstreamIndex, HasUpstreamIndex: true, CallID: strField(call["id"]), Name: strField(fn["name"]), Arguments: strField(fn["arguments"])})
 			}
 			if finish, ok := choice["finish_reason"].(string); ok && finish != "" {
 				out = append(out, canonicalDelta{Kind: "finish", Finish: finish})
@@ -1363,7 +1425,7 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			}
 		case "content_block_start":
 			if block, ok := payload["content_block"].(map[string]any); ok && block["type"] == "tool_use" {
-				out = append(out, canonicalDelta{Kind: "tool", CallID: fmt.Sprint(block["id"]), Name: fmt.Sprint(block["name"])})
+				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), HasUpstreamIndex: true, CallID: strField(block["id"]), Name: strField(block["name"])})
 			}
 		case "content_block_delta":
 			if delta, ok := payload["delta"].(map[string]any); ok {
@@ -1374,7 +1436,7 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 					out = append(out, canonicalDelta{Kind: "reasoning", Text: thinking})
 				}
 				if partial, ok := delta["partial_json"].(string); ok {
-					out = append(out, canonicalDelta{Kind: "tool", Arguments: partial})
+					out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), HasUpstreamIndex: true, Arguments: partial})
 				}
 			}
 		case "message_delta":
@@ -1385,7 +1447,10 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				out = append(out, canonicalDelta{Kind: "finish", Finish: fmt.Sprint(delta["stop_reason"])})
 			}
 		case "message_stop":
+			state.completed = true
 			return out, true
+		case "message_error", "error":
+			return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
 		}
 		return out, false
 	}
@@ -1402,12 +1467,17 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		out = append(out, canonicalDelta{Kind: "reasoning", Text: fmt.Sprint(payload["delta"])})
 	case "response.function_call_arguments.delta":
-		out = append(out, canonicalDelta{Kind: "tool", CallID: fmt.Sprint(payload["call_id"]), Arguments: fmt.Sprint(payload["delta"])})
+		index, hasIndex := coerceInt64(payload["output_index"])
+		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"])})
 	case "response.output_item.added":
 		if item, ok := payload["item"].(map[string]any); ok && item["type"] == "function_call" {
-			out = append(out, canonicalDelta{Kind: "tool", CallID: fmt.Sprint(item["call_id"]), Name: fmt.Sprint(item["name"])})
+			index, hasIndex := coerceInt64(payload["output_index"])
+			out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(item["call_id"]), ItemID: strField(item["id"]), Name: strField(item["name"])})
 		}
+	case "response.failed", "response.incomplete", "error":
+		return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
 	case "response.completed":
+		state.completed = true
 		if response, ok := payload["response"].(map[string]any); ok {
 			if u, ok := response["usage"].(map[string]any); ok {
 				out = append(out, canonicalDelta{Kind: "usage", Usage: u})
@@ -1421,7 +1491,7 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 	return out, false
 }
 
-func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *streamState, delta canonicalDelta) {
+func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *streamState, delta canonicalDelta) error {
 	if incoming == providers.ProtocolChat {
 		payload := map[string]any{"id": state.id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": state.model}
 		choice := map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": nil}
@@ -1436,9 +1506,15 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		case "reasoning":
 			d["reasoning_content"] = delta.Text
 		case "tool":
-			d["tool_calls"] = []any{map[string]any{"index": 0, "id": emptyNil(delta.CallID), "type": "function", "function": map[string]any{"name": emptyNil(delta.Name), "arguments": delta.Arguments}}}
+			call, err := state.applyToolDelta(delta)
+			if err != nil {
+				return err
+			}
+			d["tool_calls"] = []any{map[string]any{"index": call.ordinal, "id": emptyNil(delta.CallID), "type": "function", "function": map[string]any{"name": emptyNil(delta.Name), "arguments": delta.Arguments}}}
 		case "finish":
 			choice["finish_reason"] = normalizeFinish(delta.Finish)
+		case "error":
+			return errors.New("upstream stream reported failure")
 		}
 		payload["choices"] = []any{choice}
 		if delta.Kind == "usage" {
@@ -1446,7 +1522,7 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			payload["usage"] = chatUsage(delta.Usage)
 		}
 		writeSSE(w, "", payload)
-		return
+		return nil
 	}
 	if incoming == providers.ProtocolMessages {
 		if !state.started {
@@ -1475,16 +1551,8 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			}
 			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": delta.Text}})
 		case "tool":
-			if state.activeKind != "tool" || (delta.CallID != "" && delta.CallID != state.currentToolID) {
-				closeMessagesBlock(w, state)
-				state.currentToolID = delta.CallID
-				state.activeIndex = state.nextIndex
-				state.nextIndex++
-				writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": state.activeIndex, "content_block": map[string]any{"type": "tool_use", "id": delta.CallID, "name": delta.Name, "input": map[string]any{}}})
-				state.activeKind = "tool"
-			}
-			if delta.Arguments != "" {
-				writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "input_json_delta", "partial_json": delta.Arguments}})
+			if _, err := state.applyToolDelta(delta); err != nil {
+				return err
 			}
 		case "usage":
 			if u, ok := delta.Usage.(map[string]any); ok {
@@ -1499,6 +1567,18 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			}
 		case "finish":
 			closeMessagesBlock(w, state)
+			if !state.messagesToolsWritten {
+				for _, call := range state.toolCalls {
+					index := state.nextIndex
+					state.nextIndex++
+					writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": index, "content_block": map[string]any{"type": "tool_use", "id": call.callID, "name": call.name, "input": map[string]any{}}})
+					if call.arguments.Len() > 0 {
+						writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": index, "delta": map[string]any{"type": "input_json_delta", "partial_json": call.arguments.String()}})
+					}
+					writeSSE(w, "content_block_stop", map[string]any{"type": "content_block_stop", "index": index})
+				}
+				state.messagesToolsWritten = true
+			}
 			usage := map[string]any{"input_tokens": 0, "output_tokens": 0}
 			if state.hasInputTokens {
 				usage["input_tokens"] = state.inputTokens
@@ -1507,8 +1587,10 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 				usage["output_tokens"] = state.outputTokens
 			}
 			writeSSE(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": normalizeAnthropicFinish(delta.Finish), "stop_sequence": nil}, "usage": usage})
+		case "error":
+			return errors.New("upstream stream reported failure")
 		}
-		return
+		return nil
 	}
 	if !state.started {
 		response := map[string]any{"id": state.id, "object": "response", "created_at": time.Now().Unix(), "status": "in_progress", "model": state.model, "output": []any{}}
@@ -1516,64 +1598,107 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 		state.started = true
 	}
 	switch delta.Kind {
+	case "error":
+		return errors.New("upstream stream reported failure")
 	case "text":
 		if state.contentStarted == false {
 			state.outputIndex = state.nextIndex
 			state.messageIndex = state.outputIndex
 			state.nextIndex++
-			state.outputOrder = append(state.outputOrder, "message")
+			state.outputOrder = append(state.outputOrder, streamOutput{kind: "message"})
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "in_progress", "content": []any{}}})
 			writeSSE(w, "response.content_part.added", map[string]any{"type": "response.content_part.added", "output_index": state.outputIndex, "content_index": 0, "part": map[string]any{"type": "output_text", "text": "", "annotations": []any{}}})
 			state.contentStarted = true
 		}
-		if remaining := maxAccumulatedTextBytes - state.accumulatedBytes; remaining > 0 {
-			text := delta.Text
-			if len(text) > remaining {
-				text = text[:remaining]
-			}
-			state.accumulated.WriteString(text)
-			state.accumulatedBytes += len(text)
+		if len(delta.Text) > maxAccumulatedTextBytes-state.accumulatedBytes {
+			return errors.New("translated stream text exceeds limit")
 		}
+		state.accumulated.WriteString(delta.Text)
+		state.accumulatedBytes += len(delta.Text)
 		writeSSE(w, "response.output_text.delta", map[string]any{"type": "response.output_text.delta", "output_index": state.messageIndex, "item_id": "msg_" + state.id, "content_index": 0, "delta": delta.Text})
 	case "reasoning":
 		if !state.reasoningStarted {
 			state.outputIndex = state.nextIndex
 			state.reasoningIndex = state.outputIndex
 			state.nextIndex++
-			state.outputOrder = append(state.outputOrder, "reasoning")
+			state.outputOrder = append(state.outputOrder, streamOutput{kind: "reasoning"})
 			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "in_progress", "summary": []any{}}})
 			writeSSE(w, "response.reasoning_summary_part.added", map[string]any{"type": "response.reasoning_summary_part.added", "output_index": state.outputIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""}})
 			state.reasoningStarted = true
 		}
-		if remaining := maxAccumulatedTextBytes - state.reasoningAccumulated.Len(); remaining > 0 {
-			text := delta.Text
-			if len(text) > remaining {
-				text = text[:remaining]
-			}
-			state.reasoningAccumulated.WriteString(text)
+		if len(delta.Text) > maxAccumulatedTextBytes-state.reasoningAccumulated.Len() {
+			return errors.New("translated stream reasoning exceeds limit")
 		}
+		state.reasoningAccumulated.WriteString(delta.Text)
 		writeSSE(w, "response.reasoning_summary_text.delta", map[string]any{"type": "response.reasoning_summary_text.delta", "output_index": state.reasoningIndex, "item_id": "rs_" + state.id, "summary_index": 0, "delta": delta.Text})
 	case "tool":
-		if !state.toolStarted || (delta.CallID != "" && delta.CallID != state.currentToolID) {
-			if state.toolStarted {
-				writeSSE(w, "response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "output_index": state.toolIndex, "item_id": state.currentToolID, "call_id": state.currentToolID, "arguments": state.toolArguments.String()})
-				writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.toolIndex, "item": map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"}})
-				state.toolArguments.Reset()
-			}
+		call, err := state.applyToolDelta(delta)
+		if err != nil {
+			return err
+		}
+		if call.index < 0 {
 			state.outputIndex = state.nextIndex
-			state.toolIndex = state.outputIndex
+			call.index = state.nextIndex
 			state.nextIndex++
-			state.outputOrder = append(state.outputOrder, "tool")
-			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": state.outputIndex, "item": map[string]any{"type": "function_call", "call_id": delta.CallID, "name": delta.Name, "arguments": ""}})
-			state.toolStarted = true
-			state.currentToolID = delta.CallID
-			state.toolName = delta.Name
+			state.outputOrder = append(state.outputOrder, streamOutput{kind: "tool", tool: call})
+			writeSSE(w, "response.output_item.added", map[string]any{"type": "response.output_item.added", "output_index": call.index, "item": map[string]any{"type": "function_call", "call_id": delta.CallID, "name": delta.Name, "arguments": ""}})
 		}
 		if delta.Arguments != "" {
-			state.toolArguments.WriteString(delta.Arguments)
-			writeSSE(w, "response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "output_index": state.toolIndex, "item_id": delta.CallID, "call_id": delta.CallID, "delta": delta.Arguments})
+			writeSSE(w, "response.function_call_arguments.delta", map[string]any{"type": "response.function_call_arguments.delta", "output_index": call.index, "item_id": call.itemID, "call_id": call.callID, "delta": delta.Arguments})
 		}
 	}
+	return nil
+}
+
+func (state *streamState) applyToolDelta(delta canonicalDelta) (*toolCallState, error) {
+	aliases := []string{}
+	if delta.ItemID != "" {
+		aliases = append(aliases, "item:"+delta.ItemID)
+	}
+	if delta.CallID != "" {
+		aliases = append(aliases, "call:"+delta.CallID)
+	}
+	if delta.HasUpstreamIndex {
+		aliases = append(aliases, fmt.Sprintf("index:%d", delta.UpstreamIndex))
+	}
+	var call *toolCallState
+	for _, alias := range aliases {
+		if existing := state.toolAliases[alias]; existing != nil {
+			call = existing
+			break
+		}
+	}
+	if call == nil {
+		if len(state.toolCalls) >= maxStreamToolCalls {
+			return nil, errors.New("translated stream has too many tool calls")
+		}
+		call = &toolCallState{index: -1, ordinal: len(state.toolCalls)}
+		state.toolCalls = append(state.toolCalls, call)
+	}
+	if state.toolAliases == nil {
+		state.toolAliases = make(map[string]*toolCallState)
+	}
+	for _, alias := range aliases {
+		state.toolAliases[alias] = call
+	}
+	if delta.CallID != "" {
+		call.callID = delta.CallID
+	}
+	if delta.ItemID != "" {
+		call.itemID = delta.ItemID
+	}
+	if call.itemID == "" {
+		call.itemID = call.callID
+	}
+	if delta.Name != "" {
+		call.name = delta.Name
+	}
+	if len(delta.Arguments) > maxAccumulatedToolArgumentBytes-state.toolArgumentBytes {
+		return nil, errors.New("translated stream tool arguments exceed limit")
+	}
+	call.arguments.WriteString(delta.Arguments)
+	state.toolArgumentBytes += len(delta.Arguments)
+	return call, nil
 }
 
 func closeMessagesBlock(w io.Writer, state *streamState) {
@@ -1616,8 +1741,8 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		return
 	}
 	if incoming == providers.ProtocolMessages {
-		if !state.started {
-			writeTranslatedEvent(w, incoming, state, canonicalDelta{Kind: "finish", Finish: "stop"})
+		if !state.started || (!state.messagesToolsWritten && len(state.toolCalls) > 0) {
+			_ = writeTranslatedEvent(w, incoming, state, canonicalDelta{Kind: "finish", Finish: "stop"})
 		} else {
 			closeMessagesBlock(w, state)
 		}
@@ -1630,10 +1755,12 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		writeSSE(w, "response.content_part.done", map[string]any{"type": "response.content_part.done", "output_index": state.reasoningIndex, "content_index": 0, "part": map[string]any{"type": "summary_text", "text": text}})
 		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.reasoningIndex, "item": map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": text}}}})
 	}
-	if state.toolStarted {
-		args := state.toolArguments.String()
-		writeSSE(w, "response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "output_index": state.toolIndex, "item_id": state.currentToolID, "call_id": state.currentToolID, "arguments": args})
-		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.toolIndex, "item": map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": args, "status": "completed"}})
+	if len(state.toolCalls) > 0 {
+		for _, call := range state.toolCalls {
+			args := call.arguments.String()
+			writeSSE(w, "response.function_call_arguments.done", map[string]any{"type": "response.function_call_arguments.done", "output_index": call.index, "item_id": call.itemID, "call_id": call.callID, "arguments": args})
+			writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": call.index, "item": map[string]any{"type": "function_call", "call_id": call.callID, "name": call.name, "arguments": args, "status": "completed"}})
+		}
 	}
 	text := state.accumulated.String()
 	output := []any{}
@@ -1643,34 +1770,51 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.messageIndex, "item": map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}}})
 		output = append(output, map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}})
 	}
-	if state.reasoningStarted || state.toolStarted {
+	if state.reasoningStarted || len(state.toolCalls) > 0 {
 		reasoningItem := map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": state.reasoningAccumulated.String()}}}
 		if len(state.outputOrder) > 1 {
 			output = nil
-			for _, kind := range state.outputOrder {
-				if kind == "reasoning" {
+			for _, item := range state.outputOrder {
+				if item.kind == "reasoning" {
 					output = append(output, reasoningItem)
-				} else if kind == "message" {
+				} else if item.kind == "message" {
 					output = append(output, map[string]any{"id": "msg_" + state.id, "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": text, "annotations": []any{}}}})
-				} else if kind == "tool" {
-					output = append(output, map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"})
+				} else if item.kind == "tool" && item.tool != nil {
+					output = append(output, map[string]any{"type": "function_call", "call_id": item.tool.callID, "name": item.tool.name, "arguments": item.tool.arguments.String(), "status": "completed"})
 				}
 			}
 		} else if state.reasoningStarted {
 			output = append([]any{reasoningItem}, output...)
 		} else {
-			output = append(output, map[string]any{"type": "function_call", "call_id": state.currentToolID, "name": state.toolName, "arguments": state.toolArguments.String(), "status": "completed"})
+			for _, call := range state.toolCalls {
+				output = append(output, map[string]any{"type": "function_call", "call_id": call.callID, "name": call.name, "arguments": call.arguments.String(), "status": "completed"})
+			}
 		}
 	}
 	response := map[string]any{"id": state.id, "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": state.model, "output": output}
 	writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "response": response})
 }
 
+const maxSSELineBytes = 1 << 20
+
 func readSSEEvent(r *bufio.Reader) (sseEvent, error) {
 	var event sseEvent
 	for {
-		line, err := r.ReadString('\n')
-		trim := strings.TrimRight(line, "\r\n")
+		var line []byte
+		for {
+			fragment, err := r.ReadSlice('\n')
+			line = append(line, fragment...)
+			if len(line) > maxSSELineBytes {
+				return event, errors.New("SSE line exceeds limit")
+			}
+			if err != bufio.ErrBufferFull {
+				if err != nil && len(line) == 0 {
+					return event, err
+				}
+				break
+			}
+		}
+		trim := strings.TrimRight(string(line), "\r\n")
 		field, value, hasField := strings.Cut(trim, ":")
 		if hasField {
 			value = strings.TrimPrefix(value, " ")
@@ -1681,6 +1825,9 @@ func readSSEEvent(r *bufio.Reader) (sseEvent, error) {
 		case "data":
 			if len(event.Data) > 0 {
 				event.Data = append(event.Data, '\n')
+			}
+			if len(event.Data)+len(value) > maxAccumulatedTextBytes {
+				return event, errors.New("SSE event exceeds limit")
 			}
 			event.Data = append(event.Data, value...)
 		case "id":
@@ -1693,9 +1840,6 @@ func readSSEEvent(r *bufio.Reader) (sseEvent, error) {
 		}
 		if trim == "" && (len(event.Data) > 0 || event.Name != "" || event.ID != "" || event.Retry != nil) {
 			return event, nil
-		}
-		if err != nil {
-			return event, err
 		}
 	}
 }
