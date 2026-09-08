@@ -168,6 +168,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireAdmin(http.HandlerFunc(s.refreshProvider)))
 	mux.Handle("POST /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.addManualModel)))
 	mux.Handle("GET /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.listProviderModels)))
+	mux.Handle("GET /api/admin/providers/{id}/models/lookup", s.requireAdmin(http.HandlerFunc(s.lookupManualModel)))
 	mux.Handle("DELETE /api/admin/models/{id}", s.requireAdmin(http.HandlerFunc(s.deleteManualModel)))
 	mux.Handle("GET /api/admin/models", s.requireAdmin(http.HandlerFunc(s.listAllModels)))
 	mux.Handle("GET /api/admin/virtual-groups", s.requireAdmin(http.HandlerFunc(s.listVirtualGroups)))

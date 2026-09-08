@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -541,81 +542,100 @@ type modelView struct {
 	Origin                   string                           `json:"origin"`
 }
 
-func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
-	providerID := r.PathValue("id")
-	var input struct {
-		UpstreamModelID string             `json:"upstream_model_id"`
-		DisplayName     string             `json:"display_name"`
-		ContextLength   *int64             `json:"context_length"`
-		MaxOutputTokens *int64             `json:"max_output_tokens"`
-		NativeProtocol  providers.Protocol `json:"native_protocol"`
+// manualModelInput is the admin-supplied shape shared by the add and lookup
+// handlers. Empty/nil metadata fields mean "detect".
+type manualModelInput struct {
+	UpstreamModelID string             `json:"upstream_model_id"`
+	DisplayName     string             `json:"display_name"`
+	ContextLength   *int64             `json:"context_length"`
+	MaxOutputTokens *int64             `json:"max_output_tokens"`
+	NativeProtocol  providers.Protocol `json:"native_protocol"`
+}
+
+func (in *manualModelInput) normalizeAndValidate(w http.ResponseWriter) bool {
+	in.UpstreamModelID = strings.TrimSpace(in.UpstreamModelID)
+	in.DisplayName = strings.TrimSpace(in.DisplayName)
+	if in.UpstreamModelID == "" {
+		adminError(w, 400, "model_id_required", "An upstream model ID is required.")
+		return false
 	}
+	if len(in.UpstreamModelID) > 255 || strings.Contains(in.UpstreamModelID, "\x00") {
+		adminError(w, 400, "invalid_model_id", "The upstream model ID is invalid.")
+		return false
+	}
+	if in.ContextLength != nil && *in.ContextLength <= 0 || in.MaxOutputTokens != nil && *in.MaxOutputTokens <= 0 {
+		adminError(w, 400, "invalid_model_metadata", "Model metadata values must be positive.")
+		return false
+	}
+	if in.NativeProtocol != "" && in.NativeProtocol != providers.ProtocolChat && in.NativeProtocol != providers.ProtocolResponses && in.NativeProtocol != providers.ProtocolMessages {
+		adminError(w, 400, "invalid_protocol", "Unknown native protocol.")
+		return false
+	}
+	return true
+}
+
+func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
+	var input manualModelInput
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
 		return
 	}
-	input.UpstreamModelID = strings.TrimSpace(input.UpstreamModelID)
-	input.DisplayName = strings.TrimSpace(input.DisplayName)
-	if input.UpstreamModelID == "" {
-		adminError(w, 400, "model_id_required", "An upstream model ID is required.")
+	if !input.normalizeAndValidate(w) {
 		return
 	}
-	if len(input.UpstreamModelID) > 255 || strings.Contains(input.UpstreamModelID, "\x00") {
-		adminError(w, 400, "invalid_model_id", "The upstream model ID is invalid.")
-		return
-	}
-	if input.ContextLength != nil && *input.ContextLength <= 0 || input.MaxOutputTokens != nil && *input.MaxOutputTokens <= 0 {
-		adminError(w, 400, "invalid_model_metadata", "Model metadata values must be positive.")
-		return
-	}
-	if input.NativeProtocol != "" && input.NativeProtocol != providers.ProtocolChat && input.NativeProtocol != providers.ProtocolResponses && input.NativeProtocol != providers.ProtocolMessages {
-		adminError(w, 400, "invalid_protocol", "Unknown native protocol.")
-		return
-	}
-	var exists bool
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM providers WHERE id=?)`, providerID).Scan(&exists); err != nil {
-		adminError(w, 500, "database_error", "Could not check provider.")
-		return
-	}
-	if !exists {
-		adminError(w, 404, "not_found", "Provider not found.")
-		return
-	}
-	var modelID string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT id FROM provider_models WHERE provider_id=? AND upstream_model_id=?`, providerID, input.UpstreamModelID).Scan(&modelID); err == nil {
+	modelID, err := s.providers.AddManualModel(r.Context(), r.PathValue("id"), providers.ManualModelInput{
+		UpstreamModelID: input.UpstreamModelID,
+		DisplayName:     input.DisplayName,
+		ContextLength:   input.ContextLength,
+		MaxOutputTokens: input.MaxOutputTokens,
+		NativeProtocol:  input.NativeProtocol,
+	})
+	switch {
+	case errors.Is(err, providers.ErrManualModelExists):
 		adminError(w, 409, "model_exists", "That model already exists for this provider.")
 		return
-	} else if err != sql.ErrNoRows {
-		adminError(w, 500, "database_error", "Could not check model.")
+	case errors.Is(err, sql.ErrNoRows):
+		adminError(w, 404, "not_found", "Provider not found.")
 		return
-	}
-	modelID, err := id.New()
-	if err != nil {
-		adminError(w, 500, "internal_error", "Could not create model.")
-		return
-	}
-	now := database.Now()
-	displayName := input.DisplayName
-	if displayName == "" {
-		displayName = input.UpstreamModelID
-	}
-	_, err = s.db.SQL.ExecContext(r.Context(), `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,origin,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'manual',1,?,?,?,?)`, modelID, providerID, input.UpstreamModelID, displayName, input.ContextLength, input.MaxOutputTokens, nullableManualProtocol(input.NativeProtocol), now, now, now, now)
-	if err != nil {
+	case err != nil:
 		adminError(w, 500, "database_error", "Could not create model.")
-		return
-	}
-	if _, err = s.db.SQL.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT c.id,'real',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=?`, modelID, now, now, providerID); err != nil {
-		adminError(w, 500, "database_error", "Could not initialize model permissions.")
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": modelID})
 }
 
-func nullableManualProtocol(protocol providers.Protocol) any {
-	if protocol == "" {
+// lookupManualModel resolves metadata for a manual model without persisting it,
+// so the admin UI can preview detection results before saving. Live provider
+// discovery is tried first, then models.dev gap-fill.
+func (s *Server) lookupManualModel(w http.ResponseWriter, r *http.Request) {
+	upstreamID := strings.TrimSpace(r.URL.Query().Get("upstream_model_id"))
+	if upstreamID == "" || len(upstreamID) > 255 || strings.Contains(upstreamID, "\x00") {
+		adminError(w, 400, "model_id_required", "A valid upstream model ID is required.")
+		return
+	}
+	model, err := s.providers.ResolveManualModel(r.Context(), r.PathValue("id"), upstreamID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	case err != nil:
+		adminError(w, 500, "database_error", "Could not resolve model metadata.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"upstream_model_id": model.ID,
+		"display_name":      model.DisplayName,
+		"context_length":    positiveIntOrNil(model.ContextLength),
+		"max_output_tokens": positiveIntOrNil(model.MaxOutputTokens),
+		"native_protocol":   string(model.NativeProtocol),
+	})
+}
+
+func positiveIntOrNil(value int) any {
+	if value <= 0 {
 		return nil
 	}
-	return string(protocol)
+	return value
 }
 
 func (s *Server) deleteManualModel(w http.ResponseWriter, r *http.Request) {

@@ -161,8 +161,50 @@ async function deleteProvider(id) {
 async function disconnectProviderOAuth(id) { const provider = state.providers.find(item => item.id === id); if (!await confirmAction({ title: `Disconnect ${provider?.name || 'provider'}?`, copy: 'This removes the OAuth connection. Provider configuration, models, and routing are preserved.', action: 'Disconnect', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/providers/${id}/oauth`, { method: 'DELETE' }); flash('Provider disconnected.'); await loadProviders(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function deleteManualModel(id) { const model = state.models.find(item => item.id === id); if (!model || !await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'This manually-added model will be removed from the provider catalogue.', action: 'Delete model', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/models/${id}`, { method: 'DELETE' }); flash('Manual model deleted.'); await loadModels(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
-function manualModelFields() { const providers = state.providers.filter(item => item.enabled); return `<label>Provider <select name="provider_id" required>${providers.map(provider => `<option value="${h(provider.id)}">${h(provider.name)}</option>`).join('')}</select></label><label>Provider-native model ID <input name="upstream_model_id" required maxlength="255" placeholder="model-name"><small>Enter the exact model ID accepted by the provider.</small></label><label>Display name <input name="display_name" placeholder="Optional"></label><label>Context length <input name="context_length" type="number" min="1" placeholder="Optional"></label><label>Max output tokens <input name="max_output_tokens" type="number" min="1" placeholder="Optional"></label>`; }
-function openManualModel() { if (!state.providers.some(item => item.enabled)) { flash('Add an enabled provider before adding a model.', 'error'); return; } openEntity({ eyebrow: 'REAL MODEL', title: 'Add manual model', fields: manualModelFields(), submit: 'Add model', onSubmit: async form => { const values = new FormData(form); const number = name => values.get(name) ? Number(values.get(name)) : null; await api(`/api/admin/providers/${values.get('provider_id')}/models`, { method: 'POST', body: JSON.stringify({ upstream_model_id: values.get('upstream_model_id'), display_name: values.get('display_name'), context_length: number('context_length'), max_output_tokens: number('max_output_tokens') }) }); flash('Manual model added.'); await loadModels(); await loadClients(); } }); }
+function manualModelFields() {
+  const providers = state.providers.filter(item => item.enabled);
+  const protocols = ['', 'chat', 'responses', 'messages'];
+  return `<label>Provider <select name="provider_id" required>${providers.map(provider => `<option value="${h(provider.id)}">${h(provider.name)}</option>`).join('')}</select></label>
+    <label>Provider-native model ID <input name="upstream_model_id" required maxlength="255" placeholder="model-name"><small>Enter the exact model ID accepted by the provider.</small></label>
+    <div class="detect-row"><button type="button" class="btn btn-small btn-secondary" data-detect-model>Detect metadata</button><span class="meta-line">Fills from the provider, then models.dev. Blank fields are detected on save.</span></div>
+    <label>Display name <input name="display_name" placeholder="Optional"></label>
+    <label>Context length <input name="context_length" type="number" min="1" placeholder="Optional"></label>
+    <label>Max output tokens <input name="max_output_tokens" type="number" min="1" placeholder="Optional"></label>
+    <label>Native protocol <select name="native_protocol">${protocols.map(protocol => `<option value="${protocol}">${protocol || 'Provider default'}</option>`).join('')}</select><small>Leave as provider default unless the upstream surface is known.</small></label>`;
+}
+function openManualModel() {
+  if (!state.providers.some(item => item.enabled)) { flash('Add an enabled provider before adding a model.', 'error'); return; }
+  openEntity({
+    eyebrow: 'REAL MODEL', title: 'Add manual model', fields: manualModelFields(), submit: 'Add model',
+    onMount: form => {
+      const button = $('[data-detect-model]', form);
+      if (!button) return;
+      button.onclick = async () => {
+        const providerID = $('[name="provider_id"]', form).value;
+        const upstreamID = $('[name="upstream_model_id"]', form).value.trim();
+        $('#dialog-error').textContent = '';
+        if (!upstreamID) { $('#dialog-error').textContent = 'Enter the provider-native model ID first.'; return; }
+        button.disabled = true; const label = button.textContent; button.textContent = 'Detecting…';
+        try {
+          const result = await api(`/api/admin/providers/${providerID}/models/lookup?upstream_model_id=${encodeURIComponent(upstreamID)}`);
+          const set = (name, value) => { if (value) $('[name="' + name + '"]', form).value = value; };
+          set('display_name', result.display_name);
+          set('context_length', result.context_length);
+          set('max_output_tokens', result.max_output_tokens);
+          set('native_protocol', result.native_protocol);
+          if (!result.display_name && !result.context_length && !result.max_output_tokens && !result.native_protocol) $('#dialog-error').textContent = 'No metadata found; enter values manually or save to retry detection.';
+        } catch (error) { $('#dialog-error').textContent = errorMessage(error, 'Could not detect metadata.'); }
+        finally { button.disabled = false; button.textContent = label; }
+      };
+    },
+    onSubmit: async form => {
+      const values = new FormData(form);
+      const number = name => values.get(name) ? Number(values.get(name)) : null;
+      await api(`/api/admin/providers/${values.get('provider_id')}/models`, { method: 'POST', body: JSON.stringify({ upstream_model_id: values.get('upstream_model_id'), display_name: values.get('display_name'), context_length: number('context_length'), max_output_tokens: number('max_output_tokens'), native_protocol: values.get('native_protocol') }) });
+      flash('Manual model added.'); await loadModels(); await loadClients();
+    }
+  });
+}
 $('#add-real-model').onclick = openManualModel;
 async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, usage, providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage'), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.usage = usage; state.providers = providersResult.data; renderModels(); }
 function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 7 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
@@ -235,7 +277,7 @@ function renderModels() {
   const shown = state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
   $('#models-empty').hidden = shown.length > 0;
   const rows = applyModelSort(shown);
-  const html = rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button>${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}</div></td></tr>`).join('');
+  const html = rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
   $('#models-body').innerHTML = html;
   const head = $('#models-body').parentElement.querySelector('thead');
   if (head) {
