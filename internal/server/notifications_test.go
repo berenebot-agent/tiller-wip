@@ -642,6 +642,15 @@ func TestNotificationFailureDoesNotFailInference(t *testing.T) {
 	close(release)
 }
 
+func testNotificationCfg(t *testing.T, app *Server) database.NotificationSettings {
+	t.Helper()
+	cfg, err := app.db.GetNotificationSettings(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
 func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *database.DB, *httptest.Server) {
 	t.Helper()
 	webhook := httptest.NewServer(handler)
@@ -680,7 +689,7 @@ func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
 		app.notifyCooldownMu.Lock()
 		delete(app.notifyLastSent, key)
 		app.notifyCooldownMu.Unlock()
-		app.deliverNotification(eventFallback, payload)
+		app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
 		app.notifyCooldownMu.Lock()
 		_, recorded := app.notifyLastSent[key]
 		app.notifyCooldownMu.Unlock()
@@ -706,7 +715,7 @@ func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
 	key := eventFallback + "|" + payload.VirtualModel
 	status.Store(500)
-	app.deliverNotification(eventFallback, payload)
+	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
 	app.notifyCooldownMu.Lock()
 	_, sentAfterFailure := app.notifyLastSent[key]
 	_, reservedAfterFailure := app.notifyInFlight[key]
@@ -715,8 +724,8 @@ func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
 		t.Fatalf("failed delivery left state: sent=%v reserved=%v", sentAfterFailure, reservedAfterFailure)
 	}
 	status.Store(200)
-	app.deliverNotification(eventFallback, payload)
-	app.deliverNotification(eventFallback, payload)
+	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests = %d, want failed delivery retried once then cooldown suppression", got)
 	}
@@ -740,14 +749,20 @@ func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
 	}))
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
 	firstDone := make(chan struct{})
-	go func() { app.deliverNotification(eventFallback, payload); close(firstDone) }()
+	go func() {
+		app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+		close(firstDone)
+	}()
 	select {
 	case <-started:
 	case <-time.After(time.Second):
 		t.Fatal("first notification did not start")
 	}
 	secondDone := make(chan struct{})
-	go func() { app.deliverNotification(eventFallback, payload); close(secondDone) }()
+	go func() {
+		app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+		close(secondDone)
+	}()
 	select {
 	case <-secondDone:
 	case <-time.After(time.Second):
@@ -778,7 +793,7 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 	}
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
 	key := eventFallback + "|" + payload.VirtualModel
-	app.deliverNotification(eventFallback, payload)
+	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
 	app.notifyCooldownMu.Lock()
 	_, sentAfterTimeout := app.notifyLastSent[key]
 	_, reservedAfterTimeout := app.notifyInFlight[key]
@@ -788,7 +803,7 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 	}
 	phase.Store(1)
 	close(release)
-	app.deliverNotification(eventFallback, payload)
+	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests = %d, want timeout retry", got)
 	}

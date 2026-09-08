@@ -368,7 +368,10 @@ func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if t, ok := r.client.Transport.(*http.Transport); ok {
-		t.ResponseHeaderTimeout = d
+		clone := t.Clone()
+		clone.ResponseHeaderTimeout = d
+		r.client.Transport = clone
+		t.CloseIdleConnections()
 	}
 }
 
@@ -385,11 +388,19 @@ func (r *Registry) ResponseHeaderTimeout() time.Duration {
 	return 0
 }
 
-func (r *Registry) HTTPClient() *http.Client { return r.client }
+func (r *Registry) HTTPClient() *http.Client {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.client
+}
 
 // SetHTTPClient replaces the registry's HTTP client. Intended for tests that
 // need to route OAuth and upstream requests to mock servers.
-func (r *Registry) SetHTTPClient(client *http.Client) { r.client = client }
+func (r *Registry) SetHTTPClient(client *http.Client) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.client = client
+}
 
 func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, error) {
 	d, ok := Lookup(provider.Type)

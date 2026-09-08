@@ -44,7 +44,9 @@ protected as sensitive material.
 administrator enables the Detailed Error Logging setting, failed request bodies
 and provider error bodies are stored (bounded to 1 MiB). Activity exports
 containing those records must be treated as sensitive. The setting defaults to
-disabled and is presented with a warning in the admin UI.
+disabled and is presented with a warning in the admin UI. This is the documented
+exception to the AGENTS.md no-content guardrail, which is scoped to default
+logging.
 
 For questions that are not security reports, please use the project's normal
 public issue and discussion channels.

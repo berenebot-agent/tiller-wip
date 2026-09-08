@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -127,51 +128,79 @@ type NotificationSettings struct {
 // GetNotificationSettings reads the notification configuration, with sane
 // defaults if a key is missing or malformed.
 func (d *DB) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
+	return d.GetNotificationSettingsBatch(ctx)
+}
+
+func (d *DB) GetNotificationSettingsBatch(ctx context.Context) (NotificationSettings, error) {
 	ns := NotificationSettings{EventFallback: true, EventAllFailed: true, CooldownSeconds: 60, EventAdminLogin: true}
-	if v, e := d.GetBool(ctx, SettingNotificationsEnabled); e == nil {
-		ns.Enabled = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	keys := []string{SettingNotificationsEnabled, SettingNotificationsWebhookURL, SettingNotificationsEventFallback, SettingNotificationsEventAllFailed, SettingNotificationsAuthHeader, SettingNotificationsCooldownSeconds, SettingNotificationsEventClientKeyCreated, SettingNotificationsEventClientKeyDeleted, SettingNotificationsEventAdminLogin}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
+	rows, err := d.SQL.QueryContext(ctx, `SELECT key,value FROM settings WHERE key IN (`+placeholders+`)`, stringArgs(keys)...)
+	if err != nil {
+		return ns, err
 	}
-	if v, e := d.GetSetting(ctx, SettingNotificationsWebhookURL); e == nil {
-		ns.WebhookURL = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	defer rows.Close()
+	values := make(map[string]string, len(keys))
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return ns, err
+		}
+		values[key] = value
 	}
-	if v, e := d.GetBool(ctx, SettingNotificationsEventFallback); e == nil {
-		ns.EventFallback = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	if err := rows.Err(); err != nil {
+		return ns, err
 	}
-	if v, e := d.GetBool(ctx, SettingNotificationsEventAllFailed); e == nil {
-		ns.EventAllFailed = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	parseBool := func(key string, target *bool) error {
+		value, ok := values[key]
+		if !ok {
+			return nil
+		}
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return err
+		}
+		*target = parsed
+		return nil
 	}
-	if v, e := d.GetSetting(ctx, SettingNotificationsAuthHeader); e == nil {
-		ns.AuthHeader = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	if err := parseBool(SettingNotificationsEnabled, &ns.Enabled); err != nil {
+		return ns, err
 	}
-	if v, e := d.GetInt(ctx, SettingNotificationsCooldownSeconds); e == nil {
-		ns.CooldownSeconds = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	if value, ok := values[SettingNotificationsWebhookURL]; ok {
+		ns.WebhookURL = value
 	}
-	if v, e := d.GetBool(ctx, SettingNotificationsEventClientKeyCreated); e == nil {
-		ns.EventClientKeyCreated = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	if err := parseBool(SettingNotificationsEventFallback, &ns.EventFallback); err != nil {
+		return ns, err
 	}
-	if v, e := d.GetBool(ctx, SettingNotificationsEventClientKeyDeleted); e == nil {
-		ns.EventClientKeyDeleted = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	if err := parseBool(SettingNotificationsEventAllFailed, &ns.EventAllFailed); err != nil {
+		return ns, err
 	}
-	if v, e := d.GetBool(ctx, SettingNotificationsEventAdminLogin); e == nil {
-		ns.EventAdminLogin = v
-	} else if !errors.Is(e, sql.ErrNoRows) {
-		return ns, e
+	if value, ok := values[SettingNotificationsAuthHeader]; ok {
+		ns.AuthHeader = value
+	}
+	if value, ok := values[SettingNotificationsCooldownSeconds]; ok {
+		parsed, err := strconv.Atoi(value)
+		if err != nil {
+			return ns, err
+		}
+		ns.CooldownSeconds = parsed
+	}
+	if err := parseBool(SettingNotificationsEventClientKeyCreated, &ns.EventClientKeyCreated); err != nil {
+		return ns, err
+	}
+	if err := parseBool(SettingNotificationsEventClientKeyDeleted, &ns.EventClientKeyDeleted); err != nil {
+		return ns, err
+	}
+	if err := parseBool(SettingNotificationsEventAdminLogin, &ns.EventAdminLogin); err != nil {
+		return ns, err
 	}
 	return ns, nil
+}
+
+func stringArgs(values []string) []any {
+	args := make([]any, len(values))
+	for i, value := range values {
+		args[i] = value
+	}
+	return args
 }

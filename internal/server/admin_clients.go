@@ -423,20 +423,29 @@ func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load permissions.")
 		return
 	}
+	var realGroups []permissionGroup
 	for realRows.Next() {
 		var g permissionGroup
 		var feeder int
 		g.Kind = "real"
-		if realRows.Scan(&g.ID, &g.Name, &feeder) != nil {
+		if err := realRows.Scan(&g.ID, &g.Name, &feeder); err != nil {
 			realRows.Close()
 			adminError(w, 500, "database_error", "Could not load permissions.")
 			return
 		}
 		g.NewModelsEnabled = scanBool(feeder)
 		g.Models = []permissionModel{}
-		rows, e := s.db.SQL.QueryContext(r.Context(), `SELECT m.id,p.name||'/'||m.upstream_model_id,coalesce(x.enabled,0),m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='real' AND x.model_id=m.id WHERE m.provider_id=? ORDER BY m.upstream_model_id`, clientID, g.ID)
-		if e != nil {
-			realRows.Close()
+		realGroups = append(realGroups, g)
+	}
+	if err := realRows.Err(); err != nil {
+		realRows.Close()
+		adminError(w, 500, "database_error", "Could not load permissions.")
+		return
+	}
+	realRows.Close()
+	for _, g := range realGroups {
+		rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT m.id,p.name||'/'||m.upstream_model_id,coalesce(x.enabled,0),m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='real' AND x.model_id=m.id WHERE m.provider_id=? ORDER BY m.upstream_model_id`, clientID, g.ID)
+		if err != nil {
 			adminError(w, 500, "database_error", "Could not load permissions.")
 			return
 		}
@@ -444,41 +453,75 @@ func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 			var m permissionModel
 			var enabled, available int
 			m.Kind = "real"
-			_ = rows.Scan(&m.ID, &m.CanonicalModelID, &enabled, &available)
+			if err := rows.Scan(&m.ID, &m.CanonicalModelID, &enabled, &available); err != nil {
+				rows.Close()
+				adminError(w, 500, "database_error", "Could not load permissions.")
+				return
+			}
 			m.Enabled = scanBool(enabled)
 			m.Available = scanBool(available)
 			g.Models = append(g.Models, m)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			adminError(w, 500, "database_error", "Could not load permissions.")
+			return
+		}
 		rows.Close()
 		groups = append(groups, g)
 	}
-	realRows.Close()
 	virtualRows, err := s.db.SQL.QueryContext(r.Context(), `SELECT g.id,g.name,coalesce(d.new_models_enabled,0) FROM virtual_provider_groups g LEFT JOIN client_group_defaults d ON d.client_key_id=? AND d.group_kind='virtual' AND d.group_id=g.id ORDER BY g.name`, clientID)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load permissions.")
 		return
 	}
+	var virtualGroups []permissionGroup
 	for virtualRows.Next() {
 		var g permissionGroup
 		var feeder int
 		g.Kind = "virtual"
-		_ = virtualRows.Scan(&g.ID, &g.Name, &feeder)
+		if err := virtualRows.Scan(&g.ID, &g.Name, &feeder); err != nil {
+			virtualRows.Close()
+			adminError(w, 500, "database_error", "Could not load permissions.")
+			return
+		}
 		g.NewModelsEnabled = scanBool(feeder)
 		g.Models = []permissionModel{}
-		rows, _ := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id WHERE v.virtual_group_id=? ORDER BY v.name`, clientID, g.ID)
+		virtualGroups = append(virtualGroups, g)
+	}
+	if err := virtualRows.Err(); err != nil {
+		virtualRows.Close()
+		adminError(w, 500, "database_error", "Could not load permissions.")
+		return
+	}
+	virtualRows.Close()
+	for _, g := range virtualGroups {
+		rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id WHERE v.virtual_group_id=? ORDER BY v.name`, clientID, g.ID)
+		if err != nil {
+			adminError(w, 500, "database_error", "Could not load permissions.")
+			return
+		}
 		for rows.Next() {
 			var m permissionModel
 			var enabled, available int
 			m.Kind = "virtual"
-			_ = rows.Scan(&m.ID, &m.CanonicalModelID, &enabled, &available)
+			if err := rows.Scan(&m.ID, &m.CanonicalModelID, &enabled, &available); err != nil {
+				rows.Close()
+				adminError(w, 500, "database_error", "Could not load permissions.")
+				return
+			}
 			m.Enabled = scanBool(enabled)
 			m.Available = scanBool(available)
 			g.Models = append(g.Models, m)
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			adminError(w, 500, "database_error", "Could not load permissions.")
+			return
+		}
 		rows.Close()
 		groups = append(groups, g)
 	}
-	virtualRows.Close()
 	writeJSON(w, 200, map[string]any{"client_key_id": clientID, "groups": groups, "feeder_explanation": "Controls whether models discovered or created in future are enabled for this client. Changing it never alters existing model permissions."})
 }
 

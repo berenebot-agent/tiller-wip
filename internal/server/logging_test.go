@@ -410,11 +410,12 @@ func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
 	}
 }
 
-func TestProviderErrorMessageAndBodyArePassedThroughToClientButNotLogged(t *testing.T) {
-	// Direct (non-virtual, non-translated) routes pass through the
-	// provider's structured error body to the originating client so it
-	// sees the provider's error shape. The body is bounded and never
-	// stored in the activity log (privacy guardrail).
+func TestProviderErrorMessageAndBodyAreNotPassedThroughToClient(t *testing.T) {
+	// Direct (non-virtual, non-translated) routes return a fixed router-owned
+	// error rather than passing the provider's structured error body through,
+	// so a provider that echoes its received authorization header cannot leak
+	// the shared upstream credential to a less-privileged client. The body is
+	// never stored in the activity log (privacy guardrail).
 	const marker = "PROVIDER-ERROR-SECRET-MARKER"
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -430,8 +431,8 @@ func TestProviderErrorMessageAndBodyArePassedThroughToClientButNotLogged(t *test
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("provider error status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
 	}
-	if !strings.Contains(string(mustJSON(t, payload)), marker) {
-		t.Fatalf("provider error was not passed through to client: %v", payload)
+	if strings.Contains(string(mustJSON(t, payload)), marker) {
+		t.Fatalf("provider error body was passed through to client: %v", payload)
 	}
 	reqID := resp.Header.Get("X-Tiller-Request-Id")
 

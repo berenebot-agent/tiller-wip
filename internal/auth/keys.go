@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -141,6 +143,8 @@ type ClientAuthenticator struct {
 	hasher  SecretHasher
 	mu      sync.Mutex
 	entries map[[32]byte]cacheEntry
+	sem     chan struct{}
+	rev     uint64
 }
 
 // NewClientAuthenticatorWithHasher constructs a ClientAuthenticator with the
@@ -153,7 +157,7 @@ func NewClientAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) (*ClientA
 	if hasher == nil {
 		hasher = Argon2Hasher{}
 	}
-	return &ClientAuthenticator{db: db, key: key, ttl: 30 * time.Second, hasher: hasher, entries: make(map[[32]byte]cacheEntry)}, nil
+	return &ClientAuthenticator{db: db, key: key, ttl: 30 * time.Second, hasher: hasher, entries: make(map[[32]byte]cacheEntry), sem: make(chan struct{}, 4)}, nil
 }
 
 // NewClientAuthenticator constructs a ClientAuthenticator using the production
@@ -163,9 +167,14 @@ func NewClientAuthenticator(db *sql.DB) (*ClientAuthenticator, error) {
 }
 
 func (a *ClientAuthenticator) Authenticate(raw string) (ClientIdentity, bool) {
+	identity, ok, _ := a.AuthenticateContext(context.Background(), raw)
+	return identity, ok
+}
+
+func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw string) (ClientIdentity, bool, bool) {
 	selector, secret, ok := ParseKey(raw)
 	if !ok {
-		return ClientIdentity{}, false
+		return ClientIdentity{}, false, true
 	}
 	cacheKey := a.cacheKey(raw)
 	now := time.Now()
@@ -173,29 +182,43 @@ func (a *ClientAuthenticator) Authenticate(raw string) (ClientIdentity, bool) {
 	entry, found := a.entries[cacheKey]
 	if found && now.Before(entry.expires) {
 		a.mu.Unlock()
-		return entry.identity, entry.identity.Enabled
+		return entry.identity, entry.identity.Enabled, true
 	}
 	if found {
 		delete(a.entries, cacheKey)
 	}
 	a.mu.Unlock()
 
+	select {
+	case a.sem <- struct{}{}:
+	case <-ctx.Done():
+		return ClientIdentity{}, false, false
+	default:
+		return ClientIdentity{}, false, false
+	}
+	defer func() { <-a.sem }()
+
+	generation := atomic.LoadUint64(&a.rev)
 	var identity ClientIdentity
 	var hash string
-	err := a.db.QueryRow(`SELECT id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).
+	err := a.db.QueryRowContext(ctx, `SELECT id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).
 		Scan(&identity.ID, &identity.Name, &identity.Enabled, &hash)
 	if err != nil || !identity.Enabled || !a.hasher.Verify(secret, hash) {
-		return ClientIdentity{}, false
+		return ClientIdentity{}, false, true
 	}
 	a.mu.Lock()
+	defer a.mu.Unlock()
+	if atomic.LoadUint64(&a.rev) != generation {
+		return ClientIdentity{}, false, true
+	}
 	a.entries[cacheKey] = cacheEntry{identity: identity, expires: now.Add(a.ttl)}
-	a.mu.Unlock()
-	return identity, true
+	return identity, true, true
 }
 
 func (a *ClientAuthenticator) Invalidate(clientID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	atomic.AddUint64(&a.rev, 1)
 	for key, entry := range a.entries {
 		if entry.identity.ID == clientID {
 			delete(a.entries, key)
@@ -250,6 +273,7 @@ type SessionStore struct {
 	hasher SecretHasher
 	mu     sync.Mutex
 	cache  map[string]sessionCacheEntry
+	rev    uint64
 }
 
 // NewSessionStoreWithHasher constructs a SessionStore with the given hasher.
@@ -353,6 +377,7 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		delete(s.cache, selector)
 	}
 	s.mu.Unlock()
+	generation := atomic.LoadUint64(&s.rev)
 
 	var csrfToken, tokenHash, expiresAt string
 	err := s.db.QueryRow(`SELECT csrf_token, token_hash, expires_at FROM admin_sessions WHERE id=?`, selector).Scan(&csrfToken, &tokenHash, &expiresAt)
@@ -371,8 +396,11 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	}
 	session := Session{CSRFToken: csrfToken, ExpiresAt: exp}
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if atomic.LoadUint64(&s.rev) != generation {
+		return Session{}, false
+	}
 	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(sessionCacheTTL), secretHash: sha256.Sum256([]byte(secret))}
-	s.mu.Unlock()
 	return session, true
 }
 
@@ -402,6 +430,7 @@ func (s *SessionStore) Delete(token string) {
 	}
 	_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
 	s.mu.Lock()
+	atomic.AddUint64(&s.rev, 1)
 	delete(s.cache, selector)
 	s.mu.Unlock()
 }
@@ -414,6 +443,7 @@ func (s *SessionStore) CheckCSRF(session Session, token string) bool {
 func (s *SessionStore) InvalidateAll() error {
 	_, err := s.db.Exec(`DELETE FROM admin_sessions`)
 	s.mu.Lock()
+	atomic.AddUint64(&s.rev, 1)
 	s.cache = make(map[string]sessionCacheEntry)
 	s.mu.Unlock()
 	return err

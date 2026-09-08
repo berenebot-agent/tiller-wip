@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
@@ -62,15 +63,7 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 			_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT `+conservativeMin("m.context_length")+`,`+conservativeMin("m.max_output_tokens")+`,`+triStateAND("m.supports_tools")+`,`+triStateAND("m.supports_vision")+`,`+triStateAND("m.supports_reasoning")+`,`+triStateAND("m.supports_structured_output")+` FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1`, virtualID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput)
 			reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID)
 		}
-		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
-		if contextLength.Valid && contextLength.Int64 > 0 {
-			entry["context_length"] = contextLength.Int64
-		}
-		if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
-			entry["max_output_tokens"] = maxOutputTokens.Int64
-		}
-		caps.addTo(entry)
-		addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
+		entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
 		return
 	}
@@ -83,31 +76,66 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
-	defer rows.Close()
-	data := []map[string]any{}
+	type catalogueRow struct {
+		modelID                        string
+		contextLength, maxOutputTokens sql.NullInt64
+		caps                           modelCapabilities
+		reasoningRaw, virtualID        sql.NullString
+	}
+	catalogueRows := []catalogueRow{}
 	for rows.Next() {
-		var modelID string
-		var contextLength sql.NullInt64
-		var maxOutputTokens sql.NullInt64
-		var caps modelCapabilities
-		var reasoningRaw sql.NullString
-		var virtualID sql.NullString
-		if rows.Scan(&modelID, &contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw, &virtualID) == nil {
-			entry := map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"}
-			if contextLength.Valid && contextLength.Int64 > 0 {
-				entry["context_length"] = contextLength.Int64
-			}
-			if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
-				entry["max_output_tokens"] = maxOutputTokens.Int64
-			}
-			caps.addTo(entry)
-			reasoningCaps := decodeReasoningCapabilities(reasoningRaw)
-			if virtualID.Valid && reasoningCaps == nil {
-				reasoningCaps = s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID.String)
-			}
-			addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
-			data = append(data, entry)
+		var row catalogueRow
+		if err := rows.Scan(&row.modelID, &row.contextLength, &row.maxOutputTokens, &row.caps.Tools, &row.caps.Vision, &row.caps.Reasoning, &row.caps.StructuredOutput, &row.reasoningRaw, &row.virtualID); err == nil {
+			catalogueRows = append(catalogueRows, row)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+		return
+	}
+	if err := rows.Close(); err != nil {
+		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+		return
+	}
+	reasoning := map[string]*providers.ReasoningCapabilities{}
+	virtualIDs := make([]string, 0)
+	for _, row := range catalogueRows {
+		if row.virtualID.Valid {
+			virtualIDs = append(virtualIDs, row.virtualID.String)
+		}
+	}
+	if len(virtualIDs) > 0 {
+		placeholders := strings.TrimRight(strings.Repeat("?,", len(virtualIDs)), ",")
+		reasoningRows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.virtual_model_id,m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id IN (`+placeholders+`) AND t.enabled=1 AND m.available=1 AND p.enabled=1`, stringSliceToAny(virtualIDs)...)
+		if err != nil {
+			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+			return
+		}
+		for reasoningRows.Next() {
+			var virtualID string
+			var raw sql.NullString
+			if err := reasoningRows.Scan(&virtualID, &raw); err == nil {
+				reasoning[virtualID] = mergeReasoningCapabilities(reasoning[virtualID], decodeReasoningCapabilities(raw))
+			}
+		}
+		if err := reasoningRows.Err(); err != nil {
+			reasoningRows.Close()
+			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+			return
+		}
+		if err := reasoningRows.Close(); err != nil {
+			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+			return
+		}
+	}
+	data := []map[string]any{}
+	for _, row := range catalogueRows {
+		reasoningCaps := decodeReasoningCapabilities(row.reasoningRaw)
+		if row.virtualID.Valid && reasoningCaps == nil {
+			reasoningCaps = reasoning[row.virtualID.String]
+		}
+		data = append(data, buildCatalogueEntry(row.modelID, row.contextLength, row.maxOutputTokens, row.caps, reasoningCaps, anthropic))
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
@@ -141,15 +169,7 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 			inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 			return
 		}
-		entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
-		if contextLength.Valid && contextLength.Int64 > 0 {
-			entry["context_length"] = contextLength.Int64
-		}
-		if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
-			entry["max_output_tokens"] = maxOutputTokens.Int64
-		}
-		caps.addTo(entry)
-		addReasoningToCatalogueEntry(entry, decodeReasoningCapabilities(reasoningRaw), isAnthropicRequest(r))
+		entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, decodeReasoningCapabilities(reasoningRaw), isAnthropicRequest(r))
 		writeJSON(w, 200, entry)
 		return
 	}
@@ -157,15 +177,7 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 		return
 	}
-	entry := map[string]any{"id": modelName, "object": "model", "created": 0, "owned_by": "tiller-router"}
-	if contextLength.Valid && contextLength.Int64 > 0 {
-		entry["context_length"] = contextLength.Int64
-	}
-	if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
-		entry["max_output_tokens"] = maxOutputTokens.Int64
-	}
-	caps.addTo(entry)
-	addReasoningToCatalogueEntry(entry, s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID), isAnthropicRequest(r))
+	entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, s.aggregateVirtualReasoningCapabilities(r.Context(), virtualID), isAnthropicRequest(r))
 	writeJSON(w, 200, entry)
 }
 
@@ -271,7 +283,31 @@ func (s *Server) aggregateVirtualReasoningCapabilities(ctx context.Context, virt
 			merged = mergeReasoningCapabilities(merged, decodeReasoningCapabilities(raw))
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return nil
+	}
 	return merged
+}
+
+func stringSliceToAny(values []string) []any {
+	args := make([]any, len(values))
+	for i, value := range values {
+		args[i] = value
+	}
+	return args
+}
+
+func buildCatalogueEntry(modelID string, contextLength, maxOutputTokens sql.NullInt64, caps modelCapabilities, reasoningCaps *providers.ReasoningCapabilities, anthropic bool) map[string]any {
+	entry := map[string]any{"id": modelID, "object": "model", "created": 0, "owned_by": "tiller-router"}
+	if contextLength.Valid && contextLength.Int64 > 0 {
+		entry["context_length"] = contextLength.Int64
+	}
+	if maxOutputTokens.Valid && maxOutputTokens.Int64 > 0 {
+		entry["max_output_tokens"] = maxOutputTokens.Int64
+	}
+	caps.addTo(entry)
+	addReasoningToCatalogueEntry(entry, reasoningCaps, anthropic)
+	return entry
 }
 
 // modelCapabilities holds the tri-state capability flags for a model. A flag is
@@ -551,7 +587,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		candidates = route.Targets
 	}
 	var resp *http.Response
+	var selected resolvedRoute
 	var target providers.Protocol
+	var idle *time.Timer
+	var attemptTimedOut atomic.Bool
 	var translated bool
 	var cancel context.CancelFunc
 	protocolUnavailable := false
@@ -767,7 +806,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
+			attemptTimedOut.Store(false)
+			idle = time.AfterFunc(idleTimeout, func() {
+				attemptTimedOut.Store(true)
+				attemptCancel()
+			})
+			idleBody := response.Body
+			response.Body = bufferedReadCloser{Reader: &idleReader{reader: idleBody, timer: idle}, closer: idleBody}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
+				idle.Stop()
 				if route.Virtual {
 					s.inflight.targetEnd(route.RouteModelID, targetID)
 				}
@@ -781,11 +828,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
 				}
 				response.Body.Close()
+				idle.Stop()
 				attemptCancel()
+				if attemptTimedOut.Load() {
+					class = "upstream_timeout"
+				}
 				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
 				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 					attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
 				}
+				idle.Stop()
 				row.attempts = append(row.attempts, attempt)
 				nonTranslationFailure = true
 				// Stale-auth recovery: on 401/403 from an OAuth provider, force a
@@ -835,22 +887,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
-					// Direct (non-virtual, non-translated) routes pass through
-					// the provider's structured error body verbatim so the
-					// client sees the provider's error shape. The body is
-					// bounded and never persisted.
-					if upstreamErrorReadErr == nil && !translated && len(upstreamErrorBody) > 0 && int64(len(upstreamErrorBody)) <= maxUpstreamErrorBytes {
-						copySafeResponseHeaders(w.Header(), response.Header)
-						w.Header().Set("Content-Type", "application/json; charset=utf-8")
-						w.Header().Set("X-Content-Type-Options", "nosniff")
-						upstreamErrorBody = rewriteModelBytes(upstreamErrorBody, route.UpstreamModelID, route.RequestedModel)
-						if route.UpstreamModelID != route.RequestedModel {
-							upstreamErrorBody = bytes.ReplaceAll(upstreamErrorBody, []byte(route.UpstreamModelID), []byte(route.RequestedModel))
-						}
-						w.WriteHeader(response.StatusCode)
-						_, _ = w.Write(upstreamErrorBody)
-						return
-					}
 					inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
 					return
 				}
@@ -863,9 +899,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					s.inflight.targetEnd(route.RouteModelID, targetID)
 				}
 				response.Body.Close()
+				idle.Stop()
 				attemptCancel()
 				class := "upstream_read_error"
 				message := "The upstream provider could not complete the request."
+				if attemptTimedOut.Load() {
+					class = "upstream_timeout"
+				}
 				if errors.Is(e, errUpstreamResponseTooLarge) {
 					class = "upstream_response_too_large"
 					message = "The upstream provider response exceeded Tiller's non-streaming response limit."
@@ -889,15 +929,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
-			route, resp, cancel = candidate, response, attemptCancel
-			if route.Virtual {
+			selected, resp, cancel = candidate, response, attemptCancel
+			if selected.Virtual {
 				activeTargetID = targetID
 			}
-			row.attempts = append(row.attempts, requestAttempt{providerModelID: route.ProviderModelID, provider: route.Provider.Name, model: route.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
+			row.attempts = append(row.attempts, requestAttempt{providerModelID: selected.ProviderModelID, provider: selected.Provider.Name, model: selected.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 			allAttemptedFailed = false
 			success = true
-			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && candidate.ProviderModelID != "" {
-				s.cooldown.remove(candidate.ProviderModelID)
+			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && selected.ProviderModelID != "" {
+				s.cooldown.remove(selected.ProviderModelID)
 			}
 			goto routeDone
 		}
@@ -953,9 +993,9 @@ routeDone:
 		return
 	}
 	defer cancel()
-	row.resolvedProvider = &route.Provider.Name
-	row.resolvedModel = &route.UpstreamModelID
-	s.inflight.clientResolved(row.clientKeyID, route.Provider.Name+"/"+route.UpstreamModelID)
+	row.resolvedProvider = &selected.Provider.Name
+	row.resolvedModel = &selected.UpstreamModelID
+	s.inflight.clientResolved(row.clientKeyID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
 	if v := resp.Header.Get("Request-Id"); v != "" {
@@ -963,17 +1003,9 @@ routeDone:
 	} else if v := resp.Header.Get("X-Request-Id"); v != "" {
 		row.providerRequestID = &v
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		row.httpStatus = resp.StatusCode
-		row.errorText = strPtr(fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode))
-		row.errorMessage = strPtr(fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode))
-		inferenceError(w, resp.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", resp.StatusCode), incoming == providers.ProtocolMessages)
-		return
-	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	idle := time.AfterFunc(idleTimeout, cancel)
 	defer idle.Stop()
-	reader := &idleReader{reader: resp.Body, timer: idle}
+	reader := resp.Body
 	usage := &usageCapture{}
 	if translated {
 		if isStreamingResponse(resp) {
@@ -986,7 +1018,11 @@ routeDone:
 		}
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
-		if err := translateResponse(w, reader, incoming, target, route, usage); err != nil {
+		if err := translateResponse(w, reader, incoming, target, selected, usage); err != nil {
+			idle.Stop()
+			row.httpStatus = 502
+			row.errorText = strPtr("translation_error")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("translation_error"))
 			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
 		}
 		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
@@ -1002,7 +1038,7 @@ routeDone:
 		s.inflight.clientStreaming(row.clientKeyID)
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
-		rewriteSSE(w, reader, route.UpstreamModelID, route.RequestedModel, usage)
+		rewriteSSE(w, reader, selected.UpstreamModelID, selected.RequestedModel, usage)
 		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
 		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 		return
@@ -1314,7 +1350,19 @@ func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, 
 	reader := bufio.NewReader(r)
 	flusher, _ := w.(http.Flusher)
 	for {
-		line, err := reader.ReadBytes('\n')
+		var line []byte
+		var err error
+		for {
+			var fragment []byte
+			fragment, err = reader.ReadSlice('\n')
+			line = append(line, fragment...)
+			if len(line) > maxSSELineBytes {
+				return
+			}
+			if err != bufio.ErrBufferFull {
+				break
+			}
+		}
 		if len(line) > 0 {
 			done := false
 			trim := bytes.TrimSpace(line)
