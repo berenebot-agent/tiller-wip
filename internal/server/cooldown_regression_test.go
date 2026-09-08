@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -321,5 +322,104 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 	}
 	if countA < 2 {
 		t.Fatalf("model A must still be attempted after a cancelled request, hits=%v", got)
+	}
+}
+
+// TestCooldownClientCancelDuringBodyReadDoesNotCool covers the failure that
+// motivated the client-cancellation guard on the preflight body-read path: an
+// upstream returned 2xx headers, then the client cancelled while Tiller was
+// reading the response body. That read error is self-inflicted and must not
+// cool an otherwise healthy target (regression: gpt-5.6-luna cooled for 5m).
+func TestCooldownClientCancelDuringBodyReadDoesNotCool(t *testing.T) {
+	var mu sync.Mutex
+	reached := []string{}
+	bodyStarted := make(chan struct{}, 1)
+	var calls int32
+	blockA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		n := atomic.AddInt32(&calls, 1)
+		mu.Lock()
+		reached = append(reached, "a")
+		mu.Unlock()
+		if n > 1 {
+			http.Error(w, "fail", 500)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		select {
+		case bodyStarted <- struct{}{}:
+		default:
+		}
+		// Park the response body until the client (Tiller) goes away, so the
+		// router is inside preflightResponseLimit's body read on cancel.
+		<-r.Context().Done()
+	})
+	okB := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-b"}}})
+			return
+		}
+		mu.Lock()
+		reached = append(reached, "b")
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
+	})
+	api, secret, canonical, app := cooldownTestHarness(t, blockA, okB)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	body, _ := json.Marshal(map[string]any{"model": canonical, "messages": []any{}})
+	req, _ := http.NewRequestWithContext(ctx, "POST", api.base+"/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/json")
+	done := make(chan struct{})
+	go func() {
+		resp, _ := http.DefaultClient.Do(req)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		close(done)
+	}()
+	select {
+	case <-bodyStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream A never produced response headers")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancelled request did not return")
+	}
+
+	var modelA string
+	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
+		t.Fatalf("lookup model-a: %v", err)
+	}
+	if app.cooldown.cooled(modelA, time.Now()) {
+		t.Fatal("client cancellation during body read must not globally cool model A")
+	}
+
+	resp2, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{}})
+	if resp2.StatusCode != 200 {
+		t.Fatalf("subsequent normal request should succeed via B after non-cooling cancel, got %d", resp2.StatusCode)
+	}
+	mu.Lock()
+	got := append([]string(nil), reached...)
+	mu.Unlock()
+	countA := 0
+	for _, g := range got {
+		if g == "a" {
+			countA++
+		}
+	}
+	if countA < 2 {
+		t.Fatalf("model A must still be attempted after a cancelled body read, hits=%v", got)
 	}
 }
