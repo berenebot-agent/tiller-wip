@@ -88,6 +88,23 @@ func (c *cooldownStore) remove(id string) {
 	delete(c.until, id)
 }
 
+// removeByName deletes any cooldown entry matching the given provider/model
+// names. The store is keyed by provider_model_id but the admin UI addresses
+// targets by names, so this does a linear match like statusByName. It reports
+// whether an entry was actually removed.
+func (c *cooldownStore) removeByName(provider, model string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	removed := false
+	for id, e := range c.until {
+		if e.provider == provider && e.model == model {
+			delete(c.until, id)
+			removed = true
+		}
+	}
+	return removed
+}
+
 // cooldownView is the per-target cooldown state surfaced to the admin/live UI.
 type cooldownView struct {
 	ProviderModelID    string `json:"provider_model_id"`
@@ -161,4 +178,19 @@ func (s *Server) cooldownStatus(w http.ResponseWriter, r *http.Request) {
 		"origin_error_class":   entry.originErrorClass,
 		"origin_error_message": entry.originErrorMessage,
 	})
+}
+
+// clearCooldown manually removes the cooldown window for the provider/model
+// given as ?provider=<name>&model=<upstream>, so an admin can immediately
+// re-allow a target that is still cooling. It is a no-op (204) when the target
+// is not currently in cooldown.
+func (s *Server) clearCooldown(w http.ResponseWriter, r *http.Request) {
+	provider := r.URL.Query().Get("provider")
+	model := r.URL.Query().Get("model")
+	if provider == "" || model == "" {
+		adminError(w, http.StatusBadRequest, "invalid_request", "provider and model query parameters are required.")
+		return
+	}
+	s.cooldown.removeByName(provider, model)
+	w.WriteHeader(http.StatusNoContent)
 }
