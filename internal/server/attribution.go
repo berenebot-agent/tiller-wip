@@ -29,7 +29,11 @@ func virtualAttributionJoin() string {
 
 // realAttribution returns the SQL predicate + args that match rows that
 // resolved to a real model. Current rows use the stable route ID; names keep
-// legacy rows and virtual-routed requests visible.
+// legacy rows and virtual-routed requests visible. A virtual row that never
+// resolved (its fallback chain failed before any success) still belongs to
+// every target it actually attempted, so failed request_attempts are matched
+// too — otherwise the very request that opened a target's cooldown is missing
+// from that target's activity. Callers must alias request_logs as "rl".
 func realAttribution(modelID, provider, upstream string) (string, []any) {
-	return `((route_kind='real' AND route_model_id=?) OR (route_kind='virtual' AND resolved_provider=? AND resolved_model=?) OR (route_status='legacy' AND route_kind IS NULL AND resolved_provider=? AND resolved_model=?))`, []any{modelID, provider, upstream, provider, upstream}
+	return `((rl.route_kind='real' AND rl.route_model_id=?) OR (rl.route_kind='virtual' AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_status='legacy' AND rl.route_kind IS NULL AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_kind='virtual' AND EXISTS (SELECT 1 FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.provider=? AND ra.model=? AND ra.result='failed')))`, []any{modelID, provider, upstream, provider, upstream, provider, upstream}
 }

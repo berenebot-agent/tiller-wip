@@ -852,8 +852,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					return
 				}
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
-					failedAt := time.Now()
-					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
+					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
 				}
 				if !route.Virtual {
 					row.httpStatus = 502
@@ -933,8 +932,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// virtual routes and direct real-model routes never populate the
 				// shared cooldown state.
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
-					failedAt := time.Now()
-					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage("upstream_error"))
+					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage("upstream_error"))
 				}
 				// An upstream HTTP response is an upstream failure regardless of
 				// status. Ordered virtual routes try their next target by default;
@@ -976,8 +974,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// self-inflicted, not evidence the target is unhealthy: never
 				// cool it. Mirrors the network-error path above.
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
-					failedAt := time.Now()
-					s.cooldown.set(candidate.ProviderModelID, failedAt, failedAt.Add(time.Duration(cooldownSeconds)*time.Second), candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, fixedUpstreamErrorMessage(class))
+					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
 				}
 				nonTranslationFailure = true
 				row.attempts[len(row.attempts)-1].errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1528,6 +1525,23 @@ func rewriteModel(value any, upstream, requested string) {
 	}
 }
 
+// openCooldown records a fallback cooldown for the target and logs the
+// transition so operators can see a target leave rotation and why.
+func (s *Server) openCooldown(candidate resolvedRoute, class string, row *logRow, cooldownSeconds int, message string) {
+	failedAt := time.Now()
+	until := failedAt.Add(time.Duration(cooldownSeconds) * time.Second)
+	s.cooldown.set(candidate.ProviderModelID, failedAt, until, candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, message)
+	if s.logger != nil {
+		s.logger.Warn("target cooled down",
+			"provider", candidate.Provider.Name,
+			"model", candidate.UpstreamModelID,
+			"failure_class", class,
+			"until", until.Format(time.RFC3339Nano),
+			"origin_request_id", row.clientRequestID,
+		)
+	}
+}
+
 func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 	if s.logger == nil {
 		return
@@ -1548,7 +1562,23 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 	}
 	if attempt.result == "failed" {
 		s.logger.Warn("provider request failed", attrs...)
-	} else {
-		s.logger.Debug("provider request skipped", attrs...)
+		return
 	}
+	if attempt.failureClass == "cooldown" {
+		// A cooldown skip is not an error, but it is operationally important:
+		// log it at Info (visible at the default level) with the origin of the
+		// failure that opened the cooldown so the skip explains itself.
+		if s.cooldown != nil {
+			if entry, ok := s.cooldown.statusByName(attempt.provider, attempt.model, time.Now()); ok {
+				attrs = append(attrs,
+					"cooldown_origin_request_id", entry.originRequestLogID,
+					"cooldown_origin_error_class", entry.originErrorClass,
+					"cooldown_until", entry.until.Format(time.RFC3339Nano),
+				)
+			}
+		}
+		s.logger.Info("provider request skipped", attrs...)
+		return
+	}
+	s.logger.Debug("provider request skipped", attrs...)
 }
