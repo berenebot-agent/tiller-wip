@@ -218,7 +218,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	// available=1 / last_seen_at. Previously this was O(N) INSERT-or-UPDATE
 	// statements inside the transaction.
 	if len(unique) > 0 {
-		const upsertColumns = 18
+		const upsertColumns = 19
 		const upsertBatchRows = 50
 		for start := 0; start < len(unique); start += upsertBatchRows {
 			end := start + upsertBatchRows
@@ -229,7 +229,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 			args := make([]any, 0, (end-start)*upsertColumns)
 			for i := start; i < end; i++ {
 				model := unique[i]
-				placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
+				placeholders = append(placeholders, "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)")
 				args = append(args,
 					ids[i], providerID, model.ID, model.DisplayName,
 					nullableInt(model.ContextLength), nullableInt(model.MaxOutputTokens),
@@ -238,10 +238,10 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 					nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
 					nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
 					nullableReasoningCapabilities(model.ReasoningCapabilities),
-					now, now, now, now,
+					"discovered", now, now, now, now,
 				)
 			}
-			stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
+			stmt := `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,origin,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES ` +
 				strings.Join(placeholders, ",") + `
 			ON CONFLICT(provider_id, upstream_model_id) DO UPDATE SET
 				display_name=excluded.display_name,
@@ -257,7 +257,8 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				reasoning_capabilities=excluded.reasoning_capabilities,
 				available=1,
 				last_seen_at=excluded.last_seen_at,
-				updated_at=excluded.updated_at`
+				updated_at=excluded.updated_at,
+				origin=excluded.origin`
 			if _, err := tx.ExecContext(ctx, stmt, args...); err != nil {
 				return err
 			}
@@ -285,7 +286,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 	// updates (500 per statement) so no statement exceeds SQLite's 999
 	// variable limit, no matter how large the catalogue is.
 	if len(seen) > 0 {
-		rows, qerr := tx.QueryContext(ctx, `SELECT upstream_model_id FROM provider_models WHERE provider_id=? AND available=1`, providerID)
+		rows, qerr := tx.QueryContext(ctx, `SELECT upstream_model_id FROM provider_models WHERE provider_id=? AND available=1 AND origin='discovered'`, providerID)
 		if qerr != nil {
 			return qerr
 		}
@@ -317,7 +318,7 @@ func (m *Manager) applyCatalogue(ctx context.Context, providerID string, models 
 				placeholders = append(placeholders, "?")
 				rargs = append(rargs, u)
 			}
-			if _, uerr := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND upstream_model_id IN (`+strings.Join(placeholders, ",")+`)`, rargs...); uerr != nil {
+			if _, uerr := tx.ExecContext(ctx, `UPDATE provider_models SET available=0,updated_at=? WHERE provider_id=? AND available=1 AND origin='discovered' AND upstream_model_id IN (`+strings.Join(placeholders, ",")+`)`, rargs...); uerr != nil {
 				return uerr
 			}
 		}

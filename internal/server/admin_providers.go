@@ -538,6 +538,123 @@ type modelView struct {
 	Available                bool                             `json:"available"`
 	FirstSeenAt              string                           `json:"first_seen_at"`
 	LastSeenAt               string                           `json:"last_seen_at"`
+	Origin                   string                           `json:"origin"`
+}
+
+func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
+	providerID := r.PathValue("id")
+	var input struct {
+		UpstreamModelID string             `json:"upstream_model_id"`
+		DisplayName     string             `json:"display_name"`
+		ContextLength   *int64             `json:"context_length"`
+		MaxOutputTokens *int64             `json:"max_output_tokens"`
+		NativeProtocol  providers.Protocol `json:"native_protocol"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		adminError(w, 400, "invalid_request", err.Error())
+		return
+	}
+	input.UpstreamModelID = strings.TrimSpace(input.UpstreamModelID)
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	if input.UpstreamModelID == "" {
+		adminError(w, 400, "model_id_required", "An upstream model ID is required.")
+		return
+	}
+	if len(input.UpstreamModelID) > 255 || strings.Contains(input.UpstreamModelID, "\x00") {
+		adminError(w, 400, "invalid_model_id", "The upstream model ID is invalid.")
+		return
+	}
+	if input.ContextLength != nil && *input.ContextLength <= 0 || input.MaxOutputTokens != nil && *input.MaxOutputTokens <= 0 {
+		adminError(w, 400, "invalid_model_metadata", "Model metadata values must be positive.")
+		return
+	}
+	if input.NativeProtocol != "" && input.NativeProtocol != providers.ProtocolChat && input.NativeProtocol != providers.ProtocolResponses && input.NativeProtocol != providers.ProtocolMessages {
+		adminError(w, 400, "invalid_protocol", "Unknown native protocol.")
+		return
+	}
+	var exists bool
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT EXISTS(SELECT 1 FROM providers WHERE id=?)`, providerID).Scan(&exists); err != nil {
+		adminError(w, 500, "database_error", "Could not check provider.")
+		return
+	}
+	if !exists {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	}
+	var modelID string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT id FROM provider_models WHERE provider_id=? AND upstream_model_id=?`, providerID, input.UpstreamModelID).Scan(&modelID); err == nil {
+		adminError(w, 409, "model_exists", "That model already exists for this provider.")
+		return
+	} else if err != sql.ErrNoRows {
+		adminError(w, 500, "database_error", "Could not check model.")
+		return
+	}
+	modelID, err := id.New()
+	if err != nil {
+		adminError(w, 500, "internal_error", "Could not create model.")
+		return
+	}
+	now := database.Now()
+	displayName := input.DisplayName
+	if displayName == "" {
+		displayName = input.UpstreamModelID
+	}
+	_, err = s.db.SQL.ExecContext(r.Context(), `INSERT INTO provider_models(id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,origin,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,'manual',1,?,?,?,?)`, modelID, providerID, input.UpstreamModelID, displayName, input.ContextLength, input.MaxOutputTokens, nullableManualProtocol(input.NativeProtocol), now, now, now, now)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not create model.")
+		return
+	}
+	if _, err = s.db.SQL.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT c.id,'real',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=?`, modelID, now, now, providerID); err != nil {
+		adminError(w, 500, "database_error", "Could not initialize model permissions.")
+		return
+	}
+	writeJSON(w, 201, map[string]any{"id": modelID})
+}
+
+func nullableManualProtocol(protocol providers.Protocol) any {
+	if protocol == "" {
+		return nil
+	}
+	return string(protocol)
+}
+
+func (s *Server) deleteManualModel(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	var origin string
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT origin FROM provider_models WHERE id=?`, modelID).Scan(&origin); err == sql.ErrNoRows {
+		adminError(w, 404, "not_found", "Model not found.")
+		return
+	} else if err != nil {
+		adminError(w, 500, "database_error", "Could not load model.")
+		return
+	}
+	if origin != "manual" {
+		adminError(w, 403, "model_not_manual", "Only manually-added models can be deleted here.")
+		return
+	}
+	var refs int
+	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT (SELECT count(*) FROM client_single_bindings WHERE real_model_id=?) + (SELECT count(*) FROM virtual_model_targets WHERE provider_model_id=?) + (SELECT count(*) FROM virtual_models WHERE target_provider_model_id=?)`, modelID, modelID, modelID).Scan(&refs); err != nil {
+		adminError(w, 500, "database_error", "Could not check model references.")
+		return
+	}
+	if refs > 0 {
+		adminError(w, 409, "model_in_use", "Repoint clients and virtual models using this model first.")
+		return
+	}
+	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not delete model.")
+		return
+	}
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='real' AND model_id=?`, modelID); err == nil {
+		_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_models WHERE id=? AND origin='manual'`, modelID)
+	}
+	if err != nil || tx.Commit() != nil {
+		adminError(w, 500, "database_error", "Could not delete model.")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request) {
@@ -552,7 +669,7 @@ func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where s
 		limit = 100000 // return the full catalogue (e.g. for the virtual-model target selector)
 		offset = 0
 	}
-	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.max_output_tokens,m.native_protocol,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities,m.input_modalities,m.output_modalities,m.available,m.first_seen_at,m.last_seen_at FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
+	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.max_output_tokens,m.native_protocol,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities,m.input_modalities,m.output_modalities,m.available,m.first_seen_at,m.last_seen_at,m.origin FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
 	pattern := "%" + search + "%"
 	args = append(args, pattern, pattern, limit, offset)
 	rows, err := s.db.SQL.QueryContext(r.Context(), query, args...)
@@ -569,7 +686,7 @@ func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where s
 		var tools, vision, reasoning, structured sql.NullInt64
 		var reasoningCaps sql.NullString
 		var inputMod, outputMod sql.NullString
-		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &v.ContextLength, &v.MaxOutputTokens, &nativeProtocol, &tools, &vision, &reasoning, &structured, &reasoningCaps, &inputMod, &outputMod, &available, &v.FirstSeenAt, &v.LastSeenAt) != nil {
+		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &v.ContextLength, &v.MaxOutputTokens, &nativeProtocol, &tools, &vision, &reasoning, &structured, &reasoningCaps, &inputMod, &outputMod, &available, &v.FirstSeenAt, &v.LastSeenAt, &v.Origin) != nil {
 			adminError(w, 500, "database_error", "Could not list models.")
 			return
 		}
