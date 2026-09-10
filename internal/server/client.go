@@ -1066,6 +1066,11 @@ routeDone:
 	defer idle.Stop()
 	reader := resp.Body
 	usage := &usageCapture{}
+	if isStreamingResponse(resp) {
+		// Prevent common reverse proxies from buffering the live response until
+		// the model has finished generating it.
+		w.Header().Set("X-Accel-Buffering", "no")
+	}
 	if translated {
 		streamingResponse := isStreamingResponse(resp)
 		if streamingResponse {

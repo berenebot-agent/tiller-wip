@@ -270,6 +270,18 @@ func TestProviderProtocolEndpointsAndAuthentication(t *testing.T) {
 	}
 }
 
+func TestApplyRequestAuthPreservesAcceptNegotiation(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://provider.invalid/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	ApplyRequestAuth(req, Instance{Type: codexProviderType, Credential: "test-secret"})
+	if got := req.Header.Get("Accept"); got != "text/event-stream" {
+		t.Fatalf("Accept = %q, want text/event-stream", got)
+	}
+}
+
 func TestAppendEndpointMergesQueries(t *testing.T) {
 	tests := []struct {
 		name, base, endpoint string

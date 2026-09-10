@@ -1081,7 +1081,9 @@ func (r *Registry) doJSON(req *http.Request, target any) error {
 }
 
 func ApplyRequestAuth(req *http.Request, provider Instance) {
-	req.Header.Set("Accept", "application/json")
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "application/json")
+	}
 	if provider.Credential == "" {
 		return
 	}
