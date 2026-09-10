@@ -69,6 +69,10 @@ const routeIndex = new Map(); // routeID -> {label, sub}
 // itself a route (client → target, no middle lane). Unlike the old shape this
 // is not keyed to a single route, because one real model can back many routes.
 const modelIndex = new Map();
+// coolingSet: provider_model_id (and legacy provider/upstream) keys currently
+// in fallback cooldown, straight from the live snapshot. A cooled target is
+// painted red immediately instead of waiting for a skip delta.
+const coolingSet = new Set();
 // forceLinks: [{source, target}] structural pairs for the simulation.
 // EDGES: "a|b" -> {a, b, line, state, meta, fadeTimer, removeTimer} rendered legs.
 let forceLinks = [];
@@ -92,7 +96,9 @@ function refreshEmpty() {
 }
 
 function applyNodeState(d) {
-  const state = d.state || 'idle';
+  // A cooling target reads as skipped (solid red, no ring) unless a request is
+  // actually in flight against it (bypass retry), which takes visual priority.
+  const state = d.cooling && d.state !== 'active' ? 'skipped' : (d.state || 'idle');
   if (d.ring) d.ring.attr('class', 'node-ring st-' + state);
   if (d.body) d.body.attr('class', 'node-body st-' + state);
 }
@@ -290,24 +296,19 @@ function orderLane(kind, neighborKind) {
   list.forEach((n, i) => { n.fy = start + i * step; });
 }
 
-function releaseAnchors() {
-  nodes.forEach(n => {
-    if (!n.dragging) n.fy = null;
-  });
-}
-
+// resolveCrossings reorders lanes only when independent chains are actually
+// inverted. Once anchored, nodes stay put (the force layout does not resume and
+// drift them back into a crossing), which keeps the pane from oscillating.
 function resolveCrossings() {
   if (!sim) return;
-  if (independentCrossings().length === 0) {
-    releaseAnchors();
-    return;
-  }
+  if (independentCrossings().length === 0) return;
   orderLane('route', 'client');
   orderLane('target', 'route');
 }
 
 // scheduleLayoutPass coalesces fan/route/reorder work triggered by structural
-// or activity changes. It does not run per animation frame.
+// or activity changes. It does not run per animation frame, and the longer
+// debounce keeps the pane from reshuffling under steady traffic.
 function scheduleLayoutPass() {
   if (layoutTimer) return;
   layoutTimer = setTimeout(() => {
@@ -316,7 +317,7 @@ function scheduleLayoutPass() {
     recomputeFans();
     recomputeRoutes();
     renderFrame();
-  }, 700);
+  }, 1200);
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +481,7 @@ function dropEdge(e) {
 
 function removeEdge(e) {
   if (!dropEdge(e)) return;
-  reconcileGraph();
+  reconcileGraph(true);
 }
 
 // Drop nodes left with no legs. Shared targets survive while any leg uses
@@ -493,12 +494,13 @@ function pruneNodes() {
   });
   const before = nodes.length;
   nodes = nodes.filter(n => used.has(n.id));
-  if (nodes.length === before) return;
+  if (nodes.length === before) return false;
   const gone = new Set();
   byId.forEach((n, id) => {
     if (!used.has(id)) gone.add(id);
   });
   gone.forEach(id => byId.delete(id));
+  return true;
 }
 
 // A route only exists because a client reaches it; a target only exists
@@ -524,6 +526,7 @@ function targetIsFed(target) {
 }
 
 function pruneOrphans() {
+  let removed = false;
   let changed = true;
   let guard = 0;
   while (changed && guard++ < 100) {
@@ -532,27 +535,39 @@ function pruneOrphans() {
     for (const e of list) {
       if (!EDGES.has(edgeKey(e.a, e.b))) continue;
       if (e.a.kind === 'route' && !hasIngress(e.a)) {
-        if (dropEdge(e)) changed = true;
+        if (dropEdge(e)) {
+          changed = true;
+          removed = true;
+        }
         continue;
       }
       if (e.b.kind === 'route' && !hasIngress(e.b)) {
-        if (dropEdge(e)) changed = true;
+        if (dropEdge(e)) {
+          changed = true;
+          removed = true;
+        }
         continue;
       }
       if (e.b.kind === 'target' && !targetIsFed(e.b)) {
-        if (dropEdge(e)) changed = true;
+        if (dropEdge(e)) {
+          changed = true;
+          removed = true;
+        }
         continue;
       }
     }
   }
+  return removed;
 }
 
-// reconcileGraph enforces the ingress invariant and rebinds the simulation.
-// Called after every top-level event that can create or settle a leg.
-function reconcileGraph() {
-  pruneOrphans();
-  pruneNodes();
-  syncSim();
+// reconcileGraph enforces the ingress invariant and rebinds the simulation only
+// when the graph actually changed (an edge dropped, or nodes pruned). Rebinding
+// restarts the force layout, so skipping it on no-op deltas keeps the pane from
+// fidgeting under traffic. forceSync is set when an edge was dropped directly.
+function reconcileGraph(forceSync) {
+  const pruned = pruneOrphans();
+  const dropped = pruneNodes();
+  if (forceSync || pruned || dropped) syncSim();
 }
 
 function flow(e, color, n, dir) {
@@ -715,7 +730,10 @@ function buildIndexes(data) {
 function ensureTargetNode(pmID) {
   const idx = modelIndex.get(pmID);
   const label = idx ? idx.provider + '/' + idx.upstream : pmID;
-  return ensureNode('target', 't:' + pmID, label, 'real · target');
+  const node = ensureNode('target', 't:' + pmID, label, 'real · target');
+  node.cooling = coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+  applyNodeState(node);
+  return node;
 }
 
 function resolveRouteNode(routeID) {
@@ -868,6 +886,7 @@ function onOutcome(payload) {
       return;
     }
     if (o && o.is_success) {
+      targetNode.cooling = false;
       setNodeState(targetNode, 'served');
       feedItem('✓ ' + route, 'ok');
       fadeEdge(chosen, route + ' · SERVED', FADE_MS);
@@ -901,6 +920,26 @@ function onSnapshotSeed(modules) {
     onActivityDelta({ id: key.slice(0, sep), target_id: key.slice(sep + 1), active: 1 }, { seed: true });
   });
   reconcileGraph();
+}
+
+// onCooldowns paints targets that are currently in fallback cooldown straight
+// from the live snapshot, so a cooled target turns red immediately instead of
+// waiting for the next request to trip a skip delta. The next snapshot clears
+// it once the window expires.
+function onCooldowns(map) {
+  if (!sim) return;
+  coolingSet.clear();
+  Object.keys(map || {}).forEach(key => coolingSet.add(key));
+  nodes.forEach(n => {
+    if (n.kind !== 'target') return;
+    const pmID = n.id.slice(2);
+    const idx = modelIndex.get(pmID);
+    const cooling = coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+    if (n.cooling !== cooling) {
+      n.cooling = cooling;
+      applyNodeState(n);
+    }
+  });
 }
 
 export function init(root, data) {
@@ -960,6 +999,7 @@ export function destroy() {
   clientIndex.clear();
   routeIndex.clear();
   modelIndex.clear();
+  coolingSet.clear();
   forceLinks = [];
   EDGES.forEach(e => {
     if (e.fadeTimer) clearTimeout(e.fadeTimer);
@@ -972,5 +1012,5 @@ export function destroy() {
 }
 
 // The module namespace exposes init/destroy/onActivityDelta/onOutcome/
-// onSnapshotSeed, consumed directly by app.js.
-export { onActivityDelta, onOutcome, onSnapshotSeed };
+// onSnapshotSeed/onCooldowns, consumed directly by app.js.
+export { onActivityDelta, onOutcome, onSnapshotSeed, onCooldowns };

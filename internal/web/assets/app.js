@@ -1216,6 +1216,7 @@ async function loadActivityView() {
     // Seed currently-hot legs from live state in case deltas were missed
     // while the view was hidden (state keeps the client + leg lanes).
     if (activityGraphReady) mod.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs });
+    if (activityGraphReady) mod.onCooldowns(state.usage?.target_cooldown || {});
   } catch (error) {
     flash(errorMessage(error), 'error');
   }
@@ -1381,6 +1382,7 @@ live.on('snapshot', payload => {
   // missed delta self-heals without a refresh.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { activityGraphModule.onSnapshotSeed(payload.modules); } catch { /* pane update is best-effort */ }
+    try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
   }
   reconcileLive();
 });
@@ -1453,6 +1455,7 @@ navigate = function (view) {
   if (liveViewActive('virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { activityGraphModule.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs }); } catch { /* pane update is best-effort */ }
+    try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
   }
 };
 
