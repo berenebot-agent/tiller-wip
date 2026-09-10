@@ -217,7 +217,6 @@ function openManualModel() {
       const values = new FormData(form);
       const number = name => values.get(name) ? Number(values.get(name)) : null;
       await api(`/api/admin/providers/${values.get('provider_id')}/models`, { method: 'POST', body: JSON.stringify({ upstream_model_id: values.get('upstream_model_id'), display_name: values.get('display_name'), context_length: number('context_length'), max_output_tokens: number('max_output_tokens'), native_protocol: values.get('native_protocol') }) });
-      $('#form-dialog').close();
       flash('Manual model added.'); await loadModels(); await loadClients();
     }
   });
