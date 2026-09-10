@@ -7,6 +7,10 @@ type inflightState struct {
 	Streaming      int    `json:"streaming"`
 	RequestedModel string `json:"requested_model,omitempty"`
 	ResolvedModel  string `json:"resolved_model,omitempty"`
+	// RouteID is the resolved route (virtual or real-model ID) for client
+	// states, so live consumers can anchor a client to its route leg. Empty
+	// when the request ended before route resolution.
+	RouteID string `json:"route_id,omitempty"`
 }
 
 type inflightDelta struct {
@@ -77,26 +81,33 @@ func (t *inflightTracker) snapshot() map[string]inflightState {
 	return out
 }
 
-func (t *inflightTracker) clientStart(id, requestedModel string) {
+// clientStart begins client-level tracking. routeID is the resolved route
+// (virtual or real-model ID); it is echoed as the delta ID so live consumers
+// see client and route identity together. Empty when resolution has not
+// happened yet (delta keeps today's client-only shape).
+func (t *inflightTracker) clientStart(id, routeID, requestedModel string) {
 	t.mu.Lock()
 	state := t.clientStates[id]
 	state.Active++
 	state.RequestedModel = requestedModel
+	if routeID != "" {
+		state.RouteID = routeID
+	}
 	t.clientStates[id] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{ClientID: id, Active: 1, RequestedModel: requestedModel})
+	t.emit(inflightDelta{ID: routeID, ClientID: id, Active: 1, RequestedModel: requestedModel})
 }
 
-func (t *inflightTracker) clientStreaming(id string) {
+func (t *inflightTracker) clientStreaming(id, routeID string) {
 	t.mu.Lock()
 	state := t.clientStates[id]
 	state.Streaming++
 	t.clientStates[id] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{ClientID: id, Streaming: 1})
+	t.emit(inflightDelta{ID: routeID, ClientID: id, Streaming: 1})
 }
 
-func (t *inflightTracker) clientResolved(id, resolvedModel string) {
+func (t *inflightTracker) clientResolved(id, routeID, resolvedModel string) {
 	if resolvedModel == "" {
 		return
 	}
@@ -105,10 +116,12 @@ func (t *inflightTracker) clientResolved(id, resolvedModel string) {
 	state.ResolvedModel = resolvedModel
 	t.clientStates[id] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{ClientID: id, ResolvedModel: resolvedModel})
+	t.emit(inflightDelta{ID: routeID, ClientID: id, ResolvedModel: resolvedModel})
 }
 
-func (t *inflightTracker) clientEnd(id string, streamed bool) {
+// clientEnd releases one client-level request. routeID mirrors clientStart so
+// the closing delta carries the same client+route identity.
+func (t *inflightTracker) clientEnd(id, routeID string, streamed bool) {
 	t.mu.Lock()
 	state := t.clientStates[id]
 	if state.Active > 0 {
@@ -123,7 +136,7 @@ func (t *inflightTracker) clientEnd(id string, streamed bool) {
 		t.clientStates[id] = state
 	}
 	t.mu.Unlock()
-	delta := inflightDelta{ClientID: id, Active: -1}
+	delta := inflightDelta{ID: routeID, ClientID: id, Active: -1}
 	if streamed {
 		delta.Streaming = -1
 	}

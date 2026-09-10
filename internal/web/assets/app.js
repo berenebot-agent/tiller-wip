@@ -1173,20 +1173,20 @@ async function loadActivityView() {
   if (token !== state.loadToken) return;
   if (!mod) return;
   try {
-    const [clients, virtualModels, models, providers, activity] = await Promise.all([
+    // Catalogue payloads resolve live deltas into nodes. No providers fetch:
+    // provider names arrive inside virtual targets and real models. No
+    // activity seed: the pane starts empty and materializes legs from live
+    // `activity` deltas only.
+    const [clients, virtualModels, models] = await Promise.all([
       api('/api/admin/client-keys?limit=200'),
       api('/api/admin/virtual-models?limit=200'),
       api('/api/admin/models?all=1'),
-      api('/api/admin/providers?limit=200'),
-      api('/api/admin/activity?limit=50'),
     ]);
     if (token !== state.loadToken) return;
     activityGraphReady = mod.init($('#view-activity'), {
       clients: clients.data || [],
       virtualModels: virtualModels.data || [],
       models: models.data || [],
-      providers: providers.data || [],
-      activity: activity.data || [],
     }) === true;
     // Seed currently-hot legs from live state in case deltas were missed
     // while the view was hidden (state spreads the modules envelope flat).
@@ -1354,7 +1354,11 @@ live.on('snapshot', payload => {
 });
 
 live.on('activity', delta => {
-  if (delta.id) {
+  // Route-level presence counts route/target deltas only. Client deltas now
+  // also carry the route ID (dual identity) but are counted in
+  // state.inflightClients below — counting them here too would double-count
+  // active and leak streaming units (two increments, one deferred end).
+  if (delta.id && !delta.client_id) {
     const current = state.inflight[delta.id] || { active: 0, streaming: 0 };
     current.active += delta.active || 0;
     current.streaming += delta.streaming || 0;

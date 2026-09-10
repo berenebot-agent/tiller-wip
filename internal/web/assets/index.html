@@ -73,14 +73,13 @@
       </section>
 
       <section class="view" id="view-activity" aria-labelledby="activity-title">
-        <header class="dashboard-header"><div><h1 id="activity-title">Activity</h1><p class="view-sub">Live request flow: clients → tiller models → providers. Grey legs are configured but inactive; they light up while carrying a request.</p></div><div class="header-actions"><span class="graph-stats" id="graph-stats"><span><b id="graph-req">0</b> requests</span><span><b id="graph-fb">0</b> fallbacks</span><span><b id="graph-err">0</b> failed legs</span></span></div></header>
+        <header class="dashboard-header"><div><h1 id="activity-title">Activity</h1><p class="view-sub">Live request flow: clients → tiller models → real models. Only active routes appear; legs fade away 30 seconds after going quiet.</p></div><div class="header-actions"><span class="graph-stats" id="graph-stats"><span><b id="graph-req">0</b> requests</span><span><b id="graph-fb">0</b> fallbacks</span><span><b id="graph-err">0</b> failed legs</span></span></div></header>
         <div class="graph-legend" id="graph-legend">
           <span><i class="dot" style="background:#2778b8"></i>client</span>
-          <span><i class="dot" style="background:#7a5fb5"></i>tiller model (virtual / real / single)</span>
-          <span><i class="dot" style="background:#25845b"></i>provider</span>
-          <span><i class="dot" style="background:#4db2ff"></i>live flow</span>
-          <span><i class="dot" style="background:#b5403c"></i>failed leg — goes inactive</span>
-          <span><i class="dot" style="background:#c9d6e1"></i>idle / inactive route</span>
+          <span><i class="dot" style="background:#7a5fb5"></i>tiller model (virtual / real)</span>
+          <span><i class="dot" style="background:#25845b"></i>real-model target</span>
+          <span><i class="dot" style="background:#4db2ff"></i>live flow (pending outcome)</span>
+          <span><i class="dot" style="background:#b5403c"></i>failed leg — fades in 30s</span>
         </div>
         <div class="graph-stage"><svg id="activity-pane" viewBox="0 0 1180 600" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Live request flow graph"></svg><div class="empty-state" id="graph-empty" hidden><span>∅</span><h2>No activity yet</h2><p>Send a request through the router and its client → model → provider chain will light up here.</p></div></div>
         <div class="graph-detail" id="graph-detail">Click any leg for attempt detail…</div>

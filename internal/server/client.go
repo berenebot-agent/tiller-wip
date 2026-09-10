@@ -572,7 +572,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			s.inflight.end(route.RouteModelID, streamed)
 		}
 		if clientTracked {
-			s.inflight.clientEnd(row.clientKeyID, streamed)
+			s.inflight.clientEnd(row.clientKeyID, route.RouteModelID, streamed)
 		}
 		if activeTargetID != "" {
 			s.inflight.targetEnd(route.RouteModelID, activeTargetID)
@@ -603,7 +603,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
-	s.inflight.clientStart(row.clientKeyID, requested)
+	s.inflight.clientStart(row.clientKeyID, route.RouteModelID, requested)
 	clientTracked = true
 	// Route-level start covers direct real-model routes too (see the deferred
 	// end above): the Activity graph lights the 1:1 leg from this + targetStart.
@@ -1061,7 +1061,7 @@ routeDone:
 	}
 	row.resolvedProvider = &selected.Provider.Name
 	row.resolvedModel = &selected.UpstreamModelID
-	s.inflight.clientResolved(row.clientKeyID, selected.Provider.Name+"/"+selected.UpstreamModelID)
+	s.inflight.clientResolved(row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
 	if v := resp.Header.Get("Request-Id"); v != "" {
@@ -1079,7 +1079,7 @@ routeDone:
 			streamed = true
 			row.streaming = true
 			s.inflight.streaming(route.RouteModelID)
-			s.inflight.clientStreaming(row.clientKeyID)
+			s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
 		}
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
@@ -1108,7 +1108,7 @@ routeDone:
 		streamed = true
 		row.streaming = true
 		s.inflight.streaming(route.RouteModelID)
-		s.inflight.clientStreaming(row.clientKeyID)
+		s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode
 		if err := rewriteSSE(w, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {

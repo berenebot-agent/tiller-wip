@@ -1,6 +1,7 @@
 /* Activity living pane: single shared force-layout graph.
-   Edge states: idle (configured, inactive) / req (carrying a request) /
-   ok (served) / failed (no response) / cool (cooldown skip). */
+   Only active routes are shown; legs fade away 30s after going quiet.
+   Edge states: req (carrying a request) / ok (served) / failed (no response)
+   / cool (cooldown skip) / fading (melting away). */
 .view-sub {
   color: var(--muted);
   font-size: 13px;
@@ -70,13 +71,25 @@
   stroke-width: 2;
   transition: stroke 0.5s, opacity 0.5s;
 }
-.edge.idle {
-  stroke: #c9d6e1;
-  opacity: 0.55;
+.edge.fading {
+  opacity: 0;
+  transition: opacity 2s;
+  pointer-events: none;
 }
 .edge.req {
   stroke: var(--blue);
   opacity: 1;
+}
+.edge.pending {
+  stroke: #4db2ff;
+  opacity: 1;
+  stroke-dasharray: 8 3;
+  animation: pending-dash 0.8s linear infinite;
+}
+@keyframes pending-dash {
+  to {
+    stroke-dashoffset: -11;
+  }
 }
 .edge.ok {
   stroke: var(--green);
@@ -103,6 +116,17 @@
 .node-sub {
   font-size: 10px;
   fill: var(--muted);
+}
+.node-enter {
+  animation: node-pop 0.35s ease-out;
+}
+@keyframes node-pop {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 .packet {
   stroke: #fff;
