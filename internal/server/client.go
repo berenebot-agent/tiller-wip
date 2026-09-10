@@ -563,14 +563,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if logErrorBodies && row.httpStatus >= 400 {
 			row.requestBody, row.requestBodyTruncated = loggedBody(originalBody)
 		}
-		// Route-level in-flight tracking covers virtual and direct real-model
-		// routes alike: for a real route RouteModelID is the provider-model ID,
-		// so the Activity graph can light the single 1:1 leg while it is hot.
-		// The ID is empty when route resolution failed before any tracking
-		// started; ending "" would emit a spurious delta, so skip it.
-		if route.RouteModelID != "" {
-			s.inflight.end(route.RouteModelID, streamed)
-		}
+		// Single-ticket liveness: the client ticket (started below) is the
+		// only request-presence signal; route presence is derived from it.
+		// clientEnd carries the route ID, so an empty RouteModelID here
+		// (resolution failed before tracking started) emits nothing.
 		if clientTracked {
 			s.inflight.clientEnd(row.clientKeyID, route.RouteModelID, streamed)
 		}
@@ -605,9 +601,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeModel = &route.RouteModel
 	s.inflight.clientStart(row.clientKeyID, route.RouteModelID, requested)
 	clientTracked = true
-	// Route-level start covers direct real-model routes too (see the deferred
-	// end above): the Activity graph lights the 1:1 leg from this + targetStart.
-	s.inflight.start(route.RouteModelID)
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
 		candidates = route.Targets
@@ -1078,7 +1071,6 @@ routeDone:
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
-			s.inflight.streaming(route.RouteModelID)
 			s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
 		}
 		w.WriteHeader(resp.StatusCode)
@@ -1107,7 +1099,6 @@ routeDone:
 	if isStreamingResponse(resp) {
 		streamed = true
 		row.streaming = true
-		s.inflight.streaming(route.RouteModelID)
 		s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode

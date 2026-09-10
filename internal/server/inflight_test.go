@@ -5,45 +5,12 @@ import (
 	"testing"
 )
 
-func TestInflightTrackerTransitions(t *testing.T) {
-	var deltas []inflightDelta
-	tracker := &inflightTracker{states: map[string]inflightState{}, emit: func(delta inflightDelta) { deltas = append(deltas, delta) }}
-
-	tracker.start("virtual-1")
-	if got := tracker.snapshot()["virtual-1"]; got != (inflightState{Active: 1}) {
-		t.Fatalf("after start = %+v", got)
-	}
-	tracker.streaming("virtual-1")
-	if got := tracker.snapshot()["virtual-1"]; got != (inflightState{Active: 1, Streaming: 1}) {
-		t.Fatalf("after streaming = %+v", got)
-	}
-	tracker.end("virtual-1", true)
-	if len(tracker.snapshot()) != 0 {
-		t.Fatalf("state remained after end: %+v", tracker.snapshot())
-	}
-	if len(deltas) != 3 || deltas[0] != (inflightDelta{ID: "virtual-1", Active: 1}) || deltas[1] != (inflightDelta{ID: "virtual-1", Streaming: 1}) || deltas[2] != (inflightDelta{ID: "virtual-1", Active: -1, Streaming: -1}) {
-		t.Fatalf("deltas = %+v", deltas)
-	}
-}
-
-func TestInflightTrackerKeepsConcurrentRequests(t *testing.T) {
-	tracker := &inflightTracker{states: map[string]inflightState{}, emit: func(inflightDelta) {}}
-	tracker.start("virtual-1")
-	tracker.start("virtual-1")
-	tracker.streaming("virtual-1")
-	tracker.end("virtual-1", true)
-	if got := tracker.snapshot()["virtual-1"]; got != (inflightState{Active: 1}) {
-		t.Fatalf("after first concurrent end = %+v", got)
-	}
-	tracker.end("virtual-1", false)
-	if len(tracker.snapshot()) != 0 {
-		t.Fatalf("state remained after second end: %+v", tracker.snapshot())
-	}
-}
-
+// The route-level lane is gone (single-ticket liveness): the client ticket
+// is the only request-presence signal, so these tests cover the client
+// lifecycle carrying the route ID.
 func TestInflightTrackerClientTransitions(t *testing.T) {
 	var deltas []inflightDelta
-	tracker := &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, emit: func(delta inflightDelta) { deltas = append(deltas, delta) }}
+	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(delta inflightDelta) { deltas = append(deltas, delta) }}
 
 	tracker.clientStart("client-1", "route-1", "main")
 	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, RequestedModel: "main", RouteID: "route-1"}) {
@@ -63,7 +30,7 @@ func TestInflightTrackerClientTransitions(t *testing.T) {
 }
 
 func TestInflightTrackerKeepsConcurrentClientRequests(t *testing.T) {
-	tracker := &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, emit: func(inflightDelta) {}}
+	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(inflightDelta) {}}
 	tracker.clientStart("client-1", "route-1", "main")
 	tracker.clientStart("client-1", "route-1", "main")
 	tracker.clientStreaming("client-1", "route-1")
@@ -78,32 +45,28 @@ func TestInflightTrackerKeepsConcurrentClientRequests(t *testing.T) {
 }
 
 // TestInflightTrackerRealRouteBalance mirrors the direct real-model proxy
-// path: route-level start/end plus a single target start/end keyed by the
+// path: the client ticket plus a single target start/end keyed by the
 // provider-model ID on both sides (RouteModelID == ProviderModelID for a real
 // route). The full cycle must leave no residue in any snapshot.
 func TestInflightTrackerRealRouteBalance(t *testing.T) {
 	var deltas []inflightDelta
-	tracker := &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}, emit: func(delta inflightDelta) { deltas = append(deltas, delta) }}
+	tracker := &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}, emit: func(delta inflightDelta) { deltas = append(deltas, delta) }}
 
 	const pmID = "provider-model-1"
 	tracker.clientStart("client-1", pmID, "provider-a/model-a")
-	tracker.start(pmID)
 	tracker.targetStart(pmID, pmID)
 	if got := tracker.targetSnapshot()[pmID+"\x00"+pmID]; got != (inflightState{Active: 1}) {
 		t.Fatalf("after real target start = %+v", got)
 	}
 	tracker.targetEnd(pmID, pmID)
-	tracker.end(pmID, false)
 	tracker.clientEnd("client-1", pmID, false)
-	if len(tracker.snapshot()) != 0 || len(tracker.clientSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
-		t.Fatalf("state remained after real route cycle: route=%+v client=%+v target=%+v", tracker.snapshot(), tracker.clientSnapshot(), tracker.targetSnapshot())
+	if len(tracker.clientSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
+		t.Fatalf("state remained after real route cycle: client=%+v target=%+v", tracker.clientSnapshot(), tracker.targetSnapshot())
 	}
 	want := []inflightDelta{
 		{ID: pmID, ClientID: "client-1", Active: 1, RequestedModel: "provider-a/model-a"},
-		{ID: pmID, Active: 1},
 		{ID: pmID, TargetID: pmID, Active: 1},
 		{ID: pmID, TargetID: pmID, Active: -1},
-		{ID: pmID, Active: -1},
 		{ID: pmID, ClientID: "client-1", Active: -1},
 	}
 	if len(deltas) != len(want) {
@@ -117,22 +80,19 @@ func TestInflightTrackerRealRouteBalance(t *testing.T) {
 }
 
 // TestInflightTrackerRealRouteStreamingBalance covers the streaming leg of a
-// direct real-model request: streaming() increments are cleared by the same
-// deferred end(id, streamed=true) the proxy uses.
+// direct real-model request: clientStreaming increments are cleared by the
+// same deferred clientEnd(id, routeID, streamed=true) the proxy uses.
 func TestInflightTrackerRealRouteStreamingBalance(t *testing.T) {
-	tracker := &inflightTracker{states: map[string]inflightState{}, clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}, emit: func(inflightDelta) {}}
+	tracker := &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}, emit: func(inflightDelta) {}}
 
 	const pmID = "provider-model-1"
 	tracker.clientStart("client-1", pmID, "provider-a/model-a")
-	tracker.start(pmID)
 	tracker.targetStart(pmID, pmID)
-	tracker.streaming(pmID)
 	tracker.clientStreaming("client-1", pmID)
 	tracker.targetEnd(pmID, pmID)
-	tracker.end(pmID, true)
 	tracker.clientEnd("client-1", pmID, true)
-	if len(tracker.snapshot()) != 0 || len(tracker.clientSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
-		t.Fatalf("state remained after streaming real route cycle: route=%+v client=%+v target=%+v", tracker.snapshot(), tracker.clientSnapshot(), tracker.targetSnapshot())
+	if len(tracker.clientSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
+		t.Fatalf("state remained after streaming real route cycle: client=%+v target=%+v", tracker.clientSnapshot(), tracker.targetSnapshot())
 	}
 }
 
@@ -158,9 +118,6 @@ func TestDirectRealRouteEmitsBalancedTargetDeltas(t *testing.T) {
 		t.Fatalf("request status %d", resp.StatusCode)
 	}
 
-	if n := len(api.server.inflight.snapshot()); n != 0 {
-		t.Fatalf("route state remained: %+v", api.server.inflight.snapshot())
-	}
 	if n := len(api.server.inflight.clientSnapshot()); n != 0 {
 		t.Fatalf("client state remained: %+v", api.server.inflight.clientSnapshot())
 	}

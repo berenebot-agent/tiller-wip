@@ -1,7 +1,22 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {}, inflightClients: {}, inflightTargets: {}, loadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, liveRequests: {}, liveLegs: {}, loadToken: 0 };
+// routeActivity derives a virtual route's spinner state from the single-ticket
+// live requests ("any ticket with this route"). OR-folds active + streaming
+// so two clients on one virtual keep the spinner lit until both drain, and
+// the streaming label survives if either streams. Returns null when quiet so
+// the existing activity?.active optional-chaining keeps working. Deliberately
+// unmemoized: O(rows × live requests) is trivial at admin-UI scale, and a
+// cache here would risk stale spinners.
+const routeActivity = routeID => {
+  let out = null;
+  for (const req of Object.values(state.liveRequests)) {
+    if (req.routeID !== routeID || req.active <= 0) continue;
+    out = { active: 1, streaming: Math.max(out?.streaming || 0, req.streaming || 0) };
+  }
+  return out;
+};
 const sortState = { column: '1h', direction: 'desc' };
 const SORT_DEFAULTS = { canonical: 'asc', provider: 'asc', '1h': 'desc', '24h': 'desc', '7d': 'desc' };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
@@ -368,7 +383,7 @@ function patchVirtualActivityRows() {
     const roundel = $('.status-roundel', row);
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !model.available);
-    patchVirtualSpinner(row, state.inflight[model.id]);
+    patchVirtualSpinner(row, routeActivity(model.id));
   });
 }
 
@@ -419,7 +434,7 @@ function patchClientActivityRows() {
     const roundel = $('.status-roundel', row);
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !client.enabled);
-    applyClientRoundel(roundel, client, state.inflightClients[client.id]);
+    applyClientRoundel(roundel, client, state.liveRequests[client.id]);
   });
   $$('.client-card[data-client-id]', $('#clients-cards')).forEach(card => {
     const client = state.clients.find(item => item.id === card.dataset.clientId);
@@ -427,14 +442,14 @@ function patchClientActivityRows() {
     const roundel = $('.status-roundel', card);
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !client.enabled);
-    applyClientRoundel(roundel, client, state.inflightClients[client.id]);
+    applyClientRoundel(roundel, client, state.liveRequests[client.id]);
   });
 }
 
 function patchClientRoundelRow(row) {
   const client = state.clients.find(item => item.id === row.dataset.clientId);
   if (!client) return;
-  applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
+  applyClientRoundel($('.status-roundel', row), client, state.liveRequests[client.id]);
 }
 
 const capabilityNumber = value => value ? new Intl.NumberFormat().format(value) : 'Not reported';
@@ -1189,8 +1204,8 @@ async function loadActivityView() {
       models: models.data || [],
     }) === true;
     // Seed currently-hot legs from live state in case deltas were missed
-    // while the view was hidden (state spreads the modules envelope flat).
-    if (activityGraphReady) mod.onSnapshotSeed({ inflight_targets: state.inflightTargets });
+    // while the view was hidden (state keeps the client + leg lanes).
+    if (activityGraphReady) mod.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs });
   } catch (error) {
     flash(errorMessage(error), 'error');
   }
@@ -1263,7 +1278,7 @@ function patchResolution(line, target) {
   const cls = `resolution-${status}`;
   const row = line.closest('tr[data-virtual-id]');
   const key = targetActivityKey(row?.dataset.virtualId || '', line.dataset.targetKey);
-  const active = state.inflightTargets[key]?.active > 0;
+  const active = state.liveLegs[key]?.active > 0;
   const needsSwap = !indicator.classList.contains(cls) || !$('.resolution-indicator-spin', indicator);
   if (needsSwap) {
     indicator.innerHTML = `${RESOLUTION_ICONS[status]}<span class="resolution-indicator-spin" aria-hidden="true"></span>`;
@@ -1292,7 +1307,7 @@ function reconcileLive() {
         const cell = $(`.tok[data-window="${window}"]`, row);
         if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window]);
       });
-      patchVirtualSpinner(row, state.inflight[model.id]);
+      patchVirtualSpinner(row, routeActivity(model.id));
     });
   }
   if (liveViewActive('clients')) {
@@ -1303,7 +1318,7 @@ function reconcileLive() {
           const cell = $(`.tok[data-window="${window}"]`, row);
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
-        applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
+        applyClientRoundel($('.status-roundel', row), client, state.liveRequests[client.id]);
       }
       const card = $(`article.client-card[data-client-id="${CSS.escape(client.id)}"]`);
       if (card) {
@@ -1311,7 +1326,7 @@ function reconcileLive() {
           const cell = $(`.tok[data-window="${window}"]`, card);
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
-        applyClientRoundel($('.status-roundel', card), client, state.inflightClients[client.id]);
+        applyClientRoundel($('.status-roundel', card), client, state.liveRequests[client.id]);
       }
     });
   }
@@ -1342,9 +1357,8 @@ live.on('snapshot', payload => {
   ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
-  if (payload.modules?.inflight !== undefined) state.inflight = payload.modules.inflight || {};
-  if (payload.modules?.inflight_clients !== undefined) state.inflightClients = payload.modules.inflight_clients || {};
-  if (payload.modules?.inflight_targets !== undefined) state.inflightTargets = payload.modules.inflight_targets || {};
+  if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
+  if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
   // Activity living pane: seed currently-hot legs on every snapshot so a
   // missed delta self-heals without a refresh.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
@@ -1354,43 +1368,38 @@ live.on('snapshot', payload => {
 });
 
 live.on('activity', delta => {
-  // Route-level presence counts route/target deltas only. Client deltas now
-  // also carry the route ID (dual identity) but are counted in
-  // state.inflightClients below — counting them here too would double-count
-  // active and leak streaming units (two increments, one deferred end).
-  if (delta.id && !delta.client_id) {
-    const current = state.inflight[delta.id] || { active: 0, streaming: 0 };
-    current.active += delta.active || 0;
-    current.streaming += delta.streaming || 0;
-    if (current.active <= 0 && current.streaming <= 0) delete state.inflight[delta.id];
-    else state.inflight[delta.id] = current;
-    if (liveViewActive('virtual') && !liveDialogOpen()) {
-      const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
-      if (row) patchVirtualSpinner(row, state.inflight[delta.id]);
-    }
-  }
+  // Single-ticket liveness: client deltas (with route ID) accumulate in
+  // liveRequests; target deltas accumulate in liveLegs. No separate
+  // route-level lane exists, so there is nothing to double-count.
   if (delta.client_id) {
-    const current = state.inflightClients[delta.client_id] || { active: 0, streaming: 0 };
+    const current = state.liveRequests[delta.client_id] || { active: 0, streaming: 0 };
     current.active += delta.active || 0;
     current.streaming += delta.streaming || 0;
-    if (current.active <= 0 && current.streaming <= 0) delete state.inflightClients[delta.client_id];
-    else state.inflightClients[delta.client_id] = current;
+    if (delta.id) current.routeID = delta.id;
+    if (delta.requested_model) current.requestedModel = delta.requested_model;
+    if (delta.resolved_model) current.resolvedModel = delta.resolved_model;
+    if (current.active <= 0 && current.streaming <= 0) delete state.liveRequests[delta.client_id];
+    else state.liveRequests[delta.client_id] = current;
+    if (liveViewActive('virtual') && !liveDialogOpen() && delta.id) {
+      const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
+      if (row) patchVirtualSpinner(row, routeActivity(delta.id));
+    }
     if (liveViewActive('clients') && !liveDialogOpen()) {
       const row = $(`tr[data-client-id="${CSS.escape(delta.client_id)}"]`);
       if (row) patchClientRoundelRow(row);
       const card = $(`article.client-card[data-client-id="${CSS.escape(delta.client_id)}"]`);
       if (card) {
         const client = state.clients.find(item => item.id === delta.client_id);
-        if (client) applyClientRoundel($('.status-roundel', card), client, state.inflightClients[delta.client_id]);
+        if (client) applyClientRoundel($('.status-roundel', card), client, state.liveRequests[delta.client_id]);
       }
     }
   }
   if (delta.target_id) {
     const key = targetActivityKey(delta.id || '', delta.target_id);
-    const current = state.inflightTargets[key] || { active: 0 };
+    const current = state.liveLegs[key] || { active: 0 };
     current.active += delta.active || 0;
-    if (current.active <= 0) delete state.inflightTargets[key];
-    else state.inflightTargets[key] = current;
+    if (current.active <= 0) delete state.liveLegs[key];
+    else state.liveLegs[key] = current;
     if (liveViewActive('virtual') && !liveDialogOpen()) {
       const row = $(`tr[data-virtual-id="${CSS.escape(delta.id || '')}"]`, $('#virtual-body'));
       const line = row && $(`[data-target-key="${CSS.escape(delta.target_id)}"]`, row);
@@ -1399,8 +1408,7 @@ live.on('activity', delta => {
       if (line && target) patchResolution(line, target);
     }
   }
-  // Activity living pane: every `activity` delta (virtual and, after the
-  // real-route emitter change, direct real-model legs) drives the flow.
+  // Activity living pane: client + target deltas drive the flow.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { activityGraphModule.onActivityDelta(delta); } catch { /* pane update is best-effort */ }
   }
@@ -1417,7 +1425,7 @@ navigate = function (view) {
   liveNavigate(view);
   if (liveViewActive('virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
-    try { activityGraphModule.onSnapshotSeed({ inflight_targets: state.inflightTargets }); } catch { /* pane update is best-effort */ }
+    try { activityGraphModule.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs }); } catch { /* pane update is best-effort */ }
   }
 };
 

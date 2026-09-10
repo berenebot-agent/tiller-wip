@@ -92,7 +92,6 @@ func (s *Server) buildUsageSnapshot(ctx context.Context) (liveSnapshot, error) {
 		ClientCache:       clientCache,
 		RealCache:         realCache,
 		Modules: map[string]any{
-			"inflight":         s.inflight.snapshot(),
 			"inflight_clients": s.inflight.clientSnapshot(),
 			"inflight_targets": s.inflight.targetSnapshot(),
 		},
