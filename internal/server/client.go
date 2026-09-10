@@ -869,6 +869,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
+			headerLatencyMs := time.Since(attemptStart).Milliseconds()
+			streaming := isStreamingResponse(response)
 			timedOut := &atomic.Bool{}
 			attemptTimedOut = timedOut
 			idle = time.AfterFunc(idleTimeout, func() {
@@ -969,7 +971,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					message = "The upstream provider response exceeded Tiller's non-streaming response limit."
 				}
 				terminalPreflightClass = class
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds(), readCause: truncateReadCause(e), clientCtxErr: ctxErrString(r.Context().Err()), attemptTimedOut: attemptTimedOut.Load(), upstreamStreaming: streaming, headerLatencyMs: headerLatencyMs}
+				row.attempts = append(row.attempts, attempt)
 				// A body-read error caused by the client ending the request is
 				// self-inflicted, not evidence the target is unhealthy: never
 				// cool it. Mirrors the network-error path above.
@@ -1315,6 +1318,25 @@ func isTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
+func truncateReadCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.ReplaceAll(strings.TrimSpace(err.Error()), "\n", " ")
+	const max = 200
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func ctxErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func fallbackStatus(status int) bool {
 	return status < 200 || status >= 300
 }
@@ -1557,6 +1579,16 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 		"error", errorMsg,
 	}
 	if attempt.result == "failed" {
+		if attempt.readCause != "" {
+			attrs = append(attrs, "upstream_read_cause", attempt.readCause)
+		}
+		attrs = append(attrs, "attempt_timed_out", attempt.attemptTimedOut)
+		if attempt.clientCtxErr != "" {
+			attrs = append(attrs, "client_ctx_err", attempt.clientCtxErr)
+		}
+		if attempt.headerLatencyMs > 0 {
+			attrs = append(attrs, "header_latency_ms", attempt.headerLatencyMs, "upstream_streaming", attempt.upstreamStreaming)
+		}
 		s.logger.Warn("provider request failed", attrs...)
 		return
 	}

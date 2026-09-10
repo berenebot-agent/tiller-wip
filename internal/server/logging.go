@@ -54,6 +54,11 @@ type requestAttempt struct {
 	errorMessage                                           *string
 	errorBody                                              *string
 	errorBodyTruncated                                     bool
+	readCause                                              string
+	clientCtxErr                                           string
+	attemptTimedOut                                        bool
+	upstreamStreaming                                      bool
+	headerLatencyMs                                        int64
 }
 
 const maxLoggedBodyBytes = 1 << 20
