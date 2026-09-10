@@ -113,7 +113,8 @@ function syncSim() {
     exit => exit.remove(),
   );
   refreshEmpty();
-  sim.alpha(0.5).restart();
+  // Avoid reheating the layout to a fixed high alpha for every new leg.
+  sim.alpha(Math.max(sim.alpha(), 0.15)).restart();
 }
 
 function ensureNode(kind, id, label, sub) {
@@ -223,7 +224,7 @@ function pruneNodes() {
 
 function flow(e, color, n, dir) {
   for (let k = 0; k < (n || 4); k++) {
-    packets.push({ e, t: (dir || 1) === 1 ? -k * 0.22 : 1 + k * 0.22, speed: 0.014 + Math.random() * 0.008, dir: dir || 1, color });
+    addPacket({ e, t: (dir || 1) === 1 ? -k * 0.22 : 1 + k * 0.22, speed: 0.014 + Math.random() * 0.008, dir: dir || 1, color });
   }
 }
 
@@ -233,6 +234,7 @@ function flow(e, color, n, dir) {
 const FLOW_TICK_MS = 250;
 const MAX_FWD = 6;
 const MAX_BACK = 3;
+const MAX_PACKETS = 240;
 const BACK_COLOR = '#7fb8dd';
 const emitters = new Map(); // edgeKey -> interval id
 function countPackets(e, dir) {
@@ -250,8 +252,8 @@ function startEmitter(e) {
       stopEmitter(e);
       return;
     }
-    if (countPackets(e, 1) < MAX_FWD) packets.push({ e, t: -0.05, speed: 0.014 + Math.random() * 0.008, dir: 1, color: BLUE });
-    if (countPackets(e, -1) < MAX_BACK && Math.random() < 0.6) packets.push({ e, t: 1.05, speed: 0.010 + Math.random() * 0.006, dir: -1, color: BACK_COLOR });
+    if (countPackets(e, 1) < MAX_FWD) addPacket({ e, t: -0.05, speed: 0.014 + Math.random() * 0.008, dir: 1, color: BLUE });
+    if (countPackets(e, -1) < MAX_BACK && Math.random() < 0.6) addPacket({ e, t: 1.05, speed: 0.010 + Math.random() * 0.006, dir: -1, color: BACK_COLOR });
   }, FLOW_TICK_MS));
 }
 function stopEmitter(e) {
@@ -265,6 +267,11 @@ function stopEmitter(e) {
 function stopAllEmitters() {
   emitters.forEach(iv => clearInterval(iv));
   emitters.clear();
+}
+
+function addPacket(packet) {
+  if (packets.length >= MAX_PACKETS) return;
+  packets.push(packet);
 }
 
 function addBadge(e, num, kind) {
@@ -357,9 +364,9 @@ function buildIndexes(data) {
   });
 }
 
-// Right-column node for a virtual target: the real model that was tried,
-// labelled "provider/model". Direct real routes never reach here (their leg
-// ends at the middle-column route node).
+// Right-column node for a real model, labelled "provider/model". Virtual
+// routes use it as their target; direct real routes use it as their only
+// destination and skip the middle-column route node.
 function ensureTargetNode(pmID) {
   const idx = modelIndex.get(pmID);
   const label = idx ? idx.provider + '/' + idx.upstream : pmID;
@@ -389,39 +396,47 @@ function onActivityDelta(delta, opts) {
   const seed = !!(opts && opts.seed);
   if (delta.client_id && delta.id) {
     const clientNode = resolveClientNode(delta.client_id);
-    const routeNode = resolveRouteNode(delta.id);
-    const e = ensureEdge(clientNode, routeNode);
-    const key = edgeKey(clientNode, routeNode);
+    const direct = modelIndex.get(delta.id)?.routeID === delta.id;
+    const destination = direct ? ensureTargetNode(delta.id) : resolveRouteNode(delta.id);
+    const e = ensureEdge(clientNode, destination);
+    const key = edgeKey(clientNode, destination);
+    const label = clientNode.label + ' → ' + destination.label;
     if ((delta.active || 0) > 0) {
       if (!seed) hotLegs.set(key, (hotLegs.get(key) || 0) + 1);
-      setEdge(e, 'req', clientNode.label + ' → ' + routeNode.label);
+      setEdge(e, 'req', label);
       flow(e, BLUE, 3);
       if (!seed) bump('req', counters.req + 1);
     } else if ((delta.active || 0) < 0) {
       const left = Math.max(0, (hotLegs.get(key) || 1) - 1);
       if (left === 0) {
         hotLegs.delete(key);
-        settlePending(e, clientNode.label + ' → ' + routeNode.label, clientNode.label + ' → ' + routeNode.label);
+        settlePending(e, label, label);
       } else {
         hotLegs.set(key, left);
       }
     }
   }
   if (delta.target_id && delta.id) {
-    const routeNode = resolveRouteNode(delta.id);
     // Direct real-model routes carry ID === TargetID === provider-model ID:
-    // the visible 1:1 leg is client → route (lit by the client block above),
+    // the visible 1:1 leg is client → real target (lit by the client block above),
     // so a target delta here only reinforces that leg's flow.
     if (delta.id === delta.target_id) {
       if ((delta.active || 0) > 0) {
         let live = null;
         EDGES.forEach(cand => {
-          if (cand.b === routeNode && cand.state === 'req' && !live) live = cand;
+          if (cand.b.id === 't:' + delta.target_id && cand.state === 'req' && !live) live = cand;
         });
         if (live) flow(live, BLUE, 2);
       }
       return;
     }
+    const routeNode = byId.get('r:' + delta.id);
+    if (!routeNode) return;
+    let hasIngress = false;
+    EDGES.forEach(cand => {
+      if (cand.b === routeNode && cand.a.kind === 'client') hasIngress = true;
+    });
+    if (!hasIngress) return;
     const targetNode = ensureTargetNode(delta.target_id);
     const e = ensureEdge(routeNode, targetNode);
     const key = edgeKey(routeNode, targetNode);
@@ -456,29 +471,32 @@ function onActivityDelta(delta, opts) {
 
 // onOutcome colours legs from an `outcome` SSE delta keyed by
 // provider-model ID ({pmID: {is_success}}). Success → green + feed tick;
-// failure → red, counted. Both rest into the shared 30s fade. An outcome
-// for a leg with no prior delta materializes it (missed-SSE self-heal).
+// failure → red, counted. Both rest into the shared 30s fade. Outcomes
+// without a matching live leg are ignored so delayed aggregates cannot create
+// orphan model nodes or edges.
 function onOutcome(payload) {
   if (!sim) return;
   Object.entries(payload || {}).forEach(([pmID, o]) => {
     const idx = modelIndex.get(pmID);
     if (!idx) return;
-    const routeNode = resolveRouteNode(idx.routeID);
     const direct = idx.routeID === pmID;
-    const targetNode = direct ? routeNode : ensureTargetNode(pmID);
-    if (targetNode === routeNode && !direct) return;
-    // Direct real route: the visible leg is client-agnostic here, so colour
-    // the route node side via any live client→route leg, else the point.
+    const targetNode = byId.get('t:' + pmID);
+    if (!targetNode) return;
     let e;
     if (direct) {
       let live = null;
       EDGES.forEach(cand => {
-        if (cand.b === routeNode && cand.state === 'req' && !live) live = cand;
+        if (cand.b === targetNode && cand.state === 'req' && !live) live = cand;
       });
       if (!live) return;
       e = live;
     } else {
-      e = ensureEdge(routeNode, targetNode);
+      // Outcomes settle an existing live leg only. They must not materialize
+      // an orphan target when an activity delta was missed or arrived late.
+      const routeNode = byId.get('r:' + idx.routeID);
+      if (!routeNode) return;
+      e = EDGES.get(edgeKey(routeNode, targetNode));
+      if (!e) return;
     }
     const entry = pendingFallback.get(idx.routeID);
     const leg = entry ? entry.legs.find(l => l.edge === e) : null;
@@ -487,14 +505,14 @@ function onOutcome(payload) {
         leg.badge.g.select('circle').attr('fill', GREEN);
         leg.badge.g.select('text').text('0' + (entry.legs.indexOf(leg) + 1));
       }
-      feedItem('✓ ' + routeNode.label + ' → ' + idx.provider + '/' + idx.upstream, true);
-      fadeEdge(e, 'ok', (direct ? e.a.label + ' → ' : routeNode.label + ' → ') + idx.provider + '/' + idx.upstream + ' · SERVED');
+      feedItem('✓ ' + e.a.label + ' → ' + idx.provider + '/' + idx.upstream, true);
+      fadeEdge(e, 'ok', e.a.label + ' → ' + idx.provider + '/' + idx.upstream + ' · SERVED');
       setTimeout(() => clearBadgesFor(idx.routeID), SETTLE_MS);
     } else {
       bump('err', counters.err + 1);
       if (leg) leg.badge.g.select('circle').attr('fill', RED);
-      feedItem('✗ ' + routeNode.label + ' → ' + idx.provider + '/' + idx.upstream, false);
-      fadeEdge(e, 'failed', (direct ? e.a.label + ' → ' : routeNode.label + ' → ') + idx.provider + '/' + idx.upstream + ' · FAILED — fades in 30s');
+      feedItem('✗ ' + e.a.label + ' → ' + idx.provider + '/' + idx.upstream, false);
+      fadeEdge(e, 'failed', e.a.label + ' → ' + idx.provider + '/' + idx.upstream + ' · FAILED — fades in 30s');
       setTimeout(() => clearBadgesFor(idx.routeID), SETTLE_MS);
     }
   });
