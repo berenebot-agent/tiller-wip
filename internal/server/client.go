@@ -823,6 +823,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			copySafeFeatureHeaders(req.Header, r.Header, target)
 			if candidate.Provider.Type == "codex-subscription" {
 				req.Header.Set("session-id", row.clientRequestID)
+				// The ChatGPT Codex backend switches to SSE only when Accept is
+				// exactly text/event-stream (the official codex_cli_rs sends this
+				// exact value). A combined Accept leaves it on the buffered JSON
+				// path, which stalls long reasoning generations until a reverse
+				// proxy read timeout kills the connection. Set it after
+				// ApplyRequestAuth so the Codex-specific contract wins.
+				req.Header.Set("Accept", "text/event-stream")
 			}
 			targetID := candidate.ProviderModelID
 			if targetID == "" {
@@ -1495,7 +1502,8 @@ func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
 
 func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
 	reader := bufio.NewReader(r)
-	flusher, _ := w.(http.Flusher)
+	keepalive := newSSEKeepaliveWriter(w, sseKeepaliveInterval)
+	defer keepalive.Close()
 	for {
 		var line []byte
 		var err error
@@ -1534,10 +1542,8 @@ func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, 
 					}
 				}
 			}
-			_, _ = w.Write(line)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			_, _ = keepalive.Write(line)
+			keepalive.Flush()
 			if done {
 				return nil
 			}

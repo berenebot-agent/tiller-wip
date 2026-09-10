@@ -1243,17 +1243,16 @@ func chatResponseToResponses(chat map[string]any, model string) map[string]any {
 }
 
 func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
-	flusher, _ := w.(http.Flusher)
+	keepalive := newSSEKeepaliveWriter(w, sseKeepaliveInterval)
+	defer keepalive.Close()
 	state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model, reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
 	for {
 		event, err := readSSEEvent(reader)
 		data := event.Data
 		if string(data) == "[DONE]" {
 			state.completed = true
-			writeStreamDone(w, incoming, state)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			writeStreamDone(keepalive, incoming, state)
+			keepalive.Flush()
 			return nil
 		}
 		if len(data) > 0 && string(data) != "[DONE]" {
@@ -1265,26 +1264,22 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 					if delta.Kind == "error" {
 						return errors.New("upstream stream reported failure")
 					}
-					if err := writeTranslatedEvent(w, incoming, state, delta); err != nil {
+					if err := writeTranslatedEvent(keepalive, incoming, state, delta); err != nil {
 						return err
 					}
-					if flusher != nil {
-						flusher.Flush()
-					}
+					keepalive.Flush()
 				}
 				if done {
 					state.completed = true
-					writeStreamDone(w, incoming, state)
-					if flusher != nil {
-						flusher.Flush()
-					}
+					writeStreamDone(keepalive, incoming, state)
+					keepalive.Flush()
 					return nil
 				}
 			}
 		}
 		if err != nil {
 			if err == io.EOF && state.completed {
-				writeStreamDone(w, incoming, state)
+				writeStreamDone(keepalive, incoming, state)
 				return nil
 			}
 			if err == io.EOF {
