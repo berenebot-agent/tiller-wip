@@ -1375,6 +1375,13 @@ func coerceOrDefault(v any, fallback int64) int64 {
 func canonicalDeltas(event string, payload map[string]any, target providers.Protocol, state *streamState) ([]canonicalDelta, bool) {
 	out := []canonicalDelta{}
 	if target == providers.ProtocolChat {
+		// Some relays surface an upstream failure as a 200 SSE carrying a
+		// top-level error object. Classify it here so both the fallback probe
+		// and the translated path treat it as a failed target rather than a
+		// successful (empty) completion.
+		if payload["error"] != nil {
+			return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
+		}
 		if id, ok := payload["id"].(string); ok {
 			state.id = id
 		}
@@ -1399,6 +1406,9 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: upstreamIndex, HasUpstreamIndex: true, CallID: strField(call["id"]), Name: strField(fn["name"]), Arguments: strField(fn["arguments"])})
 			}
 			if finish, ok := choice["finish_reason"].(string); ok && finish != "" {
+				if finish == "error" {
+					return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
+				}
 				out = append(out, canonicalDelta{Kind: "finish", Finish: finish})
 			}
 		}

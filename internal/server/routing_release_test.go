@@ -313,7 +313,12 @@ func TestStreamFailureAfterOutputDoesNotSpliceFallback(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: {\"model\":\"model-a\",\"choices\":[]}\n\n")
+		// A real assistant delta reaches the client, then the upstream reports a
+		// stream error. The router must not splice another target after visible
+		// output has begun.
+		_, _ = io.WriteString(w, "data: {\"model\":\"model-a\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n")
+		w.(http.Flusher).Flush()
+		_, _ = io.WriteString(w, "data: {\"model\":\"model-a\",\"error\":{\"message\":\"Stream error occurred\"},\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"error\"}]}\n\n")
 		w.(http.Flusher).Flush()
 	})
 	second := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

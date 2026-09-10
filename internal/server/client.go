@@ -1005,6 +1005,49 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
+			// Ordered-fallback targets must produce usable output to count as
+			// success. A pre-output probe catches relays that return a 2xx with
+			// an explicit stream error or an empty/role-only completion, so the
+			// chain can advance instead of failing the client with no content.
+			if route.Virtual && route.RoutingMode == "ordered_fallback" {
+				outcome, probeErr := probeUpstreamOutput(response, target)
+				class := ""
+				if probeErr != nil {
+					class = "upstream_read_error"
+					if attemptTimedOut.Load() {
+						class = "upstream_timeout"
+					}
+					class = clientFailureClass(r.Context(), class)
+				} else {
+					switch outcome {
+					case probeStreamError:
+						class = "upstream_stream_error"
+					case probeEmpty:
+						class = "empty_response"
+					}
+				}
+				if class != "" {
+					s.inflight.targetEnd(route.RouteModelID, targetID)
+					response.Body.Close()
+					idle.Stop()
+					attemptCancel()
+					attempt := requestAttempt{
+						providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name,
+						model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode,
+						failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds(),
+						errorMessage:    strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)),
+						readCause:       truncateReadCause(probeErr),
+						clientCtxErr:    ctxErrString(r.Context().Err()),
+						attemptTimedOut: attemptTimedOut.Load(), upstreamStreaming: streaming,
+						headerLatencyMs: headerLatencyMs,
+					}
+					nonTranslationFailure = true
+					if !s.recordPreOutputFailure(w, r, row, candidate, attempt, class, cooldownSeconds, incoming) {
+						return
+					}
+					continue
+				}
+			}
 			selected, resp, cancel = candidate, response, attemptCancel
 			// Track the hot leg for the deferred targetEnd, for virtual and
 			// direct real-model routes alike (the 1:1 real leg included).
@@ -1176,6 +1219,33 @@ func markLastAttemptFailed(row *logRow, class string) {
 	attempt.result = "failed"
 	attempt.failureClass = class
 	attempt.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+}
+
+// recordPreOutputFailure records a failed pre-output attempt, opens a target
+// cooldown when the failure class is eligible, and marks the request as having
+// used fallback. It returns false only when the client context has ended and a
+// terminal error was written, in which case the caller must stop the loop.
+func (s *Server) recordPreOutputFailure(
+	w http.ResponseWriter, r *http.Request, row *logRow, candidate resolvedRoute,
+	attempt requestAttempt, class string, cooldownSeconds int, incoming providers.Protocol,
+) bool {
+	row.attempts = append(row.attempts, attempt)
+	s.logAttempt(row, attempt)
+	if cooldownSeconds > 0 && cooldownTrigger(class, attempt.httpStatus) && r.Context().Err() == nil {
+		s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
+	}
+	if r.Context().Err() != nil {
+		clientClass := clientFailureClass(r.Context(), class)
+		row.httpStatus = 502
+		row.errorText = strPtr(clientClass)
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(clientClass))
+		row.fallbackReason = strPtr(clientClass)
+		inferenceError(w, 502, "api_error", clientClass, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+		return false
+	}
+	row.fallbackUsed = true
+	row.fallbackReason = strPtr(class)
+	return true
 }
 
 type bufferedReadCloser struct {
@@ -1471,7 +1541,8 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 // router-side guard and never reaches this helper as a status.
 func cooldownTrigger(class string, httpStatus int) bool {
 	switch class {
-	case "upstream_unreachable", "upstream_timeout", "upstream_read_error":
+	case "upstream_unreachable", "upstream_timeout", "upstream_read_error",
+		"empty_response", "upstream_stream_error":
 		return true
 	}
 	if httpStatus == 0 {

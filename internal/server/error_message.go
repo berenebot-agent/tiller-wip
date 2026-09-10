@@ -15,6 +15,10 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "Could not reach upstream provider"
 	case "upstream_read_error":
 		return "Could not read upstream provider response"
+	case "empty_response":
+		return "The upstream provider returned no content"
+	case "upstream_stream_error":
+		return "The upstream provider reported a stream error"
 	case "upstream_response_too_large":
 		return "Upstream provider response exceeded Tiller's size limit"
 	case "model_not_found":

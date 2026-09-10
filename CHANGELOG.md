@@ -4,6 +4,19 @@ All notable changes to Tiller Router are recorded here. This project follows
 semantic versioning conventions where practical; the beta API and deployment
 behavior may still change before a stable `1.0`.
 
+## [Unreleased]
+
+### Fixed
+
+- **Ordered fallback now survives empty or errored 2xx streams.** A target that
+  returns HTTP 200 but delivers an explicit upstream stream error, or ends
+  without any assistant output before client-visible bytes, is treated as a
+  failed attempt so the chain advances to the next configured target. Both new
+  classes (`upstream_stream_error`, `empty_response`) also open a target
+  cooldown. Previously Tiller committed to the first 2xx header and relayed the
+  empty response to the client, so a broken upstream could stall the whole
+  chain.
+
 ## [0.1.0-beta.2] - 2026-09-08
 
 Second public beta. Highlights: sign in to your existing AI subscriptions,
