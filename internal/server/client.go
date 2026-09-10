@@ -563,7 +563,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if logErrorBodies && row.httpStatus >= 400 {
 			row.requestBody, row.requestBodyTruncated = loggedBody(originalBody)
 		}
-		if route.Virtual {
+		// Route-level in-flight tracking covers virtual and direct real-model
+		// routes alike: for a real route RouteModelID is the provider-model ID,
+		// so the Activity graph can light the single 1:1 leg while it is hot.
+		// The ID is empty when route resolution failed before any tracking
+		// started; ending "" would emit a spurious delta, so skip it.
+		if route.RouteModelID != "" {
 			s.inflight.end(route.RouteModelID, streamed)
 		}
 		if clientTracked {
@@ -600,9 +605,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeModel = &route.RouteModel
 	s.inflight.clientStart(row.clientKeyID, requested)
 	clientTracked = true
-	if route.Virtual {
-		s.inflight.start(route.RouteModelID)
-	}
+	// Route-level start covers direct real-model routes too (see the deferred
+	// end above): the Activity graph lights the 1:1 leg from this + targetStart.
+	s.inflight.start(route.RouteModelID)
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
 		candidates = route.Targets
@@ -823,14 +828,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if targetID == "" {
 				targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
 			}
-			if route.Virtual {
-				s.inflight.targetStart(route.RouteModelID, targetID)
-			}
+			// Target-level tracking covers direct real-model routes too: for a
+			// real route this is the single 1:1 leg, so the Activity graph can
+			// light it (and dim it on failure) while the request is in flight.
+			s.inflight.targetStart(route.RouteModelID, targetID)
 			response, e := s.providers.Registry().HTTPClient().Do(req)
 			if e != nil {
-				if route.Virtual {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
-				}
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 				attemptCancel()
 				class := "upstream_unreachable"
 				if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
@@ -874,9 +878,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			idleBody := response.Body
 			response.Body = bufferedReadCloser{Reader: &idleReader{reader: idleBody, timer: idle}, closer: idleBody}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				if route.Virtual {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
-				}
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 				class := fmt.Sprintf("http_%d", response.StatusCode)
 				var upstreamErrorBody []byte
 				var upstreamErrorReadErr error
@@ -953,9 +955,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				continue
 			}
 			if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
-				if route.Virtual {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
-				}
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 				response.Body.Close()
 				idle.Stop()
 				attemptCancel()
@@ -991,9 +991,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				continue
 			}
 			selected, resp, cancel = candidate, response, attemptCancel
-			if selected.Virtual {
-				activeTargetID = targetID
-			}
+			// Track the hot leg for the deferred targetEnd, for virtual and
+			// direct real-model routes alike (the 1:1 real leg included).
+			activeTargetID = targetID
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: selected.ProviderModelID, provider: selected.Provider.Name, model: selected.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 			allAttemptedFailed = false
 			success = true
@@ -1075,9 +1075,7 @@ routeDone:
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
-			if route.Virtual {
-				s.inflight.streaming(route.RouteModelID)
-			}
+			s.inflight.streaming(route.RouteModelID)
 			s.inflight.clientStreaming(row.clientKeyID)
 		}
 		w.WriteHeader(resp.StatusCode)
@@ -1106,9 +1104,7 @@ routeDone:
 	if isStreamingResponse(resp) {
 		streamed = true
 		row.streaming = true
-		if route.Virtual {
-			s.inflight.streaming(route.RouteModelID)
-		}
+		s.inflight.streaming(route.RouteModelID)
 		s.inflight.clientStreaming(row.clientKeyID)
 		w.WriteHeader(resp.StatusCode)
 		row.httpStatus = resp.StatusCode

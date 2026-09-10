@@ -32,7 +32,7 @@ const rowCache = (row) => {
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
 };
-const VIEWS = ['providers', 'models', 'virtual', 'clients', 'settings'];
+const VIEWS = ['providers', 'models', 'virtual', 'clients', 'activity', 'settings'];
 const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'clients'); return VIEWS.includes(v) ? v : 'clients'; };
 
 async function api(path, options = {}) {
@@ -69,8 +69,9 @@ $('#logout').addEventListener('click', async () => { try { await api('/api/admin
 
 async function navigate(view) {
   state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); $('#nav-links').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false');
-  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'settings') await loadSettings(); }
+  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') await loadSettings(); }
   catch (error) { flash(errorMessage(error), 'error'); }
+  if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
 window.addEventListener('popstate', () => navigate(viewFromHash()));
@@ -1138,6 +1139,69 @@ $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#se
 
 document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); const input = $(`#view-${state.view} input[type="search"]`); input?.focus(); } });
 
+// === ACTIVITY LIVING PANE ===
+// The graph module + vendored D3 are lazy-loaded on first entry so other
+// views never pay the download/parse cost. d3.min.js is same-origin
+// (satisfies `script-src 'self'`); the CDN tag from the mockup is never used.
+let activityGraphModule = null;
+let activityGraphReady = false;
+let activityGraphFailed = false;
+async function ensureActivityGraph() {
+  if (activityGraphModule) return activityGraphModule;
+  if (activityGraphFailed) return null;
+  try {
+    if (typeof d3 === 'undefined') {
+      await new Promise((resolve, reject) => {
+        const tag = document.createElement('script');
+        tag.src = '/d3.min.js';
+        tag.onload = resolve;
+        tag.onerror = () => reject(new Error('d3 load failed'));
+        document.head.appendChild(tag);
+      });
+    }
+    activityGraphModule = await import('/activity-graph.js');
+    return activityGraphModule;
+  } catch (error) {
+    activityGraphFailed = true;
+    flash('Activity graph could not load (D3 failed). The Settings table still works.', 'error');
+    return null;
+  }
+}
+async function loadActivityView() {
+  const token = ++state.loadToken;
+  const mod = await ensureActivityGraph();
+  if (token !== state.loadToken) return;
+  if (!mod) return;
+  try {
+    const [clients, virtualModels, models, providers, activity] = await Promise.all([
+      api('/api/admin/client-keys?limit=200'),
+      api('/api/admin/virtual-models?limit=200'),
+      api('/api/admin/models?all=1'),
+      api('/api/admin/providers?limit=200'),
+      api('/api/admin/activity?limit=50'),
+    ]);
+    if (token !== state.loadToken) return;
+    activityGraphReady = mod.init($('#view-activity'), {
+      clients: clients.data || [],
+      virtualModels: virtualModels.data || [],
+      models: models.data || [],
+      providers: providers.data || [],
+      activity: activity.data || [],
+    }) === true;
+    // Seed currently-hot legs from live state in case deltas were missed
+    // while the view was hidden (state spreads the modules envelope flat).
+    if (activityGraphReady) mod.onSnapshotSeed({ inflight_targets: state.inflightTargets });
+  } catch (error) {
+    flash(errorMessage(error), 'error');
+  }
+}
+function destroyActivityView() {
+  if (activityGraphModule && activityGraphReady) {
+    try { activityGraphModule.destroy(); } catch { /* teardown is best-effort */ }
+  }
+  activityGraphReady = false;
+}
+
 // === LIVE REFRESH ===
 // A single session-lifetime SSE connection pushes outcome deltas (resolution
 // icons) and usage snapshots (token/cache counters). DOM writes are suppressed
@@ -1266,6 +1330,11 @@ live.on('outcome', payload => {
       if (line) patchResolution(line, target);
     }));
   }
+  // Activity living pane: outcome decides the settle colour (green served /
+  // red failed); the `activity` deltas drive the flow itself.
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { activityGraphModule.onOutcome(payload); } catch { /* pane update is best-effort */ }
+  }
 });
 
 live.on('snapshot', payload => {
@@ -1276,6 +1345,11 @@ live.on('snapshot', payload => {
   if (payload.modules?.inflight !== undefined) state.inflight = payload.modules.inflight || {};
   if (payload.modules?.inflight_clients !== undefined) state.inflightClients = payload.modules.inflight_clients || {};
   if (payload.modules?.inflight_targets !== undefined) state.inflightTargets = payload.modules.inflight_targets || {};
+  // Activity living pane: seed currently-hot legs on every snapshot so a
+  // missed delta self-heals without a refresh.
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { activityGraphModule.onSnapshotSeed(payload.modules); } catch { /* pane update is best-effort */ }
+  }
   reconcileLive();
 });
 
@@ -1321,6 +1395,11 @@ live.on('activity', delta => {
       if (line && target) patchResolution(line, target);
     }
   }
+  // Activity living pane: every `activity` delta (virtual and, after the
+  // real-route emitter change, direct real-model legs) drives the flow.
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { activityGraphModule.onActivityDelta(delta); } catch { /* pane update is best-effort */ }
+  }
 });
 
 // Reconcile once when the last dialog closes.
@@ -1333,6 +1412,9 @@ const liveNavigate = navigate;
 navigate = function (view) {
   liveNavigate(view);
   if (liveViewActive('virtual', 'clients')) reconcileLive();
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { activityGraphModule.onSnapshotSeed({ inflight_targets: state.inflightTargets }); } catch { /* pane update is best-effort */ }
+  }
 };
 
 function liveStart() { live.start(); }

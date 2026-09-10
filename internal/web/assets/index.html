@@ -9,6 +9,7 @@
   <link rel="apple-touch-icon" href="/media/tiller-favicon.svg">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/virtual-dialog.css">
+  <link rel="stylesheet" href="/activity-graph.css">
 </head>
 <body>
   <div class="login-shell" id="login-shell">
@@ -30,6 +31,7 @@
         <a class="brand" href="#clients" data-view="clients" aria-label="Tiller Router home"><img class="brand-mark" src="/media/tiller-mark.svg" alt=""><span>TILLER <b>ROUTER</b></span></a>
         <div class="nav-links" id="nav-links">
           <a href="#clients" data-view="clients" class="active">Clients</a>
+          <a href="#activity" data-view="activity">Activity</a>
           <a href="#providers" data-view="providers">Providers</a>
           <a href="#models" data-view="models">Real Models</a>
           <a href="#virtual" data-view="virtual">Virtual Models</a>
@@ -68,6 +70,21 @@
         <div class="filter-bar"><label class="search-field"><span>Search</span><input id="client-search" type="search" placeholder="Client name, description, or group"></label><label class="filter-field"><span>Group</span><select id="client-group-filter"><option value="">All groups</option></select></label></div>
         <div class="table-shell clients-table-shell"><table class="form-table clients-table"><thead><tr><th>Client</th><th>Route</th><th>1h</th><th>24h</th><th>7d</th><th class="actions-head">Actions</th></tr></thead><tbody id="clients-body"></tbody></table></div><div class="empty-state" id="clients-empty" hidden><span>KEY</span><h2>No clients</h2><p>Create a Catalogue client for model permissions or a Single client for one centrally controlled route.</p></div>
         <div class="client-cards" id="clients-cards"></div>
+      </section>
+
+      <section class="view" id="view-activity" aria-labelledby="activity-title">
+        <header class="dashboard-header"><div><h1 id="activity-title">Activity</h1><p class="view-sub">Live request flow: clients → tiller models → providers. Grey legs are configured but inactive; they light up while carrying a request.</p></div><div class="header-actions"><span class="graph-stats" id="graph-stats"><span><b id="graph-req">0</b> requests</span><span><b id="graph-fb">0</b> fallbacks</span><span><b id="graph-err">0</b> failed legs</span></span></div></header>
+        <div class="graph-legend" id="graph-legend">
+          <span><i class="dot" style="background:#2778b8"></i>client</span>
+          <span><i class="dot" style="background:#7a5fb5"></i>tiller model (virtual / real / single)</span>
+          <span><i class="dot" style="background:#25845b"></i>provider</span>
+          <span><i class="dot" style="background:#4db2ff"></i>live flow</span>
+          <span><i class="dot" style="background:#b5403c"></i>failed leg — goes inactive</span>
+          <span><i class="dot" style="background:#c9d6e1"></i>idle / inactive route</span>
+        </div>
+        <div class="graph-stage"><svg id="activity-pane" viewBox="0 0 1180 600" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Live request flow graph"></svg><div class="empty-state" id="graph-empty" hidden><span>∅</span><h2>No activity yet</h2><p>Send a request through the router and its client → model → provider chain will light up here.</p></div></div>
+        <div class="graph-detail" id="graph-detail">Click any leg for attempt detail…</div>
+        <div class="graph-feed" id="graph-feed"></div>
       </section>
 
       <section class="view" id="view-settings" aria-labelledby="settings-title">
