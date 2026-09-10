@@ -54,13 +54,14 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-client' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-group/graph' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: `${providerName}/mock-model-b` }).first()).toBeVisible();
-  // The served leg settles green, the failed target leg red.
-  await expect(page.locator('#activity-pane line.edge.ok').first()).toBeVisible({ timeout: 15000 });
-  await expect(page.locator('#activity-pane line.edge.failed').first()).toBeVisible({ timeout: 15000 });
+  // The served target roundel settles green, the failed target roundel red.
+  // Outcome colour lives on the node ring; edges are flow-only.
+  await expect(page.locator('#activity-pane .node-ring.st-ok').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('#activity-pane .node-ring.st-failed').first()).toBeVisible({ timeout: 15000 });
   await expect(page.locator('#graph-feed .feed-item.ok').first()).toBeVisible({ timeout: 15000 });
 
   // Clicking the served leg shows attempt detail in the detail bar.
-  await page.locator('#activity-pane line.edge.ok').first().click();
+  await page.locator('#activity-pane line.edge', { hasText: 'mock-model-b' }).first().click();
   await expect(page.locator('#graph-detail')).toContainText('activity-graph-group/graph');
 
   // Direct real-model request: a single client → real-model leg in the

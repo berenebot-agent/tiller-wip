@@ -1,39 +1,36 @@
 // Activity living pane: one shared force-layout SVG with three soft lanes
 // (clients → tiller models → real-model targets). Only active routes are
 // shown: nodes and legs materialize from live `activity` deltas and fade away
-// FADE_MS after going quiet. No provider nodes — a leg that fails points at
-// the real model that failed (label "provider/model").
+// FADE_MS after going quiet. No provider nodes — a leg points at the real
+// model, labelled "provider/model".
 //
-// Animation is a single activity signal (no request/response split): packets
-// flow client → target while an `activity` delta reports the leg hot, and the
-// `outcome` event decides the settle colour (green served / red failed)
-// before the 30s fade.
+// Animation is a single activity signal: packets flow client → target while an
+// `activity` delta reports the leg hot. The target roundel (node ring) owns the
+// outcome — active (blue pulse) / served (green) / failed (red) / skipped
+// (amber) — and is only coloured by an explicit router signal: an `outcome`
+// event or a terminal skip delta. Nothing is inferred from a missing outcome.
+//
+// Rendering is driven by a requestAnimationFrame loop independent of the force
+// simulation. The simulation only lays nodes out; if it cools while legs are
+// still emitting packets, the loop keeps animating instead of freezing.
 //
 // Depends on the vendored D3 build (/d3.min.js, same-origin for the
 // `script-src 'self'` CSP). The host (app.js) owns data fetching and the SSE
-// subscription; this module owns the simulation, packets, badges, feed, and
+// subscription; this module owns the simulation, packets, roundels, feed, and
 // detail bar. Call init once per view entry, destroy on nav-away.
 
 const BLUE = '#2778b8';
 const GREEN = '#25845b';
-const RED = '#b5403c';
-const AMBER = '#a66312';
 const PURP = '#7a5fb5';
 
-// One fade timer for everything: legs linger this long after last activity,
-// then melt away (2s CSS transition) along with any now-unused nodes.
+// One fade timer for everything: legs linger this long after settling, then
+// melt away (2s CSS transition) along with any now-unused nodes.
 const FADE_MS = 30000;
-const SETTLE_MS = 4000;
-// A leg released with no outcome waits this long for one before assuming
-// failure: skipped-only legs (cooldown/unavailable) never emit outcomes, so
-// without the grace they would settle green as if served.
-const OUTCOME_GRACE_MS = 3000;
 
 let sim = null;
 let linkForce = null;
 let svg = null;
 let gL = null;
-let gB = null;
 let gN = null;
 let gP = null;
 let nodeSel = null;
@@ -41,9 +38,9 @@ let detailEl = null;
 let feedEl = null;
 let emptyEl = null;
 let statsEls = null;
-let tickHandler = null;
+let rafId = 0;
 
-// nodes: [{id, kind, label, sub, x, y, ...}] — d3 mutates x/y/fx/fy.
+// nodes: [{id, kind, label, sub, state, x, y, ...}] — d3 mutates x/y/fx/fy.
 // Only nodes with at least one live leg exist here.
 let nodes = [];
 const byId = new Map();
@@ -54,20 +51,18 @@ const routeIndex = new Map(); // routeID -> {label, sub}
 // colouring and right-column target nodes.
 const modelIndex = new Map();
 // forceLinks: [{source, target}] structural pairs for the simulation.
-// EDGES: "a|b" -> {a, b, line, state, meta, fadeTimer} rendered legs.
+// EDGES: "a|b" -> {a, b, line, state, meta, fadeTimer, removeTimer} rendered legs.
 let forceLinks = [];
 const EDGES = new Map();
 let packets = []; // {e, t, speed, color}
-let badges = []; // {e, g}
 let counters = { req: 0, fb: 0, err: 0 };
 const hotLegs = new Map(); // edgeKey -> active in-flight count
-// pendingFallback: routeID -> {legs: [{edge, badge}], timer} groups rapid
-// successive target deltas into one numbered fallback sequence.
-const pendingFallback = new Map();
 
 const W = 1180;
 const H = 600;
 const laneX = d => (d.kind === 'client' ? W * 0.14 : d.kind === 'route' ? W * 0.45 : W * 0.84);
+const nodeRadius = d => (d.kind === 'target' ? 12 : d.kind === 'route' ? 15 : 13);
+const nodeFill = d => (d.kind === 'client' ? BLUE : d.kind === 'route' ? PURP : GREEN);
 
 function edgeKey(a, b) {
   return a.id + '|' + b.id;
@@ -75,6 +70,19 @@ function edgeKey(a, b) {
 
 function refreshEmpty() {
   if (emptyEl) emptyEl.hidden = nodes.length > 0;
+}
+
+function applyNodeState(d) {
+  if (!d.ring) return;
+  d.ring.attr('class', 'node-ring st-' + (d.state || 'idle'));
+}
+
+// The roundel is the real-model node's outcome indicator. Only explicit router
+// signals (an outcome event or a skip delta) move it to served/failed/skipped.
+function setNodeState(node, state) {
+  if (!node || node.state === state) return;
+  node.state = state;
+  applyNodeState(node);
 }
 
 // Rebind the simulation after nodes/edges change. The key function keeps D3
@@ -87,7 +95,7 @@ function syncSim() {
     enter => {
       const g = enter.append('g').attr('class', 'node-enter').call(d3.drag()
         .on('start', (e, d) => {
-          sim.alphaTarget(0.3).restart();
+          if (sim) sim.alphaTarget(0.3).restart();
           d.fx = d.x;
           d.fy = d.y;
         })
@@ -96,13 +104,13 @@ function syncSim() {
           d.fy = e.y;
         })
         .on('end', (e, d) => {
-          sim.alphaTarget(0);
+          if (sim) sim.alphaTarget(0);
           d.fx = null;
           d.fy = null;
         }));
-      g.append('circle').attr('r', d => (d.kind === 'target' ? 12 : d.kind === 'route' ? 15 : 13))
-        .attr('fill', d => (d.kind === 'client' ? BLUE : d.kind === 'route' ? PURP : GREEN))
-        .attr('stroke', '#fff').attr('stroke-width', 2);
+      g.append('circle').attr('class', 'node-ring').attr('r', d => nodeRadius(d) + 5).attr('fill', 'none');
+      g.append('circle').attr('class', 'node-body').attr('r', nodeRadius)
+        .attr('fill', nodeFill).attr('stroke', '#fff').attr('stroke-width', 2);
       g.append('text').attr('class', 'node-label').attr('dy', 30).attr('text-anchor', 'middle')
         .text(d => (d.label.length > 24 ? d.label.slice(0, 23) + '…' : d.label));
       g.append('text').attr('class', 'node-sub').attr('dy', 43).attr('text-anchor', 'middle')
@@ -112,15 +120,20 @@ function syncSim() {
     update => update,
     exit => exit.remove(),
   );
+  nodeSel.each(function (d) {
+    d.ring = d3.select(this).select('.node-ring');
+  });
+  nodeSel.each(applyNodeState);
   refreshEmpty();
   // Avoid reheating the layout to a fixed high alpha for every new leg.
   sim.alpha(Math.max(sim.alpha(), 0.15)).restart();
+  ensureRenderLoop();
 }
 
 function ensureNode(kind, id, label, sub) {
   let n = byId.get(id);
   if (n) return n;
-  n = { id, kind, label, sub: sub || '', x: laneX({ kind }), y: H / 2 + (Math.random() - 0.5) * 240 };
+  n = { id, kind, label, sub: sub || '', state: 'idle', x: laneX({ kind }), y: H / 2 + (Math.random() - 0.5) * 240 };
   nodes.push(n);
   byId.set(id, n);
   syncSim();
@@ -137,7 +150,7 @@ function ensureEdge(a, b) {
       if (cur && cur.meta) showDetail(cur.meta);
     });
     line.append('title').text(a.label + ' → ' + b.label);
-    e = { a, b, line, state: 'idle', meta: null, fadeTimer: 0 };
+    e = { a, b, line, state: 'idle', meta: null, fadeTimer: 0, removeTimer: 0 };
     EDGES.set(key, e);
     forceLinks.push({ source: a, target: b });
     syncSim();
@@ -147,47 +160,46 @@ function ensureEdge(a, b) {
     clearTimeout(e.fadeTimer);
     e.fadeTimer = 0;
   }
+  if (e.removeTimer) {
+    clearTimeout(e.removeTimer);
+    e.removeTimer = 0;
+  }
   return e;
 }
 
 function setEdge(e, state, meta) {
   e.state = state;
   if (meta !== undefined) e.meta = meta;
-  if (e.graceTimer) {
-    clearTimeout(e.graceTimer);
-    e.graceTimer = 0;
-  }
   if (state === 'req') startEmitter(e);
   else stopEmitter(e);
   e.line.attr('class', 'edge ' + state);
 }
 
-// Settle a released leg into `pending` (still breathing, outcome unknown).
-// The first outcome to arrive colours it; if none arrives within
-// OUTCOME_GRACE_MS the leg is assumed failed (covers skip-only legs, which
-// never emit outcomes) and goes red into the shared 30s fade.
-function settlePending(e, meta, label) {
-  setEdge(e, 'pending', meta);
-  if (e.graceTimer) clearTimeout(e.graceTimer);
-  e.graceTimer = setTimeout(() => {
-    e.graceTimer = 0;
-    if (e.state !== 'pending') return;
-    bump('err', counters.err + 1);
-    feedItem('✗ ' + label + ' · no response', false);
-    fadeEdge(e, 'failed', meta + ' · FAILED — fades in 30s');
-  }, OUTCOME_GRACE_MS);
-}
-
-// Schedule the settle → fade → remove lifecycle for a leg. A fresh delta on
-// the leg cancels and restarts it via ensureEdge.
-function fadeEdge(e, settleState, settleMeta, settleMs) {
-  setEdge(e, settleState, settleMeta);
+// Schedule the fade → remove lifecycle for a settled leg. A fresh delta on the
+// leg cancels and restarts it via ensureEdge. Both timers are cleared on
+// teardown and on re-activity so a stale removal cannot delete a live leg.
+function fadeEdge(e, meta, settleMs) {
+  if (meta !== undefined) e.meta = meta;
   if (e.fadeTimer) clearTimeout(e.fadeTimer);
   e.fadeTimer = setTimeout(() => {
     e.fadeTimer = 0;
     e.line.attr('class', 'edge fading');
-    setTimeout(() => removeEdge(e), 2100);
-  }, settleMs == null ? SETTLE_MS : settleMs);
+    if (e.removeTimer) clearTimeout(e.removeTimer);
+    e.removeTimer = setTimeout(() => {
+      e.removeTimer = 0;
+      removeEdge(e);
+    }, 2100);
+  }, settleMs == null ? FADE_MS : settleMs);
+}
+
+// A leg released without an explicit outcome is not an inferred failure: stop
+// the flow, drop the roundel back to idle, and let the shared fade take it.
+// An explicit outcome arriving later recolours the roundel.
+function releaseLeg(e, destNode, label) {
+  stopEmitter(e);
+  setEdge(e, 'idle', label);
+  if (destNode && destNode.state === 'active') setNodeState(destNode, 'idle');
+  fadeEdge(e, label, FADE_MS);
 }
 
 function removeEdge(e) {
@@ -195,7 +207,7 @@ function removeEdge(e) {
   if (!EDGES.has(key)) return;
   stopEmitter(e);
   if (e.fadeTimer) clearTimeout(e.fadeTimer);
-  if (e.graceTimer) clearTimeout(e.graceTimer);
+  if (e.removeTimer) clearTimeout(e.removeTimer);
   e.line.remove();
   EDGES.delete(key);
   packets = packets.filter(p => p.e !== e);
@@ -226,11 +238,12 @@ function flow(e, color, n, dir) {
   for (let k = 0; k < (n || 4); k++) {
     addPacket({ e, t: (dir || 1) === 1 ? -k * 0.22 : 1 + k * 0.22, speed: 0.014 + Math.random() * 0.008, dir: dir || 1, color });
   }
+  ensureRenderLoop();
 }
 
 // Continuous flow: while a leg is hot it breathes — forward packets plus a
-// lighter return trickle so "pending" reads as waiting, not dead. One
-// interval per hot leg, capped so a storm cannot flood the DOM.
+// lighter return trickle. One interval per hot leg, capped so a storm cannot
+// flood the DOM.
 const FLOW_TICK_MS = 250;
 const MAX_FWD = 6;
 const MAX_BACK = 3;
@@ -248,12 +261,13 @@ function startEmitter(e) {
   const key = edgeKey(e.a, e.b);
   if (emitters.has(key)) return;
   emitters.set(key, setInterval(() => {
-    if (!EDGES.has(key) || (e.state !== 'req' && e.state !== 'pending')) {
+    if (!EDGES.has(key) || e.state !== 'req') {
       stopEmitter(e);
       return;
     }
     if (countPackets(e, 1) < MAX_FWD) addPacket({ e, t: -0.05, speed: 0.014 + Math.random() * 0.008, dir: 1, color: BLUE });
     if (countPackets(e, -1) < MAX_BACK && Math.random() < 0.6) addPacket({ e, t: 1.05, speed: 0.010 + Math.random() * 0.006, dir: -1, color: BACK_COLOR });
+    ensureRenderLoop();
   }, FLOW_TICK_MS));
 }
 function stopEmitter(e) {
@@ -274,25 +288,6 @@ function addPacket(packet) {
   packets.push(packet);
 }
 
-function addBadge(e, num, kind) {
-  const g = gB.append('g');
-  g.append('circle').attr('class', 'try-badge-bg').attr('r', 9)
-    .attr('fill', kind === 'failed' ? RED : kind === 'skipped' ? AMBER : GREEN);
-  g.append('text').attr('class', 'try-badge').attr('dy', 3.5).text('0' + num);
-  const b = { e, g };
-  badges.push(b);
-  return b;
-}
-
-function clearBadgesFor(routeID) {
-  const entry = pendingFallback.get(routeID);
-  if (!entry) return;
-  if (entry.timer) clearTimeout(entry.timer);
-  entry.legs.forEach(l => l.badge.g.remove());
-  badges = badges.filter(b => !entry.legs.some(l => l.badge === b));
-  pendingFallback.delete(routeID);
-}
-
 function bump(which, v) {
   counters[which] = v;
   if (statsEls && statsEls[which]) statsEls[which].textContent = v;
@@ -302,10 +297,10 @@ function showDetail(html) {
   if (detailEl) detailEl.innerHTML = '<code>' + html + '</code>';
 }
 
-function feedItem(text, ok) {
+function feedItem(text, kind) {
   if (!feedEl) return;
   const el = document.createElement('span');
-  el.className = 'feed-item ' + (ok ? 'ok' : 'fail');
+  el.className = 'feed-item ' + (kind || 'warn');
   el.textContent = text;
   feedEl.prepend(el);
   while (feedEl.children.length > 6) feedEl.lastChild.remove();
@@ -316,15 +311,15 @@ function feedItem(text, ok) {
   }, 9000);
 }
 
-function tick() {
+// renderFrame advances packets and redraws positions from current node x/y.
+// It is driven by the rAF loop, not by the simulation, so flow keeps moving
+// after the force layout cools. sim ticks call it too for layout updates.
+function renderFrame() {
+  if (!sim || !gP) return;
   EDGES.forEach(e => {
     e.line.attr('x1', e.a.x).attr('y1', e.a.y).attr('x2', e.b.x).attr('y2', e.b.y);
   });
   if (nodeSel) nodeSel.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
-  badges.forEach(b => {
-    if (!EDGES.has(edgeKey(b.e.a, b.e.b))) return;
-    b.g.attr('transform', 'translate(' + ((b.e.a.x + b.e.b.x) / 2) + ',' + ((b.e.a.y + b.e.b.y) / 2 - 14) + ')');
-  });
   packets.forEach(p => {
     p.t += p.speed * p.dir;
   });
@@ -339,6 +334,20 @@ function tick() {
       const t = Math.max(0, Math.min(1, d.t));
       return d.e.a.y + (d.e.b.y - d.e.a.y) * t;
     });
+}
+
+function renderLoop() {
+  rafId = 0;
+  if (!sim) return;
+  renderFrame();
+  if (packets.length > 0 || emitters.size > 0) {
+    rafId = requestAnimationFrame(renderLoop);
+  }
+}
+
+function ensureRenderLoop() {
+  if (rafId || !sim) return;
+  rafId = requestAnimationFrame(renderLoop);
 }
 
 // buildIndexes records catalogue payloads for resolving deltas into nodes.
@@ -383,16 +392,41 @@ function resolveClientNode(clientID) {
   return ensureNode('client', 'c:' + clientID, clientIndex.get(clientID) || clientID, '');
 }
 
+// handleSkip paints an explicit terminal skip (cooldown / unavailable /
+// unsupported) from a delta that carries full client + route + target context,
+// so the whole chain renders even if no ordinary activity delta was seen.
+function handleSkip(delta) {
+  const clientNode = delta.client_id ? resolveClientNode(delta.client_id) : null;
+  const targetNode = ensureTargetNode(delta.target_id);
+  const direct = !delta.id || delta.id === delta.target_id;
+  let from = clientNode;
+  if (!direct) {
+    const routeNode = resolveRouteNode(delta.id);
+    if (clientNode) ensureEdge(clientNode, routeNode);
+    from = routeNode;
+  }
+  if (!from) return;
+  const e = ensureEdge(from, targetNode);
+  const label = from.label + ' → ' + targetNode.label;
+  const reason = delta.failure_class ? ' (' + delta.failure_class + ')' : '';
+  setEdge(e, 'idle', label);
+  setNodeState(targetNode, 'skipped');
+  feedItem('⚠ ' + label + ' · skipped' + reason, 'warn');
+  fadeEdge(e, label + ' · SKIPPED' + reason, FADE_MS);
+}
+
 // onActivityDelta lights legs from a live `activity` SSE delta
-// ({id, client_id, target_id, active, streaming, ...}). Deltas with
-// active > 0 materialize nodes/legs and start flow; active < 0 releases the
-// leg toward its pending → settle → 30s-fade lifecycle. Rapid successive
-// target legs on one route are grouped into a numbered fallback sequence.
-// With {seed:true} the leg materializes without touching hot counts or
-// session counters (snapshot reseed must be idempotent: the matching release
-// already fired or is still in flight).
+// ({id, client_id, target_id, active, streaming, ...}). Deltas with active > 0
+// materialize nodes/legs and start flow; active < 0 releases the leg. A delta
+// with result: "skipped" is a terminal skip with full context. With
+// {seed:true} the leg materializes without touching hot counts or counters
+// (snapshot reseed must be idempotent).
 function onActivityDelta(delta, opts) {
   if (!sim) return;
+  if (delta.result === 'skipped') {
+    handleSkip(delta);
+    return;
+  }
   const seed = !!(opts && opts.seed);
   if (delta.client_id && delta.id) {
     const clientNode = resolveClientNode(delta.client_id);
@@ -404,13 +438,14 @@ function onActivityDelta(delta, opts) {
     if ((delta.active || 0) > 0) {
       if (!seed) hotLegs.set(key, (hotLegs.get(key) || 0) + 1);
       setEdge(e, 'req', label);
+      setNodeState(destination, 'active');
       flow(e, BLUE, 3);
       if (!seed) bump('req', counters.req + 1);
     } else if ((delta.active || 0) < 0) {
       const left = Math.max(0, (hotLegs.get(key) || 1) - 1);
       if (left === 0) {
         hotLegs.delete(key);
-        settlePending(e, label, label);
+        releaseLeg(e, destination, label);
       } else {
         hotLegs.set(key, left);
       }
@@ -418,8 +453,8 @@ function onActivityDelta(delta, opts) {
   }
   if (delta.target_id && delta.id) {
     // Direct real-model routes carry ID === TargetID === provider-model ID:
-    // the visible 1:1 leg is client → real target (lit by the client block above),
-    // so a target delta here only reinforces that leg's flow.
+    // the visible 1:1 leg is client → real target (lit by the client block
+    // above), so a target delta here only reinforces that leg's flow.
     if (delta.id === delta.target_id) {
       if ((delta.active || 0) > 0) {
         let live = null;
@@ -440,28 +475,26 @@ function onActivityDelta(delta, opts) {
     const targetNode = ensureTargetNode(delta.target_id);
     const e = ensureEdge(routeNode, targetNode);
     const key = edgeKey(routeNode, targetNode);
+    const label = routeNode.label + ' → ' + targetNode.label;
     if ((delta.active || 0) > 0) {
-      if (!seed) hotLegs.set(key, (hotLegs.get(key) || 0) + 1);
-      setEdge(e, 'req', routeNode.label + ' → ' + targetNode.label);
+      if (!seed) {
+        // A second distinct target on the same route is a real fallback. The
+        // earlier target's leg lingers (idle, fading) while the next begins.
+        let priorTargets = 0;
+        EDGES.forEach(cand => {
+          if (cand.a === routeNode && cand.b.kind === 'target' && cand.b !== targetNode) priorTargets++;
+        });
+        if (priorTargets > 0) bump('fb', counters.fb + 1);
+        hotLegs.set(key, (hotLegs.get(key) || 0) + 1);
+      }
+      setEdge(e, 'req', label);
+      setNodeState(targetNode, 'active');
       flow(e, BLUE, 3);
-      // Group into a fallback sequence when a route lights a second leg
-      // while the first is still pending.
-      let entry = pendingFallback.get(delta.id);
-      if (!entry) {
-        entry = { legs: [], timer: 0 };
-        pendingFallback.set(delta.id, entry);
-      }
-      if (!entry.legs.some(l => l.edge === e)) {
-        entry.legs.push({ edge: e, badge: addBadge(e, entry.legs.length + 1, 'pending') });
-        if (entry.legs.length > 1) bump('fb', counters.fb + 1);
-      }
-      if (entry.timer) clearTimeout(entry.timer);
-      entry.timer = setTimeout(() => clearBadgesFor(delta.id), FADE_MS);
     } else if ((delta.active || 0) < 0) {
       const left = Math.max(0, (hotLegs.get(key) || 1) - 1);
       if (left === 0) {
         hotLegs.delete(key);
-        settlePending(e, routeNode.label + ' → ' + targetNode.label, routeNode.label + ' → ' + targetNode.label);
+        releaseLeg(e, targetNode, label);
       } else {
         hotLegs.set(key, left);
       }
@@ -469,11 +502,10 @@ function onActivityDelta(delta, opts) {
   }
 }
 
-// onOutcome colours legs from an `outcome` SSE delta keyed by
-// provider-model ID ({pmID: {is_success}}). Success → green + feed tick;
-// failure → red, counted. Both rest into the shared 30s fade. Outcomes
-// without a matching live leg are ignored so delayed aggregates cannot create
-// orphan model nodes or edges.
+// onOutcome colours the target roundel from an explicit `outcome` SSE delta
+// keyed by provider-model ID ({pmID: {is_success, result, failure_class}}).
+// Served → green, failed → red, skipped → amber. Outcomes without a matching
+// live leg are ignored so a delayed aggregate cannot create an orphan node.
 function onOutcome(payload) {
   if (!sim) return;
   Object.entries(payload || {}).forEach(([pmID, o]) => {
@@ -482,38 +514,31 @@ function onOutcome(payload) {
     const direct = idx.routeID === pmID;
     const targetNode = byId.get('t:' + pmID);
     if (!targetNode) return;
-    let e;
+    let e = null;
     if (direct) {
-      let live = null;
       EDGES.forEach(cand => {
-        if (cand.b === targetNode && cand.state === 'req' && !live) live = cand;
+        if (!e && cand.b === targetNode && (cand.state === 'req' || cand.state === 'idle')) e = cand;
       });
-      if (!live) return;
-      e = live;
     } else {
-      // Outcomes settle an existing live leg only. They must not materialize
-      // an orphan target when an activity delta was missed or arrived late.
       const routeNode = byId.get('r:' + idx.routeID);
       if (!routeNode) return;
       e = EDGES.get(edgeKey(routeNode, targetNode));
-      if (!e) return;
     }
-    const entry = pendingFallback.get(idx.routeID);
-    const leg = entry ? entry.legs.find(l => l.edge === e) : null;
+    if (!e) return;
+    const route = e.a.label + ' → ' + idx.provider + '/' + idx.upstream;
+    if (o && o.result === 'skipped') {
+      setNodeState(targetNode, 'skipped');
+      return;
+    }
     if (o && o.is_success) {
-      if (leg) {
-        leg.badge.g.select('circle').attr('fill', GREEN);
-        leg.badge.g.select('text').text('0' + (entry.legs.indexOf(leg) + 1));
-      }
-      feedItem('✓ ' + e.a.label + ' → ' + idx.provider + '/' + idx.upstream, true);
-      fadeEdge(e, 'ok', e.a.label + ' → ' + idx.provider + '/' + idx.upstream + ' · SERVED');
-      setTimeout(() => clearBadgesFor(idx.routeID), SETTLE_MS);
+      setNodeState(targetNode, 'served');
+      feedItem('✓ ' + route, 'ok');
+      fadeEdge(e, route + ' · SERVED', FADE_MS);
     } else {
+      setNodeState(targetNode, 'failed');
       bump('err', counters.err + 1);
-      if (leg) leg.badge.g.select('circle').attr('fill', RED);
-      feedItem('✗ ' + e.a.label + ' → ' + idx.provider + '/' + idx.upstream, false);
-      fadeEdge(e, 'failed', e.a.label + ' → ' + idx.provider + '/' + idx.upstream + ' · FAILED — fades in 30s');
-      setTimeout(() => clearBadgesFor(idx.routeID), SETTLE_MS);
+      feedItem('✗ ' + route + ' · ' + (o?.failure_class || 'failed'), 'fail');
+      fadeEdge(e, route + ' · FAILED', FADE_MS);
     }
   });
 }
@@ -552,7 +577,6 @@ export function init(root, data) {
   };
   if (!svg || typeof d3 === 'undefined') return false;
   gL = d3.select(svg).append('g');
-  gB = d3.select(svg).append('g');
   gN = d3.select(svg).append('g');
   gP = d3.select(svg).append('g');
   d3.select(svg).append('text').attr('class', 'col-title').attr('x', 113).attr('y', 30).text('CLIENTS');
@@ -569,42 +593,38 @@ export function init(root, data) {
     .force('y', d3.forceY(H / 2).strength(0.15))
     .force('collide', d3.forceCollide(56));
   nodeSel = gN.selectAll('g').data(nodes, d => d.id);
-  if (tickHandler) sim.on('tick', null);
-  tickHandler = tick;
-  sim.on('tick', tickHandler);
+  sim.on('tick', renderFrame);
   refreshEmpty();
   return true;
 }
 
 export function destroy() {
+  if (rafId) {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+  }
   if (sim) {
     sim.stop();
     sim = null;
   }
   linkForce = null;
-  tickHandler = null;
   if (svg) d3.select(svg).selectAll('*').remove();
-  svg = gL = gB = gN = gP = nodeSel = null;
+  svg = gL = gN = gP = nodeSel = null;
   detailEl = feedEl = emptyEl = statsEls = null;
   nodes = [];
   byId.clear();
   clientIndex.clear();
   routeIndex.clear();
+  modelIndex.clear();
   forceLinks = [];
   EDGES.forEach(e => {
     if (e.fadeTimer) clearTimeout(e.fadeTimer);
-    if (e.graceTimer) clearTimeout(e.graceTimer);
+    if (e.removeTimer) clearTimeout(e.removeTimer);
   });
   EDGES.clear();
   packets = [];
-  badges = [];
   stopAllEmitters();
   hotLegs.clear();
-  modelIndex.clear();
-  pendingFallback.forEach(entry => {
-    if (entry.timer) clearTimeout(entry.timer);
-  });
-  pendingFallback.clear();
 }
 
 // The module namespace exposes init/destroy/onActivityDelta/onOutcome/

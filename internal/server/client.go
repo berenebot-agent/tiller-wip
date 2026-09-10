@@ -647,12 +647,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !candidate.Available {
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unavailable")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
 			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
 				skippedCooled = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "cooldown")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -671,6 +673,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "free_model_requires_keyless")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -679,6 +682,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				protocolUnavailable = true
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "protocol_unavailable")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -701,6 +705,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					}
 					translationFailureClass = code
 					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
+					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, code)
 					continue
 				}
 				// After translation, re-apply the canonical selector for the target.
@@ -726,6 +731,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 							return
 						}
 						row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+						s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
 						continue
 					}
 					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
@@ -778,6 +784,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						return
 					}
 					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
 					continue
 				}
 			}
@@ -833,6 +840,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
 					class = "upstream_timeout"
 				}
+				// A network error that coincides with the client ending the
+				// request is the client's, not the target's: classify it so it
+				// never degrades target health or paints a red roundel.
+				class = clientFailureClass(r.Context(), class)
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				nonTranslationFailure = true
@@ -959,6 +970,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if attemptTimedOut.Load() {
 					class = "upstream_timeout"
 				}
+				class = clientFailureClass(r.Context(), class)
 				if errors.Is(e, errUpstreamResponseTooLarge) {
 					class = "upstream_response_too_large"
 					message = "The upstream provider response exceeded Tiller's non-streaming response limit."
@@ -1086,6 +1098,7 @@ routeDone:
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
 			}
+			class = clientFailureClass(r.Context(), class)
 			row.httpStatus = 502
 			row.errorText = strPtr(class)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1112,6 +1125,7 @@ routeDone:
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
 			}
+			class = clientFailureClass(r.Context(), class)
 			row.httpStatus = 502
 			row.errorText = strPtr(class)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1131,6 +1145,7 @@ routeDone:
 		if attemptTimedOut.Load() {
 			class = "upstream_timeout"
 		}
+		class = clientFailureClass(r.Context(), class)
 		row.httpStatus = 502
 		row.errorText = strPtr(class)
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1331,6 +1346,22 @@ func ctxErrString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// clientFailureClass overrides a failure class with a client-caused one when
+// the request context has ended. A client cancel/timeout is not evidence the
+// target is unhealthy, so it must not degrade target health or paint a red
+// leg. The router's own per-attempt idle timer cancels the attempt context,
+// not the request context, so a genuine upstream timeout still classifies as
+// upstream_timeout.
+func clientFailureClass(ctx context.Context, fallback string) string {
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "client_timeout"
+		}
+		return "client_cancelled"
+	}
+	return fallback
 }
 
 func fallbackStatus(status int) bool {

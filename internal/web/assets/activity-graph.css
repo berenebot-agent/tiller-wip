@@ -76,6 +76,10 @@
   transition: opacity 2s;
   pointer-events: none;
 }
+.edge.idle {
+  stroke: #c7d3dc;
+  opacity: 0.55;
+}
 .edge.req {
   stroke: var(--blue);
   opacity: 1;
@@ -91,19 +95,33 @@
     stroke-dashoffset: -11;
   }
 }
-.edge.ok {
+/* The roundel: a ring around each node that owns the outcome. Edges are
+   flow-only; this is where served/failed/skipped reads from. */
+.node-ring {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 2.5;
+}
+.node-ring.st-active {
+  stroke: #4db2ff;
+  animation: node-pulse 1.05s ease-in-out infinite;
+}
+.node-ring.st-ok {
   stroke: var(--green);
-  opacity: 1;
 }
-.edge.failed {
+.node-ring.st-failed {
   stroke: var(--red);
-  stroke-dasharray: 6 5;
-  opacity: 0.9;
 }
-.edge.cool {
+.node-ring.st-skipped {
   stroke: var(--amber);
-  stroke-dasharray: 2 5;
-  opacity: 0.9;
+}
+@keyframes node-pulse {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 .node-label {
   font-family: var(--mono);
@@ -132,16 +150,6 @@
   stroke: #fff;
   stroke-width: 1;
   pointer-events: none;
-}
-.try-badge {
-  font: 700 10px var(--mono);
-  fill: #fff;
-  text-anchor: middle;
-  pointer-events: none;
-}
-.try-badge-bg {
-  stroke: #fff;
-  stroke-width: 1.5;
 }
 .graph-detail {
   background: var(--navy);
@@ -178,6 +186,10 @@
 .feed-item.fail {
   border-color: var(--red);
   color: var(--red);
+}
+.feed-item.warn {
+  border-color: var(--amber);
+  color: var(--amber);
 }
 @keyframes feed-pop {
   from {

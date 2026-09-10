@@ -21,6 +21,14 @@ type inflightDelta struct {
 	Streaming      int    `json:"streaming"`
 	RequestedModel string `json:"requested_model,omitempty"`
 	ResolvedModel  string `json:"resolved_model,omitempty"`
+	// Result marks an explicit terminal signal. Today it is set to "skipped"
+	// for a target the router declined to call (cooldown, unavailable,
+	// unsupported feature, etc.). It carries full client + route + target
+	// context so consumers can render the leg without inference. Empty for
+	// ordinary in-flight activity deltas.
+	Result string `json:"result,omitempty"`
+	// FailureClass accompanies Result and names the reason (e.g. "cooldown").
+	FailureClass string `json:"failure_class,omitempty"`
 }
 
 // Single-ticket liveness: each in-flight request hangs one ticket,
@@ -131,6 +139,17 @@ func (t *inflightTracker) targetEnd(routeID, targetID string) {
 	}
 	t.mu.Unlock()
 	t.emit(inflightDelta{ID: routeID, TargetID: targetID, Active: -1})
+}
+
+// targetSkipped emits one explicit terminal delta for a target the router
+// declined to call. Unlike targetStart/targetEnd it does not touch the active
+// counters (the target was never in flight); it exists so live consumers can
+// render a distinct skipped leg with full client + route + target context.
+func (t *inflightTracker) targetSkipped(routeID, clientID, targetID, failureClass string) {
+	if routeID == "" || targetID == "" {
+		return
+	}
+	t.emit(inflightDelta{ID: routeID, ClientID: clientID, TargetID: targetID, Result: "skipped", FailureClass: failureClass})
 }
 
 func (t *inflightTracker) targetSnapshot() map[string]inflightState {

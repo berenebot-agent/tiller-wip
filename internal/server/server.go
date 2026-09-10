@@ -76,6 +76,17 @@ type lastOutcome struct {
 	At        string `json:"at"`         // RFC3339Nano timestamp; empty = never
 	Status    int    `json:"status"`     // HTTP status of the last request
 	IsSuccess bool   `json:"is_success"` // whether that status was 2xx
+	// Result is the explicit outcome kind: "success", "failed" or "skipped".
+	// Empty on legacy entries recorded before this field existed.
+	Result string `json:"result,omitempty"`
+	// FailureClass names why a failed/skipped attempt did not serve.
+	FailureClass string `json:"failure_class,omitempty"`
+	// Degrading reports whether this outcome should affect the target's
+	// main-page health. A failed/skipped attempt that was replaced by a
+	// successful fallback is not degrading: the logical request succeeded, so
+	// the failed target is not painted unhealthy. The live graph still sees
+	// every attempt's explicit outcome.
+	Degrading bool `json:"degrading"`
 }
 
 type contextKey string

@@ -333,14 +333,17 @@ function resolutionStatus(target) {
       : `${cooling.provider}/${cooling.model} failed (in cooldown)`;
     return ['bad', label];
   }
+  const health = state.usage?.target_health?.[legacyKey];
   const last = state.usage?.target_last_outcome?.[key]
             || state.usage?.target_last_outcome?.[legacyKey];
-  if (last?.at) {
-    if ((Date.now() - new Date(last.at).getTime()) <= RESOLUTION_STALE_MS) return last.is_success ? ['good', 'Resolving successfully'] : ['bad', 'Last request failed'];
-  }
-  const health = state.usage?.target_health?.[legacyKey];
+  const lastFresh = last?.at && (Date.now() - new Date(last.at).getTime()) <= RESOLUTION_STALE_MS;
+  // A recent success always wins. The main page must agree with the green
+  // Activity log: one failed fallback attempt must not paint a target
+  // unhealthy when the logical request still resolved.
+  if (lastFresh && last.is_success) return ['good', 'Resolving successfully'];
   if (health?.success_1h) return ['good', 'Resolved successfully in the last hour'];
   if (health?.failure_1h) return ['bad', 'Failed in the last hour'];
+  if (lastFresh) return ['bad', 'Last request failed'];
   if (health?.success_24h) return ['neutral', 'No successful activity in the last hour'];
   return ['neutral', 'No activity recorded'];
 }
@@ -1335,18 +1338,26 @@ function reconcileLive() {
 live.on('outcome', payload => {
   if (!state.usage) state.usage = {};
   if (!state.usage.target_last_outcome) state.usage.target_last_outcome = {};
-  Object.assign(state.usage.target_last_outcome, payload);
+  // Only degrading outcomes update main-page target health: a failed fallback
+  // attempt that a later success replaced must not paint the target red. The
+  // graph still receives every attempt's explicit outcome below.
+  const degrading = new Set();
+  for (const [key, outcome] of Object.entries(payload || {})) {
+    if (outcome && outcome.degrading === false) continue;
+    state.usage.target_last_outcome[key] = outcome;
+    degrading.add(key);
+  }
   if (liveViewActive('virtual') && !liveDialogOpen()) {
     state.virtualModels.forEach(model => (model.targets || []).forEach(target => {
       const key = target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`;
-      if (!(key in payload)) return;
+      if (!degrading.has(key)) return;
       const row = $(`tr[data-virtual-id="${CSS.escape(model.id)}"]`);
       const line = row && $(`[data-target-key="${CSS.escape(key)}"]`, row);
       if (line) patchResolution(line, target);
     }));
   }
-  // Activity living pane: outcome decides the settle colour (green served /
-  // red failed); the `activity` deltas drive the flow itself.
+  // Activity living pane: the explicit outcome colours the model roundel
+  // (served/failed/skipped); the `activity` deltas drive the flow itself.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { activityGraphModule.onOutcome(payload); } catch { /* pane update is best-effort */ }
   }
@@ -1368,6 +1379,15 @@ live.on('snapshot', payload => {
 });
 
 live.on('activity', delta => {
+  // An explicit terminal skip carries full client + route + target context
+  // but is not an in-flight request, so it must not touch the live counters.
+  // Forward it to the graph (which paints the amber roundel) and stop.
+  if (delta.result === 'skipped') {
+    if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+      try { activityGraphModule.onActivityDelta(delta); } catch { /* pane update is best-effort */ }
+    }
+    return;
+  }
   // Single-ticket liveness: client deltas (with route ID) accumulate in
   // liveRequests; target deltas accumulate in liveLegs. No separate
   // route-level lane exists, so there is nothing to double-count.

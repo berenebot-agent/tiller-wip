@@ -145,9 +145,12 @@ func (s *Server) targetResolutionHealth(ctx context.Context, c1, c24 string) (ma
 			UNION ALL
 			SELECT a.provider||'/'||a.model AS key,
 				CASE WHEN a.created_at >= ? AND a.result='success' THEN 1 ELSE 0 END AS success_1h,
-				CASE WHEN a.created_at >= ? AND a.result IN ('failed','skipped') THEN 1 ELSE 0 END AS failure_1h,
+				CASE WHEN a.created_at >= ? AND a.result IN ('failed','skipped')
+					AND a.failure_class NOT IN ('client_cancelled','client_timeout')
+					AND (l.http_status IS NULL OR l.http_status < 200 OR l.http_status >= 300) THEN 1 ELSE 0 END AS failure_1h,
 				CASE WHEN a.result='success' THEN 1 ELSE 0 END AS success_24h
 			FROM request_attempts a
+			JOIN request_logs l ON l.id = a.request_log_id
 			WHERE a.created_at >= ?
 		)
 		GROUP BY key`, c1, c1, c24, c1, c1, c24)

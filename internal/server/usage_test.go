@@ -217,8 +217,9 @@ func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
 }
 
 // TestRecordLastOutcomeOrderedFallback records per-target outcomes across an
-// ordered fallback chain: the failed target turns red, the succeeding target
-// turns green, each reflecting its own last outcome.
+// ordered fallback chain. The logical request succeeded, so the failed primary
+// is non-degrading and does not paint the target unhealthy; only the serving
+// target is stored for the main page. The graph still receives both outcomes.
 func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 	s := &Server{}
 	row := &logRow{
@@ -232,9 +233,8 @@ func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	failed, ok := s.lastOutcome["pm-primary"]
-	if !ok || failed.IsSuccess {
-		t.Fatalf("expected failed target red: %v", s.lastOutcome)
+	if _, ok := s.lastOutcome["pm-primary"]; ok {
+		t.Fatalf("failed fallback target should not degrade target health: %v", s.lastOutcome)
 	}
 	success, ok := s.lastOutcome["pm-backup"]
 	if !ok || !success.IsSuccess {
@@ -290,8 +290,8 @@ func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) 
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	if got := s.lastOutcome["pm-primary"]; got.Status != 0 || got.IsSuccess {
-		t.Fatalf("network failure outcome = %+v, want status 0 and failure", got)
+	if _, ok := s.lastOutcome["pm-primary"]; ok {
+		t.Fatalf("failed fallback target should not degrade target health: %+v", s.lastOutcome)
 	}
 	if got := s.lastOutcome["pm-backup"]; got.Status != 200 || !got.IsSuccess {
 		t.Fatalf("fallback success outcome = %+v", got)
