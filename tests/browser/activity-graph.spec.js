@@ -41,7 +41,7 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await expect(page.locator('#view-activity')).toBeVisible();
   await expect(page.locator('#activity-pane')).toBeVisible();
   await expect(page.locator('#graph-empty')).toBeVisible();
-  await expect(page.locator('#activity-pane line.edge')).toHaveCount(0);
+  await expect(page.locator('#activity-pane path.edge')).toHaveCount(0);
 
   // Drive a real fallback request: first target 500s, second serves.
   const post = await page.request.post('/v1/chat/completions', { headers: { Authorization: `Bearer ${client.secret}` }, data: { model: 'activity-graph-group/graph', messages: [{ role: 'user', content: 'e2e' }] } });
@@ -50,7 +50,7 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   // Legs materialize: client → virtual in the middle lane, virtual → each
   // tried real model in the right lane. No provider nodes exist.
   await expect(page.locator('#graph-empty')).toBeHidden({ timeout: 15000 });
-  await expect.poll(async () => page.locator('#activity-pane line.edge').count(), { timeout: 15000 }).toBeGreaterThanOrEqual(3);
+  await expect.poll(async () => page.locator('#activity-pane path.edge').count(), { timeout: 15000 }).toBeGreaterThanOrEqual(3);
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-client' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-group/graph' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: `${providerName}/mock-model-b` }).first()).toBeVisible();
@@ -61,7 +61,7 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await expect(page.locator('#graph-feed .feed-item.ok').first()).toBeVisible({ timeout: 15000 });
 
   // Clicking the served leg shows attempt detail in the detail bar.
-  await page.locator('#activity-pane line.edge', { hasText: 'mock-model-b' }).first().click();
+  await page.locator('#activity-pane path.edge-hit', { hasText: 'mock-model-b' }).first().click();
   await expect(page.locator('#graph-detail')).toContainText('activity-graph-group/graph');
 
   // Direct real-model request: a single client → real-model leg in the

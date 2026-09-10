@@ -69,7 +69,21 @@
 .edge {
   fill: none;
   stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
   transition: stroke 0.5s, opacity 0.5s;
+}
+/* Invisible wide companion to each leg: keeps the thin curved stroke easy to
+   click and hover. The edge itself is pointer-events: none. */
+.edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 18;
+  pointer-events: stroke;
+}
+.edge-hit.fading {
+  pointer-events: none;
 }
 .edge.fading {
   opacity: 0;
@@ -112,8 +126,12 @@
 .node-ring.st-failed {
   stroke: var(--red);
 }
+/* Skipped targets are a solid red dot with no outer ring. */
 .node-ring.st-skipped {
-  stroke: var(--amber);
+  display: none;
+}
+.node-body.st-skipped {
+  fill: var(--red);
 }
 @keyframes node-pulse {
   0%, 100% {
