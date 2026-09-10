@@ -180,6 +180,20 @@ func TestGlobalActivitySearchFields(t *testing.T) {
 	if rows := search("MODEL-B"); len(rows) != 1 || rows[0].(map[string]any)["id"] != "row-b" {
 		t.Fatalf("case-insensitive search failed: %v", rows)
 	}
+	clientSearch := func(term string) []any {
+		status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity?search="+term, nil)
+		if status != 200 {
+			t.Fatalf("client activity search %q: %d %v", term, status, payload)
+		}
+		return payload["data"].([]any)
+	}
+	if rows := clientSearch("model-a"); len(rows) != 1 || rows[0].(map[string]any)["id"] != "row-a" {
+		t.Fatalf("client activity search by resolved model failed: %v", rows)
+	}
+	if rows := clientSearch("upstream-a"); len(rows) != 1 || rows[0].(map[string]any)["id"] != "row-a" {
+		t.Fatalf("client activity search by provider request ID failed: %v", rows)
+	}
+
 }
 
 // TestGlobalActivitySearchResolvedPair covers the Real Models "Activity" button:

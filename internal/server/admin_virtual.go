@@ -250,7 +250,7 @@ type virtualTargetView struct {
 func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.id,g.name,v.name,g.name||'/'||v.name,v.routing_mode,v.created_at,v.updated_at FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE g.name LIKE ? OR v.name LIKE ? OR EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND (p.name LIKE ? OR m.upstream_model_id LIKE ?)) ORDER BY g.name,v.name LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, limit, offset)
+	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.id,g.name,v.name,g.name||'/'||v.name,v.routing_mode,v.created_at,v.updated_at FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE g.name LIKE ? OR v.name LIKE ? OR g.name||'/'||v.name LIKE ? OR EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND (p.name LIKE ? OR m.upstream_model_id LIKE ? OR p.name||'/'||m.upstream_model_id LIKE ?)) ORDER BY g.name,v.name LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list virtual models.")
 		return

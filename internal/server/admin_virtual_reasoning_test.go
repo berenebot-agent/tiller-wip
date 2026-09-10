@@ -138,6 +138,17 @@ func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *t
 	}
 	virtualID := payload["id"].(string)
 
+	for _, term := range []string{"reasoning-vg%2Freasoning-vm", "provider-a%2Fmodel-a"} {
+		status, payload, _ = api.request("GET", "/api/admin/virtual-models?search="+term, nil)
+		if status != http.StatusOK {
+			t.Fatalf("search virtual models %q: %d %v", term, status, payload)
+		}
+		data := payload["data"].([]any)
+		if len(data) != 1 || data[0].(map[string]any)["id"] != virtualID {
+			t.Fatalf("search virtual models %q returned %v, want %s", term, data, virtualID)
+		}
+	}
+
 	status, payload, _ = api.request("GET", "/api/admin/virtual-models", nil)
 	if status != http.StatusOK {
 		t.Fatalf("list virtual models: %d %v", status, payload)

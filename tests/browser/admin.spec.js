@@ -755,6 +755,23 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
   await expect(virtualModel).toBeHidden();
 });
 
+test('real model search matches the displayed canonical model ID', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAdmin(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'canonical-model-search';
+  await createProvider(page, csrf, providerName);
+
+  await page.getByRole('link', { name: 'Real Models' }).click();
+  const search = page.locator('#model-search');
+  const row = page.locator('#models-body tr', { hasText: `${providerName}/mock-model` });
+  await expect(row).toBeVisible();
+
+  await search.fill(`${providerName}/mock-model`);
+  await expect(page.locator('#models-body tr')).toHaveCount(1);
+  await expect(row).toBeVisible();
+});
+
 
 test('activity loads clear a previously shown error on success', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
