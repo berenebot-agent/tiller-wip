@@ -55,6 +55,19 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-client' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-group/graph' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: `${providerName}/mock-model-b` }).first()).toBeVisible();
+  const graphNode = label => page.locator('#activity-pane g[role="button"]').filter({ hasText: label }).first();
+  await graphNode('activity-graph-client').click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await expect(page.locator('#activity-title')).toHaveText('activity-graph-client activity');
+  await page.getByRole('button', { name: 'Done' }).click();
+  await graphNode('activity-graph-group/graph').click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await expect(page.locator('#activity-title')).toHaveText('activity-graph-group/graph activity');
+  await page.getByRole('button', { name: 'Done' }).click();
+  await graphNode(`${providerName}/mock-model-b`).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await expect(page.locator('#activity-title')).toHaveText(`${providerName}/mock-model-b activity`);
+  await page.getByRole('button', { name: 'Done' }).click();
   // The served target roundel settles green, the failed target roundel red.
   // Outcome colour lives on the node ring; edges are flow-only.
   await expect(page.locator('#activity-pane .node-ring.st-ok').first()).toBeVisible({ timeout: 15000 });

@@ -90,6 +90,16 @@
 .node-body.st-skipped {
   fill: var(--red);
 }
+.node-clickable {
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+}
+.node-clickable:hover .node-body,
+.node-clickable:focus-visible .node-body {
+  stroke: #77bce8;
+  stroke-width: 3px;
+}
 @keyframes node-pulse {
   0%, 100% {
     opacity: 0.3;

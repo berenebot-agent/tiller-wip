@@ -1208,10 +1208,15 @@ async function loadActivityView() {
       api('/api/admin/models?all=1'),
     ]);
     if (token !== state.loadToken) return;
-    activityGraphReady = mod.init($('#view-activity'), {
+    const graphData = {
       clients: clients.data || [],
       virtualModels: virtualModels.data || [],
       models: models.data || [],
+    };
+    activityGraphReady = mod.init($('#view-activity'), {
+      ...graphData,
+    }, {
+      onNodeClick: node => openGraphActivity(node, graphData),
     }) === true;
     // Seed currently-hot legs from live state in case deltas were missed
     // while the view was hidden (state keeps the client + leg lanes).
@@ -1220,6 +1225,20 @@ async function loadActivityView() {
   } catch (error) {
     flash(errorMessage(error), 'error');
   }
+}
+function openGraphActivity(node, data) {
+  const id = node.id.slice(2);
+  const item = node.kind === 'client'
+    ? data.clients.find(client => client.id === id)
+    : node.kind === 'route'
+      ? data.virtualModels.find(model => model.id === id)
+      : data.models.find(model => model.id === id);
+  if (!item) {
+    flash('Activity details are no longer available. Refresh the Activity view.', 'error');
+    return;
+  }
+  if (node.kind === 'client') openActivity(item);
+  else openModelActivity(item, node.kind === 'route' ? 'virtual' : 'real');
 }
 function destroyActivityView() {
   if (activityGraphModule && activityGraphReady) {

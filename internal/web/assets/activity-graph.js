@@ -57,6 +57,7 @@ let gN = null;
 let gP = null;
 let nodeSel = null;
 let emptyEl = null;
+let nodeClickHandler = null;
 let rafId = 0;
 let layoutTimer = 0;
 
@@ -343,6 +344,10 @@ function scheduleLayoutPass() {
   }, 1200);
 }
 
+function activateNode(d) {
+  if (nodeClickHandler) nodeClickHandler(d);
+}
+
 // ---------------------------------------------------------------------------
 // Node / edge lifecycle.
 // ---------------------------------------------------------------------------
@@ -355,7 +360,22 @@ function syncSim() {
   if (linkForce) linkForce.links(forceLinks);
   nodeSel = gN.selectAll('g').data(nodes, d => d.id).join(
     enter => {
-      const g = enter.append('g').attr('class', 'node-enter').call(d3.drag()
+      const g = enter.append('g')
+        .attr('class', 'node-enter node-clickable')
+        .attr('role', 'button')
+        .attr('tabindex', 0)
+        .attr('aria-label', d => `Open activity for ${d.label}`)
+        .on('click', (e, d) => {
+          e.stopPropagation();
+          activateNode(d);
+        })
+        .on('keydown', (e, d) => {
+          if (e.key !== 'Enter' && e.key !== ' ') return;
+          e.preventDefault();
+          activateNode(d);
+        })
+        .call(d3.drag()
+        .clickDistance(6)
         .on('start', (e, d) => {
           if (sim) sim.alphaTarget(0.3).restart();
           d.dragging = true;
@@ -978,11 +998,12 @@ function onCooldowns(map) {
   });
 }
 
-export function init(root, data) {
+export function init(root, data, options = {}) {
   destroy();
   svg = root.querySelector('#activity-pane');
   emptyEl = root.querySelector('#graph-empty');
   if (!svg || typeof d3 === 'undefined') return false;
+  nodeClickHandler = options.onNodeClick || null;
   gLIdle = d3.select(svg).append('g');
   gLActive = d3.select(svg).append('g');
   gN = d3.select(svg).append('g');
@@ -1022,6 +1043,7 @@ export function destroy() {
   if (svg) d3.select(svg).selectAll('*').remove();
   svg = gLIdle = gLActive = gN = gP = nodeSel = null;
   emptyEl = null;
+  nodeClickHandler = null;
   nodes = [];
   byId.clear();
   clientIndex.clear();
