@@ -48,6 +48,8 @@ Exposes one stable model identity — usually something simple like `main` — b
 
 Exposes a controlled subset of Tiller's catalogue through `GET /v1/models`, with per-client model permissions. Useful to curate exactly which providers and models appear for a client to save wading through hundreds of rows of models you don't use.
 
+Capability metadata is informational: `/v1/models` includes `context_length` and `max_output_tokens` only when Tiller knows them, and a virtual model omits them when any eligible target is unknown. Clients do not necessarily consume these fields automatically; for example, an OpenCode custom-provider model ID under Tiller does not inherit limits from a same-named built-in provider entry, so OpenCode can report unknown context even when Tiller publishes the values.
+
 ---
 
 ## Virtual models
