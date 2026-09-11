@@ -59,6 +59,10 @@ type requestAttempt struct {
 	attemptTimedOut                                        bool
 	upstreamStreaming                                      bool
 	headerLatencyMs                                        int64
+	// clientError is the sanitized, client-facing detail for a failed attempt
+	// (provider error message/code/param). It is never persisted or exposed via
+	// Activity; it exists only to build a client error response.
+	clientError string
 }
 
 const maxLoggedBodyBytes = 1 << 20

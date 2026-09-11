@@ -893,13 +893,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
 				s.inflight.targetEnd(route.RouteModelID, targetID)
 				class := fmt.Sprintf("http_%d", response.StatusCode)
-				var upstreamErrorBody []byte
-				var upstreamErrorReadErr error
-				if logErrorBodies {
-					// Body content is retained only by opt-in detailed error logging
-					// and is never passed through to the client.
-					upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
-				}
+				// Always read a bounded copy: it is persisted only under opt-in
+				// detailed error logging, but a sanitized summary is always used
+				// to build the client error (direct routes) or the virtual
+				// fallback error list.
+				upstreamErrorBody, upstreamErrorReadErr := io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
 				response.Body.Close()
 				idle.Stop()
 				attemptCancel()
@@ -907,8 +905,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					class = "upstream_timeout"
 				}
 				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
-				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
-					attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
+				if upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+					if logErrorBodies {
+						attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
+					}
+					detail := parseUpstreamErrorDetail(upstreamErrorBody, response.Header.Get("Content-Type"))
+					attempt.clientError = redactProviderSecrets(detail.clientMessage(), candidate.Provider)
 				}
 				idle.Stop()
 				row.attempts = append(row.attempts, attempt)
@@ -960,7 +962,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
-					inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
+					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
+					if attempt.clientError != "" {
+						message = fmt.Sprintf("%s (HTTP %d)", attempt.clientError, response.StatusCode)
+					}
+					inferenceError(w, response.StatusCode, "api_error", "upstream_error", message, incoming == providers.ProtocolMessages)
 					return
 				}
 				row.fallbackUsed = true
@@ -1101,7 +1107,7 @@ routeDone:
 		}
 		if route.Virtual {
 			row.errorText = strPtr("virtual_model_unavailable")
-			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
+			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", exhaustedRouteMessage(row.attempts), incoming == providers.ProtocolMessages)
 		} else {
 			row.errorText = strPtr("model_unavailable")
 			inferenceError(w, 503, "service_unavailable_error", "model_unavailable", "The configured model is unavailable.", incoming == providers.ProtocolMessages)

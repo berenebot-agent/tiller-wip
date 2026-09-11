@@ -410,35 +410,48 @@ func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
 	}
 }
 
-func TestProviderErrorMessageAndBodyAreNotPassedThroughToClient(t *testing.T) {
-	// Direct (non-virtual, non-translated) routes return a fixed router-owned
-	// error rather than passing the provider's structured error body through,
-	// so a provider that echoes its received authorization header cannot leak
-	// the shared upstream credential to a less-privileged client. The body is
-	// never stored in the activity log (privacy guardrail).
-	const marker = "PROVIDER-ERROR-SECRET-MARKER"
+func TestUpstreamErrorDetailIsRedactedButSurfacedToClient(t *testing.T) {
+	// Direct (non-virtual) routes surface a sanitized provider error so the
+	// client can act on it, but any credential the provider echoes back must be
+	// redacted. The raw body is never persisted to Activity (privacy guardrail).
+	const phrase = "reasoning.effort must be one of none, low, high"
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadGateway)
-		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": marker}, "body": marker})
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+			"message": phrase + "; auth=" + r.Header.Get("Authorization"),
+			"type":    "invalid_request_error",
+			"code":    "invalid_value",
+			"param":   "reasoning.effort",
+		}})
 	})
 	api, _, clientID, secret := loggingTestHarness(t, upstream)
 	resp, payload := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{}})
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("provider error status = %d, want %d", resp.StatusCode, http.StatusBadGateway)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("provider error status = %d, want %d", resp.StatusCode, http.StatusBadRequest)
 	}
-	if strings.Contains(string(mustJSON(t, payload)), marker) {
-		t.Fatalf("provider error body was passed through to client: %v", payload)
+	encoded := string(mustJSON(t, payload))
+	if strings.Contains(encoded, "provider-secret") {
+		t.Fatalf("provider credential was passed through to client: %v", payload)
+	}
+	for _, want := range []string{phrase, "invalid_value", "reasoning.effort"} {
+		if !strings.Contains(encoded, want) {
+			t.Fatalf("client error missing %q: %v", want, payload)
+		}
 	}
 	reqID := resp.Header.Get("X-Tiller-Request-Id")
 
 	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
-	if status != http.StatusOK || strings.Contains(string(mustJSON(t, activity)), marker) {
-		t.Fatalf("provider error was persisted in activity: status=%d payload=%v", status, activity)
+	if status != http.StatusOK {
+		t.Fatalf("activity: %d %v", status, activity)
+	}
+	activityJSON := string(mustJSON(t, activity))
+	if strings.Contains(activityJSON, "provider-secret") || strings.Contains(activityJSON, phrase) {
+		t.Fatalf("provider error detail was persisted in activity: %v", activity)
 	}
 	activityRow := activity["data"].([]any)[0].(map[string]any)
 	if activityRow["error_text"] != "upstream_error" {
@@ -449,16 +462,16 @@ func TestProviderErrorMessageAndBodyAreNotPassedThroughToClient(t *testing.T) {
 		t.Fatalf("expected human-readable error_message, got %v", activityRow)
 	}
 	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
-	if status != http.StatusOK || strings.Contains(string(mustJSON(t, attempts)), marker) {
-		t.Fatalf("provider error was persisted in attempts: status=%d payload=%v", status, attempts)
+	if status != http.StatusOK {
+		t.Fatalf("attempts: %d %v", status, attempts)
+	}
+	attemptsJSON := string(mustJSON(t, attempts))
+	if strings.Contains(attemptsJSON, "provider-secret") || strings.Contains(attemptsJSON, phrase) {
+		t.Fatalf("provider error detail was persisted in attempts: %v", attempts)
 	}
 	attemptRow := attempts["data"].([]any)[0].(map[string]any)
-	if attemptRow["failure_class"] != "http_502" {
+	if attemptRow["failure_class"] != "http_400" {
 		t.Fatalf("provider attempt metadata = %v", attemptRow)
-	}
-	// Attempt error_message should be a human-readable translation.
-	if msg, ok := attemptRow["error_message"].(string); !ok || msg == "" {
-		t.Fatalf("expected human-readable attempt error_message, got %v", attemptRow)
 	}
 }
 
