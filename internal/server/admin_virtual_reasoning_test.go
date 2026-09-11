@@ -218,6 +218,33 @@ func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *t
 	}
 }
 
+func TestMergeReasoningCapabilitiesMergesEffortAliases(t *testing.T) {
+	merged := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "max"}},
+		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "high", "persistent": "none"}},
+	)
+	if merged == nil {
+		t.Fatal("merged capabilities = nil")
+	}
+	if got := merged.EffortAliases["ultra"]; got != "max" {
+		t.Fatalf("ultra alias = %q, want max (first target wins)", got)
+	}
+	if got := merged.EffortAliases["persistent"]; got != "none" {
+		t.Fatalf("persistent alias = %q, want none", got)
+	}
+	if len(merged.EffortAliases) != 2 {
+		t.Fatalf("aliases = %#v, want 2 entries", merged.EffortAliases)
+	}
+
+	single := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "max"}},
+		&providers.ReasoningCapabilities{},
+	)
+	if single == nil || single.EffortAliases["ultra"] != "max" {
+		t.Fatalf("single-sided alias merge = %#v", single)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

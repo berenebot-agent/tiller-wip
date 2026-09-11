@@ -752,7 +752,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 			}
 			if candidate.Provider.Type == "codex-subscription" {
-				attemptBody, err = normalizeCodexRequest(attemptBody)
+				attemptBody, err = normalizeCodexRequest(attemptBody, candidate.ReasoningCapabilities)
 				if err != nil {
 					row.httpStatus = 400
 					row.errorText = strPtr("invalid_request")

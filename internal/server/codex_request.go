@@ -3,15 +3,36 @@ package server
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/tiller-router/tiller-router/internal/providers"
 )
 
 // normalizeCodexRequest applies the small set of Responses adjustments that
 // the ChatGPT Codex backend requires but the public Responses surface leaves
 // optional. It intentionally does not log or return request contents.
-func normalizeCodexRequest(body []byte) ([]byte, error) {
+//
+// It also resolves Codex client-level effort aliases (e.g. "ultra") to the
+// wire effort the backend accepts, using the target model's stored
+// capabilities. The mapper and this normalizer together cover both translated
+// and same-protocol Responses requests to Codex.
+func normalizeCodexRequest(body []byte, caps *providers.ReasoningCapabilities) ([]byte, error) {
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, err
+	}
+	if reasoning, ok := request["reasoning"].(map[string]any); ok {
+		if reasoning["effort"] == "persistent" {
+			delete(reasoning, "effort")
+			if len(reasoning) == 0 {
+				delete(request, "reasoning")
+			}
+		} else if caps != nil {
+			if effort, ok := reasoning["effort"].(string); ok {
+				if resolved, ok := caps.EffortAliases[effort]; ok {
+					reasoning["effort"] = resolved
+				}
+			}
+		}
 	}
 	switch input := request["input"].(type) {
 	case string:

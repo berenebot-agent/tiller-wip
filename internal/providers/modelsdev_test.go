@@ -649,3 +649,17 @@ func TestEnrichReasoningPreservesExplicitEmptyFallback(t *testing.T) {
 		t.Fatalf("explicit empty models.dev options should remain known-empty, got %+v", got)
 	}
 }
+
+func TestMergeReasoningCapabilitiesFallbackPreservesProviderAliases(t *testing.T) {
+	provider := &ReasoningCapabilities{
+		Options:       []ReasoningOption{{Type: ReasoningOptionEffort, Values: []string{"low", "high", "ultra"}}},
+		EffortAliases: map[string]string{"ultra": "high"},
+	}
+	fallback := &ReasoningCapabilities{
+		Options: []ReasoningOption{{Type: ReasoningOptionEffort, Values: []string{"low", "medium", "high"}}, {Type: ReasoningOptionToggle}},
+	}
+	merged := mergeReasoningCapabilitiesFallback(provider, fallback)
+	if merged == nil || merged.EffortAliases["ultra"] != "high" {
+		t.Fatalf("provider aliases should survive fallback merge, got %#v", merged)
+	}
+}

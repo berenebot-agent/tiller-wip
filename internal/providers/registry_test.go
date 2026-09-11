@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/providers/codex"
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
@@ -724,5 +726,100 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 	if err := ValidateBaseURL("http://host.docker.internal:11434"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Errorf("discovery path = %q, want /models", r.URL.Path)
+			http.Error(w, "wrong path", http.StatusNotFound)
+			return
+		}
+		if got := r.URL.Query().Get("client_version"); got != codex.ClientVersion {
+			t.Errorf("client_version = %q, want %q", got, codex.ClientVersion)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{
+			map[string]any{
+				"slug": "gpt-6-astra", "display_name": "GPT-6 Astra", "supported_in_api": true, "visibility": "list",
+				"default_reasoning_level": "ultra", "multi_agent_reasoning_effort": "max",
+				"supported_reasoning_levels": []any{
+					map[string]any{"effort": "low"}, map[string]any{"effort": "medium"},
+					map[string]any{"effort": "high"}, map[string]any{"effort": "xhigh"},
+					map[string]any{"effort": "max"}, map[string]any{"effort": "ultra"},
+					map[string]any{"effort": "persistent"},
+				},
+			},
+			map[string]any{
+				"slug": "gpt-no-max", "display_name": "GPT no max", "supported_in_api": true, "visibility": "list",
+				"supported_reasoning_levels": []any{
+					map[string]any{"effort": "high"}, map[string]any{"effort": "ultra"}, map[string]any{"effort": "low"},
+				},
+			},
+		}})
+	}))
+	defer upstream.Close()
+
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: codexProviderType, BaseURL: upstream.URL, Credential: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]Model, len(models))
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+
+	astra, ok := byID["gpt-6-astra"]
+	if !ok || astra.ReasoningCapabilities == nil {
+		t.Fatalf("gpt-6-astra reasoning capabilities missing: %+v", astra)
+	}
+	if !slicesEqual(astra.ReasoningCapabilities.Options[0].Values, []string{"low", "medium", "high", "xhigh", "max", "ultra"}) {
+		t.Errorf("astra effort values = %v", astra.ReasoningCapabilities.Options[0].Values)
+	}
+	if got := astra.ReasoningCapabilities.EffortAliases["ultra"]; got != "max" {
+		t.Errorf("astra ultra alias = %q, want max", got)
+	}
+	if got := astra.ReasoningCapabilities.DefaultEffort; got != "max" {
+		t.Errorf("astra default effort = %q, want max (ultra resolved)", got)
+	}
+
+	noMax, ok := byID["gpt-no-max"]
+	if !ok || noMax.ReasoningCapabilities == nil {
+		t.Fatalf("gpt-no-max reasoning capabilities missing: %+v", noMax)
+	}
+	if got := noMax.ReasoningCapabilities.EffortAliases["ultra"]; got != "low" {
+		t.Errorf("no-max ultra alias = %q, want low (last non-ultra fallback)", got)
+	}
+}
+
+func TestCodexEffortAliases(t *testing.T) {
+	cases := []struct {
+		name       string
+		levels     []string
+		multiAgent string
+		want       string
+		wantNil    bool
+	}{
+		{name: "no ultra", levels: []string{"low", "high"}, wantNil: true},
+		{name: "multi-agent preferred", levels: []string{"low", "high", "max", "ultra"}, multiAgent: "high", want: "high"},
+		{name: "invalid multi-agent falls back to max", levels: []string{"low", "high", "max", "ultra"}, multiAgent: "persistent", want: "max"},
+		{name: "unadvertised multi-agent falls back to max", levels: []string{"low", "max", "ultra"}, multiAgent: "mega", want: "max"},
+		{name: "self multi-agent ignored", levels: []string{"low", "max", "ultra"}, multiAgent: "ultra", want: "max"},
+		{name: "reversed fallback without max", levels: []string{"high", "ultra", "low"}, want: "low"},
+		{name: "ultra alone unresolved", levels: []string{"ultra"}, wantNil: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := codexEffortAliases(tc.levels, tc.multiAgent)
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("codexEffortAliases = %v, want nil", got)
+				}
+				return
+			}
+			if got == nil || got["ultra"] != tc.want {
+				t.Fatalf("codexEffortAliases = %v, want ultra->%s", got, tc.want)
+			}
+		})
 	}
 }

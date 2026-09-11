@@ -468,7 +468,11 @@ function reasoningCapabilities(caps) {
   const thinkingModes = Array.isArray(caps.thinking_modes) ? caps.thinking_modes : [];
   const hasToggle = options.some(option => option.type === 'toggle');
   const selectors = options.length ? options.map(option => {
-    if (option.type === 'effort') return `<div class="reasoning-detail"><small>Effort values</small><div class="capability-chips">${capabilityList(option.values, 'Any value')}</div></div>`;
+    if (option.type === 'effort') {
+      const aliases = caps.effort_aliases || {};
+      const values = (option.values || []).map(value => aliases[value] ? `${value} → ${aliases[value]}` : value);
+      return `<div class="reasoning-detail"><small>Effort values</small><div class="capability-chips">${capabilityList(values, 'Any value')}</div></div>`;
+    }
     if (option.type === 'toggle') return '';
     if (option.type === 'budget_tokens') return `<div class="reasoning-detail"><small>Token budget</small><div class="reasoning-bounds"><span>Minimum <b>${capabilityBound(option.min)}</b></span><span>Maximum <b>${capabilityBound(option.max)}</b></span></div></div>`;
     return `<div class="reasoning-detail"><small>${h(option.type || 'Selector')}</small><strong>Supported</strong></div>`;

@@ -491,7 +491,7 @@ func applyMessagesReasoning(source map[string]any, selector reasoningSelector, m
 		}
 	}
 	if selector.Effort != "" && selector.Effort != "none" {
-		if effortIsSupported(selector.Effort, opts) || unknownSupport || mode == "enabled" {
+		if effortIsSupported(selector.Effort, opts) || unknownSupport {
 			setMessagesEffort(source, selector.Effort)
 			changed = true
 		}

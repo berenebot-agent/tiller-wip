@@ -153,6 +153,9 @@ type ReasoningCapabilities struct {
 	Mandatory      *bool             `json:"mandatory,omitempty"`
 	DefaultEnabled *bool             `json:"default_enabled,omitempty"`
 	Parameters     []string          `json:"parameters,omitempty"`
+	// EffortAliases maps a client-selectable effort alias (e.g. Codex "ultra")
+	// to the upstream wire effort the provider actually accepts (e.g. "max").
+	EffortAliases map[string]string `json:"effort_aliases,omitempty"`
 }
 
 // ReasoningOptions is the set of selector mechanisms a model supports, derived
@@ -479,13 +482,15 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 
 	var payload struct {
 		Models []struct {
-			Slug                     string   `json:"slug"`
-			DisplayName              string   `json:"display_name"`
-			ContextWindow            int      `json:"context_window"`
-			SupportedInAPI           *bool    `json:"supported_in_api"`
-			Visibility               string   `json:"visibility"`
-			InputModalities          []string `json:"input_modalities"`
-			SupportedReasoningLevels []struct {
+			Slug                      string   `json:"slug"`
+			DisplayName               string   `json:"display_name"`
+			ContextWindow             int      `json:"context_window"`
+			SupportedInAPI            *bool    `json:"supported_in_api"`
+			Visibility                string   `json:"visibility"`
+			InputModalities           []string `json:"input_modalities"`
+			DefaultReasoningLevel     *string  `json:"default_reasoning_level"`
+			MultiAgentReasoningEffort *string  `json:"multi_agent_reasoning_effort"`
+			SupportedReasoningLevels  []struct {
 				Effort string `json:"effort"`
 			} `json:"supported_reasoning_levels"`
 		} `json:"models"`
@@ -503,11 +508,19 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		seen[item.Slug] = true
 		var efforts []string
 		for _, level := range item.SupportedReasoningLevels {
+			if level.Effort == "" || level.Effort == "persistent" {
+				continue
+			}
 			efforts = append(efforts, level.Effort)
 		}
 		var reasoning *ReasoningCapabilities
 		if len(efforts) > 0 {
-			reasoning = &ReasoningCapabilities{Options: []ReasoningOption{{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)}}}
+			aliases := codexEffortAliases(efforts, derefString(item.MultiAgentReasoningEffort))
+			reasoning = &ReasoningCapabilities{
+				Options:       []ReasoningOption{{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)}},
+				EffortAliases: aliases,
+				DefaultEffort: resolveCodexEffort(derefString(item.DefaultReasoningLevel), aliases),
+			}
 		}
 		displayName := item.DisplayName
 		if displayName == "" {
@@ -523,6 +536,56 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	return models, nil
+}
+
+// derefString returns the pointed-to string, or "" when the pointer is nil.
+func derefString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+// codexEffortAliases mirrors the Codex client's resolve_reasoning_effort: the
+// "ultra" level is a client alias that resolves to the model's
+// multi_agent_reasoning_effort, else "max", else the highest supported
+// non-alias level. It returns nil when "ultra" is absent or cannot be resolved
+// to a concrete wire effort.
+func codexEffortAliases(levels []string, multiAgent string) map[string]string {
+	if !slices.Contains(levels, "ultra") {
+		return nil
+	}
+	var resolved string
+	switch {
+	case multiAgent != "" && multiAgent != "ultra" && slices.Contains(levels, multiAgent):
+		resolved = multiAgent
+	case slices.Contains(levels, "max"):
+		resolved = "max"
+	default:
+		for i := len(levels) - 1; i >= 0; i-- {
+			if levels[i] != "ultra" {
+				resolved = levels[i]
+				break
+			}
+		}
+	}
+	if resolved == "" || resolved == "ultra" {
+		return nil
+	}
+	return map[string]string{"ultra": resolved}
+}
+
+// resolveCodexEffort normalizes a Codex-advertised level to the wire effort the
+// router may send. "persistent" is a client-local setting with no wire effort,
+// so it resolves to empty; aliases (e.g. "ultra") resolve to their wire value.
+func resolveCodexEffort(value string, aliases map[string]string) string {
+	if value == "persistent" {
+		return ""
+	}
+	if resolved, ok := aliases[value]; ok {
+		return resolved
+	}
+	return value
 }
 
 // discoverClaude discovers models for a Claude subscription provider from the
@@ -1115,7 +1178,7 @@ func ApplyRequestAuth(req *http.Request, provider Instance) {
 	}
 	if provider.Type == codexProviderType {
 		req.Header.Set("originator", "codex_cli_rs")
-		req.Header.Set("User-Agent", "codex_cli_rs/0.136.0")
+		req.Header.Set("User-Agent", codex.UserAgent)
 		if provider.OAuthAccountID != "" {
 			req.Header.Set("ChatGPT-Account-ID", provider.OAuthAccountID)
 		}
