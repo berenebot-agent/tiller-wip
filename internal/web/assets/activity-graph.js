@@ -778,7 +778,7 @@ function buildIndexes(data) {
     });
   });
   (data.models || []).forEach(m => {
-    routeIndex.set(m.id, { label: m.canonical_model_id, sub: 'real · direct' });
+    routeIndex.set(m.id, { label: m.canonical_model_id, sub: '' });
     modelIndex.set(m.id, { provider: m.provider_name, upstream: m.upstream_model_id, direct: true, position: 1 });
   });
 }
@@ -856,7 +856,7 @@ function updateCatalogue(data) {
 function ensureTargetNode(pmID) {
   const idx = modelIndex.get(pmID);
   const label = idx ? idx.provider + '/' + idx.upstream : pmID;
-  const node = ensureNode('target', 't:' + pmID, label, 'real · target');
+  const node = ensureNode('target', 't:' + pmID, label, '');
   node.cooling = coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
   applyNodeState(node);
   return node;
