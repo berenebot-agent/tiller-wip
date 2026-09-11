@@ -83,6 +83,44 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-client' }).first()).toBeVisible();
 });
 
+// A model or client added after the pane captured its catalogue must still
+// resolve to a name: the graph reports the unknown id, the host re-fetches the
+// catalogue, and the live node is relabelled in place. Regression for the
+// raw-UUID label on late-added models. NOT RUN here (browser tier needs an
+// explicit go-ahead per AGENTS.md — run via ./tests/browser/run.sh).
+test('activity graph resolves a model added after the pane loaded', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAdmin(page);
+  const csrf = await adminCsrf(page);
+  await clearActivity(page, csrf);
+
+  // Enter Activity first so the pane's catalogue snapshot predates the model.
+  await page.locator('#nav-links').getByRole('link', { name: 'Activity' }).click();
+  await expect(page.locator('#view-activity')).toBeVisible();
+  await expect(page.locator('#activity-pane')).toBeVisible();
+
+  // Add the upstream model and provider *after* the pane captured its catalogue.
+  await mockAddModel(page, 'mock-model-late');
+  const providerName = 'activity-graph-late-provider';
+  const provider = await createProvider(page, csrf, providerName);
+  const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
+  expect(modelsRes.ok()).toBeTruthy();
+  const lateModel = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model-late');
+  expect(lateModel).toBeTruthy();
+
+  const client = await createClient(page, csrf, 'activity-graph-late-client');
+  const grantRes = await page.request.put(`/api/admin/client-keys/${client.id}/permissions`, { headers: { 'X-CSRF-Token': csrf }, data: { defaults: [], permissions: [{ kind: 'real', model_id: lateModel.id, enabled: true }] } });
+  expect(grantRes.status()).toBe(204);
+
+  // Drive a direct request for the late model. The pane materializes the leg
+  // immediately from the delta; the name arrives once the refresh lands.
+  const post = await page.request.post('/v1/chat/completions', { headers: { Authorization: `Bearer ${client.secret}` }, data: { model: `${providerName}/mock-model-late`, messages: [{ role: 'user', content: 'late' }] } });
+  expect(post.status()).toBe(200);
+
+  await expect(page.locator('#activity-pane text', { hasText: `${providerName}/mock-model-late` }).first()).toBeVisible({ timeout: 20000 });
+  await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-late-client' }).first()).toBeVisible({ timeout: 20000 });
+});
+
 test('activity graph shows empty state with no traffic', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openAdmin(page);

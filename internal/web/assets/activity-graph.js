@@ -115,6 +115,18 @@ function wrapLabel(label) {
   return out;
 }
 
+// renderNodeLabel fills a node's label text with wrapped lines. The caller must
+// position the label with an absolute `y` on the <text>, not `dy`: a tspan with
+// an explicit `x` starts a new text chunk, and Chromium then ignores the
+// parent's `dy`, collapsing the label onto the node. The first line uses no
+// delta; wrapped lines advance by 1.2em.
+function renderNodeLabel(textSel, label) {
+  textSel.selectAll('tspan').remove();
+  wrapLabel(label || '').forEach((line, i) => {
+    textSel.append('tspan').attr('x', 0).attr('dy', i === 0 ? 0 : '1.2em').text(line);
+  });
+}
+
 function refreshEmpty() {
   if (emptyEl) emptyEl.hidden = nodes.length > 0;
 }
@@ -396,12 +408,9 @@ function syncSim() {
       g.append('circle').attr('class', 'node-ring').attr('r', d => nodeRadius(d) + 5).attr('fill', 'none');
       g.append('circle').attr('class', 'node-body').attr('r', nodeRadius)
         .attr('fill', nodeFill).attr('stroke', '#fff').attr('stroke-width', 2);
-      g.append('text').attr('class', 'node-label').attr('dy', 30).attr('text-anchor', 'middle')
+      g.append('text').attr('class', 'node-label').attr('x', 0).attr('y', 30).attr('text-anchor', 'middle')
         .each(function (d) {
-          const text = d3.select(this);
-          wrapLabel(d.label || '').forEach((line, i) => {
-            text.append('tspan').attr('x', 0).attr('dy', i === 0 ? 0 : '1.2em').text(line);
-          });
+          renderNodeLabel(d3.select(this), d.label);
         });
       g.append('text').attr('class', 'node-sub').attr('dy', d => 30 + wrapLabel(d.label || '').length * 13).attr('text-anchor', 'middle')
         .text(d => d.sub || '');
@@ -737,6 +746,55 @@ function buildIndexes(data) {
   });
 }
 
+// missingIds returns the delta ids absent from the current catalogue snapshot.
+// The host re-fetches the catalogue on a miss so a model or client added after
+// the pane loaded resolves to its name instead of its raw UUID.
+function missingIds(delta) {
+  const out = [];
+  if (delta.client_id && !clientIndex.has(delta.client_id)) out.push(delta.client_id);
+  if (delta.id && !routeIndex.has(delta.id) && !modelIndex.has(delta.id)) out.push(delta.id);
+  if (delta.target_id && !modelIndex.has(delta.target_id)) out.push(delta.target_id);
+  return out;
+}
+
+// relabelNode rewrites a live node's label/sub after updateCatalogue fills in
+// an id that was unknown when the node first materialized. Nodes are keyed by
+// id and never re-enter, so the raw-id fallback would otherwise stick forever.
+function relabelNode(n) {
+  if (n.kind === 'route') {
+    const rec = routeIndex.get(n.id.slice(2));
+    if (rec) {
+      n.label = rec.label;
+      n.sub = rec.sub;
+    }
+  } else if (n.kind === 'target') {
+    const pmID = n.id.slice(2);
+    const idx = modelIndex.get(pmID);
+    if (idx) {
+      n.label = idx.provider + '/' + idx.upstream;
+      n.cooling = coolingSet.has(pmID) || coolingSet.has(idx.provider + '/' + idx.upstream);
+      applyNodeState(n);
+    }
+  } else if (n.kind === 'client') {
+    const name = clientIndex.get(n.id.slice(2));
+    if (name) n.label = name;
+  }
+  if (!nodeSel) return;
+  const g = nodeSel.filter(d => d.id === n.id);
+  if (g.empty()) return;
+  renderNodeLabel(g.select('.node-label'), n.label);
+  g.select('.node-sub').attr('dy', 30 + wrapLabel(n.label || '').length * 13).text(n.sub || '');
+  g.attr('aria-label', `Open activity for ${n.label}`);
+}
+
+// updateCatalogue rebuilds the id→name indexes from a fresh catalogue fetch and
+// relabels any live nodes that were rendered with the raw-id fallback.
+function updateCatalogue(data) {
+  if (!sim) return;
+  buildIndexes(data || {});
+  nodes.forEach(relabelNode);
+}
+
 // Right-column node for a real model, labelled "provider/model". Virtual
 // routes use it as their target; direct real routes use it as their only
 // destination and skip the middle-column route node.
@@ -764,8 +822,9 @@ function resolveClientNode(clientID) {
 // the whole chain renders even if no ordinary activity delta was seen. A skip
 // without client context is ignored rather than drawing an orphan route.
 function handleSkip(delta) {
+  const missing = missingIds(delta);
   const clientNode = delta.client_id ? resolveClientNode(delta.client_id) : null;
-  if (!clientNode) return;
+  if (!clientNode) return missing;
   const targetNode = ensureTargetNode(delta.target_id);
   const direct = !delta.id || delta.id === delta.target_id;
   let from = clientNode;
@@ -778,6 +837,7 @@ function handleSkip(delta) {
   setNodeState(targetNode, 'skipped');
   fadeEdge(e, FADE_MS);
   reconcileGraph();
+  return missing;
 }
 
 // applyActivityDelta lights legs from a live `activity` SSE delta
@@ -787,10 +847,14 @@ function handleSkip(delta) {
 // (snapshot reseed must be idempotent).
 function applyActivityDelta(delta, opts) {
   const seed = !!(opts && opts.seed);
+  const missing = missingIds(delta);
   if (delta.client_id && delta.id) {
     const clientNode = resolveClientNode(delta.client_id);
     const idx = modelIndex.get(delta.id);
-    const direct = !!idx && idx.direct;
+    // A real model used directly carries ID === TargetID even before the
+    // catalogue is known, so a newly added real model is treated as a target
+    // (client → real model) rather than a middle-lane route.
+    const direct = (!!idx && idx.direct) || delta.id === delta.target_id;
     const destination = direct ? ensureTargetNode(delta.id) : resolveRouteNode(delta.id);
     const e = ensureEdge(clientNode, destination);
     const key = edgeKey(clientNode, destination);
@@ -821,11 +885,11 @@ function applyActivityDelta(delta, opts) {
         });
         if (live) flow(live, BLUE, 2);
       }
-      return;
+      return missing;
     }
     const routeNode = byId.get('r:' + delta.id);
-    if (!routeNode) return;
-    if (!hasIngress(routeNode)) return;
+    if (!routeNode) return missing;
+    if (!hasIngress(routeNode)) return missing;
     const targetNode = ensureTargetNode(delta.target_id);
     const e = ensureEdge(routeNode, targetNode);
     const key = edgeKey(routeNode, targetNode);
@@ -848,16 +912,17 @@ function applyActivityDelta(delta, opts) {
       }
     }
   }
+  return missing;
 }
 
 function onActivityDelta(delta, opts) {
-  if (!sim) return;
+  if (!sim) return [];
   if (delta.result === 'skipped') {
-    handleSkip(delta);
-    return;
+    return handleSkip(delta);
   }
-  applyActivityDelta(delta, opts);
+  const missing = applyActivityDelta(delta, opts);
   reconcileGraph();
+  return missing;
 }
 
 // onOutcome colours the target roundel from an explicit `outcome` SSE delta
@@ -959,11 +1024,12 @@ function evictStaleLegs(modules) {
 // correct even if deltas were missed while hidden, then evicts any lit leg the
 // snapshot no longer reports so a dropped closing delta self-heals.
 function onSnapshotSeed(modules) {
-  if (!sim || !modules) return;
+  if (!sim || !modules) return [];
+  const missing = [];
   const clients = modules.inflight_clients || {};
   Object.entries(clients).forEach(([clientID, st]) => {
     if (!st || !(st.active > 0) || !st.route_id) return;
-    onActivityDelta({ id: st.route_id, client_id: clientID, active: 1 }, { seed: true });
+    missing.push(...onActivityDelta({ id: st.route_id, client_id: clientID, active: 1 }, { seed: true }));
   });
   const targets = modules.inflight_targets || {};
   Object.entries(targets).forEach(([key, st]) => {
@@ -972,10 +1038,11 @@ function onSnapshotSeed(modules) {
     // (mirrors targetActivityKey in app.js).
     const sep = key.indexOf('\x00');
     if (sep < 0) return;
-    onActivityDelta({ id: key.slice(0, sep), target_id: key.slice(sep + 1), active: 1 }, { seed: true });
+    missing.push(...onActivityDelta({ id: key.slice(0, sep), target_id: key.slice(sep + 1), active: 1 }, { seed: true }));
   });
   reconcileGraph();
   if (evictStaleLegs(modules)) reconcileGraph();
+  return missing;
 }
 
 // onCooldowns paints targets that are currently in fallback cooldown straight
@@ -1062,5 +1129,5 @@ export function destroy() {
 }
 
 // The module namespace exposes init/destroy/onActivityDelta/onOutcome/
-// onSnapshotSeed/onCooldowns, consumed directly by app.js.
-export { onActivityDelta, onOutcome, onSnapshotSeed, onCooldowns };
+// onSnapshotSeed/onCooldowns/updateCatalogue, consumed directly by app.js.
+export { onActivityDelta, onOutcome, onSnapshotSeed, onCooldowns, updateCatalogue };

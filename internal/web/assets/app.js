@@ -1171,6 +1171,53 @@ document.addEventListener('keydown', event => { if (event.key === '/' && !['INPU
 let activityGraphModule = null;
 let activityGraphReady = false;
 let activityGraphFailed = false;
+// Latest catalogue snapshot for the pane; reassigned on refresh so the node
+// click-through always reads current rows rather than the load-time closure.
+let activityGraphData = { clients: [], virtualModels: [], models: [] };
+
+// A live delta can reference a model or client added after the pane captured
+// its catalogue. On that miss we re-fetch the catalogue and relabel the live
+// nodes. The minimum interval bounds fetch frequency when an id the catalogue
+// never carries keeps appearing (e.g. beyond the client page limit).
+const ACTIVITY_CATALOGUE_MIN_INTERVAL = 5000;
+let activityCatalogueRefreshTimer = 0;
+let activityCatalogueRefreshing = false;
+let activityCatalogueRefreshedAt = 0;
+function noteActivityCatalogueMiss(ids) {
+  if (!ids || !ids.length) return;
+  scheduleActivityCatalogueRefresh();
+}
+function scheduleActivityCatalogueRefresh() {
+  if (activityCatalogueRefreshing || activityCatalogueRefreshTimer) return;
+  const wait = Math.max(0, ACTIVITY_CATALOGUE_MIN_INTERVAL - (Date.now() - activityCatalogueRefreshedAt));
+  activityCatalogueRefreshTimer = setTimeout(() => {
+    activityCatalogueRefreshTimer = 0;
+    refreshActivityCatalogue();
+  }, wait);
+}
+async function refreshActivityCatalogue() {
+  if (activityCatalogueRefreshing || !activityGraphReady || state.view !== 'activity') return;
+  activityCatalogueRefreshing = true;
+  try {
+    const [clients, virtualModels, models] = await Promise.all([
+      api('/api/admin/client-keys?limit=200'),
+      api('/api/admin/virtual-models?limit=200'),
+      api('/api/admin/models?all=1'),
+    ]);
+    if (!activityGraphReady || state.view !== 'activity') return;
+    activityGraphData = {
+      clients: clients.data || [],
+      virtualModels: virtualModels.data || [],
+      models: models.data || [],
+    };
+    activityGraphModule.updateCatalogue(activityGraphData);
+  } catch {
+    // Best-effort: the pane keeps its raw-id fallback until the next miss.
+  } finally {
+    activityCatalogueRefreshing = false;
+    activityCatalogueRefreshedAt = Date.now();
+  }
+}
 async function ensureActivityGraph() {
   if (activityGraphModule) return activityGraphModule;
   if (activityGraphFailed) return null;
@@ -1208,19 +1255,19 @@ async function loadActivityView() {
       api('/api/admin/models?all=1'),
     ]);
     if (token !== state.loadToken) return;
-    const graphData = {
+    activityGraphData = {
       clients: clients.data || [],
       virtualModels: virtualModels.data || [],
       models: models.data || [],
     };
     activityGraphReady = mod.init($('#view-activity'), {
-      ...graphData,
+      ...activityGraphData,
     }, {
-      onNodeClick: node => openGraphActivity(node, graphData),
+      onNodeClick: node => openGraphActivity(node, activityGraphData),
     }) === true;
     // Seed currently-hot legs from live state in case deltas were missed
     // while the view was hidden (state keeps the client + leg lanes).
-    if (activityGraphReady) mod.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs });
+    if (activityGraphReady) noteActivityCatalogueMiss(mod.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs }));
     if (activityGraphReady) mod.onCooldowns(state.usage?.target_cooldown || {});
   } catch (error) {
     flash(errorMessage(error), 'error');
@@ -1245,6 +1292,10 @@ function destroyActivityView() {
     try { activityGraphModule.destroy(); } catch { /* teardown is best-effort */ }
   }
   activityGraphReady = false;
+  if (activityCatalogueRefreshTimer) {
+    clearTimeout(activityCatalogueRefreshTimer);
+    activityCatalogueRefreshTimer = 0;
+  }
 }
 
 // === LIVE REFRESH ===
@@ -1400,7 +1451,7 @@ live.on('snapshot', payload => {
   // Activity living pane: seed currently-hot legs on every snapshot so a
   // missed delta self-heals without a refresh.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
-    try { activityGraphModule.onSnapshotSeed(payload.modules); } catch { /* pane update is best-effort */ }
+    try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed(payload.modules)); } catch { /* pane update is best-effort */ }
     try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
   }
   reconcileLive();
@@ -1412,7 +1463,7 @@ live.on('activity', delta => {
   // Forward it to the graph (which paints the amber roundel) and stop.
   if (delta.result === 'skipped') {
     if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
-      try { activityGraphModule.onActivityDelta(delta); } catch { /* pane update is best-effort */ }
+      try { noteActivityCatalogueMiss(activityGraphModule.onActivityDelta(delta)); } catch { /* pane update is best-effort */ }
     }
     return;
   }
@@ -1458,7 +1509,7 @@ live.on('activity', delta => {
   }
   // Activity living pane: client + target deltas drive the flow.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
-    try { activityGraphModule.onActivityDelta(delta); } catch { /* pane update is best-effort */ }
+    try { noteActivityCatalogueMiss(activityGraphModule.onActivityDelta(delta)); } catch { /* pane update is best-effort */ }
   }
 });
 
@@ -1473,7 +1524,7 @@ navigate = function (view) {
   liveNavigate(view);
   if (liveViewActive('virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
-    try { activityGraphModule.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs }); } catch { /* pane update is best-effort */ }
+    try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
     try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
   }
 };
