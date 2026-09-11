@@ -77,7 +77,7 @@
   stroke: #4db2ff;
   animation: node-pulse 1.05s ease-in-out infinite;
 }
-.node-ring.st-ok {
+.node-ring.st-served {
   stroke: var(--green);
 }
 .node-ring.st-failed {

@@ -4,10 +4,9 @@ const { openAdmin, adminCsrf, createProvider, createClient, clearActivity, mockA
 // Activity living pane: starts empty, materializes client → tiller model →
 // real-model target legs from live `activity` deltas, and `outcome` settles
 // the colour. Legs fade 30s after quiet (not asserted — expensive/flaky);
-// the empty state and live legs are asserted here. Snapshot eviction of
-// lost-delta legs is not covered (no test hook to inject a synthetic
-// snapshot). Written alongside the feature; NOT RUN here (browser tier needs
-// an explicit go-ahead per AGENTS.md — run via ./tests/browser/run.sh).
+// the empty state, live legs, and late-added model resolution are asserted.
+// Snapshot eviction of lost-delta legs is not covered (no test hook to inject
+// a synthetic snapshot). Run in the browser tier via ./tests/browser/run.sh.
 test('activity graph starts empty, lights live legs, and settles on outcome', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openAdmin(page);
@@ -55,7 +54,9 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-client' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-group/graph' }).first()).toBeVisible();
   await expect(page.locator('#activity-pane text', { hasText: `${providerName}/mock-model-b` }).first()).toBeVisible();
-  const graphNode = label => page.locator('#activity-pane g[role="button"]').filter({ hasText: label }).first();
+  // Click the roundel, not the group: a wrapped label makes the group's
+  // bounding box tall enough that its centre lands in the gap below the circle.
+  const graphNode = label => page.locator('#activity-pane g[role="button"]').filter({ hasText: label }).first().locator('.node-body');
   await graphNode('activity-graph-client').click();
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await expect(page.locator('#activity-title')).toHaveText('activity-graph-client activity');
@@ -68,10 +69,11 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await expect(page.locator('#activity-title')).toHaveText(`${providerName}/mock-model-b activity`);
   await page.getByRole('button', { name: 'Done' }).click();
-  // The served target roundel settles green, the failed target roundel red.
-  // Outcome colour lives on the node ring; edges are flow-only.
-  await expect(page.locator('#activity-pane .node-ring.st-ok').first()).toBeVisible({ timeout: 15000 });
-  await expect(page.locator('#activity-pane .node-ring.st-failed').first()).toBeVisible({ timeout: 15000 });
+  // The served target roundel settles green; the failed target turns red.
+  // A failed ordered-fallback target can open a cooldown, which the pane paints
+  // as a solid red skipped dot (ring hidden), so accept either red outcome.
+  await expect(page.locator('#activity-pane .node-ring.st-served').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('#activity-pane g[role="button"][aria-label="Open activity for ' + providerName + '/mock-model"] .node-body')).toHaveClass(/st-(failed|skipped)/);
 
   // Direct real-model request: a single client → real-model leg in the
   // middle lane, lit from `activity` deltas alone.
@@ -79,15 +81,15 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   expect(direct.status()).toBe(200);
   // The direct real-model leg lights the pane (client → real target) and the
   // served roundel stays green (the resolution feed was removed).
-  await expect(page.locator('#activity-pane .node-ring.st-ok').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('#activity-pane .node-ring.st-served').first()).toBeVisible({ timeout: 15000 });
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-client' }).first()).toBeVisible();
 });
 
 // A model or client added after the pane captured its catalogue must still
 // resolve to a name: the graph reports the unknown id, the host re-fetches the
-// catalogue, and the live node is relabelled in place. Regression for the
-// raw-UUID label on late-added models. NOT RUN here (browser tier needs an
-// explicit go-ahead per AGENTS.md — run via ./tests/browser/run.sh).
+// catalogue, and the live node is relabelled in place. It must also land in the
+// target lane, not as a phantom middle-lane route. Regression for late-added
+// models.
 test('activity graph resolves a model added after the pane loaded', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openAdmin(page);
@@ -119,6 +121,10 @@ test('activity graph resolves a model added after the pane loaded', async ({ pag
 
   await expect(page.locator('#activity-pane text', { hasText: `${providerName}/mock-model-late` }).first()).toBeVisible({ timeout: 20000 });
   await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-late-client' }).first()).toBeVisible({ timeout: 20000 });
+  // The late model must land in the REAL MODELS lane (green target body), not
+  // as a phantom middle-lane route (purple) with nothing to its right.
+  const lateNode = page.locator('#activity-pane g[role="button"]').filter({ hasText: `${providerName}/mock-model-late` }).first();
+  await expect(lateNode.locator('.node-body')).toHaveAttribute('fill', '#25845b');
 });
 
 test('activity graph shows empty state with no traffic', async ({ page }) => {

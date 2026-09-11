@@ -271,7 +271,7 @@ docker run --rm --network host \
     -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
     -v "$run_dir/activity-data:/fixture-data:rw" \
     -v "$run_dir/playwright-results:/tests/test-results" \
-    "$BROWSER_IMAGE" npx playwright test activity.spec.js &
+    "$BROWSER_IMAGE" npx playwright test activity.spec.js activity-graph.spec.js &
 activity_pid=$!
 
 playwright_status=0

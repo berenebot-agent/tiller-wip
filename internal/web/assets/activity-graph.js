@@ -73,6 +73,11 @@ const routeIndex = new Map(); // routeID -> {label, sub}
 // itself a route (client → target, no middle lane). Unlike the old shape this
 // is not keyed to a single route, because one real model can back many routes.
 const modelIndex = new Map();
+// directIds: real-model ids observed as a direct route (ID === TargetID) or
+// resolved as direct via a catalogue refresh. A client delta carries no target
+// id, so without this memory an unknown direct model is misclassified as a
+// virtual route on every client delta, even after a target delta corrected it.
+const directIds = new Set();
 // coolingSet: provider_model_id (and legacy provider/upstream) keys currently
 // in fallback cooldown, straight from the live snapshot. A cooled target is
 // painted red immediately instead of waiting for a skip delta.
@@ -571,6 +576,28 @@ function targetIsFed(target) {
   return ok;
 }
 
+// routeHasTarget reports whether a route leads anywhere. A route with a client
+// ingress but no target leg is a phantom: it renders as a middle-lane model
+// with nothing to its right.
+function routeHasTarget(routeNode) {
+  let found = false;
+  EDGES.forEach(e => {
+    if (e.a === routeNode && e.b.kind === 'target') found = true;
+  });
+  return found;
+}
+
+// routeIsHot reports whether a request is still in flight through the route. A
+// hot route may legitimately have no target yet (the target delta trails the
+// client delta), so it must not be pruned until its ingress settles.
+function routeIsHot(routeNode) {
+  let hot = false;
+  EDGES.forEach(e => {
+    if (e.b === routeNode && e.a.kind === 'client' && (e.state === 'req' || e.state === 'pending')) hot = true;
+  });
+  return hot;
+}
+
 function pruneOrphans() {
   let removed = false;
   let changed = true;
@@ -588,6 +615,16 @@ function pruneOrphans() {
         continue;
       }
       if (e.b.kind === 'route' && !hasIngress(e.b)) {
+        if (dropEdge(e)) {
+          changed = true;
+          removed = true;
+        }
+        continue;
+      }
+      // A route that goes nowhere is an orphan once nothing is in flight
+      // through it (see routeIsHot). This is what clears a phantom route left
+      // by a catalogue miss classifying a direct real model as virtual.
+      if (e.b.kind === 'route' && !routeHasTarget(e.b) && !routeIsHot(e.b)) {
         if (dropEdge(e)) {
           changed = true;
           removed = true;
@@ -787,12 +824,30 @@ function relabelNode(n) {
   g.attr('aria-label', `Open activity for ${n.label}`);
 }
 
+// reconcileDirectRoutes repairs phantom route nodes: a client delta seen before
+// the catalogue knew the id created a middle-lane route for what is actually a
+// direct real model. Only meaningful after buildIndexes has run.
+function reconcileDirectRoutes() {
+  let changed = false;
+  nodes.slice().forEach(n => {
+    if (n.kind !== 'route') return;
+    const id = n.id.slice(2);
+    const idx = modelIndex.get(id);
+    if (!idx || !idx.direct) return;
+    if (!hasIngress(n)) return;
+    directIds.add(id);
+    if (rewireRouteToTarget(n, ensureTargetNode(id))) changed = true;
+  });
+  return changed;
+}
+
 // updateCatalogue rebuilds the id→name indexes from a fresh catalogue fetch and
 // relabels any live nodes that were rendered with the raw-id fallback.
 function updateCatalogue(data) {
   if (!sim) return;
   buildIndexes(data || {});
   nodes.forEach(relabelNode);
+  if (reconcileDirectRoutes()) reconcileGraph(true);
 }
 
 // Right-column node for a real model, labelled "provider/model". Virtual
@@ -815,6 +870,33 @@ function resolveRouteNode(routeID) {
 
 function resolveClientNode(clientID) {
   return ensureNode('client', 'c:' + clientID, clientIndex.get(clientID) || clientID, '');
+}
+
+// A catalogue miss can classify a direct real model as a virtual route, because
+// client `activity` deltas carry no target id. Once the id is known to be a
+// direct real model, move any client legs off the phantom route onto the real
+// target so the chain renders in the right lane and the empty route is pruned.
+function rewireRouteToTarget(routeNode, targetNode) {
+  if (!routeNode || !targetNode || routeNode === targetNode) return false;
+  let changed = false;
+  Array.from(EDGES.values()).forEach(e => {
+    if (e.a !== routeNode && e.b !== routeNode) return;
+    const hot = hotLegs.get(edgeKey(e.a, e.b));
+    if (e.b === routeNode && e.a.kind === 'client') {
+      const moved = ensureEdge(e.a, targetNode);
+      if (hot) {
+        hotLegs.delete(edgeKey(e.a, routeNode));
+        hotLegs.set(edgeKey(e.a, targetNode), (hotLegs.get(edgeKey(e.a, targetNode)) || 0) + hot);
+      }
+      if (e.state === 'req' || e.state === 'pending') {
+        setEdge(moved, e.state);
+        setNodeState(targetNode, e.state);
+        flow(moved, BLUE, 3);
+      }
+    }
+    if (dropEdge(e)) changed = true;
+  });
+  return changed;
 }
 
 // handleSkip paints an explicit terminal skip (cooldown / unavailable /
@@ -852,9 +934,9 @@ function applyActivityDelta(delta, opts) {
     const clientNode = resolveClientNode(delta.client_id);
     const idx = modelIndex.get(delta.id);
     // A real model used directly carries ID === TargetID even before the
-    // catalogue is known, so a newly added real model is treated as a target
-    // (client → real model) rather than a middle-lane route.
-    const direct = (!!idx && idx.direct) || delta.id === delta.target_id;
+    // catalogue is known; directIds remembers an id a target delta already
+    // proved direct so later client deltas do not rebuild a phantom route.
+    const direct = (!!idx && idx.direct) || directIds.has(delta.id) || delta.id === delta.target_id;
     const destination = direct ? ensureTargetNode(delta.id) : resolveRouteNode(delta.id);
     const e = ensureEdge(clientNode, destination);
     const key = edgeKey(clientNode, destination);
@@ -878,6 +960,12 @@ function applyActivityDelta(delta, opts) {
     // the visible 1:1 leg is client → real target (lit by the client block
     // above), so a target delta here only reinforces that leg's flow.
     if (delta.id === delta.target_id) {
+      directIds.add(delta.id);
+      // A real model used directly. If an earlier client delta created a
+      // phantom route (catalogue miss), rewire that route's client legs onto
+      // the real target now that the id is known to be direct.
+      const phantom = byId.get('r:' + delta.id);
+      if (phantom && rewireRouteToTarget(phantom, ensureTargetNode(delta.id))) reconcileGraph(true);
       if ((delta.active || 0) > 0) {
         let live = null;
         EDGES.forEach(cand => {
@@ -1116,6 +1204,7 @@ export function destroy() {
   clientIndex.clear();
   routeIndex.clear();
   modelIndex.clear();
+  directIds.clear();
   coolingSet.clear();
   forceLinks = [];
   EDGES.forEach(e => {
