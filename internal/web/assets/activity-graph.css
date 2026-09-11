@@ -2,38 +2,6 @@
    Only active routes are shown; legs fade away 30s after going quiet.
    Edge states: req (carrying a request) / ok (served) / failed (no response)
    / cool (cooldown skip) / fading (melting away). */
-.view-sub {
-  color: var(--muted);
-  font-size: 13px;
-  margin: 2px 0 0;
-}
-.graph-stats {
-  display: flex;
-  gap: 16px;
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-}
-.graph-stats b {
-  color: var(--navy);
-  font-size: 15px;
-}
-.graph-legend {
-  display: flex;
-  gap: 14px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 10px;
-}
-.graph-legend .dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  margin-right: 5px;
-  vertical-align: baseline;
-}
 .graph-stage {
   background: var(--paper);
   border: 1px solid var(--line);
@@ -73,17 +41,6 @@
   stroke-linejoin: round;
   pointer-events: none;
   transition: stroke 0.5s, opacity 0.5s;
-}
-/* Invisible wide companion to each leg: keeps the thin curved stroke easy to
-   click and hover. The edge itself is pointer-events: none. */
-.edge-hit {
-  fill: none;
-  stroke: transparent;
-  stroke-width: 18;
-  pointer-events: stroke;
-}
-.edge-hit.fading {
-  pointer-events: none;
 }
 .edge.fading {
   opacity: 0;
@@ -169,62 +126,8 @@
   stroke-width: 1;
   pointer-events: none;
 }
-.graph-detail {
-  background: var(--navy);
-  color: #dcebf7;
-  border-radius: 8px;
-  padding: 10px 16px;
-  margin-top: 12px;
-  font-size: 13px;
-  min-height: 48px;
-}
-.graph-detail code {
-  font-family: var(--mono);
-  color: #9ed2f3;
-}
-.graph-feed {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-  font-size: 12px;
-}
-.feed-item {
-  background: var(--paper);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 2px 12px;
-  font-family: var(--mono);
-  animation: feed-pop 0.3s ease-out;
-}
-.feed-item.ok {
-  border-color: var(--green);
-  color: var(--green);
-}
-.feed-item.fail {
-  border-color: var(--red);
-  color: var(--red);
-}
-.feed-item.warn {
-  border-color: var(--amber);
-  color: var(--amber);
-}
-@keyframes feed-pop {
-  from {
-    transform: scale(0.92);
-    opacity: 0;
-  }
-  to {
-    transform: scale(1);
-    opacity: 1;
-  }
-}
 @media (max-width: 760px) {
   .graph-stage svg {
     height: 440px;
-  }
-  .graph-stats {
-    flex-wrap: wrap;
-    gap: 10px;
   }
 }

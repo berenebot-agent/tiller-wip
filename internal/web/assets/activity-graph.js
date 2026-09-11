@@ -35,6 +35,12 @@ const PURP = '#7a5fb5';
 // melt away (2s CSS transition) along with any now-unused nodes.
 const FADE_MS = 30000;
 
+// A lit leg absent from this many consecutive snapshots is a lost-delta
+// orphan: the backend no longer reports it, but its closing activity delta was
+// dropped. One miss is tolerated so a just-started leg survives a snapshot
+// generated before it began.
+const SNAPSHOT_EVICT_AFTER = 2;
+
 // Fan/bow geometry for curved legs. Shared-endpoint legs get symmetric
 // vertical offsets; idle legs may additionally bow to avoid active legs.
 const FAN_STEP = 16;
@@ -50,10 +56,7 @@ let gLActive = null;
 let gN = null;
 let gP = null;
 let nodeSel = null;
-let detailEl = null;
-let feedEl = null;
 let emptyEl = null;
-let statsEls = null;
 let rafId = 0;
 let layoutTimer = 0;
 
@@ -74,11 +77,10 @@ const modelIndex = new Map();
 // painted red immediately instead of waiting for a skip delta.
 const coolingSet = new Set();
 // forceLinks: [{source, target}] structural pairs for the simulation.
-// EDGES: "a|b" -> {a, b, line, state, meta, fadeTimer, removeTimer} rendered legs.
+// EDGES: "a|b" -> {a, b, line, state, snapshotMisses, fadeTimer, removeTimer} rendered legs.
 let forceLinks = [];
 const EDGES = new Map();
 let packets = []; // {e, t, speed, color}
-let counters = { req: 0, fb: 0, err: 0 };
 const hotLegs = new Map(); // edgeKey -> active in-flight count
 
 const W = 1180;
@@ -89,6 +91,27 @@ const nodeFill = d => (d.kind === 'client' ? BLUE : d.kind === 'route' ? PURP : 
 
 function edgeKey(a, b) {
   return a.id + '|' + b.id;
+}
+
+const LABEL_WRAP = 24;
+function wrapLabel(label) {
+  if (!label) return [''];
+  const out = [];
+  let rest = label;
+  while (rest.length > LABEL_WRAP) {
+    const slice = rest.slice(0, LABEL_WRAP + 1);
+    const cut = Math.max(slice.lastIndexOf('/'), slice.lastIndexOf('-'), slice.lastIndexOf('_'), slice.lastIndexOf(' '));
+    if (cut <= 0) {
+      out.push(rest.slice(0, LABEL_WRAP));
+      rest = rest.slice(LABEL_WRAP);
+    } else {
+      out.push(rest.slice(0, cut + 1).trimEnd());
+      rest = rest.slice(cut + 1).trimStart();
+    }
+    if (!rest) break;
+  }
+  if (rest) out.push(rest);
+  return out;
 }
 
 function refreshEmpty() {
@@ -354,8 +377,13 @@ function syncSim() {
       g.append('circle').attr('class', 'node-body').attr('r', nodeRadius)
         .attr('fill', nodeFill).attr('stroke', '#fff').attr('stroke-width', 2);
       g.append('text').attr('class', 'node-label').attr('dy', 30).attr('text-anchor', 'middle')
-        .text(d => (d.label.length > 24 ? d.label.slice(0, 23) + '…' : d.label));
-      g.append('text').attr('class', 'node-sub').attr('dy', 43).attr('text-anchor', 'middle')
+        .each(function (d) {
+          const text = d3.select(this);
+          wrapLabel(d.label || '').forEach((line, i) => {
+            text.append('tspan').attr('x', 0).attr('dy', i === 0 ? 0 : '1.2em').text(line);
+          });
+        });
+      g.append('text').attr('class', 'node-sub').attr('dy', d => 30 + wrapLabel(d.label || '').length * 13).attr('text-anchor', 'middle')
         .text(d => d.sub || '');
       return g;
     },
@@ -390,7 +418,6 @@ function placeEdge(e) {
   const g = e.state === 'req' || e.state === 'pending' ? gLActive : gLIdle;
   if (e.layer !== g) {
     g.node().appendChild(e.line.node());
-    g.node().appendChild(e.hit.node());
     e.layer = g;
   }
 }
@@ -400,13 +427,7 @@ function ensureEdge(a, b) {
   let e = EDGES.get(key);
   if (!e) {
     const line = gLIdle.append('path').attr('class', 'edge idle');
-    const hit = gLIdle.append('path').attr('class', 'edge-hit').style('cursor', 'pointer');
-    hit.on('click', () => {
-      const cur = EDGES.get(key);
-      if (cur && cur.meta) showDetail(cur.meta);
-    });
-    hit.append('title').text(a.label + ' → ' + b.label);
-    e = { a, b, line, hit, state: 'idle', meta: null, fadeTimer: 0, removeTimer: 0, fanA: 0, fanB: 0, bow: 0, layer: gLIdle, p0: null, p1: null, p2: null, p3: null };
+    e = { a, b, line, state: 'idle', snapshotMisses: 0, fadeTimer: 0, removeTimer: 0, fanA: 0, fanB: 0, bow: 0, layer: gLIdle, p0: null, p1: null, p2: null, p3: null };
     EDGES.set(key, e);
     forceLinks.push({ source: a, target: b });
     syncSim();
@@ -423,13 +444,12 @@ function ensureEdge(a, b) {
   return e;
 }
 
-function setEdge(e, state, meta) {
+function setEdge(e, state) {
+  if (state === 'req' && e.state !== 'req') e.snapshotMisses = 0;
   e.state = state;
-  if (meta !== undefined) e.meta = meta;
   if (state === 'req') startEmitter(e);
   else stopEmitter(e);
   e.line.attr('class', 'edge ' + state);
-  e.hit.attr('class', 'edge-hit');
   placeEdge(e);
   scheduleLayoutPass();
 }
@@ -437,13 +457,11 @@ function setEdge(e, state, meta) {
 // Schedule the fade → remove lifecycle for a settled leg. A fresh delta on the
 // leg cancels and restarts it via ensureEdge. Both timers are cleared on
 // teardown and on re-activity so a stale removal cannot delete a live leg.
-function fadeEdge(e, meta, settleMs) {
-  if (meta !== undefined) e.meta = meta;
+function fadeEdge(e, settleMs) {
   if (e.fadeTimer) clearTimeout(e.fadeTimer);
   e.fadeTimer = setTimeout(() => {
     e.fadeTimer = 0;
     e.line.attr('class', 'edge fading');
-    e.hit.attr('class', 'edge-hit fading');
     if (e.removeTimer) clearTimeout(e.removeTimer);
     e.removeTimer = setTimeout(() => {
       e.removeTimer = 0;
@@ -455,11 +473,11 @@ function fadeEdge(e, meta, settleMs) {
 // A leg released without an explicit outcome is not an inferred failure: stop
 // the flow, drop the roundel back to idle, and let the shared fade take it.
 // An explicit outcome arriving later recolours the roundel.
-function releaseLeg(e, destNode, label) {
+function releaseLeg(e, destNode) {
   stopEmitter(e);
-  setEdge(e, 'idle', label);
+  setEdge(e, 'idle');
   if (destNode && destNode.state === 'active') setNodeState(destNode, 'idle');
-  fadeEdge(e, label, FADE_MS);
+  fadeEdge(e, FADE_MS);
 }
 
 // dropEdge removes one leg's DOM/timers/registrations without pruning nodes.
@@ -472,7 +490,6 @@ function dropEdge(e) {
   if (e.fadeTimer) clearTimeout(e.fadeTimer);
   if (e.removeTimer) clearTimeout(e.removeTimer);
   e.line.remove();
-  e.hit.remove();
   EDGES.delete(key);
   packets = packets.filter(p => p.e !== e);
   forceLinks = forceLinks.filter(l => !(l.source === e.a && l.target === e.b));
@@ -624,29 +641,6 @@ function addPacket(packet) {
   packets.push(packet);
 }
 
-function bump(which, v) {
-  counters[which] = v;
-  if (statsEls && statsEls[which]) statsEls[which].textContent = v;
-}
-
-function showDetail(html) {
-  if (detailEl) detailEl.innerHTML = '<code>' + html + '</code>';
-}
-
-function feedItem(text, kind) {
-  if (!feedEl) return;
-  const el = document.createElement('span');
-  el.className = 'feed-item ' + (kind || 'warn');
-  el.textContent = text;
-  feedEl.prepend(el);
-  while (feedEl.children.length > 6) feedEl.lastChild.remove();
-  setTimeout(() => {
-    el.style.transition = 'opacity .6s';
-    el.style.opacity = 0;
-    setTimeout(() => el.remove(), 650);
-  }, 9000);
-}
-
 // renderFrame advances packets and redraws positions from current node x/y.
 // It is driven by the rAF loop, not by the simulation, so flow keeps moving
 // after the force layout cools. sim ticks call it too for layout updates.
@@ -662,7 +656,6 @@ function renderFrame() {
       ' C ' + p[1].x + ' ' + p[1].y + ' ' + p[2].x + ' ' + p[2].y +
       ' ' + p[3].x + ' ' + p[3].y;
     e.line.attr('d', d);
-    e.hit.attr('d', d);
   });
   if (nodeSel) nodeSel.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
   packets.forEach(p => {
@@ -761,19 +754,16 @@ function handleSkip(delta) {
     ensureEdge(clientNode, from);
   }
   const e = ensureEdge(from, targetNode);
-  const label = from.label + ' → ' + targetNode.label;
-  const reason = delta.failure_class ? ' (' + delta.failure_class + ')' : '';
-  setEdge(e, 'idle', label);
+  setEdge(e, 'idle');
   setNodeState(targetNode, 'skipped');
-  feedItem('⚠ ' + label + ' · skipped' + reason, 'warn');
-  fadeEdge(e, label + ' · SKIPPED' + reason, FADE_MS);
+  fadeEdge(e, FADE_MS);
   reconcileGraph();
 }
 
 // applyActivityDelta lights legs from a live `activity` SSE delta
 // ({id, client_id, target_id, active, streaming, ...}). Deltas with active > 0
 // materialize nodes/legs and start flow; active < 0 releases the leg. With
-// {seed:true} the leg materializes without touching hot counts or counters
+// {seed:true} the leg materializes without touching hot counts
 // (snapshot reseed must be idempotent).
 function applyActivityDelta(delta, opts) {
   const seed = !!(opts && opts.seed);
@@ -784,18 +774,16 @@ function applyActivityDelta(delta, opts) {
     const destination = direct ? ensureTargetNode(delta.id) : resolveRouteNode(delta.id);
     const e = ensureEdge(clientNode, destination);
     const key = edgeKey(clientNode, destination);
-    const label = clientNode.label + ' → ' + destination.label;
     if ((delta.active || 0) > 0) {
       if (!seed) hotLegs.set(key, (hotLegs.get(key) || 0) + 1);
-      setEdge(e, 'req', label);
+      setEdge(e, 'req');
       setNodeState(destination, 'active');
       flow(e, BLUE, 3);
-      if (!seed) bump('req', counters.req + 1);
     } else if ((delta.active || 0) < 0) {
       const left = Math.max(0, (hotLegs.get(key) || 1) - 1);
       if (left === 0) {
         hotLegs.delete(key);
-        releaseLeg(e, destination, label);
+        releaseLeg(e, destination);
       } else {
         hotLegs.set(key, left);
       }
@@ -821,26 +809,20 @@ function applyActivityDelta(delta, opts) {
     const targetNode = ensureTargetNode(delta.target_id);
     const e = ensureEdge(routeNode, targetNode);
     const key = edgeKey(routeNode, targetNode);
-    const label = routeNode.label + ' → ' + targetNode.label;
     if ((delta.active || 0) > 0) {
       if (!seed) {
         // A second distinct target on the same route is a real fallback. The
         // earlier target's leg lingers (idle, fading) while the next begins.
-        let priorTargets = 0;
-        EDGES.forEach(cand => {
-          if (cand.a === routeNode && cand.b.kind === 'target' && cand.b !== targetNode) priorTargets++;
-        });
-        if (priorTargets > 0) bump('fb', counters.fb + 1);
         hotLegs.set(key, (hotLegs.get(key) || 0) + 1);
       }
-      setEdge(e, 'req', label);
+      setEdge(e, 'req');
       setNodeState(targetNode, 'active');
       flow(e, BLUE, 3);
     } else if ((delta.active || 0) < 0) {
       const left = Math.max(0, (hotLegs.get(key) || 1) - 1);
       if (left === 0) {
         hotLegs.delete(key);
-        releaseLeg(e, targetNode, label);
+        releaseLeg(e, targetNode);
       } else {
         hotLegs.set(key, left);
       }
@@ -880,7 +862,6 @@ function onOutcome(payload) {
       else if (!chosen) chosen = cand;
     });
     if (!chosen) return;
-    const route = chosen.a.label + ' → ' + idx.provider + '/' + idx.upstream;
     if (o && o.result === 'skipped') {
       setNodeState(targetNode, 'skipped');
       return;
@@ -888,21 +869,75 @@ function onOutcome(payload) {
     if (o && o.is_success) {
       targetNode.cooling = false;
       setNodeState(targetNode, 'served');
-      feedItem('✓ ' + route, 'ok');
-      fadeEdge(chosen, route + ' · SERVED', FADE_MS);
+      fadeEdge(chosen, FADE_MS);
     } else {
       setNodeState(targetNode, 'failed');
-      bump('err', counters.err + 1);
-      feedItem('✗ ' + route + ' · ' + (o?.failure_class || 'failed'), 'fail');
-      fadeEdge(chosen, route + ' · FAILED', FADE_MS);
+      fadeEdge(chosen, FADE_MS);
     }
   });
   reconcileGraph();
 }
 
+// expectedActive returns the snapshot's live set: the client node ids with at
+// least one active request, and the exact route\x00target pairs in flight. We
+// match a lit leg on client presence rather than its reported route because
+// the backend tracks a single route id per client, so concurrent requests on
+// different routes would otherwise look stale. Direct target pairs collapse
+// into the client leg and are intentionally not tracked separately.
+function expectedActive(modules) {
+  const clients = new Set();
+  Object.entries(modules.inflight_clients || {}).forEach(([clientID, st]) => {
+    if (st && st.active > 0) clients.add('c:' + clientID);
+  });
+  const targetPairs = new Set();
+  Object.keys(modules.inflight_targets || {}).forEach(key => {
+    const st = modules.inflight_targets[key];
+    if (!st || !(st.active > 0)) return;
+    const sep = key.indexOf('\x00');
+    if (sep < 0) return;
+    const routeID = key.slice(0, sep);
+    const targetID = key.slice(sep + 1);
+    if (routeID === targetID) return;
+    targetPairs.add('r:' + routeID + '|t:' + targetID);
+  });
+  return { clients, targetPairs };
+}
+
+// evictStaleLegs releases lit legs the snapshot no longer reports. A dropped
+// closing delta would otherwise leave a leg pulsing as active forever: the
+// snapshot only re-lights live legs and would never clear it. A leg must be
+// missing for SNAPSHOT_EVICT_AFTER consecutive snapshots before release, so a
+// just-started leg is not torn down by a snapshot generated before it existed.
+function evictStaleLegs(modules) {
+  const { clients, targetPairs } = expectedActive(modules);
+  const doomed = [];
+  EDGES.forEach((e, key) => {
+    if (e.state !== 'req' && e.state !== 'pending') {
+      e.snapshotMisses = 0;
+      return;
+    }
+    let expected;
+    if (e.a.kind === 'client') expected = clients.has(e.a.id);
+    else if (e.a.kind === 'route' && e.b.kind === 'target') expected = targetPairs.has(key);
+    else expected = true;
+    if (expected) {
+      e.snapshotMisses = 0;
+      return;
+    }
+    e.snapshotMisses = (e.snapshotMisses || 0) + 1;
+    if (e.snapshotMisses >= SNAPSHOT_EVICT_AFTER) doomed.push(e);
+  });
+  doomed.forEach(e => {
+    hotLegs.delete(edgeKey(e.a, e.b));
+    releaseLeg(e, e.b);
+  });
+  return doomed.length > 0;
+}
+
 // onSnapshotSeed paints currently-hot legs from the snapshot envelope's
 // modules (inflight_targets + inflight_clients) on (re)entry so the pane is
-// correct even if deltas were missed while hidden.
+// correct even if deltas were missed while hidden, then evicts any lit leg the
+// snapshot no longer reports so a dropped closing delta self-heals.
 function onSnapshotSeed(modules) {
   if (!sim || !modules) return;
   const clients = modules.inflight_clients || {};
@@ -920,6 +955,7 @@ function onSnapshotSeed(modules) {
     onActivityDelta({ id: key.slice(0, sep), target_id: key.slice(sep + 1), active: 1 }, { seed: true });
   });
   reconcileGraph();
+  if (evictStaleLegs(modules)) reconcileGraph();
 }
 
 // onCooldowns paints targets that are currently in fallback cooldown straight
@@ -945,14 +981,7 @@ function onCooldowns(map) {
 export function init(root, data) {
   destroy();
   svg = root.querySelector('#activity-pane');
-  detailEl = root.querySelector('#graph-detail');
-  feedEl = root.querySelector('#graph-feed');
   emptyEl = root.querySelector('#graph-empty');
-  statsEls = {
-    req: root.querySelector('#graph-req'),
-    fb: root.querySelector('#graph-fb'),
-    err: root.querySelector('#graph-err'),
-  };
   if (!svg || typeof d3 === 'undefined') return false;
   gLIdle = d3.select(svg).append('g');
   gLActive = d3.select(svg).append('g');
@@ -961,7 +990,6 @@ export function init(root, data) {
   d3.select(svg).append('text').attr('class', 'col-title').attr('x', 113).attr('y', 30).text('CLIENTS');
   d3.select(svg).append('text').attr('class', 'col-title').attr('x', 478).attr('y', 30).text('TILLER MODELS');
   d3.select(svg).append('text').attr('class', 'col-title').attr('x', 938).attr('y', 30).text('REAL MODELS');
-  counters = { req: 0, fb: 0, err: 0 };
   buildIndexes(data || {});
   sim = d3.forceSimulation(nodes)
     .force('link', null);
@@ -993,7 +1021,7 @@ export function destroy() {
   linkForce = null;
   if (svg) d3.select(svg).selectAll('*').remove();
   svg = gLIdle = gLActive = gN = gP = nodeSel = null;
-  detailEl = feedEl = emptyEl = statsEls = null;
+  emptyEl = null;
   nodes = [];
   byId.clear();
   clientIndex.clear();

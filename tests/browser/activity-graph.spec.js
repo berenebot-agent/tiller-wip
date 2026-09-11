@@ -4,9 +4,10 @@ const { openAdmin, adminCsrf, createProvider, createClient, clearActivity, mockA
 // Activity living pane: starts empty, materializes client → tiller model →
 // real-model target legs from live `activity` deltas, and `outcome` settles
 // the colour. Legs fade 30s after quiet (not asserted — expensive/flaky);
-// the empty state, live legs, feed, and click-detail are asserted here.
-// Written alongside the feature; NOT RUN here (browser tier needs an explicit
-// go-ahead per AGENTS.md — run via ./tests/browser/run.sh).
+// the empty state and live legs are asserted here. Snapshot eviction of
+// lost-delta legs is not covered (no test hook to inject a synthetic
+// snapshot). Written alongside the feature; NOT RUN here (browser tier needs
+// an explicit go-ahead per AGENTS.md — run via ./tests/browser/run.sh).
 test('activity graph starts empty, lights live legs, and settles on outcome', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openAdmin(page);
@@ -58,17 +59,15 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   // Outcome colour lives on the node ring; edges are flow-only.
   await expect(page.locator('#activity-pane .node-ring.st-ok').first()).toBeVisible({ timeout: 15000 });
   await expect(page.locator('#activity-pane .node-ring.st-failed').first()).toBeVisible({ timeout: 15000 });
-  await expect(page.locator('#graph-feed .feed-item.ok').first()).toBeVisible({ timeout: 15000 });
-
-  // Clicking the served leg shows attempt detail in the detail bar.
-  await page.locator('#activity-pane path.edge-hit', { hasText: 'mock-model-b' }).first().click();
-  await expect(page.locator('#graph-detail')).toContainText('activity-graph-group/graph');
 
   // Direct real-model request: a single client → real-model leg in the
   // middle lane, lit from `activity` deltas alone.
   const direct = await page.request.post('/v1/chat/completions', { headers: { Authorization: `Bearer ${client.secret}` }, data: { model: `${providerName}/mock-model-b`, messages: [{ role: 'user', content: 'direct' }] } });
   expect(direct.status()).toBe(200);
-  await expect(page.locator('#graph-feed .feed-item.ok').first()).toContainText('mock-model-b');
+  // The direct real-model leg lights the pane (client → real target) and the
+  // served roundel stays green (the resolution feed was removed).
+  await expect(page.locator('#activity-pane .node-ring.st-ok').first()).toBeVisible({ timeout: 15000 });
+  await expect(page.locator('#activity-pane text', { hasText: 'activity-graph-client' }).first()).toBeVisible();
 });
 
 test('activity graph shows empty state with no traffic', async ({ page }) => {
@@ -77,8 +76,6 @@ test('activity graph shows empty state with no traffic', async ({ page }) => {
   await page.locator('#nav-links').getByRole('link', { name: 'Activity' }).click();
   await expect(page.locator('#view-activity')).toBeVisible();
   await expect(page.locator('#activity-pane')).toBeVisible();
-  // Empty until first traffic; legend and detail bar always render.
+  // Empty until first traffic; the pane is the only content.
   await expect(page.locator('#graph-empty')).toBeVisible();
-  await expect(page.locator('#graph-legend')).toBeVisible();
-  await expect(page.locator('#graph-detail')).toBeVisible();
 });
