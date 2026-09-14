@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, liveRequests: {}, liveRoutes: {}, liveLegs: {}, loadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, loadToken: 0 };
 // routeActivity derives a virtual route's spinner state from the per
 // (client, route) tickets ("any ticket with this route"). OR-folds active +
 // streaming so two clients — or one client with parallel requests on this
@@ -24,17 +24,39 @@ const routeActivity = routeID => {
 const routeTicketKey = (clientID, routeID) => `${clientID}\u0000${routeID || ''}`;
 const sortState = { column: '1h', direction: 'desc' };
 const SORT_DEFAULTS = { canonical: 'asc', provider: 'asc', '1h': 'desc', '24h': 'desc', '7d': 'desc' };
+// MODEL_USAGE_SORTS names the model-table sort columns whose ordering depends on
+// the usage envelope. The catalogue renders before usage arrives, so a usage
+// sort is only meaningful once usage lands — at which point the rows must be
+// re-sorted (see modelsResortPending / reorderModelRows).
+const MODEL_USAGE_SORTS = new Set(['1h', '24h', '7d']);
+// modelsResortPending records that usage first became available while a
+// usage-sorted model table may still be in catalogue order. Set by
+// markUsageReady, consumed once by reconcileLive (which respects an open dialog
+// and the user's current sortState). This deliberately re-applies the *current*
+// sort — it never resets the user's chosen column or direction.
+let modelsResortPending = false;
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
+// tokLoadingInner is the placeholder shown in a token cell before the usage /
+// health envelope has arrived. It is deliberately distinct from the "—" empty
+// state: "—" means "no traffic recorded" and only appears once usage is known,
+// so a slow first load reads as "still coming" rather than "no data". The
+// spinner is transform-only (compositor-friendly) and aria-hidden, because the
+// loading state can briefly cover thousands of cells at once; the wrapper
+// carries aria-busy instead of each cell being a live region. It is transient:
+// the first usage snapshot replaces it.
+const tokLoadingInner = '<span class="tok-loading" aria-hidden="true"><span class="tok-loading-spin"></span></span>';
 // renderTokInner returns the inner markup of a .tok cell (no <span class="tok">
 // wrapper). Both initial render (tok) and live patching (patchTokenCell) build
 // their DOM from this single source so the .tok element is never re-wrapped and
-// transitions between populated and empty states keep consistent structure.
-const renderTokInner = (tokens, pct) => {
+// transitions between loading, populated, and empty states keep consistent
+// structure.
+const renderTokInner = (tokens, pct, loading = false) => {
+  if (loading) return tokLoadingInner;
   if (!tokens && pct == null) return '—';
   const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
   const cache = (pct != null && !isNaN(pct))
@@ -42,7 +64,14 @@ const renderTokInner = (tokens, pct) => {
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   return `${num}${cache}`;
 };
-const tok = (tokens, pct, window) => `<span class="tok" data-window="${window}">${renderTokInner(tokens, pct)}</span>`;
+// A cell is "loading" only while the usage envelope is unknown AND this cell has
+// no value yet. Once any snapshot/fetch has landed (usageReady), absent data is
+// a genuine empty state ("—").
+const tokLoading = (tokens, pct) => !state.usageReady && !tokens && pct == null;
+const tok = (tokens, pct, window) => {
+  const loading = tokLoading(tokens, pct);
+  return `<span class="tok" data-window="${window}"${loading ? ' aria-busy="true"' : ''}>${renderTokInner(tokens, pct, loading)}</span>`;
+};
 const rowCache = (row) => {
   const inp = row.input_tokens;
   const output = row.output_tokens;
@@ -80,14 +109,33 @@ async function api(path, options = {}) {
 // Concurrent callers within a tick also share a single in-flight request.
 const USAGE_REUSE_MS = 2000;
 let usageInFlight = null;
+// markUsageReady flips token cells from the loading spinner to real values (or
+// the "—" empty state) on the first usage arrival, and flags a one-time re-sort
+// of the model table if it was rendered under a usage sort before usage was
+// known. Idempotent: later snapshots do not re-sort, matching the pre-existing
+// "sort at render, patch values live" behaviour.
+function markUsageReady() {
+  if (state.usageReady) return;
+  state.usageReady = true;
+  modelsResortPending = true;
+}
 async function loadUsage() {
   if (state.usage && Date.now() - state.usageAt < USAGE_REUSE_MS) return state.usage;
   if (usageInFlight) return usageInFlight;
   usageInFlight = api('/api/admin/usage').then(usage => {
-    state.usage = usage; state.usageAt = Date.now();
+    state.usage = usage; state.usageAt = Date.now(); markUsageReady();
     return usage;
   }).finally(() => { usageInFlight = null; });
   return usageInFlight;
+}
+
+// deferUsage keeps usage off the view's critical render path. Catalogue views
+// paint from their own (fast) fetches immediately; the usage/health envelope
+// then arrives either via the SSE baseline snapshot or this fallback fetch, and
+// reconcileLive patches the token/health cells in place. Errors are ignored:
+// the SSE snapshot is the primary source, this is the degraded-mode fallback.
+function deferUsage() {
+  loadUsage().then(() => reconcileLive()).catch(() => {});
 }
 function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/clients'); liveStop(); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; liveStart(); navigate(state.view); }
@@ -243,7 +291,7 @@ function openManualModel() {
   });
 }
 $('#add-real-model').onclick = openManualModel;
-async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, , providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), loadUsage(), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.providers = providersResult.data; renderModels(); }
+async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.providers = providersResult.data; renderModels(); deferUsage(); }
 function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 7 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
 function toggleGroup(event) {
   const header = event.currentTarget;
@@ -309,9 +357,34 @@ function cycleModelSort(column) {
   }
   renderModels();
 }
-function renderModels() {
+// shownModels is the set the Models table renders: available models (unless
+// "show retired" is checked) owned by an enabled provider.
+function shownModels() {
   const disabledProviders = new Set(state.providers.filter(item => !item.enabled).map(item => item.id));
-  const shown = state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
+  return state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
+}
+// reorderModelRows re-applies the current sort in place, moving the existing
+// <tr> nodes rather than rebuilding the tbody. It exists for the one-time
+// correction after usage first arrives: a models table rendered before usage
+// was known sorts every row as zero and keeps catalogue order, while the header
+// still claims the default "1h ↓". applyModelSort reads the live sortState, so
+// this honours whatever column/direction the user has selected — it never
+// resets the sort. Event handlers and transient DOM state are preserved because
+// the nodes are moved, not replaced.
+function reorderModelRows() {
+  const body = $('#models-body');
+  if (!body) return;
+  const rowsByID = new Map();
+  $$('tr[data-model-id]', body).forEach(row => rowsByID.set(row.dataset.modelId, row));
+  const fragment = document.createDocumentFragment();
+  applyModelSort(shownModels()).forEach(model => {
+    const row = rowsByID.get(model.id);
+    if (row) fragment.appendChild(row);
+  });
+  body.appendChild(fragment);
+}
+function renderModels() {
+  const shown = shownModels();
   $('#models-empty').hidden = shown.length > 0;
   const rows = applyModelSort(shown);
   const html = rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
@@ -333,10 +406,10 @@ function renderModels() {
 async function loadVirtual(search = $('#virtual-search').value) {
   const token = ++state.loadToken;
   const [groups, virtualModels, providersResult, modelsResult] = await Promise.all([
-    api('/api/admin/virtual-groups?limit=200'), api(`/api/admin/virtual-models?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200'), api('/api/admin/models?all=1'), loadUsage()
+    api('/api/admin/virtual-groups?limit=200'), api(`/api/admin/virtual-models?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200'), api('/api/admin/models?all=1')
   ]);
   if (token !== state.loadToken) return;
-  state.groups = groups.data; state.virtualModels = virtualModels.data; state.providers = providersResult.data; state.models = modelsResult.data; renderVirtual();
+  state.groups = groups.data; state.virtualModels = virtualModels.data; state.providers = providersResult.data; state.models = modelsResult.data; renderVirtual(); deferUsage();
 }
 const RESOLUTION_STALE_MS = 24 * 3600 * 1000;
 const RESOLUTION_ICONS = {
@@ -655,11 +728,12 @@ async function deleteVirtualModel(id) { const model = state.virtualModels.find(i
 async function loadClients() {
   const token = ++state.loadToken;
   const search = $('#client-search').value, group = $('#client-group-filter').value;
-  const [result, , models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), loadUsage(), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
+  const [result, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
   if (token !== state.loadToken) return;
   state.clients = result.data; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data;
   renderClientGroupFilter();
   renderClients();
+  deferUsage();
 }
 function renderClientGroupFilter() {
   const select = $('#client-group-filter');
@@ -1347,6 +1421,16 @@ function markChanged(el) {
 // repeated updates cannot nest .tok .tok and a token value reverting to
 // zero always clears stale Mtok/cache markup.
 function patchTokenCell(cell, tokens, pct) {
+  // Once usage has arrived, a still-unknown cell is a genuine empty state, not
+  // loading. Rebuild from the loading spinner to the "—"/populated structure.
+  if (cell.querySelector('.tok-loading')) {
+    if (tokLoading(tokens, pct)) return;
+    cell.removeAttribute('aria-busy');
+    cell.innerHTML = renderTokInner(tokens, pct);
+    const first = $('b', cell);
+    if (first) markChanged(first);
+    return;
+  }
   const populated = Boolean(tokens) || (pct != null && !isNaN(pct));
   const numEl = $('b', cell);
   const cacheEl = $('.cache-hit b', cell);
@@ -1399,6 +1483,15 @@ function patchResolution(line, target) {
 function reconcileLive() {
   if (liveDialogOpen()) { livePendingReconcile = true; return; }
   livePendingReconcile = false;
+  // One-time correction after usage first arrives: a models table rendered under
+  // a usage sort while usage was unknown is in catalogue order. Re-sort only if
+  // the models view is active and the active sort is usage-based; a
+  // canonical/provider sort needs no correction. If the view is elsewhere, drop
+  // the flag — the next loadModels() renders already-sorted with usage present.
+  if (modelsResortPending) {
+    modelsResortPending = false;
+    if (liveViewActive('models') && MODEL_USAGE_SORTS.has(sortState.column)) reorderModelRows();
+  }
   if (liveViewActive('virtual')) {
     state.virtualModels.forEach(model => {
       const row = $(`tr[data-virtual-id="${CSS.escape(model.id)}"]`);
@@ -1414,6 +1507,17 @@ function reconcileLive() {
         if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window]);
       });
       patchVirtualSpinner(row, routeActivity(model.id));
+    });
+  }
+  if (liveViewActive('models')) {
+    state.models.forEach(model => {
+      const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
+      if (!row) return;
+      const canonical = model.canonical_model_id;
+      ['1h', '24h', '7d'].forEach(window => {
+        const cell = $(`.tok[data-window="${window}"]`, row);
+        if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window]);
+      });
     });
   }
   if (liveViewActive('clients')) {
@@ -1473,8 +1577,10 @@ live.on('snapshot', payload => {
   });
   // The SSE baseline snapshot already carries the usage envelope, so mark it
   // fresh: a view load in the next USAGE_REUSE_MS window reuses it instead of
-  // firing a redundant /api/admin/usage request on first open.
-  state.usageAt = Date.now();
+  // firing a redundant /api/admin/usage request on first open. markUsageReady
+  // also flips the token placeholders from the loading spinner to real
+  // values/empty and flags the one-time model-table re-sort.
+  state.usageAt = Date.now(); markUsageReady();
   if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
   if (payload.modules?.inflight_client_routes !== undefined) state.liveRoutes = payload.modules.inflight_client_routes || {};
   if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
@@ -1562,7 +1668,7 @@ $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
 const liveNavigate = navigate;
 navigate = function (view) {
   liveNavigate(view);
-  if (liveViewActive('virtual', 'clients')) reconcileLive();
+  if (liveViewActive('models', 'virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
     try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }

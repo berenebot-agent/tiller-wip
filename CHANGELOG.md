@@ -48,6 +48,16 @@ behavior may still change before a stable `1.0`.
 - **Admin Usage cold-load performance.** Route attribution is indexed
   (migration `027`) and the usage snapshot is cached, removing the cold-load
   lag on the Usage view.
+- **Admin pages render before usage loads.** The Real Models, Virtual Models,
+  and Clients views no longer block their first paint on the usage/health
+  aggregation. Catalogue rows render immediately; token and cache cells show a
+  loading spinner until the live SSE snapshot (or the fallback fetch) arrives
+  and patches them in place. Previously every view awaited the usage endpoint —
+  the slowest call — before rendering anything, and unknown cells were
+  indistinguishable from a "no traffic" dash. Because the Real Models table
+  defaults to a usage-based sort, it is re-sorted once when usage first arrives
+  (honouring the user's current column and direction) so it never sits in
+  catalogue order under a "1h ↓" header.
 - **Catalogue capability docs.** README documents the limits of catalogue
   capability metadata.
 
