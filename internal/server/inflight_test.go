@@ -13,16 +13,16 @@ func TestInflightTrackerClientTransitions(t *testing.T) {
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(delta inflightDelta) { deltas = append(deltas, delta) }}
 
 	tracker.clientStart("client-1", "route-1", "main")
-	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, RequestedModel: "main", RouteID: "route-1"}) {
+	if got := tracker.clientRouteSnapshot()[inflightClientKey("client-1", "route-1")]; got != (inflightState{Active: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "route-1"}) {
 		t.Fatalf("after client start = %+v", got)
 	}
 	tracker.clientStreaming("client-1", "route-1")
-	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, Streaming: 1, RequestedModel: "main", RouteID: "route-1"}) {
+	if got := tracker.clientRouteSnapshot()[inflightClientKey("client-1", "route-1")]; got != (inflightState{Active: 1, Streaming: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "route-1"}) {
 		t.Fatalf("after client streaming = %+v", got)
 	}
 	tracker.clientEnd("client-1", "route-1", true)
-	if len(tracker.clientSnapshot()) != 0 {
-		t.Fatalf("client state remained after end: %+v", tracker.clientSnapshot())
+	if len(tracker.clientRouteSnapshot()) != 0 {
+		t.Fatalf("client state remained after end: %+v", tracker.clientRouteSnapshot())
 	}
 	if len(deltas) != 3 || deltas[0] != (inflightDelta{ID: "route-1", ClientID: "client-1", Active: 1, RequestedModel: "main"}) || deltas[1] != (inflightDelta{ID: "route-1", ClientID: "client-1", Streaming: 1}) || deltas[2] != (inflightDelta{ID: "route-1", ClientID: "client-1", Active: -1, Streaming: -1}) {
 		t.Fatalf("client deltas = %+v", deltas)
@@ -35,12 +35,54 @@ func TestInflightTrackerKeepsConcurrentClientRequests(t *testing.T) {
 	tracker.clientStart("client-1", "route-1", "main")
 	tracker.clientStreaming("client-1", "route-1")
 	tracker.clientEnd("client-1", "route-1", true)
-	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, RequestedModel: "main", RouteID: "route-1"}) {
+	if got := tracker.clientSnapshot()["client-1"]; got != (inflightState{Active: 1, Streaming: 0}) {
 		t.Fatalf("after first concurrent client end = %+v", got)
 	}
 	tracker.clientEnd("client-1", "route-1", false)
 	if len(tracker.clientSnapshot()) != 0 {
 		t.Fatalf("client state remained after second end: %+v", tracker.clientSnapshot())
+	}
+}
+
+// TestInflightTrackerKeepsConcurrentRoutesForOneClient covers the bug this
+// tracker shape exists to prevent: one client key issues parallel requests on
+// two different routes. Both tickets must stay lit and carry their own route
+// identity; ending one must not tear down the other. It also checks the
+// per-client aggregate folds both tickets for the client status roundel.
+func TestInflightTrackerKeepsConcurrentRoutesForOneClient(t *testing.T) {
+	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(inflightDelta) {}}
+	tracker.clientStart("client-1", "main", "main")
+	tracker.clientStart("client-1", "coding", "coding")
+
+	routes := tracker.clientRouteSnapshot()
+	if got := routes[inflightClientKey("client-1", "main")]; got != (inflightState{Active: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "main"}) {
+		t.Fatalf("main ticket = %+v", got)
+	}
+	if got := routes[inflightClientKey("client-1", "coding")]; got != (inflightState{Active: 1, RequestedModel: "coding", ClientID: "client-1", RouteID: "coding"}) {
+		t.Fatalf("coding ticket = %+v", got)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("expected two concurrent client+route tickets, got %+v", routes)
+	}
+	if agg := tracker.clientSnapshot()["client-1"]; agg.Active != 2 {
+		t.Fatalf("per-client aggregate = %+v, want active 2", agg)
+	}
+
+	tracker.clientEnd("client-1", "main", false)
+	routes = tracker.clientRouteSnapshot()
+	if _, ok := routes[inflightClientKey("client-1", "coding")]; !ok {
+		t.Fatalf("coding ticket was torn down with main: %+v", routes)
+	}
+	if _, ok := routes[inflightClientKey("client-1", "main")]; ok {
+		t.Fatalf("main ticket survived its end: %+v", routes)
+	}
+	if agg := tracker.clientSnapshot()["client-1"]; agg.Active != 1 {
+		t.Fatalf("per-client aggregate after one end = %+v, want active 1", agg)
+	}
+
+	tracker.clientEnd("client-1", "coding", false)
+	if len(tracker.clientRouteSnapshot()) != 0 || len(tracker.clientSnapshot()) != 0 {
+		t.Fatalf("state remained after both ends: routes=%+v clients=%+v", tracker.clientRouteSnapshot(), tracker.clientSnapshot())
 	}
 }
 
@@ -60,8 +102,8 @@ func TestInflightTrackerRealRouteBalance(t *testing.T) {
 	}
 	tracker.targetEnd(pmID, pmID)
 	tracker.clientEnd("client-1", pmID, false)
-	if len(tracker.clientSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
-		t.Fatalf("state remained after real route cycle: client=%+v target=%+v", tracker.clientSnapshot(), tracker.targetSnapshot())
+	if len(tracker.clientRouteSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
+		t.Fatalf("state remained after real route cycle: client=%+v target=%+v", tracker.clientRouteSnapshot(), tracker.targetSnapshot())
 	}
 	want := []inflightDelta{
 		{ID: pmID, ClientID: "client-1", Active: 1, RequestedModel: "provider-a/model-a"},
@@ -91,8 +133,8 @@ func TestInflightTrackerRealRouteStreamingBalance(t *testing.T) {
 	tracker.clientStreaming("client-1", pmID)
 	tracker.targetEnd(pmID, pmID)
 	tracker.clientEnd("client-1", pmID, true)
-	if len(tracker.clientSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
-		t.Fatalf("state remained after streaming real route cycle: client=%+v target=%+v", tracker.clientSnapshot(), tracker.targetSnapshot())
+	if len(tracker.clientRouteSnapshot()) != 0 || len(tracker.targetSnapshot()) != 0 {
+		t.Fatalf("state remained after streaming real route cycle: client=%+v target=%+v", tracker.clientRouteSnapshot(), tracker.targetSnapshot())
 	}
 }
 

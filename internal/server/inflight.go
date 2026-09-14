@@ -7,10 +7,11 @@ type inflightState struct {
 	Streaming      int    `json:"streaming"`
 	RequestedModel string `json:"requested_model,omitempty"`
 	ResolvedModel  string `json:"resolved_model,omitempty"`
-	// RouteID is the resolved route (virtual or real-model ID) for client
-	// states, so live consumers can anchor a client to its route leg. Empty
-	// when the request ended before route resolution.
-	RouteID string `json:"route_id,omitempty"`
+	// ClientID and RouteID are populated on composite (client+route) states so
+	// live consumers can anchor a specific leg without parsing the map key.
+	// They are empty on per-client aggregate and per-target states.
+	ClientID string `json:"client_id,omitempty"`
+	RouteID  string `json:"route_id,omitempty"`
 }
 
 type inflightDelta struct {
@@ -31,40 +32,50 @@ type inflightDelta struct {
 	FailureClass string `json:"failure_class,omitempty"`
 }
 
-// Single-ticket liveness: each in-flight request hangs one ticket,
-// tracked in clientStates keyed by client key id. The ticket carries the
-// resolved route ID, so route presence ("any ticket with this route") is
-// derived by consumers rather than stored in a parallel map. Target legs
-// keep their own map for per-attempt fallback granularity.
+// Single-ticket liveness: each in-flight request hangs one ticket, tracked in
+// clientStates keyed by client key id + route id. Parallel requests from one
+// client key are normal, so a ticket must be per (client, route): keying by
+// client alone would let a second route overwrite the first route identity
+// even though both remain active. Target legs keep their own map for
+// per-attempt fallback granularity.
 type inflightTracker struct {
 	mu           sync.Mutex
-	clientStates map[string]inflightState // keyed by client key id
+	clientStates map[string]inflightState // keyed by client key id + NUL + route id
 	targetStates map[string]inflightState // keyed by route id/provider model pair
 	emit         func(inflightDelta)
 }
 
-// clientStart begins client-level tracking. routeID is the resolved route
+// inflightClientKey joins the two identities a client ticket carries. An empty routeID
+// collapses to the client-only key, matching the pre-resolution case.
+func inflightClientKey(id, routeID string) string {
+	return id + "\x00" + routeID
+}
+
+// clientStart begins client+route level tracking. routeID is the resolved route
 // (virtual or real-model ID); it is echoed as the delta ID so live consumers
 // see client and route identity together. Empty when resolution has not
 // happened yet (delta keeps today's client-only shape).
 func (t *inflightTracker) clientStart(id, routeID, requestedModel string) {
 	t.mu.Lock()
-	state := t.clientStates[id]
+	key := inflightClientKey(id, routeID)
+	state := t.clientStates[key]
 	state.Active++
 	state.RequestedModel = requestedModel
-	if routeID != "" {
-		state.RouteID = routeID
-	}
-	t.clientStates[id] = state
+	state.ClientID = id
+	state.RouteID = routeID
+	t.clientStates[key] = state
 	t.mu.Unlock()
 	t.emit(inflightDelta{ID: routeID, ClientID: id, Active: 1, RequestedModel: requestedModel})
 }
 
 func (t *inflightTracker) clientStreaming(id, routeID string) {
 	t.mu.Lock()
-	state := t.clientStates[id]
+	key := inflightClientKey(id, routeID)
+	state := t.clientStates[key]
 	state.Streaming++
-	t.clientStates[id] = state
+	state.ClientID = id
+	state.RouteID = routeID
+	t.clientStates[key] = state
 	t.mu.Unlock()
 	t.emit(inflightDelta{ID: routeID, ClientID: id, Streaming: 1})
 }
@@ -74,18 +85,23 @@ func (t *inflightTracker) clientResolved(id, routeID, resolvedModel string) {
 		return
 	}
 	t.mu.Lock()
-	state := t.clientStates[id]
+	key := inflightClientKey(id, routeID)
+	state := t.clientStates[key]
 	state.ResolvedModel = resolvedModel
-	t.clientStates[id] = state
+	state.ClientID = id
+	state.RouteID = routeID
+	t.clientStates[key] = state
 	t.mu.Unlock()
 	t.emit(inflightDelta{ID: routeID, ClientID: id, ResolvedModel: resolvedModel})
 }
 
-// clientEnd releases one client-level request. routeID mirrors clientStart so
-// the closing delta carries the same client+route identity.
+// clientEnd releases one client+route request. routeID mirrors clientStart so
+// the closing delta carries the same client+route identity and only that
+// ticket is decremented; a concurrent request on another route stays lit.
 func (t *inflightTracker) clientEnd(id, routeID string, streamed bool) {
 	t.mu.Lock()
-	state := t.clientStates[id]
+	key := inflightClientKey(id, routeID)
+	state := t.clientStates[key]
 	if state.Active > 0 {
 		state.Active--
 	}
@@ -93,9 +109,9 @@ func (t *inflightTracker) clientEnd(id, routeID string, streamed bool) {
 		state.Streaming--
 	}
 	if state.Active == 0 && state.Streaming == 0 {
-		delete(t.clientStates, id)
+		delete(t.clientStates, key)
 	} else {
-		t.clientStates[id] = state
+		t.clientStates[key] = state
 	}
 	t.mu.Unlock()
 	delta := inflightDelta{ID: routeID, ClientID: id, Active: -1}
@@ -105,12 +121,35 @@ func (t *inflightTracker) clientEnd(id, routeID string, streamed bool) {
 	t.emit(delta)
 }
 
-func (t *inflightTracker) clientSnapshot() map[string]inflightState {
+// clientRouteSnapshot returns the per (client, route) tickets, keyed by the
+// same client + NUL + route composite the tracker uses. Each state carries its
+// ClientID and RouteID so consumers need not parse the key.
+func (t *inflightTracker) clientRouteSnapshot() map[string]inflightState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make(map[string]inflightState, len(t.clientStates))
-	for id, state := range t.clientStates {
-		out[id] = state
+	for key, state := range t.clientStates {
+		out[key] = state
+	}
+	return out
+}
+
+// clientSnapshot returns the per-client aggregate (all routes folded), keyed by
+// client key id. The client status roundel only needs to know whether any
+// request is active and whether any stream is in flight, so it consumes this
+// rather than the composite tickets.
+func (t *inflightTracker) clientSnapshot() map[string]inflightState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]inflightState)
+	for _, state := range t.clientStates {
+		if state.ClientID == "" {
+			continue
+		}
+		agg := out[state.ClientID]
+		agg.Active += state.Active
+		agg.Streaming += state.Streaming
+		out[state.ClientID] = agg
 	}
 	return out
 }

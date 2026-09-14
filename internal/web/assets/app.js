@@ -1,22 +1,27 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, liveRequests: {}, liveLegs: {}, loadToken: 0 };
-// routeActivity derives a virtual route's spinner state from the single-ticket
-// live requests ("any ticket with this route"). OR-folds active + streaming
-// so two clients on one virtual keep the spinner lit until both drain, and
-// the streaming label survives if either streams. Returns null when quiet so
-// the existing activity?.active optional-chaining keeps working. Deliberately
-// unmemoized: O(rows × live requests) is trivial at admin-UI scale, and a
-// cache here would risk stale spinners.
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, liveRequests: {}, liveRoutes: {}, liveLegs: {}, loadToken: 0 };
+// routeActivity derives a virtual route's spinner state from the per
+// (client, route) tickets ("any ticket with this route"). OR-folds active +
+// streaming so two clients — or one client with parallel requests on this
+// route — keep the spinner lit until all drain, and the streaming label
+// survives if any stream is in flight. Returns null when quiet so the existing
+// activity?.active optional-chaining keeps working. Deliberately unmemoized:
+// O(rows × tickets) is trivial at admin-UI scale, and a cache here would risk
+// stale spinners.
 const routeActivity = routeID => {
   let out = null;
-  for (const req of Object.values(state.liveRequests)) {
+  for (const req of Object.values(state.liveRoutes)) {
     if (req.routeID !== routeID || req.active <= 0) continue;
     out = { active: 1, streaming: Math.max(out?.streaming || 0, req.streaming || 0) };
   }
   return out;
 };
+// routeTicketKey joins the live-ticket map key the same way the backend does
+// (client id + NUL + route id). The composite key keeps concurrent requests
+// from one client key on different routes distinct.
+const routeTicketKey = (clientID, routeID) => `${clientID}\u0000${routeID || ''}`;
 const sortState = { column: '1h', direction: 'desc' };
 const SORT_DEFAULTS = { canonical: 'asc', provider: 'asc', '1h': 'desc', '24h': 'desc', '7d': 'desc' };
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
@@ -1287,7 +1292,7 @@ async function loadActivityView() {
     }) === true;
     // Seed currently-hot legs from live state in case deltas were missed
     // while the view was hidden (state keeps the client + leg lanes).
-    if (activityGraphReady) noteActivityCatalogueMiss(mod.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs }));
+    if (activityGraphReady) noteActivityCatalogueMiss(mod.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs }));
     if (activityGraphReady) mod.onCooldowns(state.usage?.target_cooldown || {});
   } catch (error) {
     flash(errorMessage(error), 'error');
@@ -1471,6 +1476,7 @@ live.on('snapshot', payload => {
   // firing a redundant /api/admin/usage request on first open.
   state.usageAt = Date.now();
   if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
+  if (payload.modules?.inflight_client_routes !== undefined) state.liveRoutes = payload.modules.inflight_client_routes || {};
   if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
   // Activity living pane: seed currently-hot legs on every snapshot so a
   // missed delta self-heals without a refresh.
@@ -1491,18 +1497,28 @@ live.on('activity', delta => {
     }
     return;
   }
-  // Single-ticket liveness: client deltas (with route ID) accumulate in
-  // liveRequests; target deltas accumulate in liveLegs. No separate
-  // route-level lane exists, so there is nothing to double-count.
+  // Single-ticket liveness: client deltas (with route ID) accumulate in both
+  // liveRoutes (per client+route, for spinners and the Activity graph) and
+  // liveRequests (per-client aggregate, for the client roundel); target deltas
+  // accumulate in liveLegs. No separate route-level lane exists, so there is
+  // nothing to double-count.
   if (delta.client_id) {
-    const current = state.liveRequests[delta.client_id] || { active: 0, streaming: 0 };
+    const routeID = delta.id || '';
+    const ticket = routeTicketKey(delta.client_id, routeID);
+    const current = state.liveRoutes[ticket] || { active: 0, streaming: 0 };
     current.active += delta.active || 0;
     current.streaming += delta.streaming || 0;
     if (delta.id) current.routeID = delta.id;
     if (delta.requested_model) current.requestedModel = delta.requested_model;
     if (delta.resolved_model) current.resolvedModel = delta.resolved_model;
-    if (current.active <= 0 && current.streaming <= 0) delete state.liveRequests[delta.client_id];
-    else state.liveRequests[delta.client_id] = current;
+    if (current.active <= 0 && current.streaming <= 0) delete state.liveRoutes[ticket];
+    else state.liveRoutes[ticket] = current;
+    // Per-client aggregate for the client status roundel.
+    const agg = state.liveRequests[delta.client_id] || { active: 0, streaming: 0 };
+    agg.active += delta.active || 0;
+    agg.streaming += delta.streaming || 0;
+    if (agg.active <= 0 && agg.streaming <= 0) delete state.liveRequests[delta.client_id];
+    else state.liveRequests[delta.client_id] = agg;
     if (liveViewActive('virtual') && !liveDialogOpen() && delta.id) {
       const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
       if (row) patchVirtualSpinner(row, routeActivity(delta.id));
@@ -1548,7 +1564,7 @@ navigate = function (view) {
   liveNavigate(view);
   if (liveViewActive('virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
-    try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_clients: state.liveRequests, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
+    try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
     try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
   }
 };

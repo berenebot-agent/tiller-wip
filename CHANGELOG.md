@@ -32,6 +32,13 @@ behavior may still change before a stable `1.0`.
   real-model requests; orphan models, graph stalls, and skipped-leg rendering
   fixed; models added after the pane loads now resolve; redundant real-model
   sublabels dropped and long labels wrap.
+- **Parallel requests from one client key no longer collapse.** Live
+  in-flight activity is now tracked per (client key, route) instead of per
+  client key alone, so an OpenCode/Tiller client running two routes at once
+  (for example `main` → Claude and `coding` → Codex) keeps both virtual-model
+  spinners and both Activity graph legs lit. The client status roundel still
+  consumes a folded per-client aggregate. Previously a second concurrent route
+  overwrote the first route's identity on the single per-client ticket.
 - **Admin dialog guards.** Stale entity submits no longer close a reopened
   dialog; search fields aligned across views; activity dialog scroll resets on
   open.

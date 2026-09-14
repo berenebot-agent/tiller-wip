@@ -1051,16 +1051,30 @@ function onOutcome(payload) {
   reconcileGraph();
 }
 
-// expectedActive returns the snapshot's live set: the client node ids with at
-// least one active request, and the exact route\x00target pairs in flight. We
-// match a lit leg on client presence rather than its reported route because
-// the backend tracks a single route id per client, so concurrent requests on
-// different routes would otherwise look stale. Direct target pairs collapse
-// into the client leg and are intentionally not tracked separately.
+// clientLegDestinationID classifies a route id to the node a client leg lands
+// on, exactly as applyActivityDelta does: a direct real model lands on its
+// target node, a virtual route on a middle-lane route node.
+function clientLegDestinationID(routeID) {
+  const idx = modelIndex.get(routeID);
+  const direct = (!!idx && idx.direct) || directIds.has(routeID);
+  return direct ? 't:' + routeID : 'r:' + routeID;
+}
+
+// expectedActive returns the snapshot's live set: the exact client+destination
+// legs in flight, and the exact route\x00target pairs in flight. Tickets are
+// keyed per (client, route), so concurrent requests from one client key on
+// different routes are tracked separately rather than collapsed onto the last
+// route. Direct target pairs collapse into the client leg and are intentionally
+// not tracked separately.
 function expectedActive(modules) {
-  const clients = new Set();
-  Object.entries(modules.inflight_clients || {}).forEach(([clientID, st]) => {
-    if (st && st.active > 0) clients.add('c:' + clientID);
+  const clientLegs = new Set();
+  Object.entries(modules.inflight_client_routes || {}).forEach(([key, st]) => {
+    if (!st || !(st.active > 0)) return;
+    const sep = key.indexOf('\x00');
+    const clientID = st.client_id || (sep >= 0 ? key.slice(0, sep) : '');
+    const routeID = st.route_id || (sep >= 0 ? key.slice(sep + 1) : '');
+    if (!clientID || !routeID) return;
+    clientLegs.add('c:' + clientID + '|' + clientLegDestinationID(routeID));
   });
   const targetPairs = new Set();
   Object.keys(modules.inflight_targets || {}).forEach(key => {
@@ -1073,7 +1087,7 @@ function expectedActive(modules) {
     if (routeID === targetID) return;
     targetPairs.add('r:' + routeID + '|t:' + targetID);
   });
-  return { clients, targetPairs };
+  return { clientLegs, targetPairs };
 }
 
 // evictStaleLegs releases lit legs the snapshot no longer reports. A dropped
@@ -1082,7 +1096,7 @@ function expectedActive(modules) {
 // missing for SNAPSHOT_EVICT_AFTER consecutive snapshots before release, so a
 // just-started leg is not torn down by a snapshot generated before it existed.
 function evictStaleLegs(modules) {
-  const { clients, targetPairs } = expectedActive(modules);
+  const { clientLegs, targetPairs } = expectedActive(modules);
   const doomed = [];
   EDGES.forEach((e, key) => {
     if (e.state !== 'req' && e.state !== 'pending') {
@@ -1090,7 +1104,7 @@ function evictStaleLegs(modules) {
       return;
     }
     let expected;
-    if (e.a.kind === 'client') expected = clients.has(e.a.id);
+    if (e.a.kind === 'client') expected = clientLegs.has(key);
     else if (e.a.kind === 'route' && e.b.kind === 'target') expected = targetPairs.has(key);
     else expected = true;
     if (expected) {
@@ -1108,16 +1122,22 @@ function evictStaleLegs(modules) {
 }
 
 // onSnapshotSeed paints currently-hot legs from the snapshot envelope's
-// modules (inflight_targets + inflight_clients) on (re)entry so the pane is
-// correct even if deltas were missed while hidden, then evicts any lit leg the
-// snapshot no longer reports so a dropped closing delta self-heals.
+// modules (inflight_targets + inflight_client_routes) on (re)entry so the pane
+// is correct even if deltas were missed while hidden, then evicts any lit leg
+// the snapshot no longer reports so a dropped closing delta self-heals. Each
+// (client, route) ticket seeds its own client leg, so a client with parallel
+// requests on different routes restores every leg.
 function onSnapshotSeed(modules) {
   if (!sim || !modules) return [];
   const missing = [];
-  const clients = modules.inflight_clients || {};
-  Object.entries(clients).forEach(([clientID, st]) => {
-    if (!st || !(st.active > 0) || !st.route_id) return;
-    missing.push(...onActivityDelta({ id: st.route_id, client_id: clientID, active: 1 }, { seed: true }));
+  const routes = modules.inflight_client_routes || {};
+  Object.entries(routes).forEach(([key, st]) => {
+    if (!st || !(st.active > 0)) return;
+    const sep = key.indexOf('\x00');
+    const clientID = st.client_id || (sep >= 0 ? key.slice(0, sep) : '');
+    const routeID = st.route_id || (sep >= 0 ? key.slice(sep + 1) : '');
+    if (!clientID || !routeID) return;
+    missing.push(...onActivityDelta({ id: routeID, client_id: clientID, active: 1 }, { seed: true }));
   });
   const targets = modules.inflight_targets || {};
   Object.entries(targets).forEach(([key, st]) => {

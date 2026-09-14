@@ -87,8 +87,9 @@ func (s *Server) buildUsageSnapshot(ctx context.Context) (liveSnapshot, error) {
 		ClientCache:       agg.ClientCache,
 		RealCache:         agg.RealCache,
 		Modules: map[string]any{
-			"inflight_clients": s.inflight.clientSnapshot(),
-			"inflight_targets": s.inflight.targetSnapshot(),
+			"inflight_clients":       s.inflight.clientSnapshot(),
+			"inflight_client_routes": s.inflight.clientRouteSnapshot(),
+			"inflight_targets":       s.inflight.targetSnapshot(),
 		},
 	}, nil
 }
