@@ -58,8 +58,14 @@ func TestReasoningRequestFixes_DoesNotRaiseExplicitOutputCap(t *testing.T) {
 func TestReasoningRequestFixes_EnabledWithoutBudgetMetadataUsesDefault(t *testing.T) {
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolMessages, caps)
-	if !strings.Contains(string(result), `"type":"enabled"`) || !strings.Contains(string(result), `"budget_tokens":1024`) || !strings.Contains(string(result), `"effort":"high"`) {
-		t.Fatalf("enabled-only target did not get valid default and effort: %s", result)
+	// Unadvertised efforts are never emitted (e5deab9): the target gets a
+	// valid enabled default, but the "high" effort is dropped because the
+	// catalogue did not advertise effort support.
+	if !strings.Contains(string(result), `"type":"enabled"`) || !strings.Contains(string(result), `"budget_tokens":1024`) {
+		t.Fatalf("enabled-only target did not get valid default: %s", result)
+	}
+	if strings.Contains(string(result), `"effort"`) {
+		t.Fatalf("unadvertised effort must not be emitted: %s", result)
 	}
 }
 
@@ -96,16 +102,26 @@ func TestReasoningRequestFixes_TranslatedEffortRetainedWithEnabledMessages(t *te
 	}
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}}
 	result := applyReasoningSelector(translated, extractReasoningSelector(request, providers.ProtocolChat), providers.ProtocolMessages, caps)
-	if !strings.Contains(string(result), `"type":"enabled"`) || !strings.Contains(string(result), `"effort":"high"`) {
-		t.Fatalf("translated effort was not retained: %s", result)
+	// The translated "high" effort is dropped when the Messages target does
+	// not advertise effort support (e5deab9); enabled thinking is retained.
+	if !strings.Contains(string(result), `"type":"enabled"`) {
+		t.Fatalf("translated request lost enabled thinking: %s", result)
+	}
+	if strings.Contains(string(result), `"effort"`) {
+		t.Fatalf("unadvertised translated effort must not be emitted: %s", result)
 	}
 }
 
 func TestReasoningRequestFixes_EnabledTrueAdaptiveOnlyPreservesEffort(t *testing.T) {
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Enabled: boolPtr(true), Effort: "high"}, providers.ProtocolMessages, caps)
-	if !strings.Contains(string(result), `"type":"adaptive"`) || !strings.Contains(string(result), `"effort":"high"`) {
-		t.Fatalf("adaptive-only enabled request lost selector fields: %s", result)
+	// Adaptive mode is preserved, but the unadvertised "high" effort is
+	// dropped rather than forwarded verbatim (e5deab9).
+	if !strings.Contains(string(result), `"type":"adaptive"`) {
+		t.Fatalf("adaptive-only enabled request lost adaptive mode: %s", result)
+	}
+	if strings.Contains(string(result), `"effort"`) {
+		t.Fatalf("unadvertised effort must not be emitted: %s", result)
 	}
 	if strings.Contains(string(result), "budget_tokens") {
 		t.Fatalf("adaptive thinking carried an invalid budget: %s", result)

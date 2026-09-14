@@ -14,3 +14,5 @@ docs/
 tests/hermes_test/
 docs/todo_enc_keys.md
 tests/logs/
+# Local build artifact — never commit.
+tiller-router.zip

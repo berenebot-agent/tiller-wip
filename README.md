@@ -83,7 +83,7 @@ Each attempt is visible in Activity, including the fallback — the client gets 
 ## Features
 
 - **Steering** — fast web control panel; single and catalogue client keys; real and virtual models in one route selector; immediate route changes; stable client-facing identities.
-- **Providers & models** — credentials entered once, use accross your tools.
+- **Providers & models** — credentials entered once, use across your tools.
 - **Routing** — fixed virtual routes; ordered fallback; configurable fallback timeout.
 - **Client API** — `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, covering the common OpenAI and Anthropic surfaces with safe protocol translation.
 - **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks).

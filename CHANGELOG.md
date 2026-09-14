@@ -6,6 +6,15 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Activity living-pane graph.** The Activity view now renders live request
+  legs as a graph (self-hosted D3, no CDN) with an active-only pane, per-client
+  legs, and click-through from graph nodes into the request dialog. Cooldown
+  state is shown inline.
+- **Sanitized upstream provider errors surfaced.** Upstream failures now
+  surface a sanitized, actionable error instead of an opaque failure.
+
 ### Fixed
 
 - **Ordered fallback now survives empty or errored 2xx streams.** A target that
@@ -16,6 +25,24 @@ behavior may still change before a stable `1.0`.
   cooldown. Previously Tiller committed to the first 2xx header and relayed the
   empty response to the client, so a broken upstream could stall the whole
   chain.
+- **Codex / SSE robustness.** Preserved upstream SSE negotiation, exact SSE
+  accept handling, streaming keepalives, and resolution of UI reasoning aliases
+  to wire efforts.
+- **Activity pane correctness.** No more phantom middle-lane routes for direct
+  real-model requests; orphan models, graph stalls, and skipped-leg rendering
+  fixed; models added after the pane loads now resolve; redundant real-model
+  sublabels dropped and long labels wrap.
+- **Admin dialog guards.** Stale entity submits no longer close a reopened
+  dialog; search fields aligned across views; activity dialog scroll resets on
+  open.
+
+### Changed
+
+- **Admin Usage cold-load performance.** Route attribution is indexed
+  (migration `027`) and the usage snapshot is cached, removing the cold-load
+  lag on the Usage view.
+- **Catalogue capability docs.** README documents the limits of catalogue
+  capability metadata.
 
 ## [0.1.0-beta.2] - 2026-09-08
 

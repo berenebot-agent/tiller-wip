@@ -24,10 +24,12 @@ import (
 const maxUpstreamNonStreamBytes int64 = 64 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
-// read for passthrough to the originating client. When detailed error
-// logging is enabled, the bounded body is also retained on the activity row;
-// otherwise it is written only to the client. Virtual fallback paths skip the
-// read unless detailed error logging is on.
+// read for the sanitized client error. When detailed error logging is
+// enabled, the bounded body is also retained on the activity row; otherwise
+// only the sanitized summary is kept. The read itself always happens (it
+// feeds the client error and the virtual fallback error list) but is bounded
+// by upstreamErrorReadTimeout so a stalled body never holds the fallback
+// chain hostage.
 const maxUpstreamErrorBytes int64 = 1 << 20
 
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
@@ -518,6 +520,35 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 // the AfterFunc's initial deadline.
 const idleTimeout = 5 * time.Minute
 
+// upstreamErrorReadTimeout bounds how long the router waits for an upstream
+// error body before giving up and falling back without the sanitized detail.
+// Error bodies are small and prompt; a provider that stalls its error body
+// must not delay the fallback chain (which the 5-minute idleTimeout would
+// otherwise allow). On timeout the caller keeps the generic http_N class.
+const upstreamErrorReadTimeout = 1 * time.Second
+
+// readUpstreamErrorBody reads a bounded copy of an upstream error body,
+// giving up after upstreamErrorReadTimeout. The timeout path returns a
+// non-nil error so callers skip the sanitized detail and proceed with the
+// generic message.
+func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(body, maxUpstreamErrorBytes+1))
+		ch <- result{data, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.data, res.err
+	case <-time.After(upstreamErrorReadTimeout):
+		return nil, context.DeadlineExceeded
+	}
+}
+
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
@@ -896,8 +927,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// Always read a bounded copy: it is persisted only under opt-in
 				// detailed error logging, but a sanitized summary is always used
 				// to build the client error (direct routes) or the virtual
-				// fallback error list.
-				upstreamErrorBody, upstreamErrorReadErr := io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
+				// fallback error list. The read gives up after
+				// upstreamErrorReadTimeout so a stalled body falls back
+				// without the detail instead of holding the chain hostage.
+				upstreamErrorBody, upstreamErrorReadErr := readUpstreamErrorBody(response.Body)
 				response.Body.Close()
 				idle.Stop()
 				attemptCancel()
