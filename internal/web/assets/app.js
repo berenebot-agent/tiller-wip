@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, liveRequests: {}, liveLegs: {}, loadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, liveRequests: {}, liveLegs: {}, loadToken: 0 };
 // routeActivity derives a virtual route's spinner state from the single-ticket
 // live requests ("any ticket with this route"). OR-folds active + streaming
 // so two clients on one virtual keep the spinner lit until both drain, and
@@ -68,6 +68,22 @@ async function api(path, options = {}) {
   return payload;
 }
 
+// loadUsage returns the usage/health envelope, reusing a recently received one
+// (from a prior fetch or an SSE snapshot) inside USAGE_REUSE_MS. On a first
+// page load the SSE baseline snapshot and the view's parallel fetches would
+// otherwise each request /api/admin/usage back-to-back; this collapses them.
+// Concurrent callers within a tick also share a single in-flight request.
+const USAGE_REUSE_MS = 2000;
+let usageInFlight = null;
+async function loadUsage() {
+  if (state.usage && Date.now() - state.usageAt < USAGE_REUSE_MS) return state.usage;
+  if (usageInFlight) return usageInFlight;
+  usageInFlight = api('/api/admin/usage').then(usage => {
+    state.usage = usage; state.usageAt = Date.now();
+    return usage;
+  }).finally(() => { usageInFlight = null; });
+  return usageInFlight;
+}
 function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/clients'); liveStop(); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; liveStart(); navigate(state.view); }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
@@ -222,7 +238,7 @@ function openManualModel() {
   });
 }
 $('#add-real-model').onclick = openManualModel;
-async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, usage, providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage'), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.usage = usage; state.providers = providersResult.data; renderModels(); }
+async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, , providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), loadUsage(), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.providers = providersResult.data; renderModels(); }
 function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 7 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
 function toggleGroup(event) {
   const header = event.currentTarget;
@@ -311,11 +327,11 @@ function renderModels() {
 
 async function loadVirtual(search = $('#virtual-search').value) {
   const token = ++state.loadToken;
-  const [groups, virtualModels, providersResult, modelsResult, usage] = await Promise.all([
-    api('/api/admin/virtual-groups?limit=200'), api(`/api/admin/virtual-models?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200'), api('/api/admin/models?all=1'), api('/api/admin/usage')
+  const [groups, virtualModels, providersResult, modelsResult] = await Promise.all([
+    api('/api/admin/virtual-groups?limit=200'), api(`/api/admin/virtual-models?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200'), api('/api/admin/models?all=1'), loadUsage()
   ]);
   if (token !== state.loadToken) return;
-  state.groups = groups.data; state.virtualModels = virtualModels.data; state.providers = providersResult.data; state.models = modelsResult.data; state.usage = usage; renderVirtual();
+  state.groups = groups.data; state.virtualModels = virtualModels.data; state.providers = providersResult.data; state.models = modelsResult.data; renderVirtual();
 }
 const RESOLUTION_STALE_MS = 24 * 3600 * 1000;
 const RESOLUTION_ICONS = {
@@ -634,9 +650,9 @@ async function deleteVirtualModel(id) { const model = state.virtualModels.find(i
 async function loadClients() {
   const token = ++state.loadToken;
   const search = $('#client-search').value, group = $('#client-group-filter').value;
-  const [result, usage, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/usage'), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
+  const [result, , models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), loadUsage(), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
   if (token !== state.loadToken) return;
-  state.clients = result.data; state.usage = usage; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data;
+  state.clients = result.data; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data;
   renderClientGroupFilter();
   renderClients();
 }
@@ -1450,6 +1466,10 @@ live.on('snapshot', payload => {
   ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
+  // The SSE baseline snapshot already carries the usage envelope, so mark it
+  // fresh: a view load in the next USAGE_REUSE_MS window reuses it instead of
+  // firing a redundant /api/admin/usage request on first open.
+  state.usageAt = Date.now();
   if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
   if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
   // Activity living pane: seed currently-hot legs on every snapshot so a

@@ -27,5 +27,9 @@ func newTestServer(t *testing.T, cfg config.Config, db *database.DB) *Server {
 		t.Fatal(err)
 	}
 	app.liveHub.timings = testLiveTimings
+	// Disable the usage-aggregate cache so tests that write request_logs and
+	// then read /api/admin/usage observe their own writes deterministically.
+	// Production keeps the TTL set by New; dedicated tests opt back in.
+	app.usageCacheTTL = 0
 	return app
 }

@@ -43,40 +43,35 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// usageAggregateTTL bounds reuse of the DB-derived usage aggregates. It is
+// short enough that token counters stay effectively live, but long enough that
+// the baseline SSE snapshot emitted on connect, the page's parallel
+// /api/admin/usage request, and any other open admin tab share one set of
+// request_logs scans instead of each paying for a full recompute.
+const usageAggregateTTL = 2 * time.Second
+
+// usageAggregates is the DB-derived portion of the usage snapshot (the
+// request_logs aggregations). The live in-memory state — last outcomes,
+// cooldowns, and in-flight requests — is deliberately excluded so it is never
+// cached and always reflects the current instant.
+type usageAggregates struct {
+	TargetHealth  map[string]targetResolutionHealth
+	VirtualModels map[string]usageWindows
+	ClientKeys    map[string]usageWindows
+	RealModels    map[string]usageWindows
+	VirtualCache  map[string]cacheWindows
+	ClientCache   map[string]cacheWindows
+	RealCache     map[string]cacheWindows
+}
+
 // buildUsageSnapshot computes the full usage/health envelope shared by the
 // /api/admin/usage endpoint and the live SSE snapshot event, so the two can
 // never drift. It is the single source of truth for the aggregate recompute.
+// The expensive DB-derived aggregates are reused for usageAggregateTTL via
+// usageAggregates; the in-memory state is always read fresh.
 func (s *Server) buildUsageSnapshot(ctx context.Context) (liveSnapshot, error) {
 	now := time.Now().UTC()
-	cut1h := now.Add(-time.Hour).Format(time.RFC3339Nano)
-	cut24h := now.Add(-24 * time.Hour).Format(time.RFC3339Nano)
-	cut7d := now.Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
-
-	clientKeys, err := s.usageByClient(ctx, cut1h, cut24h, cut7d)
-	if err != nil {
-		return liveSnapshot{}, err
-	}
-	virtualModels, err := s.usageByVirtual(ctx, cut1h, cut24h, cut7d)
-	if err != nil {
-		return liveSnapshot{}, err
-	}
-	targetHealth, err := s.targetResolutionHealth(ctx, cut1h, cut24h)
-	if err != nil {
-		return liveSnapshot{}, err
-	}
-	realModels, err := s.usageByReal(ctx, cut1h, cut24h, cut7d)
-	if err != nil {
-		return liveSnapshot{}, err
-	}
-	clientCache, err := s.cacheByClient(ctx, cut1h, cut24h, cut7d)
-	if err != nil {
-		return liveSnapshot{}, err
-	}
-	virtualCache, err := s.cacheByVirtual(ctx, cut1h, cut24h, cut7d)
-	if err != nil {
-		return liveSnapshot{}, err
-	}
-	realCache, err := s.cacheByReal(ctx, cut1h, cut24h, cut7d)
+	agg, err := s.usageAggregates(ctx, now)
 	if err != nil {
 		return liveSnapshot{}, err
 	}
@@ -84,17 +79,94 @@ func (s *Server) buildUsageSnapshot(ctx context.Context) (liveSnapshot, error) {
 		GeneratedAt:       now.Format(time.RFC3339Nano),
 		TargetLastOutcome: s.lastOutcomeSnapshot(),
 		TargetCooldown:    s.cooldown.snapshot(now),
-		TargetHealth:      targetHealth,
-		VirtualModels:     virtualModels,
-		ClientKeys:        clientKeys,
-		RealModels:        realModels,
-		VirtualCache:      virtualCache,
-		ClientCache:       clientCache,
-		RealCache:         realCache,
+		TargetHealth:      agg.TargetHealth,
+		VirtualModels:     agg.VirtualModels,
+		ClientKeys:        agg.ClientKeys,
+		RealModels:        agg.RealModels,
+		VirtualCache:      agg.VirtualCache,
+		ClientCache:       agg.ClientCache,
+		RealCache:         agg.RealCache,
 		Modules: map[string]any{
 			"inflight_clients": s.inflight.clientSnapshot(),
 			"inflight_targets": s.inflight.targetSnapshot(),
 		},
+	}, nil
+}
+
+// usageAggregates returns the DB-derived usage aggregates, reusing a recently
+// computed set within usageCacheTTL. A zero TTL disables reuse. The mutex is
+// held across the computation so concurrent callers coalesce onto one set of
+// scans rather than stampeding the database.
+func (s *Server) usageAggregates(ctx context.Context, now time.Time) (usageAggregates, error) {
+	s.usageAggMu.Lock()
+	defer s.usageAggMu.Unlock()
+	if s.usageCacheTTL > 0 && s.usageAgg != nil && now.Sub(s.usageAggAt) < s.usageCacheTTL {
+		return *s.usageAgg, nil
+	}
+	agg, err := s.computeUsageAggregates(ctx, now)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	if s.usageCacheTTL > 0 {
+		s.usageAgg = &agg
+		s.usageAggAt = now
+	}
+	return agg, nil
+}
+
+// invalidateUsageAggregates drops any cached aggregates so the next snapshot
+// reflects a just-applied write (e.g. clearing or pruning activity). It is not
+// needed for ordinary request logging, which the short TTL covers.
+func (s *Server) invalidateUsageAggregates() {
+	s.usageAggMu.Lock()
+	s.usageAgg = nil
+	s.usageAggAt = time.Time{}
+	s.usageAggMu.Unlock()
+}
+
+// computeUsageAggregates runs the request_logs aggregation queries. It is the
+// expensive path; callers should go through usageAggregates.
+func (s *Server) computeUsageAggregates(ctx context.Context, now time.Time) (usageAggregates, error) {
+	cut1h := now.Add(-time.Hour).Format(time.RFC3339Nano)
+	cut24h := now.Add(-24 * time.Hour).Format(time.RFC3339Nano)
+	cut7d := now.Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
+
+	clientKeys, err := s.usageByClient(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	virtualModels, err := s.usageByVirtual(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	targetHealth, err := s.targetResolutionHealth(ctx, cut1h, cut24h)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	realModels, err := s.usageByReal(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	clientCache, err := s.cacheByClient(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	virtualCache, err := s.cacheByVirtual(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	realCache, err := s.cacheByReal(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	return usageAggregates{
+		TargetHealth:  targetHealth,
+		VirtualModels: virtualModels,
+		ClientKeys:    clientKeys,
+		RealModels:    realModels,
+		VirtualCache:  virtualCache,
+		ClientCache:   clientCache,
+		RealCache:     realCache,
 	}, nil
 }
 

@@ -228,6 +228,7 @@ func (s *Server) pruneRequestLogs(ctx context.Context) {
 		cutoff := time.Now().UTC().Add(-time.Duration(d) * 24 * time.Hour).Format(time.RFC3339Nano)
 		_, _ = s.db.SQL.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id IN (SELECT id FROM client_keys WHERE retention_days=?) AND created_at < ?`, d, cutoff)
 	}
+	s.invalidateUsageAggregates()
 }
 
 // usageCapture accumulates token counts extracted from a response body in
