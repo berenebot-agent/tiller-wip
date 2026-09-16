@@ -38,6 +38,7 @@
 
 .combobox-wrap { min-width: 0; }
 .target-error { display: block; margin-top: 3px; color: var(--red); font: 700 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+.target-action-text { display: none; }
 
 .route-table td:first-child .meta-line { display: block; }
 
@@ -135,5 +136,20 @@
     height: 35px;
     border: 1px solid var(--line);
     background: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+  }
+
+  .routing-targets[data-fallback-targets] .target-action-glyph {
+    font-size: 16px;
+  }
+
+  .routing-targets[data-fallback-targets] .target-action-text {
+    display: inline;
+    font: 700 9px var(--mono);
+    letter-spacing: .03em;
+    text-transform: uppercase;
   }
 }

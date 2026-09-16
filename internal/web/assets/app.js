@@ -2,6 +2,8 @@ import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0 };
+const mobileVirtualDrafts = new Map();
+const mobileVirtualExpanded = new Set();
 // routeActivity derives a virtual route's spinner state from the per
 // (client, route) tickets ("any ticket with this route"). OR-folds active +
 // streaming so two clients — or one client with parallel requests on this
@@ -152,14 +154,14 @@ $('#login-form').addEventListener('submit', async event => {
 $('#logout').addEventListener('click', async () => { try { await api('/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
 
 async function navigate(view) {
-  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); $('#nav-links').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false'); document.body.classList.remove('nav-open');
+  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); const navLinks = $('#nav-links'); if (navLinks) navLinks.classList.remove('open'); const mobileMenu = $('#mobile-menu'); if (mobileMenu) mobileMenu.setAttribute('aria-expanded', 'false'); document.body.classList.remove('nav-open');
   try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') await loadSettings(); }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
 window.addEventListener('popstate', () => navigate(viewFromHash()));
-$('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); document.body.classList.toggle('nav-open', links.classList.contains('open')); });
+if ($('#mobile-menu')) $('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); document.body.classList.toggle('nav-open', links.classList.contains('open')); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
   const bar = button.closest('[data-filter-bar]');
@@ -442,10 +444,8 @@ function mobileUsage(model, kind = 'real') {
 }
 function modelCard(model) {
   const available = model.available;
-  const stateLabel = available ? 'Available' : 'Retired';
   return `<article class="mobile-card model-card" data-mobile-card="${h(model.id)}">
-    <button class="mobile-card-head mobile-card-toggle" data-mobile-model-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-model-detail-${h(model.id)}"><span class="status-roundel${available ? '' : ' status-roundel-broken'}" role="img" aria-label="${stateLabel}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.provider_name)} · ${h(model.upstream_model_id)}</small></span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
-    <div class="mobile-card-summary"><span>${h(model.native_protocol || 'Provider default')}</span><span>${h(stateLabel)}</span></div>
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-model-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-model-detail-${h(model.id)}"><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.provider_name)} · ${h(model.upstream_model_id)}</small></span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
     <div class="mobile-card-usage">${mobileUsage(model)}</div>
     <div class="mobile-card-detail" id="mobile-model-detail-${h(model.id)}" hidden><dl class="mobile-detail-grid"><div><dt>Provider</dt><dd>${h(model.provider_name)}</dd></div><div><dt>Native ID</dt><dd><code>${h(model.upstream_model_id)}</code></dd></div><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-model-activity="${h(model.id)}">Activity</button><button class="btn btn-small btn-secondary" data-mobile-model-capabilities="${h(model.id)}">Capabilities</button>${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-mobile-model-delete="${h(model.id)}">Delete</button>` : ''}</div></div>
   </article>`;
@@ -455,6 +455,11 @@ function toggleMobileCard(button) {
   const detail = card?.querySelector('.mobile-card-detail');
   if (!detail) return;
   const expanded = detail.hidden;
+  const virtualID = button.dataset.mobileVirtualToggle;
+  if (virtualID) {
+    if (expanded) mobileVirtualExpanded.add(virtualID);
+    else mobileVirtualExpanded.delete(virtualID);
+  }
   $$('.mobile-card-detail', button.closest('.mobile-card-list') || document).forEach(item => { item.hidden = true; });
   $$('[data-mobile-model-toggle], [data-mobile-virtual-toggle]', button.closest('.mobile-card-list') || document).forEach(item => item.setAttribute('aria-expanded', 'false'));
   detail.hidden = !expanded;
@@ -536,24 +541,162 @@ function renderVirtual() {
   $$('[data-group-edit]').forEach(button => button.onclick = event => { event.stopPropagation(); openVirtualGroup(state.groups.find(item => item.id === button.dataset.groupEdit)); });
    $$('[data-group-delete]').forEach(button => button.onclick = event => { event.stopPropagation(); deleteVirtualGroup(button.dataset.groupDelete); });
    $$('[data-mobile-virtual-toggle]').forEach(button => button.onclick = () => toggleMobileCard(button));
-   $$('[data-mobile-virtual-activity]').forEach(button => button.onclick = () => openModelActivity(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualActivity), 'virtual'));
-   $$('[data-mobile-virtual-capabilities]').forEach(button => button.onclick = () => openCapabilities(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualCapabilities)));
-   $$('[data-mobile-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualEdit)));
-   $$('[data-mobile-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.mobileVirtualDelete));
+    $$('[data-mobile-virtual-capabilities]').forEach(button => button.onclick = () => openCapabilities(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualCapabilities)));
+    $$('[data-mobile-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualEdit)));
+    $$('[data-mobile-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.mobileVirtualDelete));
+    $$('[data-mobile-target-up]').forEach(button => button.onclick = () => moveMobileVirtualTarget(button.dataset.mobileTargetUp, Number(button.dataset.mobileTargetIndex), -1));
+    $$('[data-mobile-target-down]').forEach(button => button.onclick = () => moveMobileVirtualTarget(button.dataset.mobileTargetDown, Number(button.dataset.mobileTargetIndex), 1));
+    $$('[data-mobile-target-remove]').forEach(button => button.onclick = () => removeMobileVirtualTarget(button.dataset.mobileTargetRemove, Number(button.dataset.mobileTargetIndex)));
+    $$('[data-mobile-target-toggle]').forEach(input => input.onchange = () => toggleMobileVirtualTarget(input.dataset.mobileTargetToggle, Number(input.dataset.mobileTargetIndex), input.checked));
+    $$('[data-mobile-target-apply]').forEach(button => button.onclick = () => applyMobileVirtualTargets(button.dataset.mobileTargetApply));
+    $$('[data-mobile-target-discard]').forEach(button => button.onclick = () => discardMobileVirtualTargets(button.dataset.mobileTargetDiscard));
+    $$('[data-mobile-target-add]').forEach(box => mountMobileVirtualAddPicker(box, state.virtualModels.find(item => item.id === box.dataset.mobileTargetAdd)));
    $$('[data-mobile-group-edit]').forEach(button => button.onclick = () => openVirtualGroup(state.groups.find(item => item.id === button.dataset.mobileGroupEdit)));
    $$('[data-mobile-group-delete]').forEach(button => button.onclick = () => deleteVirtualGroup(button.dataset.mobileGroupDelete));
 }
 
 function virtualModelCard(model) {
-  const targets = model.targets || [];
+  const targets = mobileVirtualTargets(model);
   const statusLabel = model.available ? 'Routable' : 'Broken target';
-  const targetRows = targets.length ? targets.map((target, index) => `<li><span class="target-index">${String(index + 1).padStart(2, '0')}</span>${resolutionIndicator(target)}<span>${h(target.provider_name)}/${h(target.upstream_model_id)}</span>${target.enabled ? '' : '<small>disabled</small>'}</li>`).join('') : `<li><span class="target-index">01</span><span>${h(model.target_provider_name || 'No target')}/${h(model.target_upstream_model_id || '')}</span></li>`;
+  const routable = targets.filter(target => target.enabled && target.available).length;
+  const ordered = model.routing_mode === 'ordered_fallback';
+  const draft = mobileVirtualDraftState(model.id);
+  const expanded = mobileVirtualExpanded.has(model.id);
+  const targetRows = targets.length ? targets.map((target, index) => `<li class="mobile-target-row"><span class="target-index">${String(index + 1).padStart(2, '0')}</span>${resolutionIndicator(target)}<span class="mobile-target-name">${h(target.provider_name)}/${h(target.upstream_model_id)}</span>${ordered ? `<label class="mobile-target-toggle"><span>Use</span><input type="checkbox" class="switch" data-mobile-target-toggle="${h(model.id)}" data-mobile-target-index="${index}" ${target.enabled ? 'checked' : ''} aria-label="Use target ${index + 1}"></label><span class="mobile-target-actions"><button type="button" data-mobile-target-up="${h(model.id)}" data-mobile-target-index="${index}" ${index === 0 ? 'disabled' : ''} aria-label="Move target ${index + 1} up">↑</button><button type="button" data-mobile-target-down="${h(model.id)}" data-mobile-target-index="${index}" ${index === targets.length - 1 ? 'disabled' : ''} aria-label="Move target ${index + 1} down">↓</button><button type="button" data-mobile-target-remove="${h(model.id)}" data-mobile-target-index="${index}" ${targets.length <= 1 ? 'disabled' : ''} aria-label="Remove target ${index + 1}">×</button></span>` : ''}${target.enabled ? '' : '<small>disabled</small>'}</li>`).join('') : `<li><span class="target-index">01</span><span>No target configured</span></li>`;
+  const addModelControl = ordered ? `<label class="mobile-target-add-wrap"><span>Add model</span><div class="combobox mobile-target-add-combobox" data-mobile-target-add="${h(model.id)}"><input type="text" placeholder="Search available model…" aria-label="Add model to fallback queue"><input type="hidden"></div></label>` : '';
   return `<article class="mobile-card virtual-model-card" data-mobile-card="${h(model.id)}">
-    <button class="mobile-card-head mobile-card-toggle" data-mobile-virtual-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-virtual-detail-${h(model.id)}"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(statusLabel)}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed route')}</small></span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
-    <div class="mobile-card-summary"><span>${h(statusLabel)}</span><span>${targets.length || 1} target${(targets.length || 1) === 1 ? '' : 's'}</span></div>
-    <div class="mobile-card-usage">${mobileUsage(model, 'virtual')}</div>
-    <div class="mobile-card-detail" id="mobile-virtual-detail-${h(model.id)}" hidden><div class="mobile-target-list"><p class="mobile-card-label">Target chain</p><ol>${targetRows}</ol></div><dl class="mobile-detail-grid"><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-virtual-activity="${h(model.id)}">Activity</button><button class="btn btn-small btn-secondary" data-mobile-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-mobile-virtual-edit="${h(model.id)}">Edit</button><button class="btn btn-small btn-danger" data-mobile-virtual-delete="${h(model.id)}">Delete</button></div></div>
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-virtual-toggle="${h(model.id)}" aria-expanded="${expanded}" aria-controls="mobile-virtual-detail-${h(model.id)}"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(statusLabel)}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed route')}</small></span><span class="virtual-routable-count">${routable} routable</span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
+    <div class="mobile-card-detail" id="mobile-virtual-detail-${h(model.id)}"${expanded ? '' : ' hidden'}><div class="mobile-target-list"><div class="mobile-target-list-head"><p class="mobile-card-label">${ordered ? 'Fallback order' : 'Target'}</p>${ordered ? '<small>Move, disable, or remove targets here. Changes stay pending until Apply.</small>' : ''}</div><ol>${targetRows}</ol>${addModelControl}${ordered ? '<div class="mobile-target-pending-actions"><button class="btn btn-small btn-primary" type="button" data-mobile-target-apply="' + h(model.id) + '" ' + (draft?.dirty ? '' : 'disabled') + '>Apply changes</button><button class="btn btn-small btn-secondary" type="button" data-mobile-target-discard="' + h(model.id) + '" ' + (draft?.dirty ? '' : 'disabled') + '>Discard</button></div>' : ''}</div><dl class="mobile-detail-grid"><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-mobile-virtual-edit="${h(model.id)}">Edit settings</button><button class="btn btn-small btn-danger" data-mobile-virtual-delete="${h(model.id)}">Delete</button></div></div>
   </article>`;
+}
+
+function mobileVirtualTargets(model) {
+  const draft = mobileVirtualDrafts.get(model.id);
+  if (draft) return draft.targets;
+  const targets = (model.targets || []).map(target => ({ ...target }));
+  mobileVirtualDrafts.set(model.id, { targets, dirty: false });
+  return targets;
+}
+
+function mobileVirtualDraftState(modelID) {
+  return mobileVirtualDrafts.get(modelID);
+}
+
+function mobileVirtualAddOptions(model, targets) {
+  const providerEnabled = new Map(state.providers.map(provider => [provider.id, provider.enabled]));
+  const used = new Set(targets.map(target => target.provider_model_id));
+  return state.models
+    .filter(item => item.available && providerEnabled.get(item.provider_id) !== false && !used.has(item.id))
+    .sort((a, b) => `${a.provider_name}/${a.upstream_model_id}`.localeCompare(`${b.provider_name}/${b.upstream_model_id}`))
+    .map(item => ({ id: item.id, label: `${item.provider_name} / ${item.upstream_model_id}` }));
+}
+
+function mountMobileVirtualAddPicker(root, model) {
+  if (!model) return;
+  const input = $('input[type="text"]', root);
+  const hidden = $('input[type="hidden"]', root);
+  const options = mobileVirtualAddOptions(model, mobileVirtualTargets(model)).map(option => ({ value: option.id, label: option.label, match: option.label }));
+  combobox({ input, hidden, options, placeholder: 'Search available model…', onSelect: option => addMobileVirtualTarget(model.id, option.value), minWidth: 260 });
+}
+
+function markMobileVirtualDraftDirty(modelID) {
+  const draft = mobileVirtualDrafts.get(modelID);
+  if (!draft) return;
+  draft.dirty = true;
+  renderVirtual();
+}
+
+function addMobileVirtualTarget(modelID, providerModelID) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  const targetModel = state.models.find(item => item.id === providerModelID);
+  if (!model || model.routing_mode !== 'ordered_fallback' || !targetModel) return;
+  const targets = mobileVirtualTargets(model);
+  if (targets.length >= 5) {
+    flash('The admin UI supports up to five targets.', 'info');
+    renderVirtual();
+    return;
+  }
+  if (targets.some(target => target.provider_model_id === providerModelID)) {
+    flash('That model is already in the fallback chain.', 'info');
+    renderVirtual();
+    return;
+  }
+  targets.push({
+    provider_model_id: targetModel.id,
+    provider_name: targetModel.provider_name,
+    upstream_model_id: targetModel.upstream_model_id,
+    enabled: true,
+    available: targetModel.available,
+  });
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+async function persistMobileVirtualTargets(modelID, targets) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model) return;
+  const buttons = $$(`[data-mobile-card="${CSS.escape(modelID)}"] button, [data-mobile-card="${CSS.escape(modelID)}"] input`);
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    await api(`/api/admin/virtual-models/${modelID}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ targets: targets.map(target => ({ provider_model_id: target.provider_model_id, enabled: target.enabled !== false })) })
+    });
+    flash('Fallback targets updated. New requests use the new order immediately.');
+    mobileVirtualDrafts.delete(modelID);
+    await loadVirtual();
+  } catch (error) {
+    flash(errorMessage(error), 'error');
+    renderVirtual();
+  }
+}
+
+function moveMobileVirtualTarget(modelID, index, direction) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model || model.routing_mode !== 'ordered_fallback') return;
+  const targets = mobileVirtualTargets(model);
+  const next = index + direction;
+  if (index < 0 || next < 0 || next >= targets.length) return;
+  [targets[index], targets[next]] = [targets[next], targets[index]];
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+function toggleMobileVirtualTarget(modelID, index, enabled) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model || model.routing_mode !== 'ordered_fallback') return;
+  const targets = mobileVirtualTargets(model);
+  if (!targets[index]) return;
+  targets[index].enabled = enabled;
+  if (!targets.some(target => target.enabled)) {
+    targets[index].enabled = true;
+    flash('Keep at least one fallback target enabled.', 'info');
+    renderVirtual();
+    return;
+  }
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+function removeMobileVirtualTarget(modelID, index) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model || model.routing_mode !== 'ordered_fallback') return;
+  const targets = mobileVirtualTargets(model);
+  if (targets.length <= 1) return;
+  targets.splice(index, 1);
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+async function applyMobileVirtualTargets(modelID) {
+  const draft = mobileVirtualDraftState(modelID);
+  if (!draft?.dirty) return;
+  await persistMobileVirtualTargets(modelID, draft.targets);
+}
+
+function discardMobileVirtualTargets(modelID) {
+  mobileVirtualDrafts.delete(modelID);
+  renderVirtual();
 }
 
 function patchVirtualActivityRows() {
@@ -793,16 +936,16 @@ function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minW
 function virtualModelFields(model) {
   const groupOptions = state.groups.map(group => `<option value="${h(group.id)}" ${model?.group_id === group.id ? 'selected' : ''}>${h(group.name)}</option>`).join('');
   const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
-  return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Models are tried in the order below. If one returns an error or fails to respond, the request is automatically retried with the next model below, seamlessly to the client.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
+  return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Targets run from top to bottom. Turn a target off to skip it, or use the arrows to change its priority.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
- function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
+function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id })); availableOptions = options;
   const targets = model?.targets?.length ? model.targets : [{provider_model_id:model?.target_model_id,enabled:true}];
   const makePicker = (target, row = null) => { const box = document.createElement('div'); box.className='combobox'; box.innerHTML='<input type="text" placeholder="Type a provider or model name…"><input type="hidden" name="target_model" required>'; const input=$('input[type="text"]',box), hidden=$('input[type="hidden"]',box); const pickerOptions=[...options]; const stale=target?.provider_model_id && !options.some(item=>item.value===target.provider_model_id); if(stale){ const label=target?.provider_name&&target?.upstream_model_id?`${target.provider_name} / ${target.upstream_model_id}`:target.provider_model_id; pickerOptions.unshift({value:target.provider_model_id,label:`Unavailable · ${label}`,disabled:true}); } const picker=combobox({ input, hidden, options:pickerOptions, placeholder:'Type a provider or model name…' }); picker.setOptions(pickerOptions); const found=options.find(item=>item.value===target?.provider_model_id); if(found) picker.select(options.indexOf(found)); else if(stale){ hidden.value=target.provider_model_id; input.value=pickerOptions[0].label; } else if(!target?.provider_model_id && options.length){ picker.select(0); } const original=target?.provider_model_id||null; input.addEventListener('focus',()=>{ if(input.value||hidden.value){ input.value=''; hidden.value=''; } }); input.addEventListener('blur',()=>{ if(hidden.value) return; if(original){ const idx=options.findIndex(item=>item.value===original); if(idx>=0) picker.select(idx); else { hidden.value=original; input.value=pickerOptions[0].label; } } }); const wrap=document.createElement('div'); wrap.className='combobox-wrap'; wrap.append(box); if(stale){ const err=document.createElement('small'); err.className='target-error'; err.textContent='Remove or replace unavailable model'; wrap.append(err); } return wrap; };
   const updateControls = () => { const rows=$$('.target-row',fallback); rows.forEach((row,index)=>{ $('.target-index',row).textContent=String(index+1).padStart(2,'0'); $('[data-target-up]',row).disabled=index===0; $('[data-target-down]',row).disabled=index===rows.length-1; }); };
-   const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up">↑</button><button type="button" data-target-down title="Move target down" aria-label="Move target down">↓</button><button type="button" data-target-remove title="Remove target" aria-label="Remove target">×</button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
+   const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; enableLabel.innerHTML='<span class="target-toggle-copy">Use</span>'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up"><span class="target-action-glyph">↑</span><span class="target-action-text">Up</span></button><button type="button" data-target-down title="Move target down" aria-label="Move target down"><span class="target-action-glyph">↓</span><span class="target-action-text">Down</span></button><button type="button" data-target-remove title="Remove target" aria-label="Remove target"><span class="target-action-glyph">×</span><span class="target-action-text">Remove</span></button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
    fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<5) addFallback(); else flash('The admin UI supports up to five targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
   }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); } }); }
@@ -913,24 +1056,36 @@ function openRoutePicker(client) {
 // viewport; we lift the dialog so it stays above the keyboard. The combobox
 // dropdown itself is repositioned by positionComboboxList (see below).
 function positionRoutePickerAboveKeyboard() {
-  const dialog = $('#form-dialog');
-  if (!dialog.classList.contains('route-picker-dialog')) return;
+  const dialogs = [$('#form-dialog'), $('#permissions-dialog')].filter(Boolean).filter(dialog => dialog.classList.contains('route-picker-dialog') || dialog.classList.contains('permissions-dialog'));
+  if (!dialogs.length) return;
   const vv = window.visualViewport;
   if (!vv) return;
-  const keyboardHeight = Math.max(0, window.innerHeight - vv.height);
-  if (keyboardHeight > 0) {
-    // vv.height is already the space above the keyboard — don't subtract the
-    // keyboard again (that compressed the sheet until Apply/Cancel vanished).
-    dialog.style.bottom = `${keyboardHeight}px`;
-    dialog.style.maxHeight = `${vv.height - 16}px`;
-  } else {
-    dialog.style.bottom = '';
-    dialog.style.maxHeight = '';
-  }
+  const viewportTop = vv.offsetTop || 0;
+  const viewportBottom = viewportTop + vv.height;
+  const keyboardOpen = window.innerHeight - viewportBottom > 80 || window.innerHeight - vv.height > 80;
+  dialogs.forEach(dialog => {
+    if (keyboardOpen) {
+      // Android may resize either the visual viewport or the layout viewport.
+      // Anchoring both edges to the visual viewport handles both variants and
+      // keeps the dialog footer above the IME instead of underneath it.
+      dialog.style.top = `${viewportTop + 8}px`;
+      dialog.style.bottom = `${Math.max(8, window.innerHeight - viewportBottom + 8)}px`;
+      dialog.style.height = `${Math.max(220, vv.height - 16)}px`;
+      dialog.style.maxHeight = `${Math.max(220, vv.height - 16)}px`;
+      dialog.style.margin = '0';
+    } else {
+      dialog.style.top = '';
+      dialog.style.bottom = '';
+      dialog.style.height = '';
+      dialog.style.maxHeight = '';
+      dialog.style.margin = '';
+    }
+  });
 }
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', positionRoutePickerAboveKeyboard);
   window.visualViewport.addEventListener('scroll', positionRoutePickerAboveKeyboard);
+  window.addEventListener('resize', positionRoutePickerAboveKeyboard);
   // Reposition any open combobox list when the keyboard opens/closes so it stays
   // within the visual viewport (e.g. the mobile route picker's dropdown).
   const repositionOpenLists = () => {
@@ -948,20 +1103,18 @@ function clientCard(client) {
     ? `<code class="model-id ${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</code>${client.single_target_available === false ? '<span class="client-route-broken">Unavailable</span>' : ''}`
     : `<span class="meta-line">Catalogue — model permissions</span>`;
   const quickAction = client.type === 'single'
-    ? `<button class="btn btn-small btn-secondary" data-client-route="${h(client.id)}">Change route</button>`
-    : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Manage permissions</button>`;
+    ? `<button class="client-route-button" data-client-route="${h(client.id)}" aria-label="Change route for ${h(client.name)}"><span>Current model</span><strong class="${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</strong><i aria-hidden="true">›</i></button>`
+    : `<button class="client-permission-button" data-client-models="${h(client.id)}" aria-label="Manage permissions for ${h(client.name)}"><span>Catalogue</span><strong>Manage permissions</strong><i aria-hidden="true">›</i></button>`;
   return `<article class="client-card" data-client-id="${h(client.id)}">
     <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
       ${statusDot}
-      <span class="client-card-heading"><span class="client-card-name">${h(client.name)}</span><small>${client.type === 'single' ? 'Single client' : 'Catalogue client'}</small></span>
+      <span class="client-card-heading"><span class="client-card-name">${h(client.name)}</span></span>
       ${client.group ? `<span class="group-badge">${h(client.group)}</span>` : ''}
       <span class="client-card-chevron" aria-hidden="true">▾</span>
     </button>
     <div class="client-card-quick-actions">${quickAction}</div>
-    <div class="client-card-collapsed-usage"><span class="client-card-label">Usage</span><div class="client-card-usage"><span><small>1h</small>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</span><span><small>24h</small>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</span><span><small>7d</small>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</span></div></div>
     <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
       <div class="client-card-route-panel"><div class="client-card-field-head"><span class="client-card-label">Route</span><span class="client-card-kind">${client.type === 'single' ? 'Single target' : 'Catalogue access'}</span></div><div class="client-card-route">${routeSummary}</div></div>
-      <div class="client-card-usage-panel"><span class="client-card-label">Usage</span><div class="client-card-usage"><span><small>1h</small>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</span><span><small>24h</small>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</span><span><small>7d</small>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</span></div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
         <button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button>
@@ -987,7 +1140,13 @@ function clientRow(client) {
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
-  $('#clients-cards').innerHTML = state.clients.map(clientCard).join('');
+  const mobileByGroup = new Map();
+  state.clients.forEach(client => {
+    const group = client.group || 'default';
+    if (!mobileByGroup.has(group)) mobileByGroup.set(group, []);
+    mobileByGroup.get(group).push(client);
+  });
+  $('#clients-cards').innerHTML = [...mobileByGroup.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([group, clients]) => `<section class="client-group-section"><div class="client-group-section-head"><span>${h(group)}</span><small>${clients.length} client${clients.length === 1 ? '' : 's'}</small></div>${clients.map(clientCard).join('')}</section>`).join('');
   const byGroup = new Map();
   state.clients.forEach(client => { const g = client.group || 'default'; if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push(client); });
   $('#clients-body').innerHTML = [...byGroup.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([group, clients]) => {
@@ -1019,6 +1178,9 @@ $('#clients-cards').addEventListener('click', event => {
 });
 $('#add-client').onclick = () => openClient();
 function openClient(client = null) {
+  const dialog = $('#form-dialog');
+  dialog.classList.add('client-form-dialog');
+  dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${client?.type === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${client?.type !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
   const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
@@ -1506,7 +1668,8 @@ function mobileActivityTarget(routeID, targetID) {
 }
 function renderMobileActivity() {
   const data = mobileActivityCatalogue();
-  const entries = Object.entries(state.liveRoutes || {}).filter(([, item]) => item && item.active > 0).map(([key, item]) => {
+  const byRoute = new Map();
+  Object.entries(state.liveRoutes || {}).filter(([, item]) => item && item.active > 0).forEach(([key, item]) => {
     const separator = key.indexOf('\u0000');
     const clientID = item.client_id || (separator >= 0 ? key.slice(0, separator) : '');
     const client = data.clients.find(candidate => candidate.id === clientID);
@@ -1516,8 +1679,17 @@ function renderMobileActivity() {
     const routeLabel = virtual?.canonical_model_id || real?.canonical_model_id || item.requested_model || routeID || 'Unknown route';
     const targets = Object.entries(state.liveLegs || {}).filter(([targetKey, target]) => targetKey.startsWith(`${routeID}\u0000`) && target?.active > 0).map(([targetKey]) => mobileActivityTarget(routeID, targetKey.slice(targetKey.indexOf('\u0000') + 1)));
     const targetLabel = item.resolved_model || targets[0] || 'Waiting for upstream target';
-    return { client: client?.name || item.client_id || 'Unknown client', route: routeLabel, target: targetLabel, requested: item.requested_model || routeLabel, streaming: item.streaming > 0, targets };
+    const entryKey = `${clientID}\u0000${routeID}`;
+    const existing = byRoute.get(entryKey);
+    if (existing) {
+      existing.streaming = existing.streaming || item.streaming > 0;
+      existing.targets = [...new Set([...existing.targets, ...targets])];
+      if (item.resolved_model) existing.target = item.resolved_model;
+      return;
+    }
+    byRoute.set(entryKey, { client: client?.name || clientID || 'Unknown client', route: routeLabel, target: targetLabel, requested: item.requested_model || routeLabel, streaming: item.streaming > 0, targets });
   });
+  const entries = [...byRoute.values()];
   const list = $('#mobile-activity-body');
   if (!list) return;
   $('#mobile-activity-empty').hidden = entries.length > 0;
