@@ -256,10 +256,61 @@ function recomputeFans() {
   });
   assignFans(bySource, 'fanA', 'b');
   assignFans(byTarget, 'fanB', 'a');
+  clampFansToLane();
 }
 
-// recomputeRoutes lets idle legs bow out of the way of active ones. Best-effort
-// only: it never moves active legs, and caps work on edge count.
+// clampFansToLane bounds each endpoint's fan offset so a fanned leg cannot
+// sweep into a same-lane neighbour's disc. The cap is per NODE — half the gap
+// to the nearest same-lane neighbour minus a clearance margin — so both legs
+// of a shared-endpoint fan pair clamp identically and the symmetric fan
+// contract in assignFans is preserved. A neighbour's wrapped label hangs below
+// its disc, outside the fan sweep path, so only the disc drives the margin.
+function clampFansToLane() {
+  const LABEL_CLEAR = 26; // disc radius (<=15) + margin
+  const byLane = new Map();
+  nodes.forEach(n => {
+    if (n.dragging) return;
+    let list = byLane.get(n.kind);
+    if (!list) {
+      list = [];
+      byLane.set(n.kind, list);
+    }
+    list.push(n);
+  });
+  byLane.forEach(list => {
+    list.sort((a, b) => a.y - b.y);
+    const cap = new Map();
+    list.forEach((n, i) => {
+      let capHere = Infinity;
+      if (i > 0) capHere = Math.min(capHere, Math.max(0, (n.y - list[i - 1].y) / 2 - LABEL_CLEAR));
+      if (i < list.length - 1) capHere = Math.min(capHere, Math.max(0, (list[i + 1].y - n.y) / 2 - LABEL_CLEAR));
+      cap.set(n.id, capHere);
+    });
+    EDGES.forEach(e => {
+      const capA = cap.get(e.a.id);
+      const capB = cap.get(e.b.id);
+      if (capA !== undefined && Math.abs(e.fanA) > capA) e.fanA = (e.fanA >= 0 ? 1 : -1) * capA;
+      if (capB !== undefined && Math.abs(e.fanB) > capB) e.fanB = (e.fanB >= 0 ? 1 : -1) * capB;
+    });
+  });
+}
+
+// labelBox: the wrapped label/sub block *below* a node — not the disc. Legs
+// legally pass behind discs (paint order + halo handle that); text is what
+// must stay clear. Half-width 85 covers the 24-char mono wrap at 11px.
+function labelBox(n) {
+  const lines = wrapLabel(n.label || '').length;
+  const h = 30 + lines * 13 + (n.sub ? 14 : 0);
+  return { x0: n.x - 85, x1: n.x + 85, y0: n.y + nodeRadius(n) + 2, y1: n.y + h + 6 };
+}
+
+function rectHit(pts, box) {
+  return pts.some(p => p.x > box.x0 && p.x < box.x1 && p.y > box.y0 && p.y < box.y1);
+}
+
+// recomputeRoutes lets idle legs bow out of the way of active ones and out of
+// their own endpoints' label blocks. Best-effort only: it never moves active
+// legs, and caps work on edge count.
 function recomputeRoutes() {
   if (!sim || EDGES.size === 0 || EDGES.size > 45) return;
   const active = [];
@@ -278,12 +329,17 @@ function recomputeRoutes() {
     }
     let best = 0;
     let bestScore = Infinity;
+    const boxA = labelBox(e.a);
+    const boxB = labelBox(e.b);
     for (const bow of ROUTE_BOWS) {
       const pts = sampleCurve(controlPoints(e, bow), ROUTE_SAMPLES);
       let score = Math.abs(bow) * 0.01;
       for (const ap of activeSamples) {
         if (polylinesCross(pts, ap)) score += 1;
       }
+      // A candidate bow that crosses either endpoint's wrapped label block
+      // scores worse than one crossing an active leg — text legibility wins.
+      if (rectHit(pts, boxA) || rectHit(pts, boxB)) score += 1.5;
       if (score < bestScore) {
         bestScore = score;
         best = bow;

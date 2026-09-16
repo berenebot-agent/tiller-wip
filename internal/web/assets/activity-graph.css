@@ -114,11 +114,16 @@
   fill: var(--navy);
   paint-order: stroke;
   stroke: #fff;
-  stroke-width: 3px;
+  stroke-width: 5px;
+  stroke-linejoin: round;
 }
 .node-sub {
   font-size: 10px;
   fill: var(--muted);
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 4px;
+  stroke-linejoin: round;
 }
 .node-enter {
   animation: node-pop 0.35s ease-out;
