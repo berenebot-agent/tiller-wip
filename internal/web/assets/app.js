@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, loadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0 };
 // routeActivity derives a virtual route's spinner state from the per
 // (client, route) tickets ("any ticket with this route"). OR-folds active +
 // streaming so two clients — or one client with parallel requests on this
@@ -152,15 +152,25 @@ $('#login-form').addEventListener('submit', async event => {
 $('#logout').addEventListener('click', async () => { try { await api('/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
 
 async function navigate(view) {
-  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); $('#nav-links').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false');
+  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); $('#nav-links').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false'); document.body.classList.remove('nav-open');
   try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') await loadSettings(); }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
 window.addEventListener('popstate', () => navigate(viewFromHash()));
-$('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); });
+$('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); document.body.classList.toggle('nav-open', links.classList.contains('open')); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
+$$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
+  const bar = button.closest('[data-filter-bar]');
+  const open = bar.classList.toggle('filter-open');
+  button.setAttribute('aria-expanded', String(open));
+}));
+$('#add-client-mobile').onclick = () => openClient();
+$('#add-provider-mobile').onclick = () => openProvider();
+$('#add-real-model-mobile').onclick = openManualModel;
+$('#add-virtual-group-mobile').onclick = () => openVirtualGroup();
+$('#add-virtual-model-mobile').onclick = () => openVirtualModel();
 
 let filterTimers = new Map();
 function filterInput(selector, callback) { $(selector).addEventListener('input', event => { clearTimeout(filterTimers.get(selector)); filterTimers.set(selector, setTimeout(() => callback(event.target.value), 180)); }); }
@@ -181,12 +191,28 @@ function renderProviders() {
     <td><strong>${provider.available_model_count}</strong> available${provider.model_count !== provider.available_model_count ? `<span class="meta-line"> · ${provider.model_count - provider.available_model_count} retired</span>` : ''}</td>
     <td><span class="meta-line">${date(provider.last_refresh_at)}</span></td>
     <td>${badge(provider.enabled && !provider.last_refresh_error, provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled', provider.enabled ? (provider.last_refresh_error ? 'warn' : 'good') : 'neutral')}<div class="meta-line">Credential: ${provider.auth_state ? provider.auth_state : (provider.credential_configured ? 'configured' : 'none')}</div></td>
-    <td><div class="actions"><button class="btn btn-small btn-secondary" data-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-provider-delete="${h(provider.id)}">Delete</button></div></td></tr>`).join('');
+   <td><div class="actions"><button class="btn btn-small btn-secondary" data-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-provider-delete="${h(provider.id)}">Delete</button></div></td></tr>`).join('');
+  $('#providers-empty-mobile').hidden = state.providers.length > 0;
+  $('#providers-cards').innerHTML = state.providers.map(providerCard).join('');
   const available = state.providers.reduce((sum, item) => sum + item.available_model_count, 0), retired = state.providers.reduce((sum, item) => sum + item.model_count - item.available_model_count, 0), errors = state.providers.filter(item => item.last_refresh_error).length;
   $('#provider-metrics').innerHTML = metric(state.providers.length, 'Provider instances') + metric(available, 'Available models') + metric(retired, 'Retired models') + metric(errors, 'Refresh errors');
   $$('[data-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.providerRefresh));
   $$('[data-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.providerEdit)));
   $$('[data-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.providerDelete));
+  $$('[data-mobile-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.mobileProviderRefresh));
+  $$('[data-mobile-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.mobileProviderEdit)));
+  $$('[data-mobile-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.mobileProviderDelete));
+}
+function providerCard(provider) {
+  const healthy = provider.enabled && !provider.last_refresh_error;
+  const stateLabel = provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled';
+  return `<article class="mobile-card provider-card" data-provider-id="${h(provider.id)}">
+    <div class="mobile-card-head"><div class="mobile-card-title"><span class="status-roundel${healthy ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(stateLabel)}"></span><strong>${h(provider.name)}</strong></div>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</div>
+    <div class="mobile-card-subtitle">${h(typeLabel(provider.type))} · ${h((provider.protocols || []).join(' · ') || 'provider default')}</div>
+    <div class="mobile-card-meta"><span><b>${h(provider.available_model_count)}</b> available</span><span><b>${h(provider.model_count - provider.available_model_count)}</b> retired</span><span>${h(date(provider.last_refresh_at))}</span></div>
+    ${provider.last_refresh_error ? `<p class="mobile-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
+    <div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-mobile-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-mobile-provider-delete="${h(provider.id)}">Delete</button></div>
+  </article>`;
 }
 const metric = (value, label) => `<div class="metric"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
 const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="badge badge-${kind}">${h(label)}</span>`;
@@ -386,9 +412,11 @@ function reorderModelRows() {
 function renderModels() {
   const shown = shownModels();
   $('#models-empty').hidden = shown.length > 0;
+  $('#models-empty-mobile').hidden = shown.length > 0;
   const rows = applyModelSort(shown);
   const html = rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
-  $('#models-body').innerHTML = html;
+   $('#models-body').innerHTML = html;
+   $('#models-cards').innerHTML = rows.map(modelCard).join('');
   const head = $('#models-body').parentElement.querySelector('thead');
   if (head) {
     $$('th', head).forEach(th => {
@@ -400,7 +428,37 @@ function renderModels() {
   }
   $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'));
   $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); });
-  $$('[data-model-delete]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); deleteManualModel(button.dataset.modelDelete); });
+   $$('[data-model-delete]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); deleteManualModel(button.dataset.modelDelete); });
+   $$('[data-mobile-model-toggle]').forEach(button => button.onclick = () => toggleMobileCard(button));
+   $$('[data-mobile-model-activity]').forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.id === button.dataset.mobileModelActivity), 'real'));
+   $$('[data-mobile-model-capabilities]').forEach(button => button.onclick = () => openRealModelCapabilities(state.models.find(item => item.id === button.dataset.mobileModelCapabilities)));
+   $$('[data-mobile-model-delete]').forEach(button => button.onclick = () => deleteManualModel(button.dataset.mobileModelDelete));
+}
+function mobileUsage(model, kind = 'real') {
+  const key = model.canonical_model_id;
+  const usage = kind === 'virtual' ? state.usage?.virtual_models?.[key] : state.usage?.real_models?.[key];
+  const cache = kind === 'virtual' ? state.usage?.virtual_cache?.[key] : state.usage?.real_cache?.[key];
+  return ['1h', '24h', '7d'].map(window => `<span><small>${window}</small>${tok(usage?.[window], cache?.[window], window)}</span>`).join('');
+}
+function modelCard(model) {
+  const available = model.available;
+  const stateLabel = available ? 'Available' : 'Retired';
+  return `<article class="mobile-card model-card" data-mobile-card="${h(model.id)}">
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-model-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-model-detail-${h(model.id)}"><span class="status-roundel${available ? '' : ' status-roundel-broken'}" role="img" aria-label="${stateLabel}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.provider_name)} · ${h(model.upstream_model_id)}</small></span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
+    <div class="mobile-card-summary"><span>${h(model.native_protocol || 'Provider default')}</span><span>${h(stateLabel)}</span></div>
+    <div class="mobile-card-usage">${mobileUsage(model)}</div>
+    <div class="mobile-card-detail" id="mobile-model-detail-${h(model.id)}" hidden><dl class="mobile-detail-grid"><div><dt>Provider</dt><dd>${h(model.provider_name)}</dd></div><div><dt>Native ID</dt><dd><code>${h(model.upstream_model_id)}</code></dd></div><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-model-activity="${h(model.id)}">Activity</button><button class="btn btn-small btn-secondary" data-mobile-model-capabilities="${h(model.id)}">Capabilities</button>${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-mobile-model-delete="${h(model.id)}">Delete</button>` : ''}</div></div>
+  </article>`;
+}
+function toggleMobileCard(button) {
+  const card = button.closest('[data-mobile-card]');
+  const detail = card?.querySelector('.mobile-card-detail');
+  if (!detail) return;
+  const expanded = detail.hidden;
+  $$('.mobile-card-detail', button.closest('.mobile-card-list') || document).forEach(item => { item.hidden = true; });
+  $$('[data-mobile-model-toggle], [data-mobile-virtual-toggle]', button.closest('.mobile-card-list') || document).forEach(item => item.setAttribute('aria-expanded', 'false'));
+  detail.hidden = !expanded;
+  button.setAttribute('aria-expanded', String(expanded));
 }
 
 async function loadVirtual(search = $('#virtual-search').value) {
@@ -462,15 +520,40 @@ function renderVirtual() {
     const actions = grp ? `<button class="btn btn-small btn-secondary" data-group-edit="${h(grp.id)}">Edit</button><button class="btn btn-small btn-danger" data-group-delete="${h(grp.id)}">Delete</button>` : '';
     return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><div class="client-name-line"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(model.available ? 'Routable' : 'Broken target')}" title="${h(model.available ? 'Routable' : 'Broken target')}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(model.canonical_model_id)}</strong></div><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
   }).join('');
-  $('#virtual-body').innerHTML = html;
-  patchVirtualActivityRows();
+   $('#virtual-body').innerHTML = html;
+   $('#virtual-empty-mobile').hidden = state.virtualModels.length > 0 || (!searching && state.groups.length > 0);
+   $('#virtual-cards').innerHTML = groupNames.sort((a, b) => a.localeCompare(b)).map(name => {
+     const models = byGroup.get(name) || [];
+     const group = state.groups.find(item => item.name === name);
+     return `<section class="mobile-model-group"><div class="mobile-model-group-head"><span>${h(name)}</span><small>${models.length} model${models.length === 1 ? '' : 's'}</small>${group ? `<span class="mobile-model-group-actions"><button class="btn-link" data-mobile-group-edit="${h(group.id)}">Edit</button><button class="btn-link danger-link" data-mobile-group-delete="${h(group.id)}">Delete</button></span>` : ''}</div>${models.map(virtualModelCard).join('')}${models.length ? '' : '<p class="mobile-card-empty">No models in this group.</p>'}</section>`;
+   }).join('');
+   patchVirtualActivityRows();
   $$('.group-toggle', $('#virtual-body')).forEach(header => header.onclick = toggleGroup);
   $$('[data-model-activity]', $('#virtual-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.virtualModels.find(item => item.canonical_model_id === button.dataset.modelActivity), 'virtual'); });
   $$('[data-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.virtualEdit)));
   $$('[data-virtual-capabilities]').forEach(button => button.onclick = event => { event.stopPropagation(); openCapabilities(state.virtualModels.find(item => item.id === button.dataset.virtualCapabilities)); });
   $$('[data-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.virtualDelete));
   $$('[data-group-edit]').forEach(button => button.onclick = event => { event.stopPropagation(); openVirtualGroup(state.groups.find(item => item.id === button.dataset.groupEdit)); });
-  $$('[data-group-delete]').forEach(button => button.onclick = event => { event.stopPropagation(); deleteVirtualGroup(button.dataset.groupDelete); });
+   $$('[data-group-delete]').forEach(button => button.onclick = event => { event.stopPropagation(); deleteVirtualGroup(button.dataset.groupDelete); });
+   $$('[data-mobile-virtual-toggle]').forEach(button => button.onclick = () => toggleMobileCard(button));
+   $$('[data-mobile-virtual-activity]').forEach(button => button.onclick = () => openModelActivity(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualActivity), 'virtual'));
+   $$('[data-mobile-virtual-capabilities]').forEach(button => button.onclick = () => openCapabilities(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualCapabilities)));
+   $$('[data-mobile-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualEdit)));
+   $$('[data-mobile-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.mobileVirtualDelete));
+   $$('[data-mobile-group-edit]').forEach(button => button.onclick = () => openVirtualGroup(state.groups.find(item => item.id === button.dataset.mobileGroupEdit)));
+   $$('[data-mobile-group-delete]').forEach(button => button.onclick = () => deleteVirtualGroup(button.dataset.mobileGroupDelete));
+}
+
+function virtualModelCard(model) {
+  const targets = model.targets || [];
+  const statusLabel = model.available ? 'Routable' : 'Broken target';
+  const targetRows = targets.length ? targets.map((target, index) => `<li><span class="target-index">${String(index + 1).padStart(2, '0')}</span>${resolutionIndicator(target)}<span>${h(target.provider_name)}/${h(target.upstream_model_id)}</span>${target.enabled ? '' : '<small>disabled</small>'}</li>`).join('') : `<li><span class="target-index">01</span><span>${h(model.target_provider_name || 'No target')}/${h(model.target_upstream_model_id || '')}</span></li>`;
+  return `<article class="mobile-card virtual-model-card" data-mobile-card="${h(model.id)}">
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-virtual-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-virtual-detail-${h(model.id)}"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(statusLabel)}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed route')}</small></span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
+    <div class="mobile-card-summary"><span>${h(statusLabel)}</span><span>${targets.length || 1} target${(targets.length || 1) === 1 ? '' : 's'}</span></div>
+    <div class="mobile-card-usage">${mobileUsage(model, 'virtual')}</div>
+    <div class="mobile-card-detail" id="mobile-virtual-detail-${h(model.id)}" hidden><div class="mobile-target-list"><p class="mobile-card-label">Target chain</p><ol>${targetRows}</ol></div><dl class="mobile-detail-grid"><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-virtual-activity="${h(model.id)}">Activity</button><button class="btn btn-small btn-secondary" data-mobile-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-mobile-virtual-edit="${h(model.id)}">Edit</button><button class="btn btn-small btn-danger" data-mobile-virtual-delete="${h(model.id)}">Delete</button></div></div>
+  </article>`;
 }
 
 function patchVirtualActivityRows() {
@@ -712,15 +795,15 @@ function virtualModelFields(model) {
   const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
   return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Models are tried in the order below. If one returns an error or fails to respond, the request is automatically retried with the next model below, seamlessly to the client.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
-function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
+ function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id })); availableOptions = options;
   const targets = model?.targets?.length ? model.targets : [{provider_model_id:model?.target_model_id,enabled:true}];
   const makePicker = (target, row = null) => { const box = document.createElement('div'); box.className='combobox'; box.innerHTML='<input type="text" placeholder="Type a provider or model name…"><input type="hidden" name="target_model" required>'; const input=$('input[type="text"]',box), hidden=$('input[type="hidden"]',box); const pickerOptions=[...options]; const stale=target?.provider_model_id && !options.some(item=>item.value===target.provider_model_id); if(stale){ const label=target?.provider_name&&target?.upstream_model_id?`${target.provider_name} / ${target.upstream_model_id}`:target.provider_model_id; pickerOptions.unshift({value:target.provider_model_id,label:`Unavailable · ${label}`,disabled:true}); } const picker=combobox({ input, hidden, options:pickerOptions, placeholder:'Type a provider or model name…' }); picker.setOptions(pickerOptions); const found=options.find(item=>item.value===target?.provider_model_id); if(found) picker.select(options.indexOf(found)); else if(stale){ hidden.value=target.provider_model_id; input.value=pickerOptions[0].label; } else if(!target?.provider_model_id && options.length){ picker.select(0); } const original=target?.provider_model_id||null; input.addEventListener('focus',()=>{ if(input.value||hidden.value){ input.value=''; hidden.value=''; } }); input.addEventListener('blur',()=>{ if(hidden.value) return; if(original){ const idx=options.findIndex(item=>item.value===original); if(idx>=0) picker.select(idx); else { hidden.value=original; input.value=pickerOptions[0].label; } } }); const wrap=document.createElement('div'); wrap.className='combobox-wrap'; wrap.append(box); if(stale){ const err=document.createElement('small'); err.className='target-error'; err.textContent='Remove or replace unavailable model'; wrap.append(err); } return wrap; };
   const updateControls = () => { const rows=$$('.target-row',fallback); rows.forEach((row,index)=>{ $('.target-index',row).textContent=String(index+1).padStart(2,'0'); $('[data-target-up]',row).disabled=index===0; $('[data-target-down]',row).disabled=index===rows.length-1; }); };
-  const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up">↑</button><button type="button" data-target-down title="Move target down">↓</button><button type="button" data-target-remove title="Remove target">×</button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
-  fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<5) addFallback(); else flash('The admin UI supports up to five targets.', 'info'); };
+   const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up">↑</button><button type="button" data-target-down title="Move target down" aria-label="Move target down">↓</button><button type="button" data-target-remove title="Remove target" aria-label="Remove target">×</button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
+   fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<5) addFallback(); else flash('The admin UI supports up to five targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
   }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); } }); }
 async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
@@ -809,7 +892,7 @@ function openRoutePicker(client) {
   openEntity({
     eyebrow: 'CHANGE ROUTE',
     title: `Route · ${client.name}`,
-    fields: `<label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model. New requests use the new target immediately.</small></label>`,
+    fields: `<div class="route-picker-intro"><span class="client-card-label">Current route</span><strong>${h(client.single_target_canonical || 'Unavailable target')}</strong><small>Choose an available real or virtual target. New requests use the new target immediately.</small></div><label>New target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search by provider, model, or canonical model ID.</small></label>`,
     submit: 'Apply route',
     onMount: form => {
       // Start empty and focused so the user can type ahead from the first
@@ -861,34 +944,37 @@ if (window.visualViewport) {
 }
 function clientCard(client) {
   const statusDot = `<span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span>`;
-  const routeAction = client.type === 'single'
-    ? `<button class="btn btn-small btn-secondary" data-client-route="${h(client.id)}">Change route</button>`
-    : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Catalogue permissions</button>`;
   const routeSummary = client.type === 'single'
     ? `<code class="model-id ${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</code>${client.single_target_available === false ? '<span class="client-route-broken">Unavailable</span>' : ''}`
     : `<span class="meta-line">Catalogue — model permissions</span>`;
+  const quickAction = client.type === 'single'
+    ? `<button class="btn btn-small btn-secondary" data-client-route="${h(client.id)}">Change route</button>`
+    : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Manage permissions</button>`;
   return `<article class="client-card" data-client-id="${h(client.id)}">
     <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
       ${statusDot}
-      <span class="client-card-name">${h(client.name)}</span>
+      <span class="client-card-heading"><span class="client-card-name">${h(client.name)}</span><small>${client.type === 'single' ? 'Single client' : 'Catalogue client'}</small></span>
       ${client.group ? `<span class="group-badge">${h(client.group)}</span>` : ''}
-      <span class="client-card-desc">${h(client.description || 'No description')}</span>
       <span class="client-card-chevron" aria-hidden="true">▾</span>
     </button>
+    <div class="client-card-quick-actions">${quickAction}</div>
+    <div class="client-card-collapsed-usage"><span class="client-card-label">Usage</span><div class="client-card-usage"><span><small>1h</small>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</span><span><small>24h</small>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</span><span><small>7d</small>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</span></div></div>
     <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
-      <div class="client-card-field"><span class="client-card-label">Route</span><div class="client-card-route">${routeSummary}${routeAction}</div></div>
-      <div class="client-card-field"><span class="client-card-label">Description</span><span>${h(client.description || 'No description')}</span></div>
-      <div class="client-card-field"><span class="client-card-label">Fingerprint</span><code class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</code></div>
-      <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
-      ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
-      <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
-      ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
-      <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</div></div>
+      <div class="client-card-route-panel"><div class="client-card-field-head"><span class="client-card-label">Route</span><span class="client-card-kind">${client.type === 'single' ? 'Single target' : 'Catalogue access'}</span></div><div class="client-card-route">${routeSummary}</div></div>
+      <div class="client-card-usage-panel"><span class="client-card-label">Usage</span><div class="client-card-usage"><span><small>1h</small>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</span><span><small>24h</small>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</span><span><small>7d</small>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</span></div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
         <button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button>
         <button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button>
         <button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button>
+      </div>
+      <div class="client-card-secondary">
+        <div class="client-card-field"><span class="client-card-label">Description</span><span>${h(client.description || 'No description')}</span></div>
+        <div class="client-card-field"><span class="client-card-label">Fingerprint</span><code class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</code></div>
+        <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
+        ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
+        <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
+        ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
       </div>
     </div>
   </article>`;
@@ -1196,7 +1282,13 @@ function activityRequestID(row) { const id = row.client_request_id || ''; const 
 async function copyRequestID(button) { const id = button.dataset.copyRequestId; if (!id) return; if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(id); const original = button.textContent; button.classList.add('copied'); button.textContent = 'Copied'; setTimeout(() => { button.classList.remove('copied'); button.textContent = original; }, 1200); } catch { const range = document.createRange(); range.selectNodeContents(button); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); button.title = 'Press Ctrl/Cmd+C to copy'; } }
 document.addEventListener('click', event => { const target = event.target.closest('[data-copy-request-id]'); if (target) copyRequestID(target); });
 document.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const target = event.target.closest('[data-copy-request-id]'); if (!target) return; event.preventDefault(); copyRequestID(target); });
-function renderActivity() { errorDetails.clear(); errorDetailSeq = 0; const showClient = !activityState.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; resetActivityScroll(); }
+function activityHistoryCard(row, showClient = true) {
+  const status = row.http_status >= 200 && row.http_status < 300 ? 'Succeeded' : `HTTP ${row.http_status || 'error'}`;
+  const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
+  const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
+  return `<article class="history-card"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
+}
+function renderActivity() { errorDetails.clear(); errorDetailSeq = 0; const showClient = !activityState.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#activity-mobile-body').innerHTML = activityState.rows.map(row => activityHistoryCard(row, showClient)).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; resetActivityScroll(); }
 filterInput('#activity-search', value => { activityState.search = value; activityState.offset = 0; loadActivity(); });
 $('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activityState.offset - activityState.limit); loadActivity(); };
 $('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
@@ -1224,10 +1316,36 @@ $$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick
 // identically — the extra Client column is the only difference.
 const globalActivityState = { rows: [], offset: 0, limit: 50, search: '', hasMore: true };
 async function loadGlobalActivity() { globalActivityState.controller?.abort(); globalActivityState.controller = new AbortController(); const { signal } = globalActivityState.controller; try { const result = await api(`/api/admin/activity?limit=${globalActivityState.limit + 1}&offset=${globalActivityState.offset}&search=${encodeURIComponent(globalActivityState.search || '')}`, { signal }); const fetched = result.data; globalActivityState.hasMore = fetched.length > globalActivityState.limit; globalActivityState.rows = fetched.slice(0, globalActivityState.limit); await Promise.all(globalActivityState.rows.filter(row => row.attempt_rows > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#global-activity-error').textContent = ''; renderGlobalActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#global-activity-error').textContent = errorMessage(error); } }
-function renderGlobalActivity() { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong class="client-name">${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
+function renderGlobalActivity() { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-empty-mobile').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong class="client-name">${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#global-activity-cards').innerHTML = globalActivityState.rows.map(row => activityHistoryCard(row, true)).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
 filterInput('#global-activity-search', value => { globalActivityState.search = value; globalActivityState.offset = 0; loadGlobalActivity(); });
 $('#global-activity-prev').onclick = () => { globalActivityState.offset = Math.max(0, globalActivityState.offset - globalActivityState.limit); loadGlobalActivity(); };
 $('#global-activity-next').onclick = () => { globalActivityState.offset += globalActivityState.limit; loadGlobalActivity(); };
+
+const mobileHistoryState = { rows: [], offset: 0, limit: 25, search: '', hasMore: true };
+async function loadMobileHistory() {
+  mobileHistoryState.controller?.abort();
+  mobileHistoryState.controller = new AbortController();
+  const { signal } = mobileHistoryState.controller;
+  try {
+    const result = await api(`/api/admin/activity?limit=${mobileHistoryState.limit + 1}&offset=${mobileHistoryState.offset}&search=${encodeURIComponent(mobileHistoryState.search || '')}`, { signal });
+    const fetched = result.data || [];
+    mobileHistoryState.hasMore = fetched.length > mobileHistoryState.limit;
+    mobileHistoryState.rows = fetched.slice(0, mobileHistoryState.limit);
+    $('#mobile-history-body').innerHTML = mobileHistoryState.rows.map(row => activityHistoryCard(row, true)).join('');
+    $('#mobile-history-empty').hidden = mobileHistoryState.rows.length > 0;
+    $('#mobile-history-count').textContent = mobileHistoryState.rows.length ? `${mobileHistoryState.offset + 1}–${mobileHistoryState.offset + mobileHistoryState.rows.length}` : '0 results';
+    $('#mobile-history-prev').disabled = mobileHistoryState.offset === 0;
+    $('#mobile-history-next').disabled = !mobileHistoryState.hasMore;
+    $('#mobile-history-error').textContent = '';
+  } catch (error) {
+    if (error.name !== 'AbortError') $('#mobile-history-error').textContent = errorMessage(error);
+  }
+}
+$('#open-mobile-history').onclick = () => { mobileHistoryState.offset = 0; mobileHistoryState.search = ''; $('#mobile-history-search').value = ''; loadMobileHistory(); $('#mobile-history-dialog').showModal(); };
+$('#close-mobile-history').onclick = $('#done-mobile-history').onclick = () => $('#mobile-history-dialog').close();
+filterInput('#mobile-history-search', value => { mobileHistoryState.search = value; mobileHistoryState.offset = 0; loadMobileHistory(); });
+$('#mobile-history-prev').onclick = () => { mobileHistoryState.offset = Math.max(0, mobileHistoryState.offset - mobileHistoryState.limit); loadMobileHistory(); };
+$('#mobile-history-next').onclick = () => { mobileHistoryState.offset += mobileHistoryState.limit; loadMobileHistory(); };
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
@@ -1368,9 +1486,46 @@ async function loadActivityView() {
     // while the view was hidden (state keeps the client + leg lanes).
     if (activityGraphReady) noteActivityCatalogueMiss(mod.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs }));
     if (activityGraphReady) mod.onCooldowns(state.usage?.target_cooldown || {});
+    renderMobileActivity();
   } catch (error) {
     flash(errorMessage(error), 'error');
   }
+}
+function mobileActivityCatalogue() {
+  return activityGraphData || { clients: [], virtualModels: [], models: [] };
+}
+function mobileActivityTarget(routeID, targetID) {
+  const data = mobileActivityCatalogue();
+  const virtual = data.virtualModels.find(model => model.id === routeID);
+  if (virtual) {
+    const target = (virtual.targets || []).find(item => item.provider_model_id === targetID || `${item.provider_name}/${item.upstream_model_id}` === targetID);
+    return target ? `${target.provider_name}/${target.upstream_model_id}` : targetID;
+  }
+  const model = data.models.find(item => item.id === targetID || item.canonical_model_id === targetID);
+  return model ? model.canonical_model_id : targetID;
+}
+function renderMobileActivity() {
+  const data = mobileActivityCatalogue();
+  const entries = Object.entries(state.liveRoutes || {}).filter(([, item]) => item && item.active > 0).map(([key, item]) => {
+    const separator = key.indexOf('\u0000');
+    const clientID = item.client_id || (separator >= 0 ? key.slice(0, separator) : '');
+    const client = data.clients.find(candidate => candidate.id === clientID);
+    const routeID = item.route_id || item.routeID;
+    const virtual = data.virtualModels.find(model => model.id === routeID);
+    const real = data.models.find(model => model.id === routeID || model.canonical_model_id === routeID);
+    const routeLabel = virtual?.canonical_model_id || real?.canonical_model_id || item.requested_model || routeID || 'Unknown route';
+    const targets = Object.entries(state.liveLegs || {}).filter(([targetKey, target]) => targetKey.startsWith(`${routeID}\u0000`) && target?.active > 0).map(([targetKey]) => mobileActivityTarget(routeID, targetKey.slice(targetKey.indexOf('\u0000') + 1)));
+    const targetLabel = item.resolved_model || targets[0] || 'Waiting for upstream target';
+    return { client: client?.name || item.client_id || 'Unknown client', route: routeLabel, target: targetLabel, requested: item.requested_model || routeLabel, streaming: item.streaming > 0, targets };
+  });
+  const list = $('#mobile-activity-body');
+  if (!list) return;
+  $('#mobile-activity-empty').hidden = entries.length > 0;
+  list.innerHTML = entries.map(entry => `<article class="live-activity-card"><div class="live-activity-top"><span class="live-pulse" aria-hidden="true"></span><strong>${h(entry.client)}</strong><span class="live-activity-state">${entry.streaming ? 'Streaming' : 'In flight'}</span></div><div class="live-activity-chain"><span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.route)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span></div>${entry.targets.length > 1 ? `<p class="live-activity-note">${entry.targets.length} upstream targets active</p>` : ''}<button class="btn btn-small btn-secondary" data-live-activity-client="${h(entry.client)}">View details</button></article>`).join('');
+  $$('[data-live-activity-client]', list).forEach(button => button.onclick = () => {
+    const client = data.clients.find(item => item.name === button.dataset.liveActivityClient);
+    if (client) openActivity(client);
+  });
 }
 function openGraphActivity(node, data) {
   const id = node.id.slice(2);
@@ -1533,8 +1688,10 @@ function reconcileLive() {
       const card = $(`article.client-card[data-client-id="${CSS.escape(client.id)}"]`);
       if (card) {
         ['1h', '24h', '7d'].forEach(window => {
-          const cell = $(`.tok[data-window="${window}"]`, card);
-          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
+          const cells = $$(`.tok[data-window="${window}"]`, card);
+          const values = state.usage?.client_keys?.[client.id]?.[window];
+          const caches = state.usage?.client_cache?.[client.id]?.[window];
+          cells.forEach(cell => patchTokenCell(cell, values, caches));
         });
         applyClientRoundel($('.status-roundel', card), client, state.liveRequests[client.id]);
       }
@@ -1584,6 +1741,7 @@ live.on('snapshot', payload => {
   if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
   if (payload.modules?.inflight_client_routes !== undefined) state.liveRoutes = payload.modules.inflight_client_routes || {};
   if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
+  if (liveViewActive('activity')) renderMobileActivity();
   // Activity living pane: seed currently-hot legs on every snapshot so a
   // missed delta self-heals without a refresh.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
@@ -1638,6 +1796,7 @@ live.on('activity', delta => {
         if (client) applyClientRoundel($('.status-roundel', card), client, state.liveRequests[delta.client_id]);
       }
     }
+    if (liveViewActive('activity')) renderMobileActivity();
   }
   if (delta.target_id) {
     const key = targetActivityKey(delta.id || '', delta.target_id);
@@ -1652,6 +1811,7 @@ live.on('activity', delta => {
       const target = model && (model.targets || []).find(item => (item.provider_model_id || `${item.provider_name}/${item.upstream_model_id}`) === delta.target_id);
       if (line && target) patchResolution(line, target);
     }
+    if (liveViewActive('activity')) renderMobileActivity();
   }
   // Activity living pane: client + target deltas drive the flow.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
