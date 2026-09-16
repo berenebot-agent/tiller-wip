@@ -655,6 +655,17 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	skippedCooled := false
 	allAttemptedFailed := true
 	var success bool
+	// streamKeepalive is created once a streaming client response is committed.
+	// Ordered-fallback probing can sit silent while an upstream produces no
+	// deltas; the writer emits SSE comment frames so a reverse proxy does not cut
+	// the client-facing connection. It is reused by the relay so only one writer
+	// ever touches w, and closed once when proxy returns.
+	var streamKeepalive *sseKeepaliveWriter
+	defer func() {
+		if streamKeepalive != nil {
+			streamKeepalive.Close()
+		}
+	}()
 	for pass := 0; pass < 2 && !success; pass++ {
 		bypass := pass == 1
 		if bypass && (!skippedCooled || !allAttemptedFailed) {
@@ -1006,6 +1017,18 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
+			// Ordered-fallback streaming targets are probed for usable output before
+			// committing. That probe (and the preflight read below) can sit silent for
+			// a long reasoning prefill, so commit the client stream and start SSE
+			// keepalives up front. Comment frames are transport keepalives, not model
+			// output, so the chain can still fall through to another target.
+			if route.Virtual && route.RoutingMode == "ordered_fallback" && streaming && streamKeepalive == nil {
+				copySafeResponseHeaders(w.Header(), response.Header)
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("X-Accel-Buffering", "no")
+				w.WriteHeader(response.StatusCode)
+				streamKeepalive = newSSEKeepaliveWriter(w, s.keepaliveInterval())
+			}
 			if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
 				s.inflight.targetEnd(route.RouteModelID, targetID)
 				response.Body.Close()
@@ -1140,6 +1163,14 @@ routeDone:
 		}
 		if route.Virtual {
 			row.errorText = strPtr("virtual_model_unavailable")
+			if streamKeepalive != nil {
+				// The client stream was already committed while probing; surface
+				// the exhausted chain as an SSE failure frame instead of a JSON
+				// body on a 200 stream.
+				writeStreamFailure(streamKeepalive, incoming, "virtual_model_unavailable", "tiller_"+row.clientRequestID, "")
+				streamKeepalive.Flush()
+				return
+			}
 			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", exhaustedRouteMessage(row.attempts), incoming == providers.ProtocolMessages)
 		} else {
 			row.errorText = strPtr("model_unavailable")
@@ -1167,6 +1198,26 @@ routeDone:
 	defer idle.Stop()
 	reader := resp.Body
 	usage := &usageCapture{}
+	// ensureStreamKeepalive commits the streaming status and starts the
+	// keepalive writer if the ordered-fallback probe did not already commit
+	// it. Reusing the same writer keeps a single goroutine writing to w.
+	ensureStreamKeepalive := func() *sseKeepaliveWriter {
+		if streamKeepalive == nil {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(resp.StatusCode)
+			streamKeepalive = newSSEKeepaliveWriter(w, s.keepaliveInterval())
+		}
+		return streamKeepalive
+	}
+	// streamOut routes terminal stream failures through the keepalive writer
+	// when one is active, so no two goroutines write w concurrently.
+	streamOut := func() io.Writer {
+		if streamKeepalive != nil {
+			return streamKeepalive
+		}
+		return w
+	}
 	if isStreamingResponse(resp) {
 		// Prevent common reverse proxies from buffering the live response until
 		// the model has finished generating it.
@@ -1178,10 +1229,13 @@ routeDone:
 			streamed = true
 			row.streaming = true
 			s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
+			ensureStreamKeepalive()
 		}
-		w.WriteHeader(resp.StatusCode)
+		if streamKeepalive == nil {
+			w.WriteHeader(resp.StatusCode)
+		}
 		row.httpStatus = resp.StatusCode
-		if err := translateResponse(w, reader, incoming, target, selected, usage); err != nil {
+		if err := translateResponse(w, streamKeepalive, reader, incoming, target, selected, usage); err != nil {
 			idle.Stop()
 			class := "translation_error"
 			if attemptTimedOut.Load() {
@@ -1193,7 +1247,10 @@ routeDone:
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			markLastAttemptFailed(row, class)
 			if streamingResponse {
-				writeStreamFailure(w, incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+				writeStreamFailure(streamOut(), incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+				if streamKeepalive != nil {
+					streamKeepalive.Flush()
+				}
 			}
 			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
 		} else {
@@ -1207,9 +1264,9 @@ routeDone:
 		streamed = true
 		row.streaming = true
 		s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
-		w.WriteHeader(resp.StatusCode)
+		ensureStreamKeepalive()
 		row.httpStatus = resp.StatusCode
-		if err := rewriteSSE(w, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
+		if err := rewriteSSE(w, streamKeepalive, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
 			class := "upstream_read_error"
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
@@ -1219,7 +1276,10 @@ routeDone:
 			row.errorText = strPtr(class)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			markLastAttemptFailed(row, class)
-			writeStreamFailure(w, incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+			writeStreamFailure(streamOut(), incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+			if streamKeepalive != nil {
+				streamKeepalive.Flush()
+			}
 		} else {
 			clearSelectedCooldown()
 		}
@@ -1610,10 +1670,12 @@ func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
 	return true
 }
 
-func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
+func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
 	reader := bufio.NewReader(r)
-	keepalive := newSSEKeepaliveWriter(w, sseKeepaliveInterval)
-	defer keepalive.Close()
+	if keepalive == nil {
+		keepalive = newSSEKeepaliveWriter(w, sseKeepaliveInterval)
+		defer keepalive.Close()
+	}
 	for {
 		var line []byte
 		var err error

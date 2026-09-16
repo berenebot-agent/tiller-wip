@@ -200,9 +200,11 @@ func (s *Server) lastOutcomeSnapshot() map[string]lastOutcome {
 //     failed nor any other target appears in target_health without the
 //     attempts join.
 //
-// A successful attempt is an HTTP 2xx response; every other recorded
-// response is treated as a failure. Logs are metadata-only and may be
-// disabled per key.
+// Target health is per-target and independent of the logical request's
+// outcome: a failed attempt marks that target unhealthy even when a later
+// fallback served the request. A skipped attempt (the router declined to call
+// the target) and a client-caused failure (cancel/timeout) are not target
+// failures. Logs are metadata-only and may be disabled per key.
 func (s *Server) targetResolutionHealth(ctx context.Context, c1, c24 string) (map[string]targetResolutionHealth, error) {
 	rows, err := s.db.SQL.QueryContext(ctx, `SELECT key,
 		max(success_1h), max(failure_1h), max(success_24h)
@@ -218,12 +220,10 @@ func (s *Server) targetResolutionHealth(ctx context.Context, c1, c24 string) (ma
 			UNION ALL
 			SELECT a.provider||'/'||a.model AS key,
 				CASE WHEN a.created_at >= ? AND a.result='success' THEN 1 ELSE 0 END AS success_1h,
-				CASE WHEN a.created_at >= ? AND a.result IN ('failed','skipped')
-					AND a.failure_class NOT IN ('client_cancelled','client_timeout')
-					AND (l.http_status IS NULL OR l.http_status < 200 OR l.http_status >= 300) THEN 1 ELSE 0 END AS failure_1h,
+				CASE WHEN a.created_at >= ? AND a.result='failed'
+				AND a.failure_class NOT IN ('client_cancelled','client_timeout') THEN 1 ELSE 0 END AS failure_1h,
 				CASE WHEN a.result='success' THEN 1 ELSE 0 END AS success_24h
 			FROM request_attempts a
-			JOIN request_logs l ON l.id = a.request_log_id
 			WHERE a.created_at >= ?
 		)
 		GROUP BY key`, c1, c1, c24, c1, c1, c24)

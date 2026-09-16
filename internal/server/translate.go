@@ -1043,7 +1043,7 @@ func responsesInstructionText(value any) string {
 	return ""
 }
 
-func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
+func translateResponse(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
 	reader := bufio.NewReader(r)
 	prefix, err := reader.Peek(1)
 	if err != nil {
@@ -1062,7 +1062,7 @@ func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target prov
 		_, err = w.Write(translated)
 		return err
 	}
-	return translateSSE(w, reader, incoming, target, route.RequestedModel, usage)
+	return translateSSE(w, keepalive, reader, incoming, target, route.RequestedModel, usage)
 }
 
 func translateNonstreamResponse(body []byte, incoming, target providers.Protocol, model string) ([]byte, error) {
@@ -1242,9 +1242,11 @@ func chatResponseToResponses(chat map[string]any, model string) map[string]any {
 	return map[string]any{"id": chat["id"], "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": model, "output": output, "usage": usage}
 }
 
-func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
-	keepalive := newSSEKeepaliveWriter(w, sseKeepaliveInterval)
-	defer keepalive.Close()
+func translateSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
+	if keepalive == nil {
+		keepalive = newSSEKeepaliveWriter(w, sseKeepaliveInterval)
+		defer keepalive.Close()
+	}
 	state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model, reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
 	for {
 		event, err := readSSEEvent(reader)

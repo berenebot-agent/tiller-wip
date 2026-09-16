@@ -78,6 +78,19 @@ type Server struct {
 	// usageCacheTTL bounds how long a computed usage aggregate is reused. Zero
 	// disables caching (tests use this for determinism).
 	usageCacheTTL time.Duration
+	// sseKeepalive overrides the streaming keepalive interval. Zero uses the
+	// production default (sseKeepaliveInterval); tests set it short so the
+	// silence path is exercised without waiting.
+	sseKeepalive time.Duration
+}
+
+// keepaliveInterval returns the streaming keepalive cadence, honouring the
+// test override when set.
+func (s *Server) keepaliveInterval() time.Duration {
+	if s.sseKeepalive > 0 {
+		return s.sseKeepalive
+	}
+	return sseKeepaliveInterval
 }
 
 // lastOutcome is the most recent request result for a single real model.
@@ -91,9 +104,10 @@ type lastOutcome struct {
 	// FailureClass names why a failed/skipped attempt did not serve.
 	FailureClass string `json:"failure_class,omitempty"`
 	// Degrading reports whether this outcome should affect the target's
-	// main-page health. A failed/skipped attempt that was replaced by a
-	// successful fallback is not degrading: the logical request succeeded, so
-	// the failed target is not painted unhealthy. The live graph still sees
+	// main-page health. A genuine upstream failure is degrading even when a
+	// later fallback rescues the request: target health is per-target, while
+	// request health is separate. Skipped targets (never called) and
+	// client-caused failures are non-degrading. The live graph still sees
 	// every attempt's explicit outcome.
 	Degrading bool `json:"degrading"`
 }

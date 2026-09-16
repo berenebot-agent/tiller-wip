@@ -187,11 +187,12 @@ test('virtual capabilities dialog leads with aggregate, preserves target metadat
     }]
   });
 
-  await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.getByRole('link', { name: 'Virtual Models' }).click();
-  const row = page.locator('tr[data-virtual-id="virtual-capability"]');
-  await expect(row).toBeVisible();
-  await row.getByRole('button', { name: 'Capabilities' }).click();
+await page.locator('#nav-quick').getByRole('link', { name: 'Virtual Models' }).click();
+// Mobile renders virtual models as cards, not the hidden desktop table.
+const card = page.locator('.virtual-model-card', { hasText: 'routing/reasoning' });
+await expect(card).toBeVisible();
+await card.locator('.mobile-card-head').click();
+await card.getByRole('button', { name: 'Capabilities' }).click();
   const dialog = page.locator('#capabilities-dialog');
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('AGGREGATE / ADVERTISED TO HERMES + V1');

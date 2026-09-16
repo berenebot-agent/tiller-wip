@@ -127,15 +127,16 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 
 // recordLastOutcome updates operational target status from actual attempts.
 // Every attempted or skipped target gets an explicit outcome in the live
-// delta so the graph can colour it. Only outcomes that reflect the logical
-// request's own health are stored for the main page: a failed/skipped attempt
-// that a later fallback replaced is non-degrading, so the target is not
-// painted unhealthy when the request ultimately succeeded.
+// delta so the graph can colour it. Target health is per-target: a genuine
+// upstream failure degrades the target even when a later fallback rescues the
+// request. Request health (whether the logical request was served) is a
+// separate concept and is not recorded here. Skipped targets were never
+// called and client-caused failures say nothing about the target, so neither
+// degrades it.
 func (s *Server) recordLastOutcome(row *logRow) {
 	if len(row.attempts) == 0 {
 		return
 	}
-	logicalSuccess := row.httpStatus >= 200 && row.httpStatus < 300
 	s.lastOutcomeMu.Lock()
 	if s.lastOutcome == nil {
 		s.lastOutcome = map[string]lastOutcome{}
@@ -161,9 +162,10 @@ func (s *Server) recordLastOutcome(row *logRow) {
 			// Preserve zero: a network failure has no HTTP response, even if a
 			// later fallback succeeds and sets the logical row status to 2xx.
 			out.IsSuccess = false
-			// A failed fallback leg on a request that still resolved is not a
-			// target-health signal.
-			out.Degrading = !logicalSuccess
+			// A genuine upstream failure is a target-health signal on its own,
+			// independent of whether the logical request was ultimately served
+			// by a fallback.
+			out.Degrading = true
 		case "skipped":
 			// A skipped target was never called. It shows as an amber leg on
 			// the graph but never paints the target unhealthy on the main page.

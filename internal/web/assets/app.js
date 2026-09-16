@@ -154,14 +154,13 @@ $('#login-form').addEventListener('submit', async event => {
 $('#logout').addEventListener('click', async () => { try { await api('/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
 
 async function navigate(view) {
-  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); const navLinks = $('#nav-links'); if (navLinks) navLinks.classList.remove('open'); const mobileMenu = $('#mobile-menu'); if (mobileMenu) mobileMenu.setAttribute('aria-expanded', 'false'); document.body.classList.remove('nav-open');
+  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
   try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') await loadSettings(); }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
 window.addEventListener('popstate', () => navigate(viewFromHash()));
-if ($('#mobile-menu')) $('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); document.body.classList.toggle('nav-open', links.classList.contains('open')); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
   const bar = button.closest('[data-filter-bar]');
@@ -1874,9 +1873,10 @@ function reconcileLive() {
 live.on('outcome', payload => {
   if (!state.usage) state.usage = {};
   if (!state.usage.target_last_outcome) state.usage.target_last_outcome = {};
-  // Only degrading outcomes update main-page target health: a failed fallback
-  // attempt that a later success replaced must not paint the target red. The
-  // graph still receives every attempt's explicit outcome below.
+// Only degrading outcomes update main-page target health. A genuine upstream
+// failure degrades its target even when a later fallback served the request;
+// skipped (never-called) and client-caused outcomes are non-degrading. The
+// graph still receives every attempt's explicit outcome below.
   const degrading = new Set();
   for (const [key, outcome] of Object.entries(payload || {})) {
     if (outcome && outcome.degrading === false) continue;
