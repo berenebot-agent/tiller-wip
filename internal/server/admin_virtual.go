@@ -16,12 +16,17 @@ type virtualTargetInput struct {
 	Enabled         bool   `json:"enabled"`
 }
 
+const maxVirtualTargets = 16
+
 func validateVirtualTargets(mode string, targets []virtualTargetInput) error {
 	if mode != "fixed" && mode != "ordered_fallback" {
 		return fmt.Errorf("routing_mode must be fixed or ordered_fallback")
 	}
 	if len(targets) == 0 {
 		return fmt.Errorf("at least one target is required")
+	}
+	if mode == "ordered_fallback" && len(targets) > maxVirtualTargets {
+		return fmt.Errorf("ordered fallback supports at most %d targets", maxVirtualTargets)
 	}
 	seen, active := map[string]bool{}, 0
 	for _, target := range targets {
