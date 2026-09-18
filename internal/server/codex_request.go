@@ -81,6 +81,18 @@ func normalizeCodexRequest(body []byte, caps *providers.ReasoningCapabilities) (
 	return json.Marshal(request)
 }
 
+// codexRequestEffort returns the already-normalized wire effort without
+// retaining or exposing any other request content.
+func codexRequestEffort(body []byte) string {
+	var request map[string]any
+	if json.Unmarshal(body, &request) != nil {
+		return ""
+	}
+	reasoning, _ := request["reasoning"].(map[string]any)
+	effort, _ := reasoning["effort"].(string)
+	return effort
+}
+
 func normalizeCodexAssistantContent(value any) {
 	for _, item := range asSlice(value) {
 		block, ok := item.(map[string]any)

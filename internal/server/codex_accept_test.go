@@ -1,12 +1,17 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,7 +28,13 @@ import (
 // timeouts.
 func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 	var mu sync.Mutex
-	var gotAccept string
+	var gotAccept, gotSessionID, gotClientRequestID, gotRoutingHint, gotContentType string
+	var gotRequest map[string]any
+	allowComplete := make(chan struct{})
+	upstreamDone := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(allowComplete) }) }
+	t.Cleanup(release)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/models":
@@ -31,11 +42,29 @@ func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 		case "/v1/models":
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "gpt-5.6-sol"}}})
 		case "/responses":
+			body, _ := io.ReadAll(r.Body)
 			mu.Lock()
 			gotAccept = r.Header.Get("Accept")
+			gotSessionID = r.Header.Get("session-id")
+			gotClientRequestID = r.Header.Get("x-client-request-id")
+			gotRoutingHint = r.Header.Get("x-codex-routing-hint")
+			gotContentType = r.Header.Get("Content-Type")
+			_ = json.Unmarshal(body, &gotRequest)
 			mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp-1", "object": "response", "model": "gpt-5.6-sol", "output_text": "ok"})
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = fmt.Fprint(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"ok\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			<-allowComplete
+			_, _ = fmt.Fprint(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"object\":\"response\",\"model\":\"gpt-5.6-sol\",\"output\":[]}}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			close(upstreamDone)
 		default:
 			http.NotFound(w, r)
 		}
@@ -107,13 +136,66 @@ func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 		t.Fatalf("permissions: %d %v", status, payload)
 	}
 
-	resp, _ := clientCall(t, api.base, clientSecret, "/v1/responses", map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello"})
+	encoded, _ := json.Marshal(map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello", "reasoning": map[string]any{"effort": "xhigh"}})
+	request, _ := http.NewRequest("POST", api.base+"/v1/responses", bytes.NewReader(encoded))
+	request.Header.Set("Authorization", "Bearer "+clientSecret)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Opencode-Session", "journey-board-test")
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		release()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
 	if resp.StatusCode != 200 {
 		t.Fatalf("request status = %d", resp.StatusCode)
+	}
+	reader := bufio.NewReader(resp.Body)
+	var received strings.Builder
+	for !strings.Contains(received.String(), "response.output_text.delta") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			release()
+			t.Fatalf("read first SSE event: %v", readErr)
+		}
+		received.WriteString(line)
+	}
+	select {
+	case <-upstreamDone:
+		t.Fatal("upstream completed before the first SSE event reached the client")
+	default:
+	}
+	release()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	received.Write(rest)
+	if !strings.Contains(received.String(), "response.completed") {
+		t.Fatalf("translated SSE did not complete: %s", received.String())
 	}
 	mu.Lock()
 	defer mu.Unlock()
 	if gotAccept != "text/event-stream" {
 		t.Fatalf("Codex upstream Accept = %q, want text/event-stream", gotAccept)
+	}
+	if gotContentType != "application/json" {
+		t.Fatalf("Codex upstream Content-Type = %q, want application/json", gotContentType)
+	}
+	if gotSessionID == "" {
+		t.Fatal("Codex upstream did not receive session-id")
+	}
+	if gotClientRequestID == "" || gotClientRequestID != resp.Header.Get("X-Tiller-Request-Id") {
+		t.Fatalf("Codex x-client-request-id = %q, Tiller request id = %q", gotClientRequestID, resp.Header.Get("X-Tiller-Request-Id"))
+	}
+	if gotRoutingHint != "model=gpt-5.6-sol" {
+		t.Fatalf("Codex x-codex-routing-hint = %q", gotRoutingHint)
+	}
+	if gotRequest["stream"] != true || gotRequest["store"] != false {
+		t.Fatalf("Codex request stream/store = %v/%v, want true/false", gotRequest["stream"], gotRequest["store"])
+	}
+	reasoning, _ := gotRequest["reasoning"].(map[string]any)
+	if reasoning["effort"] != "xhigh" {
+		t.Fatalf("Codex request reasoning effort = %v, want xhigh", reasoning["effort"])
 	}
 }

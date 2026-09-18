@@ -44,6 +44,28 @@ func TestOpenCodeSessionIDSynthesizedStable(t *testing.T) {
 	}
 }
 
+func TestCodexSessionIDUsesOpenCodeConversation(t *testing.T) {
+	first, firstSource := codexSessionID("journey-board", "req-1", "client-key-a")
+	again, againSource := codexSessionID("journey-board", "req-2", "client-key-a")
+	if first != again {
+		t.Fatalf("same client + same OpenCode session must be stable: %q vs %q", first, again)
+	}
+	if firstSource != "client" || againSource != "client" {
+		t.Fatalf("session sources = %q/%q, want client/client", firstSource, againSource)
+	}
+	other, source := codexSessionID("journey-board", "req-1", "client-key-b")
+	if first == other {
+		t.Fatalf("different clients + same OpenCode session must differ: both %q", first)
+	}
+	if source != "client" {
+		t.Fatalf("other session source = %q, want client", source)
+	}
+	fallback, source := codexSessionID("", "req-1", "client-key-a")
+	if fallback != "tiller-req-1" || source != "request" {
+		t.Fatalf("fallback Codex session = %q/%q, want tiller-req-1/request", fallback, source)
+	}
+}
+
 func opencodeSessionHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc) (*testAPI, string, string) {
 	t.Helper()
 	serverA := httptest.NewServer(upstreamA)

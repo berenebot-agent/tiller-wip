@@ -730,6 +730,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			translated = target != incoming
 			attemptBody := append([]byte(nil), originalBody...)
+			codexSessionSource := ""
+			codexEffort := ""
 			if translated {
 				attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
 				if err != nil {
@@ -802,6 +804,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
 					return
 				}
+				codexEffort = codexRequestEffort(attemptBody)
 			}
 			if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
 				var compatible bool
@@ -864,7 +867,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			providers.ApplyRequestAuth(req, candidate.Provider)
 			copySafeFeatureHeaders(req.Header, r.Header, target)
 			if candidate.Provider.Type == "codex-subscription" {
-				req.Header.Set("session-id", row.clientRequestID)
+				sessionID, source := codexSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID, row.clientKeyID)
+				codexSessionSource = source
+				req.Header.Set("session-id", sessionID)
+				req.Header.Set("x-client-request-id", row.clientRequestID)
+				req.Header.Set("x-codex-routing-hint", "model="+candidate.UpstreamModelID)
 				// The ChatGPT Codex backend switches to SSE only when Accept is
 				// exactly text/event-stream (the official codex_cli_rs sends this
 				// exact value). A combined Accept leaves it on the buffered JSON
@@ -924,6 +931,23 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			}
 			headerLatencyMs := time.Since(attemptStart).Milliseconds()
 			streaming := isStreamingResponse(response)
+			logCodexResponse := func(firstByteLatencyMs int64) {
+				if candidate.Provider.Type != "codex-subscription" || s.logger == nil {
+					return
+				}
+				s.logger.Info("codex upstream response",
+					"client_request_id", row.clientRequestID,
+					"provider", candidate.Provider.Name,
+					"model", candidate.UpstreamModelID,
+					"http_status", response.StatusCode,
+					"content_type", response.Header.Get("Content-Type"),
+					"upstream_streaming", streaming,
+					"header_latency_ms", headerLatencyMs,
+					"first_byte_latency_ms", firstByteLatencyMs,
+					"effort", codexEffort,
+					"session_source", codexSessionSource,
+				)
+			}
 			timedOut := &atomic.Bool{}
 			attemptTimedOut = timedOut
 			idle = time.AfterFunc(idleTimeout, func() {
@@ -1029,7 +1053,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				w.WriteHeader(response.StatusCode)
 				streamKeepalive = newSSEKeepaliveWriter(w, s.keepaliveInterval())
 			}
+			preflightStart := time.Now()
 			if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
+				if streaming {
+					logCodexResponse(time.Since(preflightStart).Milliseconds())
+				} else {
+					logCodexResponse(0)
+				}
 				s.inflight.targetEnd(route.RouteModelID, targetID)
 				response.Body.Close()
 				idle.Stop()
@@ -1066,6 +1096,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackUsed = true
 				row.fallbackReason = strPtr(class)
 				continue
+			}
+			if streaming {
+				logCodexResponse(time.Since(preflightStart).Milliseconds())
+			} else {
+				logCodexResponse(0)
 			}
 			// Ordered-fallback targets must produce usable output to count as
 			// success. A pre-output probe catches relays that return a 2xx with
@@ -1437,6 +1472,16 @@ func openCodeSessionID(clientValue, requestID, clientKeyID string) string {
 		return "tiller-anonymous"
 	}
 	return "tiller-" + strings.TrimSpace(requestID)
+}
+
+// codexSessionID keeps Codex prompt/cache affinity stable when an OpenCode
+// client supplies a conversation identity, while preserving request isolation
+// for generic clients that do not provide one.
+func codexSessionID(clientValue, requestID, clientKeyID string) (string, string) {
+	if strings.TrimSpace(clientValue) != "" {
+		return openCodeSessionID(clientValue, requestID, clientKeyID), "client"
+	}
+	return openCodeSessionID("", requestID, clientKeyID), "request"
 }
 
 // shortKeyID returns a stable, truncated fingerprint of a client key ID, kept
