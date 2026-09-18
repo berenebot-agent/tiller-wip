@@ -154,6 +154,48 @@ test('models table does not override a user-chosen sort when usage arrives', asy
   await expect(rows.nth(1)).toHaveAttribute('data-model-id', 'model-zeta');
 });
 
+// The usage sort cascades through longer windows: the default 1h sort ranks by
+// 1h first, then breaks 1h ties on 24h (and 24h ties on 7d) before falling back
+// to canonical ascending. Here gamma leads on 1h; beta and alpha are tied at 0
+// and beta wins the 24h tiebreak. The API catalogue order (gamma, alpha, beta)
+// and canonical asc (alpha, beta, gamma) are both different again, so this can
+// only pass if the 24h tiebreak is applied.
+const cascadeModels = [
+  { id: 'model-gamma', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'gamma', canonical_model_id: 'forge/gamma', available: true, native_protocol: 'chat' },
+  { id: 'model-alpha', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'alpha', canonical_model_id: 'forge/alpha', available: true, native_protocol: 'chat' },
+  { id: 'model-beta', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'beta', canonical_model_id: 'forge/beta', available: true, native_protocol: 'chat' },
+];
+
+test('models table cascades usage sort through longer windows', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.addInitScript(() => { window.EventSource = class { addEventListener() {} close() {} }; });
+  await page.route('**/api/admin/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/admin/usage') return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        target_last_outcome: {}, target_health: {},
+        real_models: {
+          'forge/alpha': { '1h': 0, '24h': 0, '7d': 100 },
+          'forge/beta': { '1h': 0, '24h': 50, '7d': 0 },
+          'forge/gamma': { '1h': 5, '24h': 0, '7d': 0 },
+        },
+        real_cache: {},
+      }),
+    });
+    if (path === '/api/admin/models') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: cascadeModels, limit: 200, offset: 0 }) });
+    if (path === '/api/admin/providers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'p1', name: 'forge', enabled: true, protocols: ['chat'] }], limit: 200, offset: 0 }) });
+    return route.continue();
+  });
+  await openAdmin(page);
+  await page.getByRole('link', { name: 'Real Models' }).click();
+  const rows = page.locator('#models-body tr[data-model-id]');
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0)).toHaveAttribute('data-model-id', 'model-gamma');
+  await expect(rows.nth(1)).toHaveAttribute('data-model-id', 'model-beta');
+  await expect(rows.nth(2)).toHaveAttribute('data-model-id', 'model-alpha');
+});
+
 test('virtual capabilities dialog leads with aggregate, preserves target metadata, and wraps on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openAdmin(page);

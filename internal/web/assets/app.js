@@ -361,17 +361,37 @@ function toggleGroup(event) {
   revealBatch();
 }
 const groupRows = (rows, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}"${row.attr || ''}>${row.html}</tr>`).join('')}`;
+// MODEL_SORT_WINDOWS defines the usage-window cascade for each sortable usage
+// column: the selected window leads, then each longer window breaks ties, so a
+// 1h sort ranks most-used-in-the-last-hour first and falls back to 24h then 7d
+// before any non-usage tiebreak. A 7d sort has no shorter-window tiebreak.
+const MODEL_SORT_WINDOWS = { '1h': ['1h', '24h', '7d'], '24h': ['24h', '7d'], '7d': ['7d'] };
+// compareModelUsage walks the window cascade in order and returns the first
+// non-zero comparison (scaled by direction), or 0 when the rows tie on every
+// listed window. direction is +1 for ascending, -1 for descending, so a
+// descending usage sort uses descending tiebreaks as well.
+function compareModelUsage(a, b, windows, direction) {
+  for (const window of windows) {
+    const delta = ((a.usage?.[window]) || 0) - ((b.usage?.[window]) || 0);
+    if (delta !== 0) return direction * delta;
+  }
+  return 0;
+}
 function applyModelSort(models) {
   const rows = models.map(model => ({ model, canonical: model.canonical_model_id || '', provider: model.provider_name || '', usage: state.usage?.real_models?.[model.canonical_model_id] || {} }));
   const direction = sortState.direction === 'asc' ? 1 : -1;
+  // canonicalAsc is direction-independent: it is the deterministic final
+  // tiebreak so exact ties (including all-zero usage) never inherit the API's
+  // catalogue order, which shifts as providers refresh.
+  const canonicalAsc = (a, b) => a.canonical.localeCompare(b.canonical);
   return rows.sort((a, b) => {
     switch (sortState.column) {
-      case 'canonical': return direction * a.canonical.localeCompare(b.canonical);
-      case 'provider': return direction * a.provider.localeCompare(b.provider);
-      case '1h': return direction * (((a.usage?.['1h']) || 0) - ((b.usage?.['1h']) || 0));
-      case '24h': return direction * (((a.usage?.['24h']) || 0) - ((b.usage?.['24h']) || 0));
-      case '7d': return direction * (((a.usage?.['7d']) || 0) - ((b.usage?.['7d']) || 0));
-      default: return 0;
+      case 'canonical': return direction * canonicalAsc(a, b);
+      case 'provider': return direction * a.provider.localeCompare(b.provider) || canonicalAsc(a, b);
+      case '1h':
+      case '24h':
+      case '7d': return compareModelUsage(a, b, MODEL_SORT_WINDOWS[sortState.column], direction) || canonicalAsc(a, b);
+      default: return canonicalAsc(a, b);
     }
   }).map(row => row.model);
 }
