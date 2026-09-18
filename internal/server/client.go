@@ -1046,8 +1046,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// a long reasoning prefill, so commit the client stream and start SSE
 			// keepalives up front. Comment frames are transport keepalives, not model
 			// output, so the chain can still fall through to another target.
+			// Only router-owned transport headers are committed before target selection;
+			// provider-specific request IDs / rate-limit headers are omitted because
+			// the serving provider isn't known yet.
 			if route.Virtual && route.RoutingMode == "ordered_fallback" && streaming && streamKeepalive == nil {
-				copySafeResponseHeaders(w.Header(), response.Header)
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("X-Accel-Buffering", "no")
 				w.WriteHeader(response.StatusCode)

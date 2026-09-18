@@ -236,3 +236,59 @@ func TestOrderedFallbackProbeKeepaliveThenExhausted(t *testing.T) {
 		t.Fatalf("expected an SSE failure frame after exhausting silent targets, got: %q", body)
 	}
 }
+
+func sseUpstreamWithHeaders(modelID, mode string, reached *[]string, mu *sync.Mutex, extraHeaders map[string]string) http.HandlerFunc {
+	base := sseUpstream(modelID, mode, reached, mu)
+	return func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range extraHeaders {
+			w.Header().Set(k, v)
+		}
+		base(w, r)
+	}
+}
+
+// TestOrderedFallbackEarlyCommitDoesNotLeakProviderHeaders verifies that
+// provider-specific headers from a failed ordered-fallback target are not
+// carried into the client response when the stream is committed early.
+func TestOrderedFallbackEarlyCommitDoesNotLeakProviderHeaders(t *testing.T) {
+	var mu sync.Mutex
+	reached := []string{}
+	// Target A returns SSE with provider-specific headers but no usable output.
+	upstreamA := sseUpstreamWithHeaders("model-a", "silent-empty", &reached, &mu, map[string]string{
+		"Request-Id":        "req-a",
+		"X-RateLimit-Limit": "10",
+	})
+	// Target B returns SSE with different provider-specific headers and valid output.
+	upstreamB := sseUpstreamWithHeaders("model-b", "content", &reached, &mu, map[string]string{
+		"Request-Id":        "req-b",
+		"X-RateLimit-Limit": "20",
+	})
+	api, secret, canonical, _ := cooldownTestHarness(t, upstreamA, upstreamB)
+
+	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{
+		"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hi"}}, "stream": true,
+	})
+	defer resp.Body.Close()
+
+	// Target A's provider-specific headers must not appear in the client response.
+	if got := resp.Header.Get("Request-Id"); got != "" {
+		t.Errorf("client response carries a Request-Id %q from the non-serving target", got)
+	}
+	if got := resp.Header.Get("X-RateLimit-Limit"); got != "" {
+		t.Errorf("client response carries X-RateLimit-Limit %q from the non-serving target", got)
+	}
+	if got := resp.Header.Get("X-RateLimit-Remaining"); got != "" {
+		t.Errorf("client response carries X-RateLimit-Remaining %q from the non-serving target", got)
+	}
+	if got := resp.Header.Get("X-RateLimit-Reset"); got != "" {
+		t.Errorf("client response carries X-RateLimit-Reset %q from the non-serving target", got)
+	}
+	// Target B's content must still be delivered.
+	body, _ := io.ReadAll(resp.Body)
+	if !bytes.Contains(body, []byte("hello-from-model-b")) {
+		t.Fatalf("expected fallback content from model-b, got: %s", body)
+	}
+	if got := reachedOrder(&mu, &reached); len(got) != 2 || got[0] != "model-a" || got[1] != "model-b" {
+		t.Fatalf("attempt order = %v, want [model-a model-b]", got)
+	}
+}
