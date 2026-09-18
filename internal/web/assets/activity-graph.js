@@ -227,7 +227,11 @@ function assignFans(groups, field, other) {
     const sorted = list.slice().sort((x, y) => (x[other].y - y[other].y) || (x[other].id < y[other].id ? -1 : 1));
     const step = Math.min(FAN_STEP, (FAN_MAX * 2) / (sorted.length - 1));
     const mid = (sorted.length - 1) / 2;
-    sorted.forEach((e, i) => { e[field] = (i - mid) * step; });
+    // Two-leg fans are centred too tightly: mid = 0.5 lands the legs at
+    // ±8px on a 16px grid — effectively stacked. Spread them to ±step so
+    // each leg sits on its own horizontal track. N>2 keeps the centred
+    // layout (a middle leg genuinely sits between its neighbours).
+    sorted.forEach((e, i) => { e[field] = sorted.length === 2 ? ((i === 0 ? -1 : 1) * step) : (i - mid) * step; });
   });
 }
 

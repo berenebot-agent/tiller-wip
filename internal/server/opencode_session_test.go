@@ -4,15 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 func TestOpenCodeSessionIDNamespacing(t *testing.T) {
@@ -63,6 +66,158 @@ func TestCodexSessionIDUsesOpenCodeConversation(t *testing.T) {
 	fallback, source := codexSessionID("", "req-1", "client-key-a")
 	if fallback != "tiller-req-1" || source != "request" {
 		t.Fatalf("fallback Codex session = %q/%q, want tiller-req-1/request", fallback, source)
+	}
+}
+
+func TestClientSessionHeaderPrecedence(t *testing.T) {
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{name: "opencode session", headers: map[string]string{"X-Opencode-Session": "oc-1"}, want: "oc-1"},
+		{name: "session affinity", headers: map[string]string{"x-session-affinity": "aff-1"}, want: "aff-1"},
+		{name: "session id", headers: map[string]string{"X-Session-Id": "sid-1"}, want: "sid-1"},
+		{name: "opencode wins over affinity", headers: map[string]string{"X-Opencode-Session": "oc-1", "x-session-affinity": "aff-1"}, want: "oc-1"},
+		{name: "affinity wins over session id", headers: map[string]string{"x-session-affinity": "aff-1", "X-Session-Id": "sid-1"}, want: "aff-1"},
+		{name: "none", headers: map[string]string{}, want: ""},
+		{name: "blank is ignored", headers: map[string]string{"X-Session-Id": "   ", "x-session-affinity": "aff-2"}, want: "aff-2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := http.Header{}
+			for key, value := range tc.headers {
+				h.Set(key, value)
+			}
+			if got := clientSessionHeader(h); got != tc.want {
+				t.Fatalf("clientSessionHeader = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCodexSessionAffinityHeaderStable guards the OpenCode-through-Tiller cache
+// affinity path: OpenCode sends x-session-affinity / X-Session-Id (not
+// x-opencode-session) to third-party providers, and those must map to one
+// stable upstream Codex session-id across turns while an absent header keeps
+// requests isolated.
+func TestCodexSessionAffinityHeaderStable(t *testing.T) {
+	var mu sync.Mutex
+	sessions := []string{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{map[string]any{"slug": "gpt-5.6-sol", "display_name": "gpt-5.6-sol", "supported_in_api": true}}})
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "gpt-5.6-sol"}}})
+		case "/responses":
+			mu.Lock()
+			sessions = append(sessions, r.Header.Get("session-id"))
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp-1", "object": "response", "model": "gpt-5.6-sol", "output_text": "ok"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	router := httptest.NewServer(app.Handler())
+	t.Cleanup(router.Close)
+
+	jar, _ := cookiejar.New(nil)
+	api := &testAPI{t: t, base: router.URL, client: &http.Client{Jar: jar}, server: app}
+	status, payload, _ := api.request("POST", "/api/admin/session", map[string]any{"username": "admin", "password": "correct horse"})
+	if status != 200 {
+		t.Fatalf("login: %d %v", status, payload)
+	}
+	api.csrf = payload["csrf_token"].(string)
+
+	status, payload, _ = api.request("POST", "/api/admin/providers", map[string]any{"name": "codex-mock", "type": "codex-subscription", "base_url": upstream.URL, "protocols": []any{"responses"}})
+	if status != 201 {
+		t.Fatalf("create provider: %d %v", status, payload)
+	}
+	providerID := payload["id"].(string)
+
+	future := time.Now().Add(time.Hour)
+	store := oauth.NewStore(db.SQL)
+	if err := store.Put(context.Background(), oauth.TokenRecord{
+		ProviderID: providerID, AccessToken: "live-token", RefreshToken: "refresh-token", TokenType: "Bearer",
+		ExpiresAt: &future, AuthState: oauth.AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatal(payload)
+	}
+	var modelID string
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["upstream_model_id"] == "gpt-5.6-sol" {
+			modelID = m["id"].(string)
+		}
+	}
+	if modelID == "" {
+		t.Fatal("mock upstream did not expose gpt-5.6-sol")
+	}
+
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "test client", "description": "codex-affinity", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+	clientSecret := payload["secret"].(string)
+	status, payload, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{"defaults": []any{}, "permissions": []any{map[string]any{"kind": "real", "model_id": modelID, "enabled": true}}})
+	if status != 204 {
+		t.Fatalf("permissions: %d %v", status, payload)
+	}
+
+	call := func(header, value string) {
+		t.Helper()
+		encoded, _ := json.Marshal(map[string]any{"model": "codex-mock/gpt-5.6-sol", "input": "hello"})
+		req, _ := http.NewRequest("POST", api.base+"/v1/responses", bytes.NewReader(encoded))
+		req.Header.Set("Authorization", "Bearer "+clientSecret)
+		req.Header.Set("Content-Type", "application/json")
+		if header != "" {
+			req.Header.Set(header, value)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("request status = %d", resp.StatusCode)
+		}
+	}
+
+	call("X-Session-Id", "conv-1")
+	call("x-session-affinity", "conv-1")
+	call("", "")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(sessions) != 3 {
+		t.Fatalf("expected 3 upstream requests, got %d", len(sessions))
+	}
+	if sessions[0] == "" || sessions[1] == "" {
+		t.Fatalf("client-affinity requests must carry a session-id, got %v", sessions)
+	}
+	if sessions[0] != sessions[1] {
+		t.Fatalf("same conversation affinity must map to one session-id: %q vs %q", sessions[0], sessions[1])
+	}
+	if sessions[2] == sessions[0] {
+		t.Fatalf("headerless request must stay isolated, but reused %q", sessions[2])
 	}
 }
 

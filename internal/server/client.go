@@ -867,7 +867,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			providers.ApplyRequestAuth(req, candidate.Provider)
 			copySafeFeatureHeaders(req.Header, r.Header, target)
 			if candidate.Provider.Type == "codex-subscription" {
-				sessionID, source := codexSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID, row.clientKeyID)
+				sessionID, source := codexSessionID(clientSessionHeader(r.Header), row.clientRequestID, row.clientKeyID)
 				codexSessionSource = source
 				req.Header.Set("session-id", sessionID)
 				req.Header.Set("x-client-request-id", row.clientRequestID)
@@ -1474,9 +1474,25 @@ func openCodeSessionID(clientValue, requestID, clientKeyID string) string {
 	return "tiller-" + strings.TrimSpace(requestID)
 }
 
-// codexSessionID keeps Codex prompt/cache affinity stable when an OpenCode
-// client supplies a conversation identity, while preserving request isolation
-// for generic clients that do not provide one.
+// clientSessionHeader returns the client-supplied conversation identity from
+// the first session header present, or "" when none is provided.
+//
+// OpenCode only sends x-opencode-session when the provider ID starts with
+// "opencode". A third-party OpenAI-compatible provider (Tiller included) gets
+// x-session-affinity / X-Session-Id instead, so prompt-cache affinity needs to
+// accept all three header shapes.
+func clientSessionHeader(h http.Header) string {
+	for _, name := range []string{"x-opencode-session", "x-session-affinity", "x-session-id"} {
+		if v := strings.TrimSpace(h.Get(name)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// codexSessionID keeps Codex prompt/cache affinity stable when a client
+// supplies a conversation identity, while preserving request isolation for
+// generic clients that do not provide one.
 func codexSessionID(clientValue, requestID, clientKeyID string) (string, string) {
 	if strings.TrimSpace(clientValue) != "" {
 		return openCodeSessionID(clientValue, requestID, clientKeyID), "client"
