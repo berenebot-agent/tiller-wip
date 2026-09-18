@@ -1,0 +1,148 @@
+/* Activity living pane: single shared force-layout graph.
+   Only active routes are shown; legs fade away 30s after going quiet.
+   Edge states: req (carrying a request) / ok (served) / failed (no response)
+   / cool (cooldown skip) / fading (melting away). */
+.graph-stage {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  position: relative;
+  overflow: auto;
+}
+.graph-stage svg {
+  display: block;
+  width: 100%;
+  min-width: 760px;
+  height: 600px;
+  background: radial-gradient(circle at 50% 40%, #fbfdfe, #eef3f6);
+}
+.graph-stage .empty-state {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  pointer-events: none;
+}
+.col-title {
+  font: 700 11px var(--mono);
+  fill: var(--muted);
+  letter-spacing: 0.12em;
+}
+.edge {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+  transition: stroke 0.5s, opacity 0.5s;
+}
+.edge.fading {
+  opacity: 0;
+  transition: opacity 2s;
+  pointer-events: none;
+}
+.edge.idle {
+  stroke: #c7d3dc;
+  opacity: 0.55;
+}
+.edge.req {
+  stroke: var(--blue);
+  opacity: 1;
+}
+.edge.pending {
+  stroke: #4db2ff;
+  opacity: 1;
+  stroke-dasharray: 8 3;
+  animation: pending-dash 0.8s linear infinite;
+}
+@keyframes pending-dash {
+  to {
+    stroke-dashoffset: -11;
+  }
+}
+/* The roundel: a ring around each node that owns the outcome. Edges are
+   flow-only; this is where served/failed/skipped reads from. */
+.node-ring {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 2.5;
+}
+.node-ring.st-active {
+  stroke: #4db2ff;
+  animation: node-pulse 1.05s ease-in-out infinite;
+}
+.node-ring.st-served {
+  stroke: var(--green);
+}
+.node-ring.st-failed {
+  stroke: var(--red);
+}
+/* Skipped targets are a solid red dot with no outer ring. */
+.node-ring.st-skipped {
+  display: none;
+}
+.node-body.st-skipped {
+  fill: var(--red);
+}
+.node-clickable {
+  cursor: pointer;
+  user-select: none;
+  touch-action: none;
+}
+.node-clickable:hover .node-body,
+.node-clickable:focus-visible .node-body {
+  stroke: #77bce8;
+  stroke-width: 3px;
+}
+@keyframes node-pulse {
+  0%, 100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.node-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  fill: var(--navy);
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 5px;
+  stroke-linejoin: round;
+}
+.node-sub {
+  font-size: 10px;
+  fill: var(--muted);
+  paint-order: stroke;
+  stroke: #fff;
+  stroke-width: 4px;
+  stroke-linejoin: round;
+}
+.node-enter {
+  animation: node-pop 0.35s ease-out;
+}
+@keyframes node-pop {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.packet {
+  stroke: #fff;
+  stroke-width: 1;
+  pointer-events: none;
+}
+@media (max-width: 760px) {
+  .graph-stage svg {
+    height: 440px;
+  }
+}

@@ -217,8 +217,10 @@ func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
 }
 
 // TestRecordLastOutcomeOrderedFallback records per-target outcomes across an
-// ordered fallback chain: the failed target turns red, the succeeding target
-// turns green, each reflecting its own last outcome.
+// ordered fallback chain. Target health is per-target: the failed primary is
+// recorded unhealthy even though the logical request succeeded via the
+// backup. Request health is a separate concept. The graph receives both
+// outcomes.
 func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 	s := &Server{}
 	row := &logRow{
@@ -233,8 +235,8 @@ func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
 	failed, ok := s.lastOutcome["pm-primary"]
-	if !ok || failed.IsSuccess {
-		t.Fatalf("expected failed target red: %v", s.lastOutcome)
+	if !ok || failed.IsSuccess || failed.Status != 503 {
+		t.Fatalf("failed primary must degrade target health: %v", s.lastOutcome)
 	}
 	success, ok := s.lastOutcome["pm-backup"]
 	if !ok || !success.IsSuccess {
@@ -290,8 +292,9 @@ func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) 
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	if got := s.lastOutcome["pm-primary"]; got.Status != 0 || got.IsSuccess {
-		t.Fatalf("network failure outcome = %+v, want status 0 and failure", got)
+	primary, ok := s.lastOutcome["pm-primary"]
+	if !ok || primary.IsSuccess || primary.Status != 0 {
+		t.Fatalf("failed primary must degrade target health with status 0: %+v", s.lastOutcome)
 	}
 	if got := s.lastOutcome["pm-backup"]; got.Status != 200 || !got.IsSuccess {
 		t.Fatalf("fallback success outcome = %+v", got)
@@ -438,11 +441,12 @@ func TestUsageTargetHealthIncludesFailedAttempts(t *testing.T) {
 		t.Fatalf("failed target health wrong: %+v", a)
 	}
 
-	// Skipped target: surfaces as failure too — it was attempted, the
-	// router declined to call it, that is a health signal.
+	// Skipped target: surfaces (it was attempted) but is neutral, not a
+	// failure. The router declined to call it, which says nothing about the
+	// target's health.
 	if b, ok := health["provider-a/model-b"].(map[string]any); !ok {
 		t.Fatalf("expected skipped target in target_health, got %v", health)
-	} else if b["success_24h"] != false || b["failure_1h"] != true {
+	} else if b["success_24h"] != false || b["failure_1h"] != false || b["success_1h"] != false {
 		t.Fatalf("skipped target health wrong: %+v", b)
 	}
 
@@ -451,5 +455,53 @@ func TestUsageTargetHealthIncludesFailedAttempts(t *testing.T) {
 		t.Fatalf("expected success target in target_health, got %v", health)
 	} else if c["success_24h"] != true || c["failure_1h"] != false || c["success_1h"] != true {
 		t.Fatalf("success target health wrong: %+v", c)
+	}
+}
+
+// TestUsageTargetHealthCountsFailedTargetOnResolvedRequest verifies that a
+// target which failed while a later fallback served the logical request is
+// still reported as a target failure. Request health (served = 2xx) and
+// target health (this target failed) are separate: a working fallback must
+// not mask a broken primary. Regression for the semantic where logical
+// request success suppressed the failed target's red state.
+func TestUsageTargetHealthCountsFailedTargetOnResolvedRequest(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	now := time.Now().UTC()
+
+	// The logical request was served by provider-b/model-c (http_status 200,
+	// resolved_provider/resolved_model point at the fallback), but the primary
+	// target provider-a/model-a failed first.
+	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,attempt_count,fallback_used,fallback_reason,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"resolved", clientID, "virtual/coding", "virtual/coding", "virtual", "v1", "virtual/coding", "provider-b", "model-c", "chat", 0, 200, 12, 2, 1, "upstream_error", "req-resolved", now.Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	// Failed primary attempt (500).
+	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		"a-failed", "resolved", 1, "provider-a", "model-a", "failed", 500, "upstream_error", 4, now.Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	// Successful fallback attempt.
+	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"c-success", "resolved", 2, "provider-b", "model-c", "success", 200, 8, now.Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	health := payload["target_health"].(map[string]any)
+
+	// Failed primary must stay red even though the request was served.
+	if a, ok := health["provider-a/model-a"].(map[string]any); !ok {
+		t.Fatalf("expected failed primary in target_health, got %v", health)
+	} else if a["failure_1h"] != true || a["success_1h"] != false || a["success_24h"] != false {
+		t.Fatalf("failed primary on resolved request must report failure_1h: %+v", a)
+	}
+	// The fallback that served the request is healthy.
+	if c, ok := health["provider-b/model-c"].(map[string]any); !ok {
+		t.Fatalf("expected serving target in target_health, got %v", health)
+	} else if c["success_1h"] != true || c["failure_1h"] != false {
+		t.Fatalf("serving target health wrong: %+v", c)
 	}
 }

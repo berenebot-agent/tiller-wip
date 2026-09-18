@@ -12,7 +12,7 @@ import (
 func translatedSSE(t *testing.T, input string, incoming, target providers.Protocol) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	if err := translateSSE(rec, bufio.NewReader(strings.NewReader(input)), incoming, target, "client-model", nil); err != nil {
+	if err := translateSSE(rec, nil, bufio.NewReader(strings.NewReader(input)), incoming, target, "client-model", nil); err != nil {
 		t.Fatalf("translateSSE: %v", err)
 	}
 	return rec.Body.String()

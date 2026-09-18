@@ -4,6 +4,63 @@ All notable changes to Tiller Router are recorded here. This project follows
 semantic versioning conventions where practical; the beta API and deployment
 behavior may still change before a stable `1.0`.
 
+## [Unreleased]
+
+### Added
+
+- **Activity living-pane graph.** The Activity view now renders live request
+  legs as a graph (self-hosted D3, no CDN) with an active-only pane, per-client
+  legs, and click-through from graph nodes into the request dialog. Cooldown
+  state is shown inline.
+- **Sanitized upstream provider errors surfaced.** Upstream failures now
+  surface a sanitized, actionable error instead of an opaque failure.
+
+### Fixed
+
+- **Ordered fallback now survives empty or errored 2xx streams.** A target that
+  returns HTTP 200 but delivers an explicit upstream stream error, or ends
+  without any assistant output before client-visible bytes, is treated as a
+  failed attempt so the chain advances to the next configured target. Both new
+  classes (`upstream_stream_error`, `empty_response`) also open a target
+  cooldown. Previously Tiller committed to the first 2xx header and relayed the
+  empty response to the client, so a broken upstream could stall the whole
+  chain.
+- **Codex / SSE robustness.** Preserved upstream SSE negotiation, exact SSE
+  accept handling, streaming keepalives, and resolution of UI reasoning aliases
+  to wire efforts.
+- **Activity pane correctness.** No more phantom middle-lane routes for direct
+  real-model requests; orphan models, graph stalls, and skipped-leg rendering
+  fixed; models added after the pane loads now resolve; redundant real-model
+  sublabels dropped and long labels wrap.
+- **Parallel requests from one client key no longer collapse.** Live
+  in-flight activity is now tracked per (client key, route) instead of per
+  client key alone, so an OpenCode/Tiller client running two routes at once
+  (for example `main` → Claude and `coding` → Codex) keeps both virtual-model
+  spinners and both Activity graph legs lit. The client status roundel still
+  consumes a folded per-client aggregate. Previously a second concurrent route
+  overwrote the first route's identity on the single per-client ticket.
+- **Admin dialog guards.** Stale entity submits no longer close a reopened
+  dialog; search fields aligned across views; activity dialog scroll resets on
+  open.
+
+### Changed
+
+- **Admin Usage cold-load performance.** Route attribution is indexed
+  (migration `027`) and the usage snapshot is cached, removing the cold-load
+  lag on the Usage view.
+- **Admin pages render before usage loads.** The Real Models, Virtual Models,
+  and Clients views no longer block their first paint on the usage/health
+  aggregation. Catalogue rows render immediately; token and cache cells show a
+  loading spinner until the live SSE snapshot (or the fallback fetch) arrives
+  and patches them in place. Previously every view awaited the usage endpoint —
+  the slowest call — before rendering anything, and unknown cells were
+  indistinguishable from a "no traffic" dash. Because the Real Models table
+  defaults to a usage-based sort, it is re-sorted once when usage first arrives
+  (honouring the user's current column and direction) so it never sits in
+  catalogue order under a "1h ↓" header.
+- **Catalogue capability docs.** README documents the limits of catalogue
+  capability metadata.
+
 ## [0.1.0-beta.2] - 2026-09-08
 
 Second public beta. Highlights: sign in to your existing AI subscriptions,

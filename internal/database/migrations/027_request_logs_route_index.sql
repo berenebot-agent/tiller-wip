@@ -1,0 +1,16 @@
+-- Composite index for virtual-model usage/health attribution.
+--
+-- The usage snapshot and Activity queries attribute request_logs to virtual
+-- models with a three-branch OR predicate (see internal/server/attribution.go,
+-- virtualAttributionJoin): route_kind='virtual' AND route_model_id, plus the
+-- legacy route_status='legacy' AND route_kind IS NULL branches matched by
+-- requested_model / route_model. Without an index the planner scans the whole
+-- created_at window once per branch, which on a large request_logs table made
+-- the per-snapshot virtual aggregation cost hundreds of milliseconds.
+--
+-- This index serves all three branches: the leading route_kind column is an
+-- equality match for every branch, route_model_id covers the primary branch,
+-- and the legacy branches fall back to a route_kind-only prefix scan that the
+-- trailing created_at still bounds. Measured on a 48k-row/216 MB database:
+-- the virtual aggregation dropped from ~290 ms to ~22 ms with no ANALYZE.
+CREATE INDEX request_logs_route_created ON request_logs(route_kind, route_model_id, created_at);

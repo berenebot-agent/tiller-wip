@@ -27,7 +27,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE /out/licenses/modernc.org-memory-LICENSE && \
     cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE-GO /out/licenses/modernc.org-memory-LICENSE-GO && \
     cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE-LOGO /out/licenses/modernc.org-memory-LICENSE-LOGO && \
-    cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE-MMAP-GO /out/licenses/modernc.org-memory-LICENSE-MMAP-GO
+    cp /go/pkg/mod/modernc.org/memory@v1.11.0/LICENSE-MMAP-GO /out/licenses/modernc.org-memory-LICENSE-MMAP-GO && \
+    cp internal/web/assets/D3-LICENSE /out/licenses/d3-LICENSE
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/tiller-router/tiller-router/internal/version.Version=${TILLER_VERSION} -X github.com/tiller-router/tiller-router/internal/version.Commit=${TILLER_COMMIT}" -o /out/tiller-router ./cmd/tiller-router
 RUN mkdir -p /out/data && chmod 0700 /out/data
 RUN mkdir -p /out/tmp && chmod 1777 /out/tmp

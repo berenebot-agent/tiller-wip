@@ -38,6 +38,7 @@
 
 .combobox-wrap { min-width: 0; }
 .target-error { display: block; margin-top: 3px; color: var(--red); font: 700 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
+.target-action-text { display: none; }
 
 .route-table td:first-child .meta-line { display: block; }
 
@@ -84,3 +85,71 @@
 .attempt-cooldown .attempt-status { color: var(--muted); }
 .fallback-label { display: block; margin-top: 4px; color: var(--red); font: 700 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
 .fallback-hint { display: block; margin: 6px 0 10px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+
+.routing-targets[data-fallback-targets] {
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #f8fafb;
+}
+
+.routing-targets[data-fallback-targets] .target-row {
+  grid-template-columns: 28px minmax(0, 1fr) 34px auto;
+  padding: 10px 0;
+}
+
+.routing-targets[data-fallback-targets] .target-enable {
+  min-height: 34px;
+}
+
+.routing-targets[data-fallback-targets] .target-actions button {
+  font-weight: 700;
+}
+
+@media (max-width: 720px) {
+  #form-dialog:not(.route-picker-dialog) {
+    max-height: 92vh;
+  }
+
+  #form-dialog:not(.route-picker-dialog) form {
+    max-height: 92vh;
+  }
+
+  .routing-targets[data-fallback-targets] {
+    padding: 8px;
+  }
+
+  .routing-targets[data-fallback-targets] .target-row {
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    gap: 6px;
+  }
+
+  .routing-targets[data-fallback-targets] .target-actions {
+    grid-column: 2 / 4;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    width: 100%;
+    padding-top: 4px;
+  }
+
+  .routing-targets[data-fallback-targets] .target-actions button {
+    height: 35px;
+    border: 1px solid var(--line);
+    background: white;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+  }
+
+  .routing-targets[data-fallback-targets] .target-action-glyph {
+    font-size: 16px;
+  }
+
+  .routing-targets[data-fallback-targets] .target-action-text {
+    display: inline;
+    font: 700 9px var(--mono);
+    letter-spacing: .03em;
+    text-transform: uppercase;
+  }
+}

@@ -84,6 +84,118 @@ test('thinking modes remain configurable when selector options are empty', async
   await expect(dialog.locator('[data-reasoning-state="known"]')).not.toContainText('No configurable selectors');
 });
 
+// The catalogue order (alpha, zeta) deliberately differs from both the default
+// 1h-desc order (zeta first — zeta has the traffic) and the canonical-asc order
+// (alpha first), so the two sorts are distinguishable.
+const sortModels = [
+  { id: 'model-alpha', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'alpha', canonical_model_id: 'forge/alpha', available: true, native_protocol: 'chat' },
+  { id: 'model-zeta', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'zeta', canonical_model_id: 'forge/zeta', available: true, native_protocol: 'chat' },
+];
+
+// mockDeferredUsageCatalogue stubs the admin API and delays only the usage
+// endpoint, so the models table paints (in catalogue order) before usage
+// arrives. EventSource is stubbed so the deferred fetch is the sole source.
+async function mockDeferredUsageCatalogue(page, usageDelayMs) {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.addInitScript(() => { window.EventSource = class { addEventListener() {} close() {} }; });
+  await page.route('**/api/admin/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/admin/usage') {
+      await new Promise(resolve => setTimeout(resolve, usageDelayMs));
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          target_last_outcome: {}, target_health: {},
+          real_models: { 'forge/alpha': { '1h': 10, '24h': 10, '7d': 10 }, 'forge/zeta': { '1h': 9999, '24h': 9999, '7d': 9999 } },
+          real_cache: {},
+        }),
+      });
+    }
+    if (path === '/api/admin/models') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: sortModels, limit: 200, offset: 0 }) });
+    if (path === '/api/admin/providers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'p1', name: 'forge', enabled: true, protocols: ['chat'] }], limit: 200, offset: 0 }) });
+    return route.continue();
+  });
+}
+
+// Regression: the Models table renders before the usage envelope arrives, so a
+// usage-based sort (the default is 1h desc) sees every row as zero and keeps
+// catalogue order. Once usage lands the rows must be re-sorted to honour the
+// active sort.
+test('models table re-sorts by usage once the deferred envelope arrives', async ({ page }) => {
+  await mockDeferredUsageCatalogue(page, 1200);
+  await openAdmin(page);
+  await page.getByRole('link', { name: 'Real Models' }).click();
+  const rows = page.locator('#models-body tr[data-model-id]');
+  await expect(rows).toHaveCount(2);
+  // Default sort is 1h desc: the high-usage model must lead once usage arrives,
+  // despite the API returning it second.
+  await expect.poll(() => rows.first().getAttribute('data-model-id'), { timeout: 6000 }).toBe('model-zeta');
+  await expect(rows.nth(1)).toHaveAttribute('data-model-id', 'model-alpha');
+});
+
+// The one-time usage re-sort must never override a user's chosen sort. Here the
+// user switches to canonical (asc) while usage is still pending; when usage
+// lands the rows must remain in canonical order, not jump to 1h-desc.
+test('models table does not override a user-chosen sort when usage arrives', async ({ page }) => {
+  await mockDeferredUsageCatalogue(page, 3000);
+  await openAdmin(page);
+  await page.getByRole('link', { name: 'Real Models' }).click();
+  const rows = page.locator('#models-body tr[data-model-id]');
+  await expect(rows).toHaveCount(2);
+
+  // Canonical asc puts alpha first — the opposite of the 1h-desc order, so this
+  // is a real discriminator.
+  await page.locator('th[data-sort="canonical"]').click();
+  await expect(rows.first()).toHaveAttribute('data-model-id', 'model-alpha');
+
+  // Wait for the delayed usage to land, then confirm canonical order held.
+  await expect.poll(() => page.evaluate(() => document.querySelectorAll('#models-body .tok .tok-loading').length), { timeout: 8000 }).toBe(0);
+  await expect(rows.first()).toHaveAttribute('data-model-id', 'model-alpha');
+  await expect(rows.nth(1)).toHaveAttribute('data-model-id', 'model-zeta');
+});
+
+// The usage sort cascades through longer windows: the default 1h sort ranks by
+// 1h first, then breaks 1h ties on 24h (and 24h ties on 7d) before falling back
+// to canonical ascending. Here gamma leads on 1h; beta and alpha are tied at 0
+// and beta wins the 24h tiebreak. The API catalogue order (gamma, alpha, beta)
+// and canonical asc (alpha, beta, gamma) are both different again, so this can
+// only pass if the 24h tiebreak is applied.
+const cascadeModels = [
+  { id: 'model-gamma', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'gamma', canonical_model_id: 'forge/gamma', available: true, native_protocol: 'chat' },
+  { id: 'model-alpha', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'alpha', canonical_model_id: 'forge/alpha', available: true, native_protocol: 'chat' },
+  { id: 'model-beta', provider_id: 'p1', provider_name: 'forge', upstream_model_id: 'beta', canonical_model_id: 'forge/beta', available: true, native_protocol: 'chat' },
+];
+
+test('models table cascades usage sort through longer windows', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.addInitScript(() => { window.EventSource = class { addEventListener() {} close() {} }; });
+  await page.route('**/api/admin/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/admin/usage') return route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        target_last_outcome: {}, target_health: {},
+        real_models: {
+          'forge/alpha': { '1h': 0, '24h': 0, '7d': 100 },
+          'forge/beta': { '1h': 0, '24h': 50, '7d': 0 },
+          'forge/gamma': { '1h': 5, '24h': 0, '7d': 0 },
+        },
+        real_cache: {},
+      }),
+    });
+    if (path === '/api/admin/models') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: cascadeModels, limit: 200, offset: 0 }) });
+    if (path === '/api/admin/providers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'p1', name: 'forge', enabled: true, protocols: ['chat'] }], limit: 200, offset: 0 }) });
+    return route.continue();
+  });
+  await openAdmin(page);
+  await page.getByRole('link', { name: 'Real Models' }).click();
+  const rows = page.locator('#models-body tr[data-model-id]');
+  await expect(rows).toHaveCount(3);
+  await expect(rows.nth(0)).toHaveAttribute('data-model-id', 'model-gamma');
+  await expect(rows.nth(1)).toHaveAttribute('data-model-id', 'model-beta');
+  await expect(rows.nth(2)).toHaveAttribute('data-model-id', 'model-alpha');
+});
+
 test('virtual capabilities dialog leads with aggregate, preserves target metadata, and wraps on mobile', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openAdmin(page);
@@ -117,11 +229,12 @@ test('virtual capabilities dialog leads with aggregate, preserves target metadat
     }]
   });
 
-  await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.getByRole('link', { name: 'Virtual Models' }).click();
-  const row = page.locator('tr[data-virtual-id="virtual-capability"]');
-  await expect(row).toBeVisible();
-  await row.getByRole('button', { name: 'Capabilities' }).click();
+await page.locator('#nav-quick').getByRole('link', { name: 'Virtual Models' }).click();
+// Mobile renders virtual models as cards, not the hidden desktop table.
+const card = page.locator('.virtual-model-card', { hasText: 'routing/reasoning' });
+await expect(card).toBeVisible();
+await card.locator('.mobile-card-head').click();
+await card.getByRole('button', { name: 'Capabilities' }).click();
   const dialog = page.locator('#capabilities-dialog');
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText('AGGREGATE / ADVERTISED TO HERMES + V1');

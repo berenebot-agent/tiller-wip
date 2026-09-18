@@ -54,6 +54,15 @@ type requestAttempt struct {
 	errorMessage                                           *string
 	errorBody                                              *string
 	errorBodyTruncated                                     bool
+	readCause                                              string
+	clientCtxErr                                           string
+	attemptTimedOut                                        bool
+	upstreamStreaming                                      bool
+	headerLatencyMs                                        int64
+	// clientError is the sanitized, client-facing detail for a failed attempt
+	// (provider error message/code/param). It is never persisted or exposed via
+	// Activity; it exists only to build a client error response.
+	clientError string
 }
 
 const maxLoggedBodyBytes = 1 << 20
@@ -117,7 +126,13 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 }
 
 // recordLastOutcome updates operational target status from actual attempts.
-// Skipped targets were not called and therefore do not receive an outcome.
+// Every attempted or skipped target gets an explicit outcome in the live
+// delta so the graph can colour it. Target health is per-target: a genuine
+// upstream failure degrades the target even when a later fallback rescues the
+// request. Request health (whether the logical request was served) is a
+// separate concept and is not recorded here. Skipped targets were never
+// called and client-caused failures say nothing about the target, so neither
+// degrades it.
 func (s *Server) recordLastOutcome(row *logRow) {
 	if len(row.attempts) == 0 {
 		return
@@ -132,15 +147,36 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		if attempt.providerModelID == "" {
 			continue
 		}
+		// A failure caused by the client ending the request (cancel/timeout)
+		// says nothing about the target. Never let it degrade the target or
+		// show up as a failed leg.
+		if attempt.result != "success" && clientCausedFailure(attempt) {
+			continue
+		}
+		out := lastOutcome{At: recordedAt, Status: attempt.httpStatus, Result: attempt.result, FailureClass: attempt.failureClass}
 		switch attempt.result {
 		case "success":
-			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
-			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: true}
+			out.IsSuccess = true
+			out.Degrading = true
 		case "failed":
 			// Preserve zero: a network failure has no HTTP response, even if a
 			// later fallback succeeds and sets the logical row status to 2xx.
-			s.lastOutcome[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
-			delta[attempt.providerModelID] = lastOutcome{At: recordedAt, Status: attempt.httpStatus, IsSuccess: false}
+			out.IsSuccess = false
+			// A genuine upstream failure is a target-health signal on its own,
+			// independent of whether the logical request was ultimately served
+			// by a fallback.
+			out.Degrading = true
+		case "skipped":
+			// A skipped target was never called. It shows as an amber leg on
+			// the graph but never paints the target unhealthy on the main page.
+			out.IsSuccess = false
+			out.Degrading = false
+		default:
+			continue
+		}
+		delta[attempt.providerModelID] = out
+		if out.Degrading {
+			s.lastOutcome[attempt.providerModelID] = out
 		}
 	}
 	s.lastOutcomeMu.Unlock()
@@ -150,6 +186,16 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	if len(delta) > 0 && s.liveHub != nil {
 		s.liveHub.emitOutcome(delta)
 	}
+}
+
+// clientCausedFailure reports whether an attempt failed because the client
+// ended the request rather than because the target misbehaved. The request
+// context error is captured on the attempt for exactly this distinction.
+func clientCausedFailure(attempt requestAttempt) bool {
+	if attempt.failureClass == "client_cancelled" || attempt.failureClass == "client_timeout" {
+		return true
+	}
+	return attempt.clientCtxErr != ""
 }
 
 func nullInt(v int) any {
@@ -184,6 +230,7 @@ func (s *Server) pruneRequestLogs(ctx context.Context) {
 		cutoff := time.Now().UTC().Add(-time.Duration(d) * 24 * time.Hour).Format(time.RFC3339Nano)
 		_, _ = s.db.SQL.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id IN (SELECT id FROM client_keys WHERE retention_days=?) AND created_at < ?`, d, cutoff)
 	}
+	s.invalidateUsageAggregates()
 }
 
 // usageCapture accumulates token counts extracted from a response body in

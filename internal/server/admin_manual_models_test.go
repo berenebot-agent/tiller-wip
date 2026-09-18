@@ -77,6 +77,14 @@ func TestManualModelLookupAddAndDelete(t *testing.T) {
 	if !found {
 		t.Fatalf("manual model %s missing from catalogue", manualID)
 	}
+	status, payload, _ = api.request("GET", "/api/admin/models?all=1&search=provider-a%2Fmodel-meta", nil)
+	if status != 200 {
+		t.Fatalf("canonical model search: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != manualID {
+		t.Fatalf("canonical model search returned %v, want %s", data, manualID)
+	}
 
 	status, _, _ = api.request("POST", "/api/admin/providers/"+providerID+"/models", map[string]any{"upstream_model_id": "model-meta"})
 	if status != 409 {

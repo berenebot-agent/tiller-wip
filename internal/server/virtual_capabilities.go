@@ -237,6 +237,19 @@ func mergeReasoningCapabilities(a, b *providers.ReasoningCapabilities) *provider
 		}
 		result.ThinkingModes = modes
 	}
+	// Effort aliases are a union; first target wins on a conflict. Routing
+	// resolves aliases per selected target, so this is aggregate display only.
+	if len(a.EffortAliases) > 0 || len(b.EffortAliases) > 0 {
+		result.EffortAliases = make(map[string]string, len(a.EffortAliases)+len(b.EffortAliases))
+		for key, value := range a.EffortAliases {
+			result.EffortAliases[key] = value
+		}
+		for key, value := range b.EffortAliases {
+			if _, exists := result.EffortAliases[key]; !exists {
+				result.EffortAliases[key] = value
+			}
+		}
+	}
 	return result
 }
 

@@ -81,6 +81,14 @@ func TestClientActivityCSVExport(t *testing.T) {
 	if len(records) != 2 {
 		t.Fatalf("search export should have header + 1 row, got %d", len(records))
 	}
+	status, body = getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export?search=upstream-a")
+	if status != 200 {
+		t.Fatalf("provider request ID export search: %d", status)
+	}
+	records, _ = csv.NewReader(strings.NewReader(body)).ReadAll()
+	if len(records) != 2 {
+		t.Fatalf("provider request ID export search should have header + 1 row, got %d", len(records))
+	}
 }
 
 func TestClientActivityCSVExportPeriodFilter(t *testing.T) {
@@ -230,6 +238,14 @@ func TestVirtualActivityListScopedToModel(t *testing.T) {
 	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-a" {
 		t.Fatalf("virtual activity not scoped: %v", data)
 	}
+	status, payload, _ = api.request("GET", "/api/admin/virtual-models/"+virtualID+"/activity?search=model-a", nil)
+	if status != 200 {
+		t.Fatalf("virtual activity search: %d %v", status, payload)
+	}
+	data = payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-a" {
+		t.Fatalf("virtual activity search by resolved model failed: %v", data)
+	}
 	status, _, _ = api.request("GET", "/api/admin/virtual-models/does-not-exist/activity", nil)
 	if status != 404 {
 		t.Fatalf("expected 404 for unknown virtual model, got %d", status)
@@ -317,6 +333,14 @@ func TestRealModelActivityListScopedToModel(t *testing.T) {
 	data := payload["data"].([]any)
 	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-a" {
 		t.Fatalf("real model activity not scoped: %v", data)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/models/"+modelID+"/activity?search=model-a", nil)
+	if status != 200 {
+		t.Fatalf("real model activity search: %d %v", status, payload)
+	}
+	data = payload["data"].([]any)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-a" {
+		t.Fatalf("real model activity search by resolved model failed: %v", data)
 	}
 	status, _, _ = api.request("GET", "/api/admin/models/does-not-exist/activity", nil)
 	if status != 404 {

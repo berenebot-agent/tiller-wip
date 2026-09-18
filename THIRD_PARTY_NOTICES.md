@@ -2,8 +2,8 @@
 
 Tiller Router is distributed under the [GNU Affero General Public License,
 version 3](LICENSE). The dependencies below are separate works; their own
-licenses continue to apply. Versions are the direct and transitive Go modules
-listed in this repository's `go.mod`.
+licenses continue to apply. Go module versions are the direct and transitive
+modules listed in this repository's `go.mod`.
 
 ## Go modules
 
@@ -29,6 +29,12 @@ checkout. The container image includes the applicable dependency license texts
 under `/licenses`, including embedded subcomponent notices from the modernc.org
 modules. Notices and source are also available from each upstream repository.
 
+## Vendored frontend assets (shipped in the application image)
+
+| Asset | Version | License | Upstream notice |
+| --- | --- | --- | --- |
+| `internal/web/assets/d3.min.js` (D3.js, self-hosted for the Activity graph) | v7.9.0 | ISC | `internal/web/assets/D3-LICENSE`, [upstream LICENSE](https://github.com/d3/d3/blob/main/LICENSE) |
+
 ## Test-only tooling and images
 
 The browser test harness declares Playwright Test `1.55.0` in
@@ -39,6 +45,6 @@ compatibility and browser harnesses also use their declared test-container base
 images, and the reverse-proxy smoke uses the official Nginx Alpine test image.
 These test-only tools are not application runtime dependencies.
 
-No provider SDK, JavaScript bundle, or vendored third-party source is included
+No provider SDK is included
 in the application image. Review the upstream notices before redistributing a
 modified build or a test environment.

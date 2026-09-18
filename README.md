@@ -48,6 +48,8 @@ Exposes one stable model identity — usually something simple like `main` — b
 
 Exposes a controlled subset of Tiller's catalogue through `GET /v1/models`, with per-client model permissions. Useful to curate exactly which providers and models appear for a client to save wading through hundreds of rows of models you don't use.
 
+Capability metadata is informational: `/v1/models` includes `context_length` and `max_output_tokens` only when Tiller knows them, and a virtual model omits them when any eligible target is unknown. Clients do not necessarily consume these fields automatically; for example, an OpenCode custom-provider model ID under Tiller does not inherit limits from a same-named built-in provider entry, so OpenCode can report unknown context even when Tiller publishes the values.
+
 ---
 
 ## Virtual models
@@ -81,7 +83,7 @@ Each attempt is visible in Activity, including the fallback — the client gets 
 ## Features
 
 - **Steering** — fast web control panel; single and catalogue client keys; real and virtual models in one route selector; immediate route changes; stable client-facing identities.
-- **Providers & models** — credentials entered once, use accross your tools.
+- **Providers & models** — credentials entered once, use across your tools.
 - **Routing** — fixed virtual routes; ordered fallback; configurable fallback timeout.
 - **Client API** — `GET /v1/models`, `POST /v1/chat/completions`, `POST /v1/responses`, `POST /v1/messages`, covering the common OpenAI and Anthropic surfaces with safe protocol translation.
 - **Activity** — searchable, filterable, CSV-exportable request metadata (client, model, route, provider, status, latency, tokens, fallbacks).

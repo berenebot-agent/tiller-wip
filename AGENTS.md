@@ -10,6 +10,13 @@ Guardrails for any coding agent working in this repository. This file describes 
 
 - Before writing code for a new feature, confirm the scope with the human driving the change. Anything deferred is fine to build in live dev with explicit human sign-off, but never silently and never "just to see."
 - Adding a brand-new dependency, service, or infrastructure component (Redis, Postgres, message queues, vector DBs, Kubernetes, etc.) still requires an explicit, named request from a human.
+- Named frontend dependencies approved by a human are recorded here so future
+  work does not re-litigate them:
+  - **D3.js v7.9.0 (ISC)** — approved by Ben (2026-09-10) for the Activity
+    living-pane graph. Vendored self-hosted at `internal/web/assets/d3.min.js`
+    (same-origin, satisfies the `script-src 'self'` CSP); no CDN. License text
+    at `internal/web/assets/D3-LICENSE`, notice row in `THIRD_PARTY_NOTICES.md`,
+    license copy in the image under `/licenses/d3-LICENSE`.
 - Do not "clean up" the deferred-work backlog's phase ordering or scope on your own initiative. Backlog sequencing is a human decision.
 - If a task requires touching something explicitly marked deferred (e.g. credential encryption or provider-health infrastructure) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
 
@@ -80,7 +87,7 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 
 ## Behavioral guardrails for routing logic
 
-- Ordered fallback is allowed only for an explicitly configured virtual model and only before client-visible output begins. It must follow the stored target order and remain visible in Activity; every upstream non-2xx/read/connect failure is eligible unless the router itself failed or the client request was cancelled/expired. Direct real-model requests, hidden health-based rerouting, retries of the same target within a single pass, and post-output stream splicing remain forbidden. The ordered-fallback bypass pass (Pass 2, cooldown ignored) may retry targets that already failed in Pass 1 — that duplication is intentional per docs/archive/roadmap_fallback_cooldown.md and is not a "retry of the same target" violation.
+- Ordered fallback is allowed only for an explicitly configured virtual model and only before client-visible output begins. It must follow the stored target order and remain visible in Activity; every upstream non-2xx/read/connect failure, and a 2xx stream that yields an explicit upstream stream error or no assistant output before any client-visible byte, is eligible unless the router itself failed or the client request was cancelled/expired. Direct real-model requests, hidden health-based rerouting, retries of the same target within a single pass, and post-output stream splicing remain forbidden. The ordered-fallback bypass pass (Pass 2, cooldown ignored) may retry targets that already failed in Pass 1 — that duplication is intentional per docs/archive/roadmap_fallback_cooldown.md and is not a "retry of the same target" violation.
 - Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing — treat any code path that blurs it as a bug.
 - Preserve the real/virtual model permission boundary exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
 

@@ -491,7 +491,7 @@ func applyMessagesReasoning(source map[string]any, selector reasoningSelector, m
 		}
 	}
 	if selector.Effort != "" && selector.Effort != "none" {
-		if effortIsSupported(selector.Effort, opts) || unknownSupport || mode == "enabled" {
+		if effortIsSupported(selector.Effort, opts) || unknownSupport {
 			setMessagesEffort(source, selector.Effort)
 			changed = true
 		}
@@ -1043,7 +1043,7 @@ func responsesInstructionText(value any) string {
 	return ""
 }
 
-func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
+func translateResponse(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
 	reader := bufio.NewReader(r)
 	prefix, err := reader.Peek(1)
 	if err != nil {
@@ -1062,7 +1062,7 @@ func translateResponse(w http.ResponseWriter, r io.Reader, incoming, target prov
 		_, err = w.Write(translated)
 		return err
 	}
-	return translateSSE(w, reader, incoming, target, route.RequestedModel, usage)
+	return translateSSE(w, keepalive, reader, incoming, target, route.RequestedModel, usage)
 }
 
 func translateNonstreamResponse(body []byte, incoming, target providers.Protocol, model string) ([]byte, error) {
@@ -1242,18 +1242,19 @@ func chatResponseToResponses(chat map[string]any, model string) map[string]any {
 	return map[string]any{"id": chat["id"], "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": model, "output": output, "usage": usage}
 }
 
-func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
-	flusher, _ := w.(http.Flusher)
+func translateSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
+	if keepalive == nil {
+		keepalive = newSSEKeepaliveWriter(w, sseKeepaliveInterval)
+		defer keepalive.Close()
+	}
 	state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model, reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
 	for {
 		event, err := readSSEEvent(reader)
 		data := event.Data
 		if string(data) == "[DONE]" {
 			state.completed = true
-			writeStreamDone(w, incoming, state)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			writeStreamDone(keepalive, incoming, state)
+			keepalive.Flush()
 			return nil
 		}
 		if len(data) > 0 && string(data) != "[DONE]" {
@@ -1265,26 +1266,22 @@ func translateSSE(w http.ResponseWriter, reader *bufio.Reader, incoming, target 
 					if delta.Kind == "error" {
 						return errors.New("upstream stream reported failure")
 					}
-					if err := writeTranslatedEvent(w, incoming, state, delta); err != nil {
+					if err := writeTranslatedEvent(keepalive, incoming, state, delta); err != nil {
 						return err
 					}
-					if flusher != nil {
-						flusher.Flush()
-					}
+					keepalive.Flush()
 				}
 				if done {
 					state.completed = true
-					writeStreamDone(w, incoming, state)
-					if flusher != nil {
-						flusher.Flush()
-					}
+					writeStreamDone(keepalive, incoming, state)
+					keepalive.Flush()
 					return nil
 				}
 			}
 		}
 		if err != nil {
 			if err == io.EOF && state.completed {
-				writeStreamDone(w, incoming, state)
+				writeStreamDone(keepalive, incoming, state)
 				return nil
 			}
 			if err == io.EOF {
@@ -1380,6 +1377,13 @@ func coerceOrDefault(v any, fallback int64) int64 {
 func canonicalDeltas(event string, payload map[string]any, target providers.Protocol, state *streamState) ([]canonicalDelta, bool) {
 	out := []canonicalDelta{}
 	if target == providers.ProtocolChat {
+		// Some relays surface an upstream failure as a 200 SSE carrying a
+		// top-level error object. Classify it here so both the fallback probe
+		// and the translated path treat it as a failed target rather than a
+		// successful (empty) completion.
+		if payload["error"] != nil {
+			return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
+		}
 		if id, ok := payload["id"].(string); ok {
 			state.id = id
 		}
@@ -1404,6 +1408,9 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: upstreamIndex, HasUpstreamIndex: true, CallID: strField(call["id"]), Name: strField(fn["name"]), Arguments: strField(fn["arguments"])})
 			}
 			if finish, ok := choice["finish_reason"].(string); ok && finish != "" {
+				if finish == "error" {
+					return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
+				}
 				out = append(out, canonicalDelta{Kind: "finish", Finish: finish})
 			}
 		}

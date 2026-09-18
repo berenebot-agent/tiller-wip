@@ -24,10 +24,12 @@ import (
 const maxUpstreamNonStreamBytes int64 = 64 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
-// read for passthrough to the originating client. When detailed error
-// logging is enabled, the bounded body is also retained on the activity row;
-// otherwise it is written only to the client. Virtual fallback paths skip the
-// read unless detailed error logging is on.
+// read for the sanitized client error. When detailed error logging is
+// enabled, the bounded body is also retained on the activity row; otherwise
+// only the sanitized summary is kept. The read itself always happens (it
+// feeds the client error and the virtual fallback error list) but is bounded
+// by upstreamErrorReadTimeout so a stalled body never holds the fallback
+// chain hostage.
 const maxUpstreamErrorBytes int64 = 1 << 20
 
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
@@ -518,6 +520,35 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 // the AfterFunc's initial deadline.
 const idleTimeout = 5 * time.Minute
 
+// upstreamErrorReadTimeout bounds how long the router waits for an upstream
+// error body before giving up and falling back without the sanitized detail.
+// Error bodies are small and prompt; a provider that stalls its error body
+// must not delay the fallback chain (which the 5-minute idleTimeout would
+// otherwise allow). On timeout the caller keeps the generic http_N class.
+const upstreamErrorReadTimeout = 1 * time.Second
+
+// readUpstreamErrorBody reads a bounded copy of an upstream error body,
+// giving up after upstreamErrorReadTimeout. The timeout path returns a
+// non-nil error so callers skip the sanitized detail and proceed with the
+// generic message.
+func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		data, err := io.ReadAll(io.LimitReader(body, maxUpstreamErrorBytes+1))
+		ch <- result{data, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.data, res.err
+	case <-time.After(upstreamErrorReadTimeout):
+		return nil, context.DeadlineExceeded
+	}
+}
+
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
@@ -563,11 +594,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if logErrorBodies && row.httpStatus >= 400 {
 			row.requestBody, row.requestBodyTruncated = loggedBody(originalBody)
 		}
-		if route.Virtual {
-			s.inflight.end(route.RouteModelID, streamed)
-		}
+		// Single-ticket liveness: the client ticket (started below) is the
+		// only request-presence signal; route presence is derived from it.
+		// clientEnd carries the route ID, so an empty RouteModelID here
+		// (resolution failed before tracking started) emits nothing.
 		if clientTracked {
-			s.inflight.clientEnd(row.clientKeyID, streamed)
+			s.inflight.clientEnd(row.clientKeyID, route.RouteModelID, streamed)
 		}
 		if activeTargetID != "" {
 			s.inflight.targetEnd(route.RouteModelID, activeTargetID)
@@ -598,11 +630,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
-	s.inflight.clientStart(row.clientKeyID, requested)
+	s.inflight.clientStart(row.clientKeyID, route.RouteModelID, requested)
 	clientTracked = true
-	if route.Virtual {
-		s.inflight.start(route.RouteModelID)
-	}
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
 		candidates = route.Targets
@@ -626,6 +655,17 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	skippedCooled := false
 	allAttemptedFailed := true
 	var success bool
+	// streamKeepalive is created once a streaming client response is committed.
+	// Ordered-fallback probing can sit silent while an upstream produces no
+	// deltas; the writer emits SSE comment frames so a reverse proxy does not cut
+	// the client-facing connection. It is reused by the relay so only one writer
+	// ever touches w, and closed once when proxy returns.
+	var streamKeepalive *sseKeepaliveWriter
+	defer func() {
+		if streamKeepalive != nil {
+			streamKeepalive.Close()
+		}
+	}()
 	for pass := 0; pass < 2 && !success; pass++ {
 		bypass := pass == 1
 		if bypass && (!skippedCooled || !allAttemptedFailed) {
@@ -649,12 +689,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !candidate.Available {
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unavailable")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
 			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
 				skippedCooled = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "cooldown")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -673,6 +715,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "free_model_requires_keyless")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -681,11 +724,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				protocolUnavailable = true
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
+				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "protocol_unavailable")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
 			translated = target != incoming
 			attemptBody := append([]byte(nil), originalBody...)
+			codexSessionSource := ""
+			codexEffort := ""
 			if translated {
 				attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
 				if err != nil {
@@ -703,6 +749,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					}
 					translationFailureClass = code
 					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
+					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, code)
 					continue
 				}
 				// After translation, re-apply the canonical selector for the target.
@@ -728,6 +775,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 							return
 						}
 						row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+						s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
 						continue
 					}
 					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
@@ -748,7 +796,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 			}
 			if candidate.Provider.Type == "codex-subscription" {
-				attemptBody, err = normalizeCodexRequest(attemptBody)
+				attemptBody, err = normalizeCodexRequest(attemptBody, candidate.ReasoningCapabilities)
 				if err != nil {
 					row.httpStatus = 400
 					row.errorText = strPtr("invalid_request")
@@ -756,6 +804,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Codex request could not be normalized.", incoming == providers.ProtocolMessages)
 					return
 				}
+				codexEffort = codexRequestEffort(attemptBody)
 			}
 			if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
 				var compatible bool
@@ -780,6 +829,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						return
 					}
 					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
+					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
 					continue
 				}
 			}
@@ -817,25 +867,39 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			providers.ApplyRequestAuth(req, candidate.Provider)
 			copySafeFeatureHeaders(req.Header, r.Header, target)
 			if candidate.Provider.Type == "codex-subscription" {
-				req.Header.Set("session-id", row.clientRequestID)
+				sessionID, source := codexSessionID(clientSessionHeader(r.Header), row.clientRequestID, row.clientKeyID)
+				codexSessionSource = source
+				req.Header.Set("session-id", sessionID)
+				req.Header.Set("x-client-request-id", row.clientRequestID)
+				req.Header.Set("x-codex-routing-hint", "model="+candidate.UpstreamModelID)
+				// The ChatGPT Codex backend switches to SSE only when Accept is
+				// exactly text/event-stream (the official codex_cli_rs sends this
+				// exact value). A combined Accept leaves it on the buffered JSON
+				// path, which stalls long reasoning generations until a reverse
+				// proxy read timeout kills the connection. Set it after
+				// ApplyRequestAuth so the Codex-specific contract wins.
+				req.Header.Set("Accept", "text/event-stream")
 			}
 			targetID := candidate.ProviderModelID
 			if targetID == "" {
 				targetID = candidate.Provider.Name + "/" + candidate.UpstreamModelID
 			}
-			if route.Virtual {
-				s.inflight.targetStart(route.RouteModelID, targetID)
-			}
+			// Target-level tracking covers direct real-model routes too: for a
+			// real route this is the single 1:1 leg, so the Activity graph can
+			// light it (and dim it on failure) while the request is in flight.
+			s.inflight.targetStart(route.RouteModelID, targetID)
 			response, e := s.providers.Registry().HTTPClient().Do(req)
 			if e != nil {
-				if route.Virtual {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
-				}
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 				attemptCancel()
 				class := "upstream_unreachable"
 				if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
 					class = "upstream_timeout"
 				}
+				// A network error that coincides with the client ending the
+				// request is the client's, not the target's: classify it so it
+				// never degrades target health or paints a red roundel.
+				class = clientFailureClass(r.Context(), class)
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()})
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				nonTranslationFailure = true
@@ -865,6 +929,25 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
+			headerLatencyMs := time.Since(attemptStart).Milliseconds()
+			streaming := isStreamingResponse(response)
+			logCodexResponse := func(firstByteLatencyMs int64) {
+				if candidate.Provider.Type != "codex-subscription" || s.logger == nil {
+					return
+				}
+				s.logger.Info("codex upstream response",
+					"client_request_id", row.clientRequestID,
+					"provider", candidate.Provider.Name,
+					"model", candidate.UpstreamModelID,
+					"http_status", response.StatusCode,
+					"content_type", response.Header.Get("Content-Type"),
+					"upstream_streaming", streaming,
+					"header_latency_ms", headerLatencyMs,
+					"first_byte_latency_ms", firstByteLatencyMs,
+					"effort", codexEffort,
+					"session_source", codexSessionSource,
+				)
+			}
 			timedOut := &atomic.Bool{}
 			attemptTimedOut = timedOut
 			idle = time.AfterFunc(idleTimeout, func() {
@@ -874,17 +957,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			idleBody := response.Body
 			response.Body = bufferedReadCloser{Reader: &idleReader{reader: idleBody, timer: idle}, closer: idleBody}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				if route.Virtual {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
-				}
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 				class := fmt.Sprintf("http_%d", response.StatusCode)
-				var upstreamErrorBody []byte
-				var upstreamErrorReadErr error
-				if logErrorBodies {
-					// Body content is retained only by opt-in detailed error logging
-					// and is never passed through to the client.
-					upstreamErrorBody, upstreamErrorReadErr = io.ReadAll(io.LimitReader(response.Body, maxUpstreamErrorBytes+1))
-				}
+				// Always read a bounded copy: it is persisted only under opt-in
+				// detailed error logging, but a sanitized summary is always used
+				// to build the client error (direct routes) or the virtual
+				// fallback error list. The read gives up after
+				// upstreamErrorReadTimeout so a stalled body falls back
+				// without the detail instead of holding the chain hostage.
+				upstreamErrorBody, upstreamErrorReadErr := readUpstreamErrorBody(response.Body)
 				response.Body.Close()
 				idle.Stop()
 				attemptCancel()
@@ -892,8 +973,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					class = "upstream_timeout"
 				}
 				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
-				if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
-					attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
+				if upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+					if logErrorBodies {
+						attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
+					}
+					detail := parseUpstreamErrorDetail(upstreamErrorBody, response.Header.Get("Content-Type"))
+					attempt.clientError = redactProviderSecrets(detail.clientMessage(), candidate.Provider)
 				}
 				idle.Stop()
 				row.attempts = append(row.attempts, attempt)
@@ -945,17 +1030,39 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
-					inferenceError(w, response.StatusCode, "api_error", "upstream_error", fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode), incoming == providers.ProtocolMessages)
+					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
+					if attempt.clientError != "" {
+						message = fmt.Sprintf("%s (HTTP %d)", attempt.clientError, response.StatusCode)
+					}
+					inferenceError(w, response.StatusCode, "api_error", "upstream_error", message, incoming == providers.ProtocolMessages)
 					return
 				}
 				row.fallbackUsed = true
 				row.fallbackReason = strPtr(class)
 				continue
 			}
+			// Ordered-fallback streaming targets are probed for usable output before
+			// committing. That probe (and the preflight read below) can sit silent for
+			// a long reasoning prefill, so commit the client stream and start SSE
+			// keepalives up front. Comment frames are transport keepalives, not model
+			// output, so the chain can still fall through to another target.
+			// Only router-owned transport headers are committed before target selection;
+			// provider-specific request IDs / rate-limit headers are omitted because
+			// the serving provider isn't known yet.
+			if route.Virtual && route.RoutingMode == "ordered_fallback" && streaming && streamKeepalive == nil {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("X-Accel-Buffering", "no")
+				w.WriteHeader(response.StatusCode)
+				streamKeepalive = newSSEKeepaliveWriter(w, s.keepaliveInterval())
+			}
+			preflightStart := time.Now()
 			if e = preflightResponseLimit(response, maxUpstreamNonStreamBytes); e != nil {
-				if route.Virtual {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
+				if streaming {
+					logCodexResponse(time.Since(preflightStart).Milliseconds())
+				} else {
+					logCodexResponse(0)
 				}
+				s.inflight.targetEnd(route.RouteModelID, targetID)
 				response.Body.Close()
 				idle.Stop()
 				attemptCancel()
@@ -964,12 +1071,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if attemptTimedOut.Load() {
 					class = "upstream_timeout"
 				}
+				class = clientFailureClass(r.Context(), class)
 				if errors.Is(e, errUpstreamResponseTooLarge) {
 					class = "upstream_response_too_large"
 					message = "The upstream provider response exceeded Tiller's non-streaming response limit."
 				}
 				terminalPreflightClass = class
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds()})
+				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: 0, failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds(), readCause: truncateReadCause(e), clientCtxErr: ctxErrString(r.Context().Err()), attemptTimedOut: attemptTimedOut.Load(), upstreamStreaming: streaming, headerLatencyMs: headerLatencyMs}
+				row.attempts = append(row.attempts, attempt)
 				// A body-read error caused by the client ending the request is
 				// self-inflicted, not evidence the target is unhealthy: never
 				// cool it. Mirrors the network-error path above.
@@ -990,10 +1099,58 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.fallbackReason = strPtr(class)
 				continue
 			}
-			selected, resp, cancel = candidate, response, attemptCancel
-			if selected.Virtual {
-				activeTargetID = targetID
+			if streaming {
+				logCodexResponse(time.Since(preflightStart).Milliseconds())
+			} else {
+				logCodexResponse(0)
 			}
+			// Ordered-fallback targets must produce usable output to count as
+			// success. A pre-output probe catches relays that return a 2xx with
+			// an explicit stream error or an empty/role-only completion, so the
+			// chain can advance instead of failing the client with no content.
+			if route.Virtual && route.RoutingMode == "ordered_fallback" {
+				outcome, probeErr := probeUpstreamOutput(response, target)
+				class := ""
+				if probeErr != nil {
+					class = "upstream_read_error"
+					if attemptTimedOut.Load() {
+						class = "upstream_timeout"
+					}
+					class = clientFailureClass(r.Context(), class)
+				} else {
+					switch outcome {
+					case probeStreamError:
+						class = "upstream_stream_error"
+					case probeEmpty:
+						class = "empty_response"
+					}
+				}
+				if class != "" {
+					s.inflight.targetEnd(route.RouteModelID, targetID)
+					response.Body.Close()
+					idle.Stop()
+					attemptCancel()
+					attempt := requestAttempt{
+						providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name,
+						model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode,
+						failureClass: class, latencyMs: time.Since(attemptStart).Milliseconds(),
+						errorMessage:    strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)),
+						readCause:       truncateReadCause(probeErr),
+						clientCtxErr:    ctxErrString(r.Context().Err()),
+						attemptTimedOut: attemptTimedOut.Load(), upstreamStreaming: streaming,
+						headerLatencyMs: headerLatencyMs,
+					}
+					nonTranslationFailure = true
+					if !s.recordPreOutputFailure(w, r, row, candidate, attempt, class, cooldownSeconds, incoming) {
+						return
+					}
+					continue
+				}
+			}
+			selected, resp, cancel = candidate, response, attemptCancel
+			// Track the hot leg for the deferred targetEnd, for virtual and
+			// direct real-model routes alike (the 1:1 real leg included).
+			activeTargetID = targetID
 			row.attempts = append(row.attempts, requestAttempt{providerModelID: selected.ProviderModelID, provider: selected.Provider.Name, model: selected.UpstreamModelID, result: "success", httpStatus: response.StatusCode, latencyMs: time.Since(attemptStart).Milliseconds()})
 			allAttemptedFailed = false
 			success = true
@@ -1043,7 +1200,15 @@ routeDone:
 		}
 		if route.Virtual {
 			row.errorText = strPtr("virtual_model_unavailable")
-			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", "The virtual model could not be served by its configured targets.", incoming == providers.ProtocolMessages)
+			if streamKeepalive != nil {
+				// The client stream was already committed while probing; surface
+				// the exhausted chain as an SSE failure frame instead of a JSON
+				// body on a 200 stream.
+				writeStreamFailure(streamKeepalive, incoming, "virtual_model_unavailable", "tiller_"+row.clientRequestID, "")
+				streamKeepalive.Flush()
+				return
+			}
+			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", exhaustedRouteMessage(row.attempts), incoming == providers.ProtocolMessages)
 		} else {
 			row.errorText = strPtr("model_unavailable")
 			inferenceError(w, 503, "service_unavailable_error", "model_unavailable", "The configured model is unavailable.", incoming == providers.ProtocolMessages)
@@ -1058,7 +1223,7 @@ routeDone:
 	}
 	row.resolvedProvider = &selected.Provider.Name
 	row.resolvedModel = &selected.UpstreamModelID
-	s.inflight.clientResolved(row.clientKeyID, selected.Provider.Name+"/"+selected.UpstreamModelID)
+	s.inflight.clientResolved(row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
 	if v := resp.Header.Get("Request-Id"); v != "" {
@@ -1070,30 +1235,59 @@ routeDone:
 	defer idle.Stop()
 	reader := resp.Body
 	usage := &usageCapture{}
+	// ensureStreamKeepalive commits the streaming status and starts the
+	// keepalive writer if the ordered-fallback probe did not already commit
+	// it. Reusing the same writer keeps a single goroutine writing to w.
+	ensureStreamKeepalive := func() *sseKeepaliveWriter {
+		if streamKeepalive == nil {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.WriteHeader(resp.StatusCode)
+			streamKeepalive = newSSEKeepaliveWriter(w, s.keepaliveInterval())
+		}
+		return streamKeepalive
+	}
+	// streamOut routes terminal stream failures through the keepalive writer
+	// when one is active, so no two goroutines write w concurrently.
+	streamOut := func() io.Writer {
+		if streamKeepalive != nil {
+			return streamKeepalive
+		}
+		return w
+	}
+	if isStreamingResponse(resp) {
+		// Prevent common reverse proxies from buffering the live response until
+		// the model has finished generating it.
+		w.Header().Set("X-Accel-Buffering", "no")
+	}
 	if translated {
 		streamingResponse := isStreamingResponse(resp)
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
-			if route.Virtual {
-				s.inflight.streaming(route.RouteModelID)
-			}
-			s.inflight.clientStreaming(row.clientKeyID)
+			s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
+			ensureStreamKeepalive()
 		}
-		w.WriteHeader(resp.StatusCode)
+		if streamKeepalive == nil {
+			w.WriteHeader(resp.StatusCode)
+		}
 		row.httpStatus = resp.StatusCode
-		if err := translateResponse(w, reader, incoming, target, selected, usage); err != nil {
+		if err := translateResponse(w, streamKeepalive, reader, incoming, target, selected, usage); err != nil {
 			idle.Stop()
 			class := "translation_error"
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
 			}
+			class = clientFailureClass(r.Context(), class)
 			row.httpStatus = 502
 			row.errorText = strPtr(class)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			markLastAttemptFailed(row, class)
 			if streamingResponse {
-				writeStreamFailure(w, incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+				writeStreamFailure(streamOut(), incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+				if streamKeepalive != nil {
+					streamKeepalive.Flush()
+				}
 			}
 			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
 		} else {
@@ -1106,22 +1300,23 @@ routeDone:
 	if isStreamingResponse(resp) {
 		streamed = true
 		row.streaming = true
-		if route.Virtual {
-			s.inflight.streaming(route.RouteModelID)
-		}
-		s.inflight.clientStreaming(row.clientKeyID)
-		w.WriteHeader(resp.StatusCode)
+		s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
+		ensureStreamKeepalive()
 		row.httpStatus = resp.StatusCode
-		if err := rewriteSSE(w, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
+		if err := rewriteSSE(w, streamKeepalive, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
 			class := "upstream_read_error"
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
 			}
+			class = clientFailureClass(r.Context(), class)
 			row.httpStatus = 502
 			row.errorText = strPtr(class)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 			markLastAttemptFailed(row, class)
-			writeStreamFailure(w, incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+			writeStreamFailure(streamOut(), incoming, class, "tiller_"+row.clientRequestID, selected.RequestedModel)
+			if streamKeepalive != nil {
+				streamKeepalive.Flush()
+			}
 		} else {
 			clearSelectedCooldown()
 		}
@@ -1136,6 +1331,7 @@ routeDone:
 		if attemptTimedOut.Load() {
 			class = "upstream_timeout"
 		}
+		class = clientFailureClass(r.Context(), class)
 		row.httpStatus = 502
 		row.errorText = strPtr(class)
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1159,6 +1355,33 @@ func markLastAttemptFailed(row *logRow, class string) {
 	attempt.result = "failed"
 	attempt.failureClass = class
 	attempt.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+}
+
+// recordPreOutputFailure records a failed pre-output attempt, opens a target
+// cooldown when the failure class is eligible, and marks the request as having
+// used fallback. It returns false only when the client context has ended and a
+// terminal error was written, in which case the caller must stop the loop.
+func (s *Server) recordPreOutputFailure(
+	w http.ResponseWriter, r *http.Request, row *logRow, candidate resolvedRoute,
+	attempt requestAttempt, class string, cooldownSeconds int, incoming providers.Protocol,
+) bool {
+	row.attempts = append(row.attempts, attempt)
+	s.logAttempt(row, attempt)
+	if cooldownSeconds > 0 && cooldownTrigger(class, attempt.httpStatus) && r.Context().Err() == nil {
+		s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
+	}
+	if r.Context().Err() != nil {
+		clientClass := clientFailureClass(r.Context(), class)
+		row.httpStatus = 502
+		row.errorText = strPtr(clientClass)
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(clientClass))
+		row.fallbackReason = strPtr(clientClass)
+		inferenceError(w, 502, "api_error", clientClass, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+		return false
+	}
+	row.fallbackUsed = true
+	row.fallbackReason = strPtr(class)
+	return true
 }
 
 type bufferedReadCloser struct {
@@ -1253,6 +1476,32 @@ func openCodeSessionID(clientValue, requestID, clientKeyID string) string {
 	return "tiller-" + strings.TrimSpace(requestID)
 }
 
+// clientSessionHeader returns the client-supplied conversation identity from
+// the first session header present, or "" when none is provided.
+//
+// OpenCode only sends x-opencode-session when the provider ID starts with
+// "opencode". A third-party OpenAI-compatible provider (Tiller included) gets
+// x-session-affinity / X-Session-Id instead, so prompt-cache affinity needs to
+// accept all three header shapes.
+func clientSessionHeader(h http.Header) string {
+	for _, name := range []string{"x-opencode-session", "x-session-affinity", "x-session-id"} {
+		if v := strings.TrimSpace(h.Get(name)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// codexSessionID keeps Codex prompt/cache affinity stable when a client
+// supplies a conversation identity, while preserving request isolation for
+// generic clients that do not provide one.
+func codexSessionID(clientValue, requestID, clientKeyID string) (string, string) {
+	if strings.TrimSpace(clientValue) != "" {
+		return openCodeSessionID(clientValue, requestID, clientKeyID), "client"
+	}
+	return openCodeSessionID("", requestID, clientKeyID), "request"
+}
+
 // shortKeyID returns a stable, truncated fingerprint of a client key ID, kept
 // short enough to survive the 128-byte OpenCode session cap after namespacing.
 func shortKeyID(id string) string {
@@ -1317,6 +1566,41 @@ func headerTokens(values []string) []string {
 func isTimeout(err error) bool {
 	var netErr interface{ Timeout() bool }
 	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func truncateReadCause(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := strings.ReplaceAll(strings.TrimSpace(err.Error()), "\n", " ")
+	const max = 200
+	if len(s) > max {
+		s = s[:max] + "…"
+	}
+	return s
+}
+
+func ctxErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// clientFailureClass overrides a failure class with a client-caused one when
+// the request context has ended. A client cancel/timeout is not evidence the
+// target is unhealthy, so it must not degrade target health or paint a red
+// leg. The router's own per-attempt idle timer cancels the attempt context,
+// not the request context, so a genuine upstream timeout still classifies as
+// upstream_timeout.
+func clientFailureClass(ctx context.Context, fallback string) string {
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "client_timeout"
+		}
+		return "client_cancelled"
+	}
+	return fallback
 }
 
 func fallbackStatus(status int) bool {
@@ -1419,7 +1703,8 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 // router-side guard and never reaches this helper as a status.
 func cooldownTrigger(class string, httpStatus int) bool {
 	switch class {
-	case "upstream_unreachable", "upstream_timeout", "upstream_read_error":
+	case "upstream_unreachable", "upstream_timeout", "upstream_read_error",
+		"empty_response", "upstream_stream_error":
 		return true
 	}
 	if httpStatus == 0 {
@@ -1448,9 +1733,12 @@ func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
 	return true
 }
 
-func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
+func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
 	reader := bufio.NewReader(r)
-	flusher, _ := w.(http.Flusher)
+	if keepalive == nil {
+		keepalive = newSSEKeepaliveWriter(w, sseKeepaliveInterval)
+		defer keepalive.Close()
+	}
 	for {
 		var line []byte
 		var err error
@@ -1489,10 +1777,8 @@ func rewriteSSE(w http.ResponseWriter, r io.Reader, upstream, requested string, 
 					}
 				}
 			}
-			_, _ = w.Write(line)
-			if flusher != nil {
-				flusher.Flush()
-			}
+			_, _ = keepalive.Write(line)
+			keepalive.Flush()
 			if done {
 				return nil
 			}
@@ -1561,6 +1847,16 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 		"error", errorMsg,
 	}
 	if attempt.result == "failed" {
+		if attempt.readCause != "" {
+			attrs = append(attrs, "upstream_read_cause", attempt.readCause)
+		}
+		attrs = append(attrs, "attempt_timed_out", attempt.attemptTimedOut)
+		if attempt.clientCtxErr != "" {
+			attrs = append(attrs, "client_ctx_err", attempt.clientCtxErr)
+		}
+		if attempt.headerLatencyMs > 0 {
+			attrs = append(attrs, "header_latency_ms", attempt.headerLatencyMs, "upstream_streaming", attempt.upstreamStreaming)
+		}
 		s.logger.Warn("provider request failed", attrs...)
 		return
 	}

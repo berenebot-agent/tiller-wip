@@ -160,13 +160,16 @@ func TestReasoningPermutations(t *testing.T) {
 			mustNotContain: []string{"ultra", "effort"},
 		},
 		{
-			// Messages: any positive effort implies enabled thinking, and effort
-			// is then emitted even when the literal value isn't in the
-			// advertised list (mode == "enabled" bypasses the allowlist). This
-			// is current mapper behavior — document it, don't assert the ideal.
-			name: "effort ultra unsupported Messages still emits effort (mode-enabled bypass)", selector: reasoningSelector{Present: true, Effort: "ultra"},
+			// Messages: a positive effort enables thinking, but the effort
+			// value itself is emitted only when the target advertises it.
+			name: "effort ultra unsupported Messages strips effort", selector: reasoningSelector{Present: true, Effort: "ultra"},
 			caps: effortLowMedHigh, target: providers.ProtocolMessages,
-			mustContain: []string{`"effort":"ultra"`},
+			mustNotContain: []string{"ultra", "effort"},
+		},
+		{
+			name: "effort high supported Messages emits effort", selector: reasoningSelector{Present: true, Effort: "high"},
+			caps: effortLowMedHigh, target: providers.ProtocolMessages,
+			mustContain: []string{`"effort":"high"`},
 		},
 		{
 			name: "effort minimal not advertised Chat stripped", selector: reasoningSelector{Present: true, Effort: "minimal"},

@@ -1,20 +1,64 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, inflight: {}, inflightClients: {}, inflightTargets: {}, loadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0 };
+const mobileVirtualDrafts = new Map();
+const mobileVirtualExpanded = new Set();
+// routeActivity derives a virtual route's spinner state from the per
+// (client, route) tickets ("any ticket with this route"). OR-folds active +
+// streaming so two clients — or one client with parallel requests on this
+// route — keep the spinner lit until all drain, and the streaming label
+// survives if any stream is in flight. Returns null when quiet so the existing
+// activity?.active optional-chaining keeps working. Deliberately unmemoized:
+// O(rows × tickets) is trivial at admin-UI scale, and a cache here would risk
+// stale spinners.
+const routeActivity = routeID => {
+  let out = null;
+  for (const req of Object.values(state.liveRoutes)) {
+    if (req.routeID !== routeID || req.active <= 0) continue;
+    out = { active: 1, streaming: Math.max(out?.streaming || 0, req.streaming || 0) };
+  }
+  return out;
+};
+// routeTicketKey joins the live-ticket map key the same way the backend does
+// (client id + NUL + route id). The composite key keeps concurrent requests
+// from one client key on different routes distinct.
+const routeTicketKey = (clientID, routeID) => `${clientID}\u0000${routeID || ''}`;
 const sortState = { column: '1h', direction: 'desc' };
 const SORT_DEFAULTS = { canonical: 'asc', provider: 'asc', '1h': 'desc', '24h': 'desc', '7d': 'desc' };
+// MODEL_USAGE_SORTS names the model-table sort columns whose ordering depends on
+// the usage envelope. The catalogue renders before usage arrives, so a usage
+// sort is only meaningful once usage lands — at which point the rows must be
+// re-sorted (see modelsResortPending / reorderModelRows).
+const MODEL_USAGE_SORTS = new Set(['1h', '24h', '7d']);
+// modelsResortPending records that usage first became available while a
+// usage-sorted model table may still be in catalogue order. Set by
+// markUsageReady, consumed once by reconcileLive (which respects an open dialog
+// and the user's current sortState). This deliberately re-applies the *current*
+// sort — it never resets the user's chosen column or direction.
+let modelsResortPending = false;
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
+// tokLoadingInner is the placeholder shown in a token cell before the usage /
+// health envelope has arrived. It is deliberately distinct from the "—" empty
+// state: "—" means "no traffic recorded" and only appears once usage is known,
+// so a slow first load reads as "still coming" rather than "no data". The
+// spinner is transform-only (compositor-friendly) and aria-hidden, because the
+// loading state can briefly cover thousands of cells at once; the wrapper
+// carries aria-busy instead of each cell being a live region. It is transient:
+// the first usage snapshot replaces it.
+const tokLoadingInner = '<span class="tok-loading" aria-hidden="true"><span class="tok-loading-spin"></span></span>';
 // renderTokInner returns the inner markup of a .tok cell (no <span class="tok">
 // wrapper). Both initial render (tok) and live patching (patchTokenCell) build
 // their DOM from this single source so the .tok element is never re-wrapped and
-// transitions between populated and empty states keep consistent structure.
-const renderTokInner = (tokens, pct) => {
+// transitions between loading, populated, and empty states keep consistent
+// structure.
+const renderTokInner = (tokens, pct, loading = false) => {
+  if (loading) return tokLoadingInner;
   if (!tokens && pct == null) return '—';
   const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
   const cache = (pct != null && !isNaN(pct))
@@ -22,7 +66,14 @@ const renderTokInner = (tokens, pct) => {
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   return `${num}${cache}`;
 };
-const tok = (tokens, pct, window) => `<span class="tok" data-window="${window}">${renderTokInner(tokens, pct)}</span>`;
+// A cell is "loading" only while the usage envelope is unknown AND this cell has
+// no value yet. Once any snapshot/fetch has landed (usageReady), absent data is
+// a genuine empty state ("—").
+const tokLoading = (tokens, pct) => !state.usageReady && !tokens && pct == null;
+const tok = (tokens, pct, window) => {
+  const loading = tokLoading(tokens, pct);
+  return `<span class="tok" data-window="${window}"${loading ? ' aria-busy="true"' : ''}>${renderTokInner(tokens, pct, loading)}</span>`;
+};
 const rowCache = (row) => {
   const inp = row.input_tokens;
   const output = row.output_tokens;
@@ -32,7 +83,7 @@ const rowCache = (row) => {
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
 };
-const VIEWS = ['providers', 'models', 'virtual', 'clients', 'settings'];
+const VIEWS = ['providers', 'models', 'virtual', 'clients', 'activity', 'settings'];
 const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'clients'); return VIEWS.includes(v) ? v : 'clients'; };
 
 async function api(path, options = {}) {
@@ -53,6 +104,41 @@ async function api(path, options = {}) {
   return payload;
 }
 
+// loadUsage returns the usage/health envelope, reusing a recently received one
+// (from a prior fetch or an SSE snapshot) inside USAGE_REUSE_MS. On a first
+// page load the SSE baseline snapshot and the view's parallel fetches would
+// otherwise each request /api/admin/usage back-to-back; this collapses them.
+// Concurrent callers within a tick also share a single in-flight request.
+const USAGE_REUSE_MS = 2000;
+let usageInFlight = null;
+// markUsageReady flips token cells from the loading spinner to real values (or
+// the "—" empty state) on the first usage arrival, and flags a one-time re-sort
+// of the model table if it was rendered under a usage sort before usage was
+// known. Idempotent: later snapshots do not re-sort, matching the pre-existing
+// "sort at render, patch values live" behaviour.
+function markUsageReady() {
+  if (state.usageReady) return;
+  state.usageReady = true;
+  modelsResortPending = true;
+}
+async function loadUsage() {
+  if (state.usage && Date.now() - state.usageAt < USAGE_REUSE_MS) return state.usage;
+  if (usageInFlight) return usageInFlight;
+  usageInFlight = api('/api/admin/usage').then(usage => {
+    state.usage = usage; state.usageAt = Date.now(); markUsageReady();
+    return usage;
+  }).finally(() => { usageInFlight = null; });
+  return usageInFlight;
+}
+
+// deferUsage keeps usage off the view's critical render path. Catalogue views
+// paint from their own (fast) fetches immediately; the usage/health envelope
+// then arrives either via the SSE baseline snapshot or this fallback fetch, and
+// reconcileLive patches the token/health cells in place. Errors are ignored:
+// the SSE snapshot is the primary source, this is the degraded-mode fallback.
+function deferUsage() {
+  loadUsage().then(() => reconcileLive()).catch(() => {});
+}
 function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/clients'); liveStop(); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; liveStart(); navigate(state.view); }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
@@ -68,14 +154,24 @@ $('#login-form').addEventListener('submit', async event => {
 $('#logout').addEventListener('click', async () => { try { await api('/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
 
 async function navigate(view) {
-  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view)); $('#nav-links').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false');
-  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'settings') await loadSettings(); }
+  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
+  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') await loadSettings(); }
   catch (error) { flash(errorMessage(error), 'error'); }
+  if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
 window.addEventListener('popstate', () => navigate(viewFromHash()));
-$('#mobile-menu').addEventListener('click', event => { const links = $('#nav-links'); links.classList.toggle('open'); event.currentTarget.setAttribute('aria-expanded', String(links.classList.contains('open'))); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
+$$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
+  const bar = button.closest('[data-filter-bar]');
+  const open = bar.classList.toggle('filter-open');
+  button.setAttribute('aria-expanded', String(open));
+}));
+$('#add-client-mobile').onclick = () => openClient();
+$('#add-provider-mobile').onclick = () => openProvider();
+$('#add-real-model-mobile').onclick = openManualModel;
+$('#add-virtual-group-mobile').onclick = () => openVirtualGroup();
+$('#add-virtual-model-mobile').onclick = () => openVirtualModel();
 
 let filterTimers = new Map();
 function filterInput(selector, callback) { $(selector).addEventListener('input', event => { clearTimeout(filterTimers.get(selector)); filterTimers.set(selector, setTimeout(() => callback(event.target.value), 180)); }); }
@@ -96,12 +192,28 @@ function renderProviders() {
     <td><strong>${provider.available_model_count}</strong> available${provider.model_count !== provider.available_model_count ? `<span class="meta-line"> · ${provider.model_count - provider.available_model_count} retired</span>` : ''}</td>
     <td><span class="meta-line">${date(provider.last_refresh_at)}</span></td>
     <td>${badge(provider.enabled && !provider.last_refresh_error, provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled', provider.enabled ? (provider.last_refresh_error ? 'warn' : 'good') : 'neutral')}<div class="meta-line">Credential: ${provider.auth_state ? provider.auth_state : (provider.credential_configured ? 'configured' : 'none')}</div></td>
-    <td><div class="actions"><button class="btn btn-small btn-secondary" data-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-provider-delete="${h(provider.id)}">Delete</button></div></td></tr>`).join('');
+   <td><div class="actions"><button class="btn btn-small btn-secondary" data-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-provider-delete="${h(provider.id)}">Delete</button></div></td></tr>`).join('');
+  $('#providers-empty-mobile').hidden = state.providers.length > 0;
+  $('#providers-cards').innerHTML = state.providers.map(providerCard).join('');
   const available = state.providers.reduce((sum, item) => sum + item.available_model_count, 0), retired = state.providers.reduce((sum, item) => sum + item.model_count - item.available_model_count, 0), errors = state.providers.filter(item => item.last_refresh_error).length;
   $('#provider-metrics').innerHTML = metric(state.providers.length, 'Provider instances') + metric(available, 'Available models') + metric(retired, 'Retired models') + metric(errors, 'Refresh errors');
   $$('[data-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.providerRefresh));
   $$('[data-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.providerEdit)));
   $$('[data-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.providerDelete));
+  $$('[data-mobile-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.mobileProviderRefresh));
+  $$('[data-mobile-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.mobileProviderEdit)));
+  $$('[data-mobile-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.mobileProviderDelete));
+}
+function providerCard(provider) {
+  const healthy = provider.enabled && !provider.last_refresh_error;
+  const stateLabel = provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled';
+  return `<article class="mobile-card provider-card" data-provider-id="${h(provider.id)}">
+    <div class="mobile-card-head"><div class="mobile-card-title"><span class="status-roundel${healthy ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(stateLabel)}"></span><strong>${h(provider.name)}</strong></div>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</div>
+    <div class="mobile-card-subtitle">${h(typeLabel(provider.type))} · ${h((provider.protocols || []).join(' · ') || 'provider default')}</div>
+    <div class="mobile-card-meta"><span><b>${h(provider.available_model_count)}</b> available</span><span><b>${h(provider.model_count - provider.available_model_count)}</b> retired</span><span>${h(date(provider.last_refresh_at))}</span></div>
+    ${provider.last_refresh_error ? `<p class="mobile-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
+    <div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-mobile-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-mobile-provider-delete="${h(provider.id)}">Delete</button></div>
+  </article>`;
 }
 const metric = (value, label) => `<div class="metric"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
 const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="badge badge-${kind}">${h(label)}</span>`;
@@ -206,7 +318,7 @@ function openManualModel() {
   });
 }
 $('#add-real-model').onclick = openManualModel;
-async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, usage, providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/usage'), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.usage = usage; state.providers = providersResult.data; renderModels(); }
+async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.providers = providersResult.data; renderModels(); deferUsage(); }
 function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 7 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
 function toggleGroup(event) {
   const header = event.currentTarget;
@@ -249,17 +361,37 @@ function toggleGroup(event) {
   revealBatch();
 }
 const groupRows = (rows, collapsed) => `${rows.map(row => `<tr class="group-row${collapsed ? ' group-row-hidden' : ''}"${row.attr || ''}>${row.html}</tr>`).join('')}`;
+// MODEL_SORT_WINDOWS defines the usage-window cascade for each sortable usage
+// column: the selected window leads, then each longer window breaks ties, so a
+// 1h sort ranks most-used-in-the-last-hour first and falls back to 24h then 7d
+// before any non-usage tiebreak. A 7d sort has no shorter-window tiebreak.
+const MODEL_SORT_WINDOWS = { '1h': ['1h', '24h', '7d'], '24h': ['24h', '7d'], '7d': ['7d'] };
+// compareModelUsage walks the window cascade in order and returns the first
+// non-zero comparison (scaled by direction), or 0 when the rows tie on every
+// listed window. direction is +1 for ascending, -1 for descending, so a
+// descending usage sort uses descending tiebreaks as well.
+function compareModelUsage(a, b, windows, direction) {
+  for (const window of windows) {
+    const delta = ((a.usage?.[window]) || 0) - ((b.usage?.[window]) || 0);
+    if (delta !== 0) return direction * delta;
+  }
+  return 0;
+}
 function applyModelSort(models) {
   const rows = models.map(model => ({ model, canonical: model.canonical_model_id || '', provider: model.provider_name || '', usage: state.usage?.real_models?.[model.canonical_model_id] || {} }));
   const direction = sortState.direction === 'asc' ? 1 : -1;
+  // canonicalAsc is direction-independent: it is the deterministic final
+  // tiebreak so exact ties (including all-zero usage) never inherit the API's
+  // catalogue order, which shifts as providers refresh.
+  const canonicalAsc = (a, b) => a.canonical.localeCompare(b.canonical);
   return rows.sort((a, b) => {
     switch (sortState.column) {
-      case 'canonical': return direction * a.canonical.localeCompare(b.canonical);
-      case 'provider': return direction * a.provider.localeCompare(b.provider);
-      case '1h': return direction * (((a.usage?.['1h']) || 0) - ((b.usage?.['1h']) || 0));
-      case '24h': return direction * (((a.usage?.['24h']) || 0) - ((b.usage?.['24h']) || 0));
-      case '7d': return direction * (((a.usage?.['7d']) || 0) - ((b.usage?.['7d']) || 0));
-      default: return 0;
+      case 'canonical': return direction * canonicalAsc(a, b);
+      case 'provider': return direction * a.provider.localeCompare(b.provider) || canonicalAsc(a, b);
+      case '1h':
+      case '24h':
+      case '7d': return compareModelUsage(a, b, MODEL_SORT_WINDOWS[sortState.column], direction) || canonicalAsc(a, b);
+      default: return canonicalAsc(a, b);
     }
   }).map(row => row.model);
 }
@@ -272,13 +404,40 @@ function cycleModelSort(column) {
   }
   renderModels();
 }
-function renderModels() {
+// shownModels is the set the Models table renders: available models (unless
+// "show retired" is checked) owned by an enabled provider.
+function shownModels() {
   const disabledProviders = new Set(state.providers.filter(item => !item.enabled).map(item => item.id));
-  const shown = state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
+  return state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
+}
+// reorderModelRows re-applies the current sort in place, moving the existing
+// <tr> nodes rather than rebuilding the tbody. It exists for the one-time
+// correction after usage first arrives: a models table rendered before usage
+// was known sorts every row as zero and keeps catalogue order, while the header
+// still claims the default "1h ↓". applyModelSort reads the live sortState, so
+// this honours whatever column/direction the user has selected — it never
+// resets the sort. Event handlers and transient DOM state are preserved because
+// the nodes are moved, not replaced.
+function reorderModelRows() {
+  const body = $('#models-body');
+  if (!body) return;
+  const rowsByID = new Map();
+  $$('tr[data-model-id]', body).forEach(row => rowsByID.set(row.dataset.modelId, row));
+  const fragment = document.createDocumentFragment();
+  applyModelSort(shownModels()).forEach(model => {
+    const row = rowsByID.get(model.id);
+    if (row) fragment.appendChild(row);
+  });
+  body.appendChild(fragment);
+}
+function renderModels() {
+  const shown = shownModels();
   $('#models-empty').hidden = shown.length > 0;
+  $('#models-empty-mobile').hidden = shown.length > 0;
   const rows = applyModelSort(shown);
   const html = rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
-  $('#models-body').innerHTML = html;
+   $('#models-body').innerHTML = html;
+   $('#models-cards').innerHTML = rows.map(modelCard).join('');
   const head = $('#models-body').parentElement.querySelector('thead');
   if (head) {
     $$('th', head).forEach(th => {
@@ -290,16 +449,49 @@ function renderModels() {
   }
   $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'));
   $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); });
-  $$('[data-model-delete]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); deleteManualModel(button.dataset.modelDelete); });
+   $$('[data-model-delete]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); deleteManualModel(button.dataset.modelDelete); });
+   $$('[data-mobile-model-toggle]').forEach(button => button.onclick = () => toggleMobileCard(button));
+   $$('[data-mobile-model-activity]').forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.id === button.dataset.mobileModelActivity), 'real'));
+   $$('[data-mobile-model-capabilities]').forEach(button => button.onclick = () => openRealModelCapabilities(state.models.find(item => item.id === button.dataset.mobileModelCapabilities)));
+   $$('[data-mobile-model-delete]').forEach(button => button.onclick = () => deleteManualModel(button.dataset.mobileModelDelete));
+}
+function mobileUsage(model, kind = 'real') {
+  const key = model.canonical_model_id;
+  const usage = kind === 'virtual' ? state.usage?.virtual_models?.[key] : state.usage?.real_models?.[key];
+  const cache = kind === 'virtual' ? state.usage?.virtual_cache?.[key] : state.usage?.real_cache?.[key];
+  return ['1h', '24h', '7d'].map(window => `<span><small>${window}</small>${tok(usage?.[window], cache?.[window], window)}</span>`).join('');
+}
+function modelCard(model) {
+  const available = model.available;
+  return `<article class="mobile-card model-card" data-mobile-card="${h(model.id)}">
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-model-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-model-detail-${h(model.id)}"><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.provider_name)} · ${h(model.upstream_model_id)}</small></span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
+    <div class="mobile-card-usage">${mobileUsage(model)}</div>
+    <div class="mobile-card-detail" id="mobile-model-detail-${h(model.id)}" hidden><dl class="mobile-detail-grid"><div><dt>Provider</dt><dd>${h(model.provider_name)}</dd></div><div><dt>Native ID</dt><dd><code>${h(model.upstream_model_id)}</code></dd></div><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-model-activity="${h(model.id)}">Activity</button><button class="btn btn-small btn-secondary" data-mobile-model-capabilities="${h(model.id)}">Capabilities</button>${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-mobile-model-delete="${h(model.id)}">Delete</button>` : ''}</div></div>
+  </article>`;
+}
+function toggleMobileCard(button) {
+  const card = button.closest('[data-mobile-card]');
+  const detail = card?.querySelector('.mobile-card-detail');
+  if (!detail) return;
+  const expanded = detail.hidden;
+  const virtualID = button.dataset.mobileVirtualToggle;
+  if (virtualID) {
+    if (expanded) mobileVirtualExpanded.add(virtualID);
+    else mobileVirtualExpanded.delete(virtualID);
+  }
+  $$('.mobile-card-detail', button.closest('.mobile-card-list') || document).forEach(item => { item.hidden = true; });
+  $$('[data-mobile-model-toggle], [data-mobile-virtual-toggle]', button.closest('.mobile-card-list') || document).forEach(item => item.setAttribute('aria-expanded', 'false'));
+  detail.hidden = !expanded;
+  button.setAttribute('aria-expanded', String(expanded));
 }
 
 async function loadVirtual(search = $('#virtual-search').value) {
   const token = ++state.loadToken;
-  const [groups, virtualModels, providersResult, modelsResult, usage] = await Promise.all([
-    api('/api/admin/virtual-groups?limit=200'), api(`/api/admin/virtual-models?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200'), api('/api/admin/models?all=1'), api('/api/admin/usage')
+  const [groups, virtualModels, providersResult, modelsResult] = await Promise.all([
+    api('/api/admin/virtual-groups?limit=200'), api(`/api/admin/virtual-models?limit=200&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200'), api('/api/admin/models?all=1')
   ]);
   if (token !== state.loadToken) return;
-  state.groups = groups.data; state.virtualModels = virtualModels.data; state.providers = providersResult.data; state.models = modelsResult.data; state.usage = usage; renderVirtual();
+  state.groups = groups.data; state.virtualModels = virtualModels.data; state.providers = providersResult.data; state.models = modelsResult.data; renderVirtual(); deferUsage();
 }
 const RESOLUTION_STALE_MS = 24 * 3600 * 1000;
 const RESOLUTION_ICONS = {
@@ -317,14 +509,17 @@ function resolutionStatus(target) {
       : `${cooling.provider}/${cooling.model} failed (in cooldown)`;
     return ['bad', label];
   }
+  const health = state.usage?.target_health?.[legacyKey];
   const last = state.usage?.target_last_outcome?.[key]
             || state.usage?.target_last_outcome?.[legacyKey];
-  if (last?.at) {
-    if ((Date.now() - new Date(last.at).getTime()) <= RESOLUTION_STALE_MS) return last.is_success ? ['good', 'Resolving successfully'] : ['bad', 'Last request failed'];
-  }
-  const health = state.usage?.target_health?.[legacyKey];
+  const lastFresh = last?.at && (Date.now() - new Date(last.at).getTime()) <= RESOLUTION_STALE_MS;
+  // A recent success always wins. The main page must agree with the green
+  // Activity log: one failed fallback attempt must not paint a target
+  // unhealthy when the logical request still resolved.
+  if (lastFresh && last.is_success) return ['good', 'Resolving successfully'];
   if (health?.success_1h) return ['good', 'Resolved successfully in the last hour'];
   if (health?.failure_1h) return ['bad', 'Failed in the last hour'];
+  if (lastFresh) return ['bad', 'Last request failed'];
   if (health?.success_24h) return ['neutral', 'No successful activity in the last hour'];
   return ['neutral', 'No activity recorded'];
 }
@@ -349,15 +544,178 @@ function renderVirtual() {
     const actions = grp ? `<button class="btn btn-small btn-secondary" data-group-edit="${h(grp.id)}">Edit</button><button class="btn btn-small btn-danger" data-group-delete="${h(grp.id)}">Delete</button>` : '';
     return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><div class="client-name-line"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(model.available ? 'Routable' : 'Broken target')}" title="${h(model.available ? 'Routable' : 'Broken target')}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(model.canonical_model_id)}</strong></div><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
   }).join('');
-  $('#virtual-body').innerHTML = html;
-  patchVirtualActivityRows();
+   $('#virtual-body').innerHTML = html;
+   $('#virtual-empty-mobile').hidden = state.virtualModels.length > 0 || (!searching && state.groups.length > 0);
+   $('#virtual-cards').innerHTML = groupNames.sort((a, b) => a.localeCompare(b)).map(name => {
+     const models = byGroup.get(name) || [];
+     const group = state.groups.find(item => item.name === name);
+     return `<section class="mobile-model-group"><div class="mobile-model-group-head"><span>${h(name)}</span><small>${models.length} model${models.length === 1 ? '' : 's'}</small>${group ? `<span class="mobile-model-group-actions"><button class="btn-link" data-mobile-group-edit="${h(group.id)}">Edit</button><button class="btn-link danger-link" data-mobile-group-delete="${h(group.id)}">Delete</button></span>` : ''}</div>${models.map(virtualModelCard).join('')}${models.length ? '' : '<p class="mobile-card-empty">No models in this group.</p>'}</section>`;
+   }).join('');
+   patchVirtualActivityRows();
   $$('.group-toggle', $('#virtual-body')).forEach(header => header.onclick = toggleGroup);
   $$('[data-model-activity]', $('#virtual-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.virtualModels.find(item => item.canonical_model_id === button.dataset.modelActivity), 'virtual'); });
   $$('[data-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.virtualEdit)));
   $$('[data-virtual-capabilities]').forEach(button => button.onclick = event => { event.stopPropagation(); openCapabilities(state.virtualModels.find(item => item.id === button.dataset.virtualCapabilities)); });
   $$('[data-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.virtualDelete));
   $$('[data-group-edit]').forEach(button => button.onclick = event => { event.stopPropagation(); openVirtualGroup(state.groups.find(item => item.id === button.dataset.groupEdit)); });
-  $$('[data-group-delete]').forEach(button => button.onclick = event => { event.stopPropagation(); deleteVirtualGroup(button.dataset.groupDelete); });
+   $$('[data-group-delete]').forEach(button => button.onclick = event => { event.stopPropagation(); deleteVirtualGroup(button.dataset.groupDelete); });
+   $$('[data-mobile-virtual-toggle]').forEach(button => button.onclick = () => toggleMobileCard(button));
+    $$('[data-mobile-virtual-capabilities]').forEach(button => button.onclick = () => openCapabilities(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualCapabilities)));
+    $$('[data-mobile-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.mobileVirtualEdit)));
+    $$('[data-mobile-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.mobileVirtualDelete));
+    $$('[data-mobile-target-up]').forEach(button => button.onclick = () => moveMobileVirtualTarget(button.dataset.mobileTargetUp, Number(button.dataset.mobileTargetIndex), -1));
+    $$('[data-mobile-target-down]').forEach(button => button.onclick = () => moveMobileVirtualTarget(button.dataset.mobileTargetDown, Number(button.dataset.mobileTargetIndex), 1));
+    $$('[data-mobile-target-remove]').forEach(button => button.onclick = () => removeMobileVirtualTarget(button.dataset.mobileTargetRemove, Number(button.dataset.mobileTargetIndex)));
+    $$('[data-mobile-target-toggle]').forEach(input => input.onchange = () => toggleMobileVirtualTarget(input.dataset.mobileTargetToggle, Number(input.dataset.mobileTargetIndex), input.checked));
+    $$('[data-mobile-target-apply]').forEach(button => button.onclick = () => applyMobileVirtualTargets(button.dataset.mobileTargetApply));
+    $$('[data-mobile-target-discard]').forEach(button => button.onclick = () => discardMobileVirtualTargets(button.dataset.mobileTargetDiscard));
+    $$('[data-mobile-target-add]').forEach(box => mountMobileVirtualAddPicker(box, state.virtualModels.find(item => item.id === box.dataset.mobileTargetAdd)));
+   $$('[data-mobile-group-edit]').forEach(button => button.onclick = () => openVirtualGroup(state.groups.find(item => item.id === button.dataset.mobileGroupEdit)));
+   $$('[data-mobile-group-delete]').forEach(button => button.onclick = () => deleteVirtualGroup(button.dataset.mobileGroupDelete));
+}
+
+function virtualModelCard(model) {
+  const targets = mobileVirtualTargets(model);
+  const statusLabel = model.available ? 'Routable' : 'Broken target';
+  const routable = targets.filter(target => target.enabled && target.available).length;
+  const ordered = model.routing_mode === 'ordered_fallback';
+  const draft = mobileVirtualDraftState(model.id);
+  const expanded = mobileVirtualExpanded.has(model.id);
+  const targetRows = targets.length ? targets.map((target, index) => `<li class="mobile-target-row"><span class="target-index">${String(index + 1).padStart(2, '0')}</span>${resolutionIndicator(target)}<span class="mobile-target-name">${h(target.provider_name)}/${h(target.upstream_model_id)}</span>${ordered ? `<label class="mobile-target-toggle"><span>Use</span><input type="checkbox" class="switch" data-mobile-target-toggle="${h(model.id)}" data-mobile-target-index="${index}" ${target.enabled ? 'checked' : ''} aria-label="Use target ${index + 1}"></label><span class="mobile-target-actions"><button type="button" data-mobile-target-up="${h(model.id)}" data-mobile-target-index="${index}" ${index === 0 ? 'disabled' : ''} aria-label="Move target ${index + 1} up">↑</button><button type="button" data-mobile-target-down="${h(model.id)}" data-mobile-target-index="${index}" ${index === targets.length - 1 ? 'disabled' : ''} aria-label="Move target ${index + 1} down">↓</button><button type="button" data-mobile-target-remove="${h(model.id)}" data-mobile-target-index="${index}" ${targets.length <= 1 ? 'disabled' : ''} aria-label="Remove target ${index + 1}">×</button></span>` : ''}${target.enabled ? '' : '<small>disabled</small>'}</li>`).join('') : `<li><span class="target-index">01</span><span>No target configured</span></li>`;
+  const addModelControl = ordered ? `<label class="mobile-target-add-wrap"><span>Add model</span><div class="combobox mobile-target-add-combobox" data-mobile-target-add="${h(model.id)}"><input type="text" placeholder="Search available model…" aria-label="Add model to fallback queue"><input type="hidden"></div></label>` : '';
+  return `<article class="mobile-card virtual-model-card" data-mobile-card="${h(model.id)}">
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-virtual-toggle="${h(model.id)}" aria-expanded="${expanded}" aria-controls="mobile-virtual-detail-${h(model.id)}"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(statusLabel)}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed route')}</small></span><span class="virtual-routable-count">${routable} routable</span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
+    <div class="mobile-card-detail" id="mobile-virtual-detail-${h(model.id)}"${expanded ? '' : ' hidden'}><div class="mobile-target-list"><div class="mobile-target-list-head"><p class="mobile-card-label">${ordered ? 'Fallback order' : 'Target'}</p>${ordered ? '<small>Move, disable, or remove targets here. Changes stay pending until Apply.</small>' : ''}</div><ol>${targetRows}</ol>${addModelControl}${ordered ? '<div class="mobile-target-pending-actions"><button class="btn btn-small btn-primary" type="button" data-mobile-target-apply="' + h(model.id) + '" ' + (draft?.dirty ? '' : 'disabled') + '>Apply changes</button><button class="btn btn-small btn-secondary" type="button" data-mobile-target-discard="' + h(model.id) + '" ' + (draft?.dirty ? '' : 'disabled') + '>Discard</button></div>' : ''}</div><dl class="mobile-detail-grid"><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-mobile-virtual-edit="${h(model.id)}">Edit settings</button><button class="btn btn-small btn-danger" data-mobile-virtual-delete="${h(model.id)}">Delete</button></div></div>
+  </article>`;
+}
+
+function mobileVirtualTargets(model) {
+  const draft = mobileVirtualDrafts.get(model.id);
+  if (draft) return draft.targets;
+  const targets = (model.targets || []).map(target => ({ ...target }));
+  mobileVirtualDrafts.set(model.id, { targets, dirty: false });
+  return targets;
+}
+
+function mobileVirtualDraftState(modelID) {
+  return mobileVirtualDrafts.get(modelID);
+}
+
+function mobileVirtualAddOptions(model, targets) {
+  const providerEnabled = new Map(state.providers.map(provider => [provider.id, provider.enabled]));
+  const used = new Set(targets.map(target => target.provider_model_id));
+  return state.models
+    .filter(item => item.available && providerEnabled.get(item.provider_id) !== false && !used.has(item.id))
+    .sort((a, b) => `${a.provider_name}/${a.upstream_model_id}`.localeCompare(`${b.provider_name}/${b.upstream_model_id}`))
+    .map(item => ({ id: item.id, label: `${item.provider_name} / ${item.upstream_model_id}` }));
+}
+
+function mountMobileVirtualAddPicker(root, model) {
+  if (!model) return;
+  const input = $('input[type="text"]', root);
+  const hidden = $('input[type="hidden"]', root);
+  const options = mobileVirtualAddOptions(model, mobileVirtualTargets(model)).map(option => ({ value: option.id, label: option.label, match: option.label }));
+  combobox({ input, hidden, options, placeholder: 'Search available model…', onSelect: option => addMobileVirtualTarget(model.id, option.value), minWidth: 260 });
+}
+
+function markMobileVirtualDraftDirty(modelID) {
+  const draft = mobileVirtualDrafts.get(modelID);
+  if (!draft) return;
+  draft.dirty = true;
+  renderVirtual();
+}
+
+function addMobileVirtualTarget(modelID, providerModelID) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  const targetModel = state.models.find(item => item.id === providerModelID);
+  if (!model || model.routing_mode !== 'ordered_fallback' || !targetModel) return;
+  const targets = mobileVirtualTargets(model);
+  if (targets.length >= 16) {
+    flash('The admin UI supports up to 16 targets.', 'info');
+    renderVirtual();
+    return;
+  }
+  if (targets.some(target => target.provider_model_id === providerModelID)) {
+    flash('That model is already in the fallback chain.', 'info');
+    renderVirtual();
+    return;
+  }
+  targets.push({
+    provider_model_id: targetModel.id,
+    provider_name: targetModel.provider_name,
+    upstream_model_id: targetModel.upstream_model_id,
+    enabled: true,
+    available: targetModel.available,
+  });
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+async function persistMobileVirtualTargets(modelID, targets) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model) return;
+  const buttons = $$(`[data-mobile-card="${CSS.escape(modelID)}"] button, [data-mobile-card="${CSS.escape(modelID)}"] input`);
+  buttons.forEach(button => { button.disabled = true; });
+  try {
+    await api(`/api/admin/virtual-models/${modelID}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ targets: targets.map(target => ({ provider_model_id: target.provider_model_id, enabled: target.enabled !== false })) })
+    });
+    flash('Fallback targets updated. New requests use the new order immediately.');
+    mobileVirtualDrafts.delete(modelID);
+    await loadVirtual();
+  } catch (error) {
+    flash(errorMessage(error), 'error');
+    renderVirtual();
+  }
+}
+
+function moveMobileVirtualTarget(modelID, index, direction) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model || model.routing_mode !== 'ordered_fallback') return;
+  const targets = mobileVirtualTargets(model);
+  const next = index + direction;
+  if (index < 0 || next < 0 || next >= targets.length) return;
+  [targets[index], targets[next]] = [targets[next], targets[index]];
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+function toggleMobileVirtualTarget(modelID, index, enabled) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model || model.routing_mode !== 'ordered_fallback') return;
+  const targets = mobileVirtualTargets(model);
+  if (!targets[index]) return;
+  targets[index].enabled = enabled;
+  if (!targets.some(target => target.enabled)) {
+    targets[index].enabled = true;
+    flash('Keep at least one fallback target enabled.', 'info');
+    renderVirtual();
+    return;
+  }
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+function removeMobileVirtualTarget(modelID, index) {
+  const model = state.virtualModels.find(item => item.id === modelID);
+  if (!model || model.routing_mode !== 'ordered_fallback') return;
+  const targets = mobileVirtualTargets(model);
+  if (targets.length <= 1) return;
+  targets.splice(index, 1);
+  mobileVirtualExpanded.add(modelID);
+  markMobileVirtualDraftDirty(modelID);
+}
+
+async function applyMobileVirtualTargets(modelID) {
+  const draft = mobileVirtualDraftState(modelID);
+  if (!draft?.dirty) return;
+  await persistMobileVirtualTargets(modelID, draft.targets);
+}
+
+function discardMobileVirtualTargets(modelID) {
+  mobileVirtualDrafts.delete(modelID);
+  renderVirtual();
 }
 
 function patchVirtualActivityRows() {
@@ -367,7 +725,7 @@ function patchVirtualActivityRows() {
     const roundel = $('.status-roundel', row);
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !model.available);
-    patchVirtualSpinner(row, state.inflight[model.id]);
+    patchVirtualSpinner(row, routeActivity(model.id));
   });
 }
 
@@ -418,7 +776,7 @@ function patchClientActivityRows() {
     const roundel = $('.status-roundel', row);
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !client.enabled);
-    applyClientRoundel(roundel, client, state.inflightClients[client.id]);
+    applyClientRoundel(roundel, client, state.liveRequests[client.id]);
   });
   $$('.client-card[data-client-id]', $('#clients-cards')).forEach(card => {
     const client = state.clients.find(item => item.id === card.dataset.clientId);
@@ -426,14 +784,14 @@ function patchClientActivityRows() {
     const roundel = $('.status-roundel', card);
     if (!roundel) return;
     roundel.classList.toggle('status-roundel-broken', !client.enabled);
-    applyClientRoundel(roundel, client, state.inflightClients[client.id]);
+    applyClientRoundel(roundel, client, state.liveRequests[client.id]);
   });
 }
 
 function patchClientRoundelRow(row) {
   const client = state.clients.find(item => item.id === row.dataset.clientId);
   if (!client) return;
-  applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
+  applyClientRoundel($('.status-roundel', row), client, state.liveRequests[client.id]);
 }
 
 const capabilityNumber = value => value ? new Intl.NumberFormat().format(value) : 'Not reported';
@@ -449,7 +807,11 @@ function reasoningCapabilities(caps) {
   const thinkingModes = Array.isArray(caps.thinking_modes) ? caps.thinking_modes : [];
   const hasToggle = options.some(option => option.type === 'toggle');
   const selectors = options.length ? options.map(option => {
-    if (option.type === 'effort') return `<div class="reasoning-detail"><small>Effort values</small><div class="capability-chips">${capabilityList(option.values, 'Any value')}</div></div>`;
+    if (option.type === 'effort') {
+      const aliases = caps.effort_aliases || {};
+      const values = (option.values || []).map(value => aliases[value] ? `${value} → ${aliases[value]}` : value);
+      return `<div class="reasoning-detail"><small>Effort values</small><div class="capability-chips">${capabilityList(values, 'Any value')}</div></div>`;
+    }
     if (option.type === 'toggle') return '';
     if (option.type === 'budget_tokens') return `<div class="reasoning-detail"><small>Token budget</small><div class="reasoning-bounds"><span>Minimum <b>${capabilityBound(option.min)}</b></span><span>Maximum <b>${capabilityBound(option.max)}</b></span></div></div>`;
     return `<div class="reasoning-detail"><small>${h(option.type || 'Selector')}</small><strong>Supported</strong></div>`;
@@ -593,17 +955,17 @@ function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minW
 function virtualModelFields(model) {
   const groupOptions = state.groups.map(group => `<option value="${h(group.id)}" ${model?.group_id === group.id ? 'selected' : ''}>${h(group.name)}</option>`).join('');
   const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
-  return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Models are tried in the order below. If one returns an error or fails to respond, the request is automatically retried with the next model below, seamlessly to the client.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
+  return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Targets run from top to bottom. Turn a target off to skip it, or use the arrows to change its priority.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
-function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
+function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id })); availableOptions = options;
   const targets = model?.targets?.length ? model.targets : [{provider_model_id:model?.target_model_id,enabled:true}];
   const makePicker = (target, row = null) => { const box = document.createElement('div'); box.className='combobox'; box.innerHTML='<input type="text" placeholder="Type a provider or model name…"><input type="hidden" name="target_model" required>'; const input=$('input[type="text"]',box), hidden=$('input[type="hidden"]',box); const pickerOptions=[...options]; const stale=target?.provider_model_id && !options.some(item=>item.value===target.provider_model_id); if(stale){ const label=target?.provider_name&&target?.upstream_model_id?`${target.provider_name} / ${target.upstream_model_id}`:target.provider_model_id; pickerOptions.unshift({value:target.provider_model_id,label:`Unavailable · ${label}`,disabled:true}); } const picker=combobox({ input, hidden, options:pickerOptions, placeholder:'Type a provider or model name…' }); picker.setOptions(pickerOptions); const found=options.find(item=>item.value===target?.provider_model_id); if(found) picker.select(options.indexOf(found)); else if(stale){ hidden.value=target.provider_model_id; input.value=pickerOptions[0].label; } else if(!target?.provider_model_id && options.length){ picker.select(0); } const original=target?.provider_model_id||null; input.addEventListener('focus',()=>{ if(input.value||hidden.value){ input.value=''; hidden.value=''; } }); input.addEventListener('blur',()=>{ if(hidden.value) return; if(original){ const idx=options.findIndex(item=>item.value===original); if(idx>=0) picker.select(idx); else { hidden.value=original; input.value=pickerOptions[0].label; } } }); const wrap=document.createElement('div'); wrap.className='combobox-wrap'; wrap.append(box); if(stale){ const err=document.createElement('small'); err.className='target-error'; err.textContent='Remove or replace unavailable model'; wrap.append(err); } return wrap; };
   const updateControls = () => { const rows=$$('.target-row',fallback); rows.forEach((row,index)=>{ $('.target-index',row).textContent=String(index+1).padStart(2,'0'); $('[data-target-up]',row).disabled=index===0; $('[data-target-down]',row).disabled=index===rows.length-1; }); };
-  const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up">↑</button><button type="button" data-target-down title="Move target down">↓</button><button type="button" data-target-remove title="Remove target">×</button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
-  fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<5) addFallback(); else flash('The admin UI supports up to five targets.', 'info'); };
+   const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; enableLabel.innerHTML='<span class="target-toggle-copy">Use</span>'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up"><span class="target-action-glyph">↑</span><span class="target-action-text">Up</span></button><button type="button" data-target-down title="Move target down" aria-label="Move target down"><span class="target-action-glyph">↓</span><span class="target-action-text">Down</span></button><button type="button" data-target-remove title="Remove target" aria-label="Remove target"><span class="target-action-glyph">×</span><span class="target-action-text">Remove</span></button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
+   fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<16) addFallback(); else flash('The admin UI supports up to 16 targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
   }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); } }); }
 async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
@@ -611,11 +973,12 @@ async function deleteVirtualModel(id) { const model = state.virtualModels.find(i
 async function loadClients() {
   const token = ++state.loadToken;
   const search = $('#client-search').value, group = $('#client-group-filter').value;
-  const [result, usage, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/usage'), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
+  const [result, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
   if (token !== state.loadToken) return;
-  state.clients = result.data; state.usage = usage; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data;
+  state.clients = result.data; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data;
   renderClientGroupFilter();
   renderClients();
+  deferUsage();
 }
 function renderClientGroupFilter() {
   const select = $('#client-group-filter');
@@ -691,7 +1054,7 @@ function openRoutePicker(client) {
   openEntity({
     eyebrow: 'CHANGE ROUTE',
     title: `Route · ${client.name}`,
-    fields: `<label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model. New requests use the new target immediately.</small></label>`,
+    fields: `<div class="route-picker-intro"><span class="client-card-label">Current route</span><strong>${h(client.single_target_canonical || 'Unavailable target')}</strong><small>Choose an available real or virtual target. New requests use the new target immediately.</small></div><label>New target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search by provider, model, or canonical model ID.</small></label>`,
     submit: 'Apply route',
     onMount: form => {
       // Start empty and focused so the user can type ahead from the first
@@ -712,24 +1075,36 @@ function openRoutePicker(client) {
 // viewport; we lift the dialog so it stays above the keyboard. The combobox
 // dropdown itself is repositioned by positionComboboxList (see below).
 function positionRoutePickerAboveKeyboard() {
-  const dialog = $('#form-dialog');
-  if (!dialog.classList.contains('route-picker-dialog')) return;
+  const dialogs = [$('#form-dialog'), $('#permissions-dialog')].filter(Boolean).filter(dialog => dialog.classList.contains('route-picker-dialog') || dialog.classList.contains('permissions-dialog'));
+  if (!dialogs.length) return;
   const vv = window.visualViewport;
   if (!vv) return;
-  const keyboardHeight = Math.max(0, window.innerHeight - vv.height);
-  if (keyboardHeight > 0) {
-    // vv.height is already the space above the keyboard — don't subtract the
-    // keyboard again (that compressed the sheet until Apply/Cancel vanished).
-    dialog.style.bottom = `${keyboardHeight}px`;
-    dialog.style.maxHeight = `${vv.height - 16}px`;
-  } else {
-    dialog.style.bottom = '';
-    dialog.style.maxHeight = '';
-  }
+  const viewportTop = vv.offsetTop || 0;
+  const viewportBottom = viewportTop + vv.height;
+  const keyboardOpen = window.innerHeight - viewportBottom > 80 || window.innerHeight - vv.height > 80;
+  dialogs.forEach(dialog => {
+    if (keyboardOpen) {
+      // Android may resize either the visual viewport or the layout viewport.
+      // Anchoring both edges to the visual viewport handles both variants and
+      // keeps the dialog footer above the IME instead of underneath it.
+      dialog.style.top = `${viewportTop + 8}px`;
+      dialog.style.bottom = `${Math.max(8, window.innerHeight - viewportBottom + 8)}px`;
+      dialog.style.height = `${Math.max(220, vv.height - 16)}px`;
+      dialog.style.maxHeight = `${Math.max(220, vv.height - 16)}px`;
+      dialog.style.margin = '0';
+    } else {
+      dialog.style.top = '';
+      dialog.style.bottom = '';
+      dialog.style.height = '';
+      dialog.style.maxHeight = '';
+      dialog.style.margin = '';
+    }
+  });
 }
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', positionRoutePickerAboveKeyboard);
   window.visualViewport.addEventListener('scroll', positionRoutePickerAboveKeyboard);
+  window.addEventListener('resize', positionRoutePickerAboveKeyboard);
   // Reposition any open combobox list when the keyboard opens/closes so it stays
   // within the visual viewport (e.g. the mobile route picker's dropdown).
   const repositionOpenLists = () => {
@@ -743,34 +1118,35 @@ if (window.visualViewport) {
 }
 function clientCard(client) {
   const statusDot = `<span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span>`;
-  const routeAction = client.type === 'single'
-    ? `<button class="btn btn-small btn-secondary" data-client-route="${h(client.id)}">Change route</button>`
-    : `<button class="btn btn-small btn-secondary" data-client-models="${h(client.id)}">Catalogue permissions</button>`;
   const routeSummary = client.type === 'single'
     ? `<code class="model-id ${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</code>${client.single_target_available === false ? '<span class="client-route-broken">Unavailable</span>' : ''}`
     : `<span class="meta-line">Catalogue — model permissions</span>`;
+  const quickAction = client.type === 'single'
+    ? `<button class="client-route-button" data-client-route="${h(client.id)}" aria-label="Change route for ${h(client.name)}"><span>Current model</span><strong class="${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</strong><i aria-hidden="true">›</i></button>`
+    : `<button class="client-permission-button" data-client-models="${h(client.id)}" aria-label="Manage permissions for ${h(client.name)}"><span>Catalogue</span><strong>Manage permissions</strong><i aria-hidden="true">›</i></button>`;
   return `<article class="client-card" data-client-id="${h(client.id)}">
     <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
       ${statusDot}
-      <span class="client-card-name">${h(client.name)}</span>
+      <span class="client-card-heading"><span class="client-card-name">${h(client.name)}</span></span>
       ${client.group ? `<span class="group-badge">${h(client.group)}</span>` : ''}
-      <span class="client-card-desc">${h(client.description || 'No description')}</span>
       <span class="client-card-chevron" aria-hidden="true">▾</span>
     </button>
+    <div class="client-card-quick-actions">${quickAction}</div>
     <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
-      <div class="client-card-field"><span class="client-card-label">Route</span><div class="client-card-route">${routeSummary}${routeAction}</div></div>
-      <div class="client-card-field"><span class="client-card-label">Description</span><span>${h(client.description || 'No description')}</span></div>
-      <div class="client-card-field"><span class="client-card-label">Fingerprint</span><code class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</code></div>
-      <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
-      ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
-      <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
-      ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
-      <div class="client-card-field"><span class="client-card-label">Usage</span><div class="client-card-usage">${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</div></div>
+      <div class="client-card-route-panel"><div class="client-card-field-head"><span class="client-card-label">Route</span><span class="client-card-kind">${client.type === 'single' ? 'Single target' : 'Catalogue access'}</span></div><div class="client-card-route">${routeSummary}</div></div>
       <div class="client-card-actions">
         <button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button>
         <button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button>
         <button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button>
         <button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button>
+      </div>
+      <div class="client-card-secondary">
+        <div class="client-card-field"><span class="client-card-label">Description</span><span>${h(client.description || 'No description')}</span></div>
+        <div class="client-card-field"><span class="client-card-label">Fingerprint</span><code class="secret-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</code></div>
+        <div class="client-card-field"><span class="client-card-label">Created</span><span>${date(client.created_at)}</span></div>
+        ${client.rotated_at ? `<div class="client-card-field"><span class="client-card-label">Rotated</span><span>${date(client.rotated_at)}</span></div>` : ''}
+        <div class="client-card-field"><span class="client-card-label">Type</span><span>${client.type === 'single' ? 'Single' : 'Catalogue'}</span></div>
+        ${client.group ? `<div class="client-card-field"><span class="client-card-label">Group</span><span>${h(client.group)}</span></div>` : ''}
       </div>
     </div>
   </article>`;
@@ -783,7 +1159,13 @@ function clientRow(client) {
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
-  $('#clients-cards').innerHTML = state.clients.map(clientCard).join('');
+  const mobileByGroup = new Map();
+  state.clients.forEach(client => {
+    const group = client.group || 'default';
+    if (!mobileByGroup.has(group)) mobileByGroup.set(group, []);
+    mobileByGroup.get(group).push(client);
+  });
+  $('#clients-cards').innerHTML = [...mobileByGroup.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([group, clients]) => `<section class="client-group-section"><div class="client-group-section-head"><span>${h(group)}</span><small>${clients.length} client${clients.length === 1 ? '' : 's'}</small></div>${clients.map(clientCard).join('')}</section>`).join('');
   const byGroup = new Map();
   state.clients.forEach(client => { const g = client.group || 'default'; if (!byGroup.has(g)) byGroup.set(g, []); byGroup.get(g).push(client); });
   $('#clients-body').innerHTML = [...byGroup.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([group, clients]) => {
@@ -815,6 +1197,9 @@ $('#clients-cards').addEventListener('click', event => {
 });
 $('#add-client').onclick = () => openClient();
 function openClient(client = null) {
+  const dialog = $('#form-dialog');
+  dialog.classList.add('client-form-dialog');
+  dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${client?.type === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${client?.type !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
   const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
@@ -1009,6 +1394,7 @@ $('#save-permissions').onclick = async () => {
 };
 
 const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
+function resetActivityScroll() { $('.activity-table-shell', $('#activity-dialog')).scrollTop = 0; }
 async function openActivity(client) {
   activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = '';
   $('#activity-search').value = '';
@@ -1025,8 +1411,9 @@ async function openActivity(client) {
   info.innerHTML = `<span class="activity-client-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span>  <span>Created ${date(client.created_at)}</span>${client.rotated_at ? `  <span>Rotated ${date(client.rotated_at)}</span>` : ''}`;
   await loadActivity();
   $('#activity-dialog').showModal();
+  resetActivityScroll();
 }
-async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; document.getElementById('activity-client-info')?.remove(); await loadActivity(); $('#activity-dialog').showModal(); }
+async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; document.getElementById('activity-client-info')?.remove(); await loadActivity(); $('#activity-dialog').showModal(); resetActivityScroll(); }
 async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_rows > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
 function activityAttempt(attempt, index) { const route = `${attempt.provider}/${attempt.model}`; const isCooldown = attempt.failure_class === 'cooldown'; const status = attempt.http_status ? `HTTP ${attempt.http_status}` : (isCooldown ? 'cooldown' : h(attempt.result)); let cls; if (attempt.result === 'success') cls = 'attempt-success'; else if (attempt.result === 'failed') cls = 'attempt-failed'; else if (isCooldown) cls = 'attempt-cooldown'; else cls = 'attempt-neutral'; let clickAttr = ''; let hoverAttr = ''; if (attempt.result === 'failed') { const key = ++errorDetailSeq; const parts = []; if (attempt.error_message) parts.push(attempt.error_message); if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`); if (attempt.error_body) parts.push(`Provider error body:\n${attempt.error_body}${attempt.error_body_truncated ? '\n\n[truncated]' : ''}`); if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`); if (attempt.request_body) parts.push(`Client request body:\n${attempt.request_body}${attempt.request_body_truncated ? '\n\n[truncated]' : ''}`); errorDetails.set(key, { title: `${route} · ${status}`, body: parts.join('\n\n') || '(no error details)' }); clickAttr = ` data-error-key="${key}"`; const hover = [attempt.error_message, attempt.latency_ms ? `Latency: ${attempt.latency_ms} ms` : ''].filter(Boolean).join(' · '); if (hover) hoverAttr = ` title="${h(hover)}"`; } else if (isCooldown) { const key = ++errorDetailSeq; errorDetails.set(key, { cooldown: { provider: attempt.provider, model: attempt.model, created_at: attempt.created_at }, title: `${route} · cooldown` }); clickAttr = ` data-error-key="${key}"`; hoverAttr = ` title="${h('Cooldown — click for details')}"`; } return `<div class="activity-attempt ${cls}"${clickAttr}${hoverAttr}><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code title="${h(route)}">${h(route)}</code></span><span class="attempt-status">${status}</span></div>`; }
 // Full error text for failed attempts. The complete string lives here keyed by
@@ -1076,7 +1463,13 @@ function activityRequestID(row) { const id = row.client_request_id || ''; const 
 async function copyRequestID(button) { const id = button.dataset.copyRequestId; if (!id) return; if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(id); const original = button.textContent; button.classList.add('copied'); button.textContent = 'Copied'; setTimeout(() => { button.classList.remove('copied'); button.textContent = original; }, 1200); } catch { const range = document.createRange(); range.selectNodeContents(button); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); button.title = 'Press Ctrl/Cmd+C to copy'; } }
 document.addEventListener('click', event => { const target = event.target.closest('[data-copy-request-id]'); if (target) copyRequestID(target); });
 document.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const target = event.target.closest('[data-copy-request-id]'); if (!target) return; event.preventDefault(); copyRequestID(target); });
-function renderActivity() { errorDetails.clear(); errorDetailSeq = 0; const showClient = !activityState.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; }
+function activityHistoryCard(row, showClient = true) {
+  const status = row.http_status >= 200 && row.http_status < 300 ? 'Succeeded' : `HTTP ${row.http_status || 'error'}`;
+  const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
+  const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
+  return `<article class="history-card"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
+}
+function renderActivity() { errorDetails.clear(); errorDetailSeq = 0; const showClient = !activityState.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#activity-mobile-body').innerHTML = activityState.rows.map(row => activityHistoryCard(row, showClient)).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; resetActivityScroll(); }
 filterInput('#activity-search', value => { activityState.search = value; activityState.offset = 0; loadActivity(); });
 $('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activityState.offset - activityState.limit); loadActivity(); };
 $('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
@@ -1104,10 +1497,36 @@ $$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick
 // identically — the extra Client column is the only difference.
 const globalActivityState = { rows: [], offset: 0, limit: 50, search: '', hasMore: true };
 async function loadGlobalActivity() { globalActivityState.controller?.abort(); globalActivityState.controller = new AbortController(); const { signal } = globalActivityState.controller; try { const result = await api(`/api/admin/activity?limit=${globalActivityState.limit + 1}&offset=${globalActivityState.offset}&search=${encodeURIComponent(globalActivityState.search || '')}`, { signal }); const fetched = result.data; globalActivityState.hasMore = fetched.length > globalActivityState.limit; globalActivityState.rows = fetched.slice(0, globalActivityState.limit); await Promise.all(globalActivityState.rows.filter(row => row.attempt_rows > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#global-activity-error').textContent = ''; renderGlobalActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#global-activity-error').textContent = errorMessage(error); } }
-function renderGlobalActivity() { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong class="client-name">${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
+function renderGlobalActivity() { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-empty-mobile').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong class="client-name">${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#global-activity-cards').innerHTML = globalActivityState.rows.map(row => activityHistoryCard(row, true)).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
 filterInput('#global-activity-search', value => { globalActivityState.search = value; globalActivityState.offset = 0; loadGlobalActivity(); });
 $('#global-activity-prev').onclick = () => { globalActivityState.offset = Math.max(0, globalActivityState.offset - globalActivityState.limit); loadGlobalActivity(); };
 $('#global-activity-next').onclick = () => { globalActivityState.offset += globalActivityState.limit; loadGlobalActivity(); };
+
+const mobileHistoryState = { rows: [], offset: 0, limit: 25, search: '', hasMore: true };
+async function loadMobileHistory() {
+  mobileHistoryState.controller?.abort();
+  mobileHistoryState.controller = new AbortController();
+  const { signal } = mobileHistoryState.controller;
+  try {
+    const result = await api(`/api/admin/activity?limit=${mobileHistoryState.limit + 1}&offset=${mobileHistoryState.offset}&search=${encodeURIComponent(mobileHistoryState.search || '')}`, { signal });
+    const fetched = result.data || [];
+    mobileHistoryState.hasMore = fetched.length > mobileHistoryState.limit;
+    mobileHistoryState.rows = fetched.slice(0, mobileHistoryState.limit);
+    $('#mobile-history-body').innerHTML = mobileHistoryState.rows.map(row => activityHistoryCard(row, true)).join('');
+    $('#mobile-history-empty').hidden = mobileHistoryState.rows.length > 0;
+    $('#mobile-history-count').textContent = mobileHistoryState.rows.length ? `${mobileHistoryState.offset + 1}–${mobileHistoryState.offset + mobileHistoryState.rows.length}` : '0 results';
+    $('#mobile-history-prev').disabled = mobileHistoryState.offset === 0;
+    $('#mobile-history-next').disabled = !mobileHistoryState.hasMore;
+    $('#mobile-history-error').textContent = '';
+  } catch (error) {
+    if (error.name !== 'AbortError') $('#mobile-history-error').textContent = errorMessage(error);
+  }
+}
+$('#open-mobile-history').onclick = () => { mobileHistoryState.offset = 0; mobileHistoryState.search = ''; $('#mobile-history-search').value = ''; loadMobileHistory(); $('#mobile-history-dialog').showModal(); };
+$('#close-mobile-history').onclick = $('#done-mobile-history').onclick = () => $('#mobile-history-dialog').close();
+filterInput('#mobile-history-search', value => { mobileHistoryState.search = value; mobileHistoryState.offset = 0; loadMobileHistory(); });
+$('#mobile-history-prev').onclick = () => { mobileHistoryState.offset = Math.max(0, mobileHistoryState.offset - mobileHistoryState.limit); loadMobileHistory(); };
+$('#mobile-history-next').onclick = () => { mobileHistoryState.offset += mobileHistoryState.limit; loadMobileHistory(); };
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
@@ -1126,8 +1545,13 @@ $('#clear-notifications-auth').addEventListener('click', async () => { const but
 $('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
 
 let entitySubmit = null;
-function openEntity({ eyebrow, title, fields, submit, onMount, onSubmit }) { const dialog = $('#form-dialog'), form = $('#entity-form'); $('#dialog-eyebrow').textContent = eyebrow; $('#dialog-title').textContent = title; $('#dialog-fields').innerHTML = fields; $('#dialog-submit').textContent = submit; $('#dialog-error').textContent = ''; entitySubmit = onSubmit; form.onsubmit = handleEntitySubmit; dialog.showModal(); onMount?.(form); setTimeout(() => $('input:not([type="checkbox"]),select,textarea', form)?.focus(), 0); }
-async function handleEntitySubmit(event) { const form = event.currentTarget, button = $('#dialog-submit'); if (event.submitter?.value === 'cancel') return; event.preventDefault(); if (!form.reportValidity()) return; button.disabled = true; $('#dialog-error').textContent = ''; try { await entitySubmit(form); $('#form-dialog').close(); } catch (error) { $('#dialog-error').textContent = errorMessage(error); } finally { button.disabled = false; } }
+// Monotonic id for the currently-open entity dialog. A submit captures it and
+// only closes/updates the dialog if no newer openEntity() replaced it while the
+// request (and its follow-up reloads) were in flight. Without this, a slow
+// save's trailing close() shut a dialog the user had already reopened.
+let entitySubmitSeq = 0;
+function openEntity({ eyebrow, title, fields, submit, onMount, onSubmit }) { const dialog = $('#form-dialog'), form = $('#entity-form'); $('#dialog-eyebrow').textContent = eyebrow; $('#dialog-title').textContent = title; $('#dialog-fields').innerHTML = fields; $('#dialog-submit').textContent = submit; $('#dialog-submit').disabled = false; $('#dialog-error').textContent = ''; entitySubmit = onSubmit; entitySubmitSeq += 1; form.onsubmit = handleEntitySubmit; dialog.showModal(); onMount?.(form); setTimeout(() => $('input:not([type="checkbox"]),select,textarea', form)?.focus(), 0); }
+async function handleEntitySubmit(event) { const form = event.currentTarget, button = $('#dialog-submit'); if (event.submitter?.value === 'cancel') return; event.preventDefault(); if (!form.reportValidity()) return; const submit = entitySubmit, seq = entitySubmitSeq; button.disabled = true; $('#dialog-error').textContent = ''; try { await submit(form); if (seq === entitySubmitSeq) $('#form-dialog').close(); } catch (error) { if (seq === entitySubmitSeq) $('#dialog-error').textContent = errorMessage(error); } finally { if (seq === entitySubmitSeq) button.disabled = false; } }
 
 function confirmAction({ title, copy, action, breaking = false, typeMatch = null, typeLabel = 'name' }) { return new Promise(resolve => { const dialog = $('#confirm-dialog'), form = $('form', dialog), checkWrap = $('#confirm-check-wrap'), check = $('#confirm-check'), typeWrap = $('#confirm-type-wrap'), typeInput = $('#confirm-type'); $('#confirm-title').textContent = title; $('#confirm-copy').textContent = copy; $('#confirm-action').textContent = action; $('#confirm-error').textContent = ''; checkWrap.hidden = !breaking; check.checked = false; typeWrap.hidden = !typeMatch; typeInput.value = ''; if (typeMatch) $('#confirm-type-label').textContent = `Type the ${typeLabel} to confirm`; const valid = () => !typeMatch || typeInput.value === typeMatch; const close = event => { dialog.removeEventListener('close', close); resolve(dialog.returnValue === 'confirm' && (!breaking || check.checked) && valid()); }; form.onsubmit = event => { if (event.submitter?.value !== 'confirm') return; if (breaking && !check.checked) { event.preventDefault(); $('#confirm-error').textContent = 'Acknowledge the breaking client-facing change first.'; return; } if (typeMatch && !valid()) { event.preventDefault(); $('#confirm-error').textContent = `Type the ${typeLabel} exactly to confirm.`; } }; dialog.addEventListener('close', close); dialog.showModal(); if (typeMatch) setTimeout(() => typeInput.focus(), 0); }); }
 
@@ -1137,6 +1561,187 @@ $('#copy-secret').onclick = async () => { const text = $('#secret-value').textCo
 $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#secret-dialog').close(); };
 
 document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); const input = $(`#view-${state.view} input[type="search"]`); input?.focus(); } });
+
+// === ACTIVITY LIVING PANE ===
+// The graph module + vendored D3 are lazy-loaded on first entry so other
+// views never pay the download/parse cost. d3.min.js is same-origin
+// (satisfies `script-src 'self'`); the CDN tag from the mockup is never used.
+let activityGraphModule = null;
+let activityGraphReady = false;
+let activityGraphFailed = false;
+// Latest catalogue snapshot for the pane; reassigned on refresh so the node
+// click-through always reads current rows rather than the load-time closure.
+let activityGraphData = { clients: [], virtualModels: [], models: [] };
+
+// A live delta can reference a model or client added after the pane captured
+// its catalogue. On that miss we re-fetch the catalogue and relabel the live
+// nodes. The minimum interval bounds fetch frequency when an id the catalogue
+// never carries keeps appearing (e.g. beyond the client page limit).
+const ACTIVITY_CATALOGUE_MIN_INTERVAL = 5000;
+let activityCatalogueRefreshTimer = 0;
+let activityCatalogueRefreshing = false;
+let activityCatalogueRefreshedAt = 0;
+function noteActivityCatalogueMiss(ids) {
+  if (!ids || !ids.length) return;
+  scheduleActivityCatalogueRefresh();
+}
+function scheduleActivityCatalogueRefresh() {
+  if (activityCatalogueRefreshing || activityCatalogueRefreshTimer) return;
+  const wait = Math.max(0, ACTIVITY_CATALOGUE_MIN_INTERVAL - (Date.now() - activityCatalogueRefreshedAt));
+  activityCatalogueRefreshTimer = setTimeout(() => {
+    activityCatalogueRefreshTimer = 0;
+    refreshActivityCatalogue();
+  }, wait);
+}
+async function refreshActivityCatalogue() {
+  if (activityCatalogueRefreshing || !activityGraphReady || state.view !== 'activity') return;
+  activityCatalogueRefreshing = true;
+  try {
+    const [clients, virtualModels, models] = await Promise.all([
+      api('/api/admin/client-keys?limit=200'),
+      api('/api/admin/virtual-models?limit=200'),
+      api('/api/admin/models?all=1'),
+    ]);
+    if (!activityGraphReady || state.view !== 'activity') return;
+    activityGraphData = {
+      clients: clients.data || [],
+      virtualModels: virtualModels.data || [],
+      models: models.data || [],
+    };
+    activityGraphModule.updateCatalogue(activityGraphData);
+  } catch {
+    // Best-effort: the pane keeps its raw-id fallback until the next miss.
+  } finally {
+    activityCatalogueRefreshing = false;
+    activityCatalogueRefreshedAt = Date.now();
+  }
+}
+async function ensureActivityGraph() {
+  if (activityGraphModule) return activityGraphModule;
+  if (activityGraphFailed) return null;
+  try {
+    if (typeof d3 === 'undefined') {
+      await new Promise((resolve, reject) => {
+        const tag = document.createElement('script');
+        tag.src = '/d3.min.js';
+        tag.onload = resolve;
+        tag.onerror = () => reject(new Error('d3 load failed'));
+        document.head.appendChild(tag);
+      });
+    }
+    activityGraphModule = await import('/activity-graph.js');
+    return activityGraphModule;
+  } catch (error) {
+    activityGraphFailed = true;
+    flash('Activity graph could not load (D3 failed). The Settings table still works.', 'error');
+    return null;
+  }
+}
+async function loadActivityView() {
+  const token = ++state.loadToken;
+  const mod = await ensureActivityGraph();
+  if (token !== state.loadToken) return;
+  if (!mod) return;
+  try {
+    // Catalogue payloads resolve live deltas into nodes. No providers fetch:
+    // provider names arrive inside virtual targets and real models. No
+    // activity seed: the pane starts empty and materializes legs from live
+    // `activity` deltas only.
+    const [clients, virtualModels, models] = await Promise.all([
+      api('/api/admin/client-keys?limit=200'),
+      api('/api/admin/virtual-models?limit=200'),
+      api('/api/admin/models?all=1'),
+    ]);
+    if (token !== state.loadToken) return;
+    activityGraphData = {
+      clients: clients.data || [],
+      virtualModels: virtualModels.data || [],
+      models: models.data || [],
+    };
+    activityGraphReady = mod.init($('#view-activity'), {
+      ...activityGraphData,
+    }, {
+      onNodeClick: node => openGraphActivity(node, activityGraphData),
+    }) === true;
+    // Seed currently-hot legs from live state in case deltas were missed
+    // while the view was hidden (state keeps the client + leg lanes).
+    if (activityGraphReady) noteActivityCatalogueMiss(mod.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs }));
+    if (activityGraphReady) mod.onCooldowns(state.usage?.target_cooldown || {});
+    renderMobileActivity();
+  } catch (error) {
+    flash(errorMessage(error), 'error');
+  }
+}
+function mobileActivityCatalogue() {
+  return activityGraphData || { clients: [], virtualModels: [], models: [] };
+}
+function mobileActivityTarget(routeID, targetID) {
+  const data = mobileActivityCatalogue();
+  const virtual = data.virtualModels.find(model => model.id === routeID);
+  if (virtual) {
+    const target = (virtual.targets || []).find(item => item.provider_model_id === targetID || `${item.provider_name}/${item.upstream_model_id}` === targetID);
+    return target ? `${target.provider_name}/${target.upstream_model_id}` : targetID;
+  }
+  const model = data.models.find(item => item.id === targetID || item.canonical_model_id === targetID);
+  return model ? model.canonical_model_id : targetID;
+}
+function renderMobileActivity() {
+  const data = mobileActivityCatalogue();
+  const byRoute = new Map();
+  Object.entries(state.liveRoutes || {}).filter(([, item]) => item && item.active > 0).forEach(([key, item]) => {
+    const separator = key.indexOf('\u0000');
+    const clientID = item.client_id || (separator >= 0 ? key.slice(0, separator) : '');
+    const client = data.clients.find(candidate => candidate.id === clientID);
+    const routeID = item.route_id || item.routeID;
+    const virtual = data.virtualModels.find(model => model.id === routeID);
+    const real = data.models.find(model => model.id === routeID || model.canonical_model_id === routeID);
+    const routeLabel = virtual?.canonical_model_id || real?.canonical_model_id || item.requested_model || routeID || 'Unknown route';
+    const targets = Object.entries(state.liveLegs || {}).filter(([targetKey, target]) => targetKey.startsWith(`${routeID}\u0000`) && target?.active > 0).map(([targetKey]) => mobileActivityTarget(routeID, targetKey.slice(targetKey.indexOf('\u0000') + 1)));
+    const targetLabel = item.resolved_model || targets[0] || 'Waiting for upstream target';
+    const entryKey = `${clientID}\u0000${routeID}`;
+    const existing = byRoute.get(entryKey);
+    if (existing) {
+      existing.streaming = existing.streaming || item.streaming > 0;
+      existing.targets = [...new Set([...existing.targets, ...targets])];
+      if (item.resolved_model) existing.target = item.resolved_model;
+      return;
+    }
+    byRoute.set(entryKey, { client: client?.name || clientID || 'Unknown client', route: routeLabel, target: targetLabel, requested: item.requested_model || routeLabel, streaming: item.streaming > 0, targets });
+  });
+  const entries = [...byRoute.values()];
+  const list = $('#mobile-activity-body');
+  if (!list) return;
+  $('#mobile-activity-empty').hidden = entries.length > 0;
+  list.innerHTML = entries.map(entry => `<article class="live-activity-card"><div class="live-activity-top"><span class="live-pulse" aria-hidden="true"></span><strong>${h(entry.client)}</strong><span class="live-activity-state">${entry.streaming ? 'Streaming' : 'In flight'}</span></div><div class="live-activity-chain"><span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.route)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span></div>${entry.targets.length > 1 ? `<p class="live-activity-note">${entry.targets.length} upstream targets active</p>` : ''}<button class="btn btn-small btn-secondary" data-live-activity-client="${h(entry.client)}">View details</button></article>`).join('');
+  $$('[data-live-activity-client]', list).forEach(button => button.onclick = () => {
+    const client = data.clients.find(item => item.name === button.dataset.liveActivityClient);
+    if (client) openActivity(client);
+  });
+}
+function openGraphActivity(node, data) {
+  const id = node.id.slice(2);
+  const item = node.kind === 'client'
+    ? data.clients.find(client => client.id === id)
+    : node.kind === 'route'
+      ? data.virtualModels.find(model => model.id === id)
+      : data.models.find(model => model.id === id);
+  if (!item) {
+    flash('Activity details are no longer available. Refresh the Activity view.', 'error');
+    return;
+  }
+  if (node.kind === 'client') openActivity(item);
+  else openModelActivity(item, node.kind === 'route' ? 'virtual' : 'real');
+}
+function destroyActivityView() {
+  if (activityGraphModule && activityGraphReady) {
+    try { activityGraphModule.destroy(); } catch { /* teardown is best-effort */ }
+  }
+  activityGraphReady = false;
+  if (activityCatalogueRefreshTimer) {
+    clearTimeout(activityCatalogueRefreshTimer);
+    activityCatalogueRefreshTimer = 0;
+  }
+}
 
 // === LIVE REFRESH ===
 // A single session-lifetime SSE connection pushes outcome deltas (resolution
@@ -1162,6 +1767,16 @@ function markChanged(el) {
 // repeated updates cannot nest .tok .tok and a token value reverting to
 // zero always clears stale Mtok/cache markup.
 function patchTokenCell(cell, tokens, pct) {
+  // Once usage has arrived, a still-unknown cell is a genuine empty state, not
+  // loading. Rebuild from the loading spinner to the "—"/populated structure.
+  if (cell.querySelector('.tok-loading')) {
+    if (tokLoading(tokens, pct)) return;
+    cell.removeAttribute('aria-busy');
+    cell.innerHTML = renderTokInner(tokens, pct);
+    const first = $('b', cell);
+    if (first) markChanged(first);
+    return;
+  }
   const populated = Boolean(tokens) || (pct != null && !isNaN(pct));
   const numEl = $('b', cell);
   const cacheEl = $('.cache-hit b', cell);
@@ -1199,7 +1814,7 @@ function patchResolution(line, target) {
   const cls = `resolution-${status}`;
   const row = line.closest('tr[data-virtual-id]');
   const key = targetActivityKey(row?.dataset.virtualId || '', line.dataset.targetKey);
-  const active = state.inflightTargets[key]?.active > 0;
+  const active = state.liveLegs[key]?.active > 0;
   const needsSwap = !indicator.classList.contains(cls) || !$('.resolution-indicator-spin', indicator);
   if (needsSwap) {
     indicator.innerHTML = `${RESOLUTION_ICONS[status]}<span class="resolution-indicator-spin" aria-hidden="true"></span>`;
@@ -1214,6 +1829,15 @@ function patchResolution(line, target) {
 function reconcileLive() {
   if (liveDialogOpen()) { livePendingReconcile = true; return; }
   livePendingReconcile = false;
+  // One-time correction after usage first arrives: a models table rendered under
+  // a usage sort while usage was unknown is in catalogue order. Re-sort only if
+  // the models view is active and the active sort is usage-based; a
+  // canonical/provider sort needs no correction. If the view is elsewhere, drop
+  // the flag — the next loadModels() renders already-sorted with usage present.
+  if (modelsResortPending) {
+    modelsResortPending = false;
+    if (liveViewActive('models') && MODEL_USAGE_SORTS.has(sortState.column)) reorderModelRows();
+  }
   if (liveViewActive('virtual')) {
     state.virtualModels.forEach(model => {
       const row = $(`tr[data-virtual-id="${CSS.escape(model.id)}"]`);
@@ -1228,7 +1852,18 @@ function reconcileLive() {
         const cell = $(`.tok[data-window="${window}"]`, row);
         if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window]);
       });
-      patchVirtualSpinner(row, state.inflight[model.id]);
+      patchVirtualSpinner(row, routeActivity(model.id));
+    });
+  }
+  if (liveViewActive('models')) {
+    state.models.forEach(model => {
+      const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
+      if (!row) return;
+      const canonical = model.canonical_model_id;
+      ['1h', '24h', '7d'].forEach(window => {
+        const cell = $(`.tok[data-window="${window}"]`, row);
+        if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window]);
+      });
     });
   }
   if (liveViewActive('clients')) {
@@ -1239,15 +1874,17 @@ function reconcileLive() {
           const cell = $(`.tok[data-window="${window}"]`, row);
           if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
         });
-        applyClientRoundel($('.status-roundel', row), client, state.inflightClients[client.id]);
+        applyClientRoundel($('.status-roundel', row), client, state.liveRequests[client.id]);
       }
       const card = $(`article.client-card[data-client-id="${CSS.escape(client.id)}"]`);
       if (card) {
         ['1h', '24h', '7d'].forEach(window => {
-          const cell = $(`.tok[data-window="${window}"]`, card);
-          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
+          const cells = $$(`.tok[data-window="${window}"]`, card);
+          const values = state.usage?.client_keys?.[client.id]?.[window];
+          const caches = state.usage?.client_cache?.[client.id]?.[window];
+          cells.forEach(cell => patchTokenCell(cell, values, caches));
         });
-        applyClientRoundel($('.status-roundel', card), client, state.inflightClients[client.id]);
+        applyClientRoundel($('.status-roundel', card), client, state.liveRequests[client.id]);
       }
     });
   }
@@ -1256,15 +1893,29 @@ function reconcileLive() {
 live.on('outcome', payload => {
   if (!state.usage) state.usage = {};
   if (!state.usage.target_last_outcome) state.usage.target_last_outcome = {};
-  Object.assign(state.usage.target_last_outcome, payload);
+// Only degrading outcomes update main-page target health. A genuine upstream
+// failure degrades its target even when a later fallback served the request;
+// skipped (never-called) and client-caused outcomes are non-degrading. The
+// graph still receives every attempt's explicit outcome below.
+  const degrading = new Set();
+  for (const [key, outcome] of Object.entries(payload || {})) {
+    if (outcome && outcome.degrading === false) continue;
+    state.usage.target_last_outcome[key] = outcome;
+    degrading.add(key);
+  }
   if (liveViewActive('virtual') && !liveDialogOpen()) {
     state.virtualModels.forEach(model => (model.targets || []).forEach(target => {
       const key = target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`;
-      if (!(key in payload)) return;
+      if (!degrading.has(key)) return;
       const row = $(`tr[data-virtual-id="${CSS.escape(model.id)}"]`);
       const line = row && $(`[data-target-key="${CSS.escape(key)}"]`, row);
       if (line) patchResolution(line, target);
     }));
+  }
+  // Activity living pane: the explicit outcome colours the model roundel
+  // (served/failed/skipped); the `activity` deltas drive the flow itself.
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { activityGraphModule.onOutcome(payload); } catch { /* pane update is best-effort */ }
   }
 });
 
@@ -1273,46 +1924,78 @@ live.on('snapshot', payload => {
   ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
-  if (payload.modules?.inflight !== undefined) state.inflight = payload.modules.inflight || {};
-  if (payload.modules?.inflight_clients !== undefined) state.inflightClients = payload.modules.inflight_clients || {};
-  if (payload.modules?.inflight_targets !== undefined) state.inflightTargets = payload.modules.inflight_targets || {};
+  // The SSE baseline snapshot already carries the usage envelope, so mark it
+  // fresh: a view load in the next USAGE_REUSE_MS window reuses it instead of
+  // firing a redundant /api/admin/usage request on first open. markUsageReady
+  // also flips the token placeholders from the loading spinner to real
+  // values/empty and flags the one-time model-table re-sort.
+  state.usageAt = Date.now(); markUsageReady();
+  if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
+  if (payload.modules?.inflight_client_routes !== undefined) state.liveRoutes = payload.modules.inflight_client_routes || {};
+  if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
+  if (liveViewActive('activity')) renderMobileActivity();
+  // Activity living pane: seed currently-hot legs on every snapshot so a
+  // missed delta self-heals without a refresh.
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed(payload.modules)); } catch { /* pane update is best-effort */ }
+    try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
+  }
   reconcileLive();
 });
 
 live.on('activity', delta => {
-  if (delta.id) {
-    const current = state.inflight[delta.id] || { active: 0, streaming: 0 };
-    current.active += delta.active || 0;
-    current.streaming += delta.streaming || 0;
-    if (current.active <= 0 && current.streaming <= 0) delete state.inflight[delta.id];
-    else state.inflight[delta.id] = current;
-    if (liveViewActive('virtual') && !liveDialogOpen()) {
-      const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
-      if (row) patchVirtualSpinner(row, state.inflight[delta.id]);
+  // An explicit terminal skip carries full client + route + target context
+  // but is not an in-flight request, so it must not touch the live counters.
+  // Forward it to the graph (which paints the amber roundel) and stop.
+  if (delta.result === 'skipped') {
+    if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+      try { noteActivityCatalogueMiss(activityGraphModule.onActivityDelta(delta)); } catch { /* pane update is best-effort */ }
     }
+    return;
   }
+  // Single-ticket liveness: client deltas (with route ID) accumulate in both
+  // liveRoutes (per client+route, for spinners and the Activity graph) and
+  // liveRequests (per-client aggregate, for the client roundel); target deltas
+  // accumulate in liveLegs. No separate route-level lane exists, so there is
+  // nothing to double-count.
   if (delta.client_id) {
-    const current = state.inflightClients[delta.client_id] || { active: 0, streaming: 0 };
+    const routeID = delta.id || '';
+    const ticket = routeTicketKey(delta.client_id, routeID);
+    const current = state.liveRoutes[ticket] || { active: 0, streaming: 0 };
     current.active += delta.active || 0;
     current.streaming += delta.streaming || 0;
-    if (current.active <= 0 && current.streaming <= 0) delete state.inflightClients[delta.client_id];
-    else state.inflightClients[delta.client_id] = current;
+    if (delta.id) current.routeID = delta.id;
+    if (delta.requested_model) current.requestedModel = delta.requested_model;
+    if (delta.resolved_model) current.resolvedModel = delta.resolved_model;
+    if (current.active <= 0 && current.streaming <= 0) delete state.liveRoutes[ticket];
+    else state.liveRoutes[ticket] = current;
+    // Per-client aggregate for the client status roundel.
+    const agg = state.liveRequests[delta.client_id] || { active: 0, streaming: 0 };
+    agg.active += delta.active || 0;
+    agg.streaming += delta.streaming || 0;
+    if (agg.active <= 0 && agg.streaming <= 0) delete state.liveRequests[delta.client_id];
+    else state.liveRequests[delta.client_id] = agg;
+    if (liveViewActive('virtual') && !liveDialogOpen() && delta.id) {
+      const row = $(`tr[data-virtual-id="${CSS.escape(delta.id)}"]`);
+      if (row) patchVirtualSpinner(row, routeActivity(delta.id));
+    }
     if (liveViewActive('clients') && !liveDialogOpen()) {
       const row = $(`tr[data-client-id="${CSS.escape(delta.client_id)}"]`);
       if (row) patchClientRoundelRow(row);
       const card = $(`article.client-card[data-client-id="${CSS.escape(delta.client_id)}"]`);
       if (card) {
         const client = state.clients.find(item => item.id === delta.client_id);
-        if (client) applyClientRoundel($('.status-roundel', card), client, state.inflightClients[delta.client_id]);
+        if (client) applyClientRoundel($('.status-roundel', card), client, state.liveRequests[delta.client_id]);
       }
     }
+    if (liveViewActive('activity')) renderMobileActivity();
   }
   if (delta.target_id) {
     const key = targetActivityKey(delta.id || '', delta.target_id);
-    const current = state.inflightTargets[key] || { active: 0 };
+    const current = state.liveLegs[key] || { active: 0 };
     current.active += delta.active || 0;
-    if (current.active <= 0) delete state.inflightTargets[key];
-    else state.inflightTargets[key] = current;
+    if (current.active <= 0) delete state.liveLegs[key];
+    else state.liveLegs[key] = current;
     if (liveViewActive('virtual') && !liveDialogOpen()) {
       const row = $(`tr[data-virtual-id="${CSS.escape(delta.id || '')}"]`, $('#virtual-body'));
       const line = row && $(`[data-target-key="${CSS.escape(delta.target_id)}"]`, row);
@@ -1320,6 +2003,11 @@ live.on('activity', delta => {
       const target = model && (model.targets || []).find(item => (item.provider_model_id || `${item.provider_name}/${item.upstream_model_id}`) === delta.target_id);
       if (line && target) patchResolution(line, target);
     }
+    if (liveViewActive('activity')) renderMobileActivity();
+  }
+  // Activity living pane: client + target deltas drive the flow.
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { noteActivityCatalogueMiss(activityGraphModule.onActivityDelta(delta)); } catch { /* pane update is best-effort */ }
   }
 });
 
@@ -1332,7 +2020,11 @@ $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
 const liveNavigate = navigate;
 navigate = function (view) {
   liveNavigate(view);
-  if (liveViewActive('virtual', 'clients')) reconcileLive();
+  if (liveViewActive('models', 'virtual', 'clients')) reconcileLive();
+  if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
+    try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
+    try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
+  }
 };
 
 function liveStart() { live.start(); }

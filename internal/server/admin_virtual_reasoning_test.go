@@ -138,6 +138,17 @@ func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *t
 	}
 	virtualID := payload["id"].(string)
 
+	for _, term := range []string{"reasoning-vg%2Freasoning-vm", "provider-a%2Fmodel-a"} {
+		status, payload, _ = api.request("GET", "/api/admin/virtual-models?search="+term, nil)
+		if status != http.StatusOK {
+			t.Fatalf("search virtual models %q: %d %v", term, status, payload)
+		}
+		data := payload["data"].([]any)
+		if len(data) != 1 || data[0].(map[string]any)["id"] != virtualID {
+			t.Fatalf("search virtual models %q returned %v, want %s", term, data, virtualID)
+		}
+	}
+
 	status, payload, _ = api.request("GET", "/api/admin/virtual-models", nil)
 	if status != http.StatusOK {
 		t.Fatalf("list virtual models: %d %v", status, payload)
@@ -204,6 +215,33 @@ func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *t
 		if _, exists := raw.(map[string]any)["reasoning_capabilities"]; exists {
 			t.Fatalf("NULL/malformed target capability should be omitted: %#v", raw)
 		}
+	}
+}
+
+func TestMergeReasoningCapabilitiesMergesEffortAliases(t *testing.T) {
+	merged := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "max"}},
+		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "high", "persistent": "none"}},
+	)
+	if merged == nil {
+		t.Fatal("merged capabilities = nil")
+	}
+	if got := merged.EffortAliases["ultra"]; got != "max" {
+		t.Fatalf("ultra alias = %q, want max (first target wins)", got)
+	}
+	if got := merged.EffortAliases["persistent"]; got != "none" {
+		t.Fatalf("persistent alias = %q, want none", got)
+	}
+	if len(merged.EffortAliases) != 2 {
+		t.Fatalf("aliases = %#v, want 2 entries", merged.EffortAliases)
+	}
+
+	single := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "max"}},
+		&providers.ReasoningCapabilities{},
+	)
+	if single == nil || single.EffortAliases["ultra"] != "max" {
+		t.Fatalf("single-sided alias merge = %#v", single)
 	}
 }
 

@@ -38,16 +38,16 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.locator('#clients-body tr.group-row')).toHaveCount(1);
   await expect(page.locator('#clients-body tr.group-toggle')).toHaveCount(1);
 
-  await page.getByRole('button', { name: 'Toggle navigation' }).click();
-  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+await page.locator('#nav-quick').getByRole('link', { name: 'Settings' }).click();
   await expect(page.locator('#top-status')).toHaveText('READY');
   await expect(page.locator('.backup-warning')).toContainText('recoverable provider API credentials');
   await expect(page.locator('#fallback-form input[name="fallback_timeout_seconds"]')).toHaveValue('60');
   await expect(page.locator('#fallback-form')).toContainText('at least 60 seconds');
 
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await expect(page.getByRole('button', { name: 'Toggle navigation' })).toBeHidden();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
+await page.setViewportSize({ width: 1440, height: 900 });
+await expect(page.locator('#nav-quick')).toBeHidden();
+await expect(page.locator('#nav-links')).toBeVisible();
+expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
   } finally {
     await context.close();
   }
@@ -119,7 +119,7 @@ test('mobile: Client Keys renders as cards with expandable detail and working ac
   const detail = card.locator('.client-card-detail');
   await expect(detail).toBeVisible();
   // Vertical fields are present.
-  for (const label of ['Description', 'Fingerprint', 'Created', 'Type', 'Route', 'Usage']) {
+  for (const label of ['Description', 'Fingerprint', 'Created', 'Type', 'Route']) {
     await expect(detail.getByText(label)).toBeVisible();
   }
   // Actions are present.
@@ -133,9 +133,9 @@ test('mobile: Client Keys renders as cards with expandable detail and working ac
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
 
-  // A Catalogue key's card opens catalogue permissions; the permissions dialog
-  // renders with its filter cleared.
-  await detail.getByRole('button', { name: 'Catalogue permissions' }).click();
+// A Catalogue key's card opens catalogue permissions via its quick action;
+// the permissions dialog renders with its filter cleared.
+await card.locator('.client-card-quick-actions').getByRole('button', { name: 'Manage permissions' }).click();
   await expect(page.locator('#permissions-dialog')).toBeVisible();
   await expect(page.locator('#permission-search')).toHaveValue('');
   await page.getByRole('button', { name: 'Cancel', exact: true }).click();
@@ -184,7 +184,7 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
 
   // "Change route" opens the target-only quick picker — not the full client
   // Settings dialog. On mobile it renders as a bottom sheet.
-  await detail.getByRole('button', { name: 'Change route' }).click();
+  await card.locator('.client-card-quick-actions').getByRole('button', { name: 'Change route' }).click();
   const dialog = page.locator('#form-dialog');
   await expect(dialog).toBeVisible();
   await expect(dialog).toHaveClass(/route-picker-dialog/);
@@ -755,6 +755,23 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
   await expect(virtualModel).toBeHidden();
 });
 
+test('real model search matches the displayed canonical model ID', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAdmin(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'canonical-model-search';
+  await createProvider(page, csrf, providerName);
+
+  await page.getByRole('link', { name: 'Real Models' }).click();
+  const search = page.locator('#model-search');
+  const row = page.locator('#models-body tr', { hasText: `${providerName}/mock-model` });
+  await expect(row).toBeVisible();
+
+  await search.fill(`${providerName}/mock-model`);
+  await expect(page.locator('#models-body tr')).toHaveCount(1);
+  await expect(row).toBeVisible();
+});
+
 
 test('activity loads clear a previously shown error on success', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
@@ -1161,15 +1178,19 @@ test('virtual-model target combobox: non-matching text still blocks submission',
   if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });
 
-test('mobile: ordered-fallback target dropdown spans the dialog width', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await openAdmin(page);
-  const csrf = await adminCsrf(page);
-  const providerName = 'vm-mobile-list';
-  await createProvider(page, csrf, providerName);
-  const modelsRes = await page.request.get('/api/admin/models?all=1');
-  const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
-  expect(real).toBeTruthy();
+test('mobile: ordered-fallback add-model dropdown stays within the viewport', async ({ page }) => {
+await page.setViewportSize({ width: 390, height: 844 });
+await openAdmin(page);
+const csrf = await adminCsrf(page);
+const providerName = 'vm-mobile-list';
+const provider = await createProvider(page, csrf, providerName);
+// The mock's only default model is mock-model (the sole target here), so add
+// another available model for the add-model picker to offer.
+await mockAddModel(page, 'mobile-fb-extra');
+await refreshProviderApi(page, csrf, provider.id);
+const modelsRes = await page.request.get('/api/admin/models?all=1');
+const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
+expect(real).toBeTruthy();
 
   const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-mobile-list-vg' } });
   expect(groupRes.status()).toBe(201);
@@ -1178,33 +1199,32 @@ test('mobile: ordered-fallback target dropdown spans the dialog width', async ({
   expect(virtualRes.status()).toBe(201);
   const virtual = await virtualRes.json();
 
-  await page.goto('/#virtual');
-  await expect(page.locator('#view-virtual')).toBeVisible();
-  const row = page.locator('#virtual-body tr', { hasText: 'vm-mobile-list-vg/mobile-fb' });
-  await row.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByRole('heading', { name: 'Edit vm-mobile-list-vg/mobile-fb' })).toBeVisible();
+await page.goto('/#virtual');
+await expect(page.locator('#view-virtual')).toBeVisible();
+// Mobile edits the fallback chain inline on the card; the desktop dialog
+// hides [data-fallback-targets] at this width.
+const card = page.locator('.virtual-model-card', { hasText: 'vm-mobile-list-vg/mobile-fb' });
+await expect(card).toBeVisible();
+await card.locator('.mobile-card-head').click();
 
-  const input = page.locator('[data-fallback-targets] .target-row .combobox input[type="text"]');
-  await input.click();
-  const list = page.locator('[data-fallback-targets] .combobox-list');
-  await expect(list).toBeVisible();
+const box = card.locator('[data-mobile-target-add]');
+const input = box.locator('input[type="text"]');
+await input.click();
+const list = box.locator('.combobox-list');
+await expect(list).toBeVisible();
 
-  const m = await page.evaluate(() => {
-    const l = document.querySelector('[data-fallback-targets] .combobox-list').getBoundingClientRect();
-    const i = document.querySelector('[data-fallback-targets] .combobox input[type="text"]').getBoundingClientRect();
-    const d = document.querySelector('#form-dialog').getBoundingClientRect();
-    return { listW: l.width, listRight: l.right, inputW: i.width, dialogW: d.width, vw: window.innerWidth };
-  });
-  expect(m.dialogW).toBeGreaterThan(m.inputW + 40);
-  expect(m.listW).toBeGreaterThanOrEqual(m.dialogW - 2);
-  expect(m.listW).toBeGreaterThan(m.inputW + 40);
-  expect(m.listRight).toBeLessThanOrEqual(m.vw);
+// The fixed dropdown must stay fully inside the viewport on a phone.
+const inputBox = await input.boundingBox();
+const listBox = await list.boundingBox();
+expect(inputBox.width).toBeGreaterThan(0);
+expect(listBox.width).toBeGreaterThan(0);
+expect(listBox.x).toBeGreaterThanOrEqual(0);
+expect(listBox.x + listBox.width).toBeLessThanOrEqual(390);
 
-  await input.click();
-  await expect(list).toBeHidden();
-  await page.getByRole('button', { name: 'Cancel' }).click();
-  await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
-  await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
+await input.click();
+await expect(list).toBeHidden();
+await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
+await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });
 
 test('virtual models table: group header colspan matches data row columns', async ({ page }) => {
