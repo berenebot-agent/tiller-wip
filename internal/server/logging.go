@@ -9,6 +9,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // logRow is the metadata captured for a single routed request. It is built up
@@ -94,8 +95,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		row.accountID = database.LocalAccountID
 	}
 	s.recordLastOutcome(row)
-	var enabled int
-	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
+	enabled, err := s.scopeFor(row.accountID).ClientKeyLoggingEnabled(ctx, row.clientKeyID)
+	if err != nil || !enabled {
 		return
 	}
 	// Write-time invariant: a 2xx "success" row must always carry a resolved
@@ -107,28 +108,55 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 			s.logger.Warn("request logged as success without a resolved target", "client_request_id", row.clientRequestID, "requested_model", row.requestedModel, "http_status", row.httpStatus)
 		}
 	}
+	attempts := make([]store.RequestAttemptInsert, 0, len(row.attempts))
+	for _, attempt := range row.attempts {
+		attempts = append(attempts, store.RequestAttemptInsert{
+			Provider:           attempt.provider,
+			Model:              attempt.model,
+			Result:             attempt.result,
+			HTTPStatus:         attempt.httpStatus,
+			FailureClass:       attempt.failureClass,
+			ErrorMessage:       attempt.errorMessage,
+			ErrorBody:          attempt.errorBody,
+			ErrorBodyTruncated: attempt.errorBodyTruncated,
+			LatencyMs:          attempt.latencyMs,
+		})
+	}
 	// One transaction per logical request: the request_logs row and all of its
 	// attempt rows commit together or not at all, so a single SQLite fsync (the
 	// implicit-transaction commit) covers the whole write instead of 1+N.
-	tx, err := s.db.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return
-	}
-	defer tx.Rollback() // no-op after a successful Commit
-	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,account_id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.accountID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, routeStatus, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, row.requestBody, boolInt(row.requestBodyTruncated), row.errorBody, boolInt(row.errorBodyTruncated), attemptCount(row.attempts), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
-		return
-	}
-	for i, attempt := range row.attempts {
-		attemptID, err := id.New()
-		if err != nil {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,account_id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, row.accountID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.errorMessage, attempt.errorBody, boolInt(attempt.errorBodyTruncated), attempt.latencyMs, row.createdAt); err != nil {
-			return
-		}
-	}
-	_ = tx.Commit()
+	_ = s.scopeFor(row.accountID).InsertRequestLog(ctx, store.RequestLogInsert{
+		ID:                       row.clientRequestID,
+		ClientKeyID:              row.clientKeyID,
+		RequestedModel:           row.requestedModel,
+		ExposedModel:             row.exposedModel,
+		RouteKind:                row.routeKind,
+		RouteModelID:             row.routeModelID,
+		RouteModel:               row.routeModel,
+		RouteStatus:              routeStatus,
+		ResolvedProvider:         row.resolvedProvider,
+		ResolvedModel:            row.resolvedModel,
+		Protocol:                 row.protocol,
+		Streaming:                row.streaming,
+		HTTPStatus:               row.httpStatus,
+		LatencyMs:                row.latencyMs,
+		InputTokens:              row.inputTokens,
+		OutputTokens:             row.outputTokens,
+		CacheReadInputTokens:     row.cacheReadInputTokens,
+		CacheCreationInputTokens: row.cacheCreationInputTokens,
+		ProviderRequestID:        row.providerRequestID,
+		ClientRequestID:          row.clientRequestID,
+		ErrorText:                row.errorText,
+		ErrorMessage:             row.errorMessage,
+		RequestBody:              row.requestBody,
+		RequestBodyTruncated:     row.requestBodyTruncated,
+		ErrorBody:                row.errorBody,
+		ErrorBodyTruncated:       row.errorBodyTruncated,
+		FallbackUsed:             row.fallbackUsed,
+		FallbackReason:           row.fallbackReason,
+		CreatedAt:                row.createdAt,
+		Attempts:                 attempts,
+	})
 }
 
 // recordLastOutcome updates operational target status from actual attempts.
@@ -204,38 +232,10 @@ func clientCausedFailure(attempt requestAttempt) bool {
 	return attempt.clientCtxErr != ""
 }
 
-func nullInt(v int) any {
-	if v == 0 {
-		return nil
-	}
-	return v
-}
-func nullString(v string) any {
-	if v == "" {
-		return nil
-	}
-	return v
-}
-
 // pruneRequestLogs deletes request logs older than each client's retention
 // window. Runs at startup and hourly.
 func (s *Server) pruneRequestLogs(ctx context.Context) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT DISTINCT retention_days FROM client_keys`)
-	if err != nil {
-		return
-	}
-	var days []int
-	for rows.Next() {
-		var d int
-		if rows.Scan(&d) == nil {
-			days = append(days, d)
-		}
-	}
-	rows.Close()
-	for _, d := range days {
-		cutoff := time.Now().UTC().Add(-time.Duration(d) * 24 * time.Hour).Format(time.RFC3339Nano)
-		_, _ = s.db.SQL.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id IN (SELECT id FROM client_keys WHERE retention_days=?) AND created_at < ?`, d, cutoff)
-	}
+	_ = s.storeHandle().PruneRequestLogs(ctx, time.Now())
 	s.invalidateUsageAggregates()
 }
 

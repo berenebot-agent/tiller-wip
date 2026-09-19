@@ -1,7 +1,7 @@
 package server
 
 import (
-	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -10,6 +10,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // generateClientKey generates a client key using the server's injected
@@ -54,73 +55,39 @@ func validClientModelName(name string) bool {
 	return len(name) >= 1 && len(name) <= 255 && !strings.Contains(name, "//") && clientModelNamePattern.MatchString(name)
 }
 
-func validateSingleTarget(tx *sql.Tx, targetType, targetID string) error {
-	table := "provider_models"
-	if targetType == "virtual" {
-		table = "virtual_models"
-	} else if targetType != "real" {
-		return sql.ErrNoRows
-	}
-	var exists int
-	if err := tx.QueryRow(`SELECT count(*) FROM `+table+` WHERE id=?`, targetID).Scan(&exists); err != nil || exists != 1 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-func upsertSingleBinding(tx *sql.Tx, clientID, modelName, targetType, targetID, now string) error {
-	var realID, virtualID any
-	if targetType == "real" {
-		realID = targetID
-	} else {
-		virtualID = targetID
-	}
-	_, err := tx.Exec(`INSERT INTO client_single_bindings(client_key_id,exposed_model_name,real_model_id,virtual_model_id,created_at,updated_at)
-		VALUES(?,?,?,?,?,?) ON CONFLICT(client_key_id) DO UPDATE SET exposed_model_name=excluded.exposed_model_name,real_model_id=excluded.real_model_id,virtual_model_id=excluded.virtual_model_id,updated_at=excluded.updated_at`, clientID, modelName, realID, virtualID, now, now)
-	return err
-}
-
 func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	groupFilter := strings.TrimSpace(r.URL.Query().Get("group"))
-	pattern := "%" + search + "%"
-	query := `SELECT c.id,c.name,c.description,c.key_group,c.secret_fingerprint,c.enabled,c.logging_enabled,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
-		coalesce(b.exposed_model_name,''),
-		CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
-		coalesce(b.real_model_id,b.virtual_model_id,''),
-		CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END,
-		CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.enabled=1 AND rm.available=1,0)
-		     WHEN b.virtual_model_id IS NOT NULL THEN EXISTS(SELECT 1 FROM virtual_model_targets vt JOIN provider_models pm ON pm.id=vt.provider_model_id JOIN providers p ON p.id=pm.provider_id WHERE vt.virtual_model_id=b.virtual_model_id AND vt.enabled=1 AND pm.available=1 AND p.enabled=1)
-		     ELSE 0 END
-		FROM client_keys c LEFT JOIN client_single_bindings b ON b.client_key_id=c.id
-		LEFT JOIN provider_models rm ON rm.id=b.real_model_id LEFT JOIN providers rp ON rp.id=rm.provider_id
-		LEFT JOIN virtual_models vm ON vm.id=b.virtual_model_id LEFT JOIN virtual_provider_groups vg ON vg.id=vm.virtual_group_id
-		WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?)`
-	args := []any{pattern, pattern, pattern}
-	if groupFilter != "" {
-		query += ` AND c.key_group = ?`
-		args = append(args, groupFilter)
-	}
-	query += ` ORDER BY c.name LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-	rows, err := s.db.SQL.QueryContext(r.Context(), query, args...)
+	rows, err := s.scope(r).ListClientKeys(r.Context(), store.ClientKeyFilter{Search: search, Group: groupFilter, Limit: limit, Offset: offset})
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list client keys.")
 		return
 	}
-	defer rows.Close()
-	data := []clientKeyView{}
-	for rows.Next() {
-		var v clientKeyView
-		var enabled, loggingEnabled int
-		var targetAvailable int
-		if rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &targetAvailable) != nil {
-			adminError(w, 500, "database_error", "Could not list client keys.")
-			return
+	data := make([]clientKeyView, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		v := clientKeyView{
+			ID:                    row.ID,
+			Name:                  row.Name,
+			Description:           row.Description,
+			Group:                 row.Group,
+			Fingerprint:           row.Fingerprint,
+			Enabled:               row.Enabled,
+			LoggingEnabled:        row.LoggingEnabled,
+			RetentionDays:         row.RetentionDays,
+			CreatedAt:             row.CreatedAt,
+			UpdatedAt:             row.UpdatedAt,
+			Type:                  row.Type,
+			SingleModelName:       row.SingleModelName,
+			SingleTargetType:      row.SingleTargetType,
+			SingleTargetID:        row.SingleTargetID,
+			SingleTargetCanonical: row.SingleTargetCanonical,
+			SingleTargetAvailable: row.SingleTargetAvailable,
 		}
-		v.Enabled = scanBool(enabled)
-		v.LoggingEnabled = scanBool(loggingEnabled)
-		v.SingleTargetAvailable = scanBool(targetAvailable)
+		if row.RotatedAt.Valid {
+			rotated := row.RotatedAt.String
+			v.RotatedAt = &rotated
+		}
 		data = append(data, v)
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
@@ -181,46 +148,33 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not create client key.")
 		return
 	}
-	now := database.Now()
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
+	err = s.scope(r).CreateClientKey(r.Context(), store.CreateClientKeyInput{
+		ID:               clientID,
+		Name:             input.Name,
+		Description:      input.Description,
+		Group:            group,
+		Selector:         generated.Selector,
+		Hash:             generated.Hash,
+		Fingerprint:      generated.Fingerprint,
+		Type:             input.Type,
+		LoggingEnabled:   loggingEnabled,
+		RetentionDays:    retentionDays,
+		SingleModelName:  input.SingleModelName,
+		SingleTargetType: input.SingleTargetType,
+		SingleTargetID:   input.SingleTargetID,
+	})
 	if err != nil {
-		adminError(w, 500, "database_error", "Could not create client key.")
-		return
-	}
-	defer tx.Rollback()
-	if input.Type == "single" {
-		if err = validateSingleTarget(tx, input.SingleTargetType, input.SingleTargetID); err != nil {
+		switch {
+		case errors.Is(err, store.ErrSingleTargetNotFound):
 			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
-			return
-		}
-	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO client_keys(id,name,description,key_group,selector,secret_hash,secret_fingerprint,enabled,logging_enabled,retention_days,created_at,updated_at,key_type) VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?)`, clientID, input.Name, input.Description, group, generated.Selector, generated.Hash, generated.Fingerprint, boolInt(loggingEnabled), retentionDays, now, now, input.Type)
-	if err == nil && input.Type == "single" {
-		err = upsertSingleBinding(tx, clientID, input.SingleModelName, input.SingleTargetType, input.SingleTargetID, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT ?,'real',id,0,? FROM providers`, clientID, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT ?,'virtual',id,0,? FROM virtual_provider_groups`, clientID, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT ?,'real',id,0,?,? FROM provider_models`, clientID, now, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT ?,'virtual',id,0,?,? FROM virtual_models`, clientID, now, now)
-	}
-	if err == nil {
-		err = s.clients.InvalidateWith(clientID, tx.Commit)
-	}
-	if err != nil {
-		if database.IsConstraint(err) {
+		case database.IsConstraint(err):
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")
-		} else {
+		default:
 			adminError(w, 500, "database_error", "Could not create client key.")
 		}
 		return
 	}
+	s.clients.Invalidate(clientID)
 	writeJSON(w, 201, map[string]any{"id": clientID, "name": input.Name, "type": input.Type, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. It cannot be displayed again."})
 	s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyCreated, fmt.Sprintf("Client: %s\nType: %s", input.Name, input.Type))
 }
@@ -248,21 +202,17 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := r.PathValue("id")
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not update client key.")
-		return
-	}
-	defer tx.Rollback()
-	var name, description, keyType, keyGroup string
-	var enabled, loggingEnabled, retentionDays int
-	if err = tx.QueryRowContext(r.Context(), `SELECT name,description,key_group,enabled,logging_enabled,retention_days,key_type FROM client_keys WHERE id=?`, clientID).Scan(&name, &description, &keyGroup, &enabled, &loggingEnabled, &retentionDays, &keyType); err == sql.ErrNoRows {
+	sc := s.scope(r)
+	current, err := sc.GetClientKeyEditable(r.Context(), clientID)
+	if errors.Is(err, store.ErrClientKeyNotFound) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not update client key.")
 		return
 	}
+	name, description, keyGroup, keyType := current.Name, current.Description, current.Group, current.Type
+	enabled, loggingEnabled, retentionDays := current.Enabled, current.LoggingEnabled, current.RetentionDays
 	if input.Name != nil {
 		name = *input.Name
 	}
@@ -277,10 +227,10 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if input.Enabled != nil {
-		enabled = boolInt(*input.Enabled)
+		enabled = *input.Enabled
 	}
 	if input.LoggingEnabled != nil {
-		loggingEnabled = boolInt(*input.LoggingEnabled)
+		loggingEnabled = *input.LoggingEnabled
 	}
 	if input.RetentionDays != nil {
 		retentionDays = *input.RetentionDays
@@ -293,21 +243,23 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_client_type", "Client key type must be catalogue or single.")
 		return
 	}
-	var oldModelName, targetType, targetID string
-	var realID, virtualID sql.NullString
-	bindErr := tx.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, clientID).Scan(&oldModelName, &realID, &virtualID)
-	if bindErr != nil && bindErr != sql.ErrNoRows {
+	binding, bindFound, err := sc.GetSingleBinding(r.Context(), clientID)
+	if err != nil {
 		adminError(w, 500, "database_error", "Could not update client key.")
 		return
 	}
-	modelName := oldModelName
-	if bindErr == sql.ErrNoRows {
-		modelName = "main"
+	var oldModelName, targetType, targetID string
+	if bindFound {
+		oldModelName = binding.ModelName
+		if binding.RealModelID.Valid {
+			targetType, targetID = "real", binding.RealModelID.String
+		} else if binding.VirtualModelID.Valid {
+			targetType, targetID = "virtual", binding.VirtualModelID.String
+		}
 	}
-	if realID.Valid {
-		targetType, targetID = "real", realID.String
-	} else if virtualID.Valid {
-		targetType, targetID = "virtual", virtualID.String
+	modelName := oldModelName
+	if !bindFound {
+		modelName = "main"
 	}
 	if input.SingleModelName != nil {
 		modelName = *input.SingleModelName
@@ -320,36 +272,46 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		targetType, targetID = *input.SingleTargetType, *input.SingleTargetID
 	}
 	bindingSupplied := input.SingleModelName != nil || input.SingleTargetID != nil
+	writeBinding := false
 	if keyType == "single" || bindingSupplied {
 		if !validClientModelName(modelName) {
 			adminError(w, 400, "invalid_model_name", "Client-facing model names must use 1-255 model-safe characters.")
 			return
 		}
-		if err = validateSingleTarget(tx, targetType, targetID); err != nil {
-			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
-			return
-		}
-		if oldType == "single" && bindErr == nil && modelName != oldModelName && !input.ConfirmModelNameChange {
+		if oldType == "single" && bindFound && modelName != oldModelName && !input.ConfirmModelNameChange {
 			adminError(w, 409, "breaking_change_confirmation_required", "Changing the client-facing model name may require client reconfiguration. Confirm the breaking change.")
 			return
 		}
+		writeBinding = true
 	}
-	now := database.Now()
-	_, err = tx.ExecContext(r.Context(), `UPDATE client_keys SET name=?,description=?,key_group=?,enabled=?,logging_enabled=?,retention_days=?,key_type=?,updated_at=? WHERE id=?`, name, description, keyGroup, enabled, loggingEnabled, retentionDays, keyType, now, clientID)
-	if err == nil && (keyType == "single" || bindingSupplied) {
-		err = upsertSingleBinding(tx, clientID, modelName, targetType, targetID, now)
-	}
-	if err == nil {
-		err = s.clients.InvalidateWith(clientID, tx.Commit)
-	}
+	err = sc.UpdateClientKey(r.Context(), store.UpdateClientKeyInput{
+		ID:             clientID,
+		Name:           name,
+		Description:    description,
+		Group:          keyGroup,
+		Type:           keyType,
+		Enabled:        enabled,
+		LoggingEnabled: loggingEnabled,
+		RetentionDays:  retentionDays,
+		WriteBinding:   writeBinding,
+		ModelName:      modelName,
+		TargetType:     targetType,
+		TargetID:       targetID,
+	})
 	if err != nil {
-		if database.IsConstraint(err) {
+		switch {
+		case errors.Is(err, store.ErrSingleTargetNotFound):
+			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
+		case errors.Is(err, store.ErrClientKeyNotFound):
+			adminError(w, 404, "not_found", "Client key not found.")
+		case database.IsConstraint(err):
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")
-		} else {
+		default:
 			adminError(w, 500, "database_error", "Could not update client key.")
 		}
 		return
 	}
+	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
 }
 
@@ -360,50 +322,39 @@ func (s *Server) rotateClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "internal_error", "Could not rotate client key.")
 		return
 	}
-	now := database.Now()
-	var result sql.Result
-	err = s.clients.InvalidateWith(clientID, func() error {
-		var updateErr error
-		result, updateErr = s.db.SQL.ExecContext(r.Context(), `UPDATE client_keys SET selector=?,secret_hash=?,secret_fingerprint=?,rotated_at=?,updated_at=? WHERE id=?`, generated.Selector, generated.Hash, generated.Fingerprint, now, now, clientID)
-		return updateErr
-	})
+	found, err := s.scope(r).RotateClientKey(r.Context(), clientID, generated.Selector, generated.Hash, generated.Fingerprint)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not rotate client key.")
 		return
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
+	if !found {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
+	s.clients.Invalidate(clientID)
 	writeJSON(w, 200, map[string]any{"id": clientID, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. The previous key is already invalid and this one cannot be displayed again."})
 }
 
 func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
-	var name string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT name FROM client_keys WHERE id=?`, clientID).Scan(&name); err == sql.ErrNoRows {
+	name, err := s.scope(r).ClientKeyName(r.Context(), clientID)
+	if errors.Is(err, store.ErrClientKeyNotFound) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not delete client key.")
 		return
 	}
-	var result sql.Result
-	err := s.clients.InvalidateWith(clientID, func() error {
-		var deleteErr error
-		result, deleteErr = s.db.SQL.ExecContext(r.Context(), `DELETE FROM client_keys WHERE id=?`, clientID)
-		return deleteErr
-	})
+	found, err := s.scope(r).DeleteClientKey(r.Context(), clientID)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not delete client key.")
 		return
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
+	if !found {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
+	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
 	s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
 }
@@ -425,117 +376,23 @@ type permissionModel struct {
 
 func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
-	var exists int
-	if s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM client_keys WHERE id=?`, clientID).Scan(&exists) != nil || exists == 0 {
+	groups, err := s.scope(r).ListPermissions(r.Context(), clientID)
+	if errors.Is(err, store.ErrClientKeyNotFound) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
-	}
-	groups := []permissionGroup{}
-	realRows, err := s.db.SQL.QueryContext(r.Context(), `SELECT p.id,p.name,coalesce(d.new_models_enabled,0) FROM providers p LEFT JOIN client_group_defaults d ON d.client_key_id=? AND d.group_kind='real' AND d.group_id=p.id ORDER BY p.name`, clientID)
-	if err != nil {
+	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not load permissions.")
 		return
 	}
-	var realGroups []permissionGroup
-	for realRows.Next() {
-		var g permissionGroup
-		var feeder int
-		g.Kind = "real"
-		if err := realRows.Scan(&g.ID, &g.Name, &feeder); err != nil {
-			realRows.Close()
-			adminError(w, 500, "database_error", "Could not load permissions.")
-			return
+	view := make([]permissionGroup, 0, len(groups))
+	for _, g := range groups {
+		pg := permissionGroup{Kind: g.Kind, ID: g.ID, Name: g.Name, NewModelsEnabled: g.NewModelsEnabled, Models: make([]permissionModel, 0, len(g.Models))}
+		for _, m := range g.Models {
+			pg.Models = append(pg.Models, permissionModel{Kind: m.Kind, ID: m.ID, CanonicalModelID: m.CanonicalModelID, Enabled: m.Enabled, Available: m.Available})
 		}
-		g.NewModelsEnabled = scanBool(feeder)
-		g.Models = []permissionModel{}
-		realGroups = append(realGroups, g)
+		view = append(view, pg)
 	}
-	if err := realRows.Err(); err != nil {
-		realRows.Close()
-		adminError(w, 500, "database_error", "Could not load permissions.")
-		return
-	}
-	realRows.Close()
-	for _, g := range realGroups {
-		rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT m.id,p.name||'/'||m.upstream_model_id,coalesce(x.enabled,0),m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='real' AND x.model_id=m.id WHERE m.provider_id=? ORDER BY m.upstream_model_id`, clientID, g.ID)
-		if err != nil {
-			adminError(w, 500, "database_error", "Could not load permissions.")
-			return
-		}
-		for rows.Next() {
-			var m permissionModel
-			var enabled, available int
-			m.Kind = "real"
-			if err := rows.Scan(&m.ID, &m.CanonicalModelID, &enabled, &available); err != nil {
-				rows.Close()
-				adminError(w, 500, "database_error", "Could not load permissions.")
-				return
-			}
-			m.Enabled = scanBool(enabled)
-			m.Available = scanBool(available)
-			g.Models = append(g.Models, m)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			adminError(w, 500, "database_error", "Could not load permissions.")
-			return
-		}
-		rows.Close()
-		groups = append(groups, g)
-	}
-	virtualRows, err := s.db.SQL.QueryContext(r.Context(), `SELECT g.id,g.name,coalesce(d.new_models_enabled,0) FROM virtual_provider_groups g LEFT JOIN client_group_defaults d ON d.client_key_id=? AND d.group_kind='virtual' AND d.group_id=g.id ORDER BY g.name`, clientID)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not load permissions.")
-		return
-	}
-	var virtualGroups []permissionGroup
-	for virtualRows.Next() {
-		var g permissionGroup
-		var feeder int
-		g.Kind = "virtual"
-		if err := virtualRows.Scan(&g.ID, &g.Name, &feeder); err != nil {
-			virtualRows.Close()
-			adminError(w, 500, "database_error", "Could not load permissions.")
-			return
-		}
-		g.NewModelsEnabled = scanBool(feeder)
-		g.Models = []permissionModel{}
-		virtualGroups = append(virtualGroups, g)
-	}
-	if err := virtualRows.Err(); err != nil {
-		virtualRows.Close()
-		adminError(w, 500, "database_error", "Could not load permissions.")
-		return
-	}
-	virtualRows.Close()
-	for _, g := range virtualGroups {
-		rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id WHERE v.virtual_group_id=? ORDER BY v.name`, clientID, g.ID)
-		if err != nil {
-			adminError(w, 500, "database_error", "Could not load permissions.")
-			return
-		}
-		for rows.Next() {
-			var m permissionModel
-			var enabled, available int
-			m.Kind = "virtual"
-			if err := rows.Scan(&m.ID, &m.CanonicalModelID, &enabled, &available); err != nil {
-				rows.Close()
-				adminError(w, 500, "database_error", "Could not load permissions.")
-				return
-			}
-			m.Enabled = scanBool(enabled)
-			m.Available = scanBool(available)
-			g.Models = append(g.Models, m)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			adminError(w, 500, "database_error", "Could not load permissions.")
-			return
-		}
-		rows.Close()
-		groups = append(groups, g)
-	}
-	writeJSON(w, 200, map[string]any{"client_key_id": clientID, "groups": groups, "feeder_explanation": "Controls whether models discovered or created in future are enabled for this client. Changing it never alters existing model permissions."})
+	writeJSON(w, 200, map[string]any{"client_key_id": clientID, "groups": view, "feeder_explanation": "Controls whether models discovered or created in future are enabled for this client. Changing it never alters existing model permissions."})
 }
 
 func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
@@ -556,59 +413,40 @@ func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	clientID := r.PathValue("id")
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not update permissions.")
-		return
-	}
-	defer tx.Rollback()
-	var exists int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_keys WHERE id=?`, clientID).Scan(&exists); err != nil || exists == 0 {
-		adminError(w, 404, "not_found", "Client key not found.")
-		return
-	}
-	now := database.Now()
 	for _, d := range input.Defaults {
-		table := "providers"
-		if d.Kind == "virtual" {
-			table = "virtual_provider_groups"
-		} else if d.Kind != "real" {
+		if d.Kind != "real" && d.Kind != "virtual" {
 			adminError(w, 400, "invalid_permission", "Invalid group kind.")
-			return
-		}
-		var valid int
-		if tx.QueryRowContext(r.Context(), `SELECT count(*) FROM `+table+` WHERE id=?`, d.GroupID).Scan(&valid) != nil || valid == 0 {
-			adminError(w, 400, "invalid_permission", "Unknown permission group.")
-			return
-		}
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(client_key_id,group_kind,group_id) DO UPDATE SET new_models_enabled=excluded.new_models_enabled,updated_at=excluded.updated_at`, clientID, d.Kind, d.GroupID, boolInt(d.Enabled), now)
-		if err != nil {
-			adminError(w, 500, "database_error", "Could not update permissions.")
 			return
 		}
 	}
 	for _, p := range input.Permissions {
-		table := "provider_models"
-		if p.Kind == "virtual" {
-			table = "virtual_models"
-		} else if p.Kind != "real" {
+		if p.Kind != "real" && p.Kind != "virtual" {
 			adminError(w, 400, "invalid_permission", "Invalid model kind.")
 			return
 		}
-		var valid int
-		if tx.QueryRowContext(r.Context(), `SELECT count(*) FROM `+table+` WHERE id=?`, p.ModelID).Scan(&valid) != nil || valid == 0 {
-			adminError(w, 400, "invalid_permission", "Unknown model permission.")
-			return
-		}
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(client_key_id,model_kind,model_id) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at`, clientID, p.Kind, p.ModelID, boolInt(p.Enabled), now, now)
-		if err != nil {
-			adminError(w, 500, "database_error", "Could not update permissions.")
-			return
-		}
 	}
-	if err := s.clients.InvalidateWith(clientID, tx.Commit); err != nil {
-		adminError(w, 500, "database_error", "Could not update permissions.")
+	defaults := make([]store.PermissionDefaultUpdate, 0, len(input.Defaults))
+	for _, d := range input.Defaults {
+		defaults = append(defaults, store.PermissionDefaultUpdate{Kind: d.Kind, GroupID: d.GroupID, Enabled: d.Enabled})
+	}
+	permissions := make([]store.PermissionModelUpdate, 0, len(input.Permissions))
+	for _, p := range input.Permissions {
+		permissions = append(permissions, store.PermissionModelUpdate{Kind: p.Kind, ModelID: p.ModelID, Enabled: p.Enabled})
+	}
+	err := s.scope(r).UpdatePermissions(r.Context(), clientID, defaults, permissions)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrClientKeyNotFound):
+			adminError(w, 404, "not_found", "Client key not found.")
+		case errors.Is(err, store.ErrPermissionGroupNotFound):
+			adminError(w, 400, "invalid_permission", "Unknown permission group.")
+		case errors.Is(err, store.ErrPermissionModelNotFound):
+			adminError(w, 400, "invalid_permission", "Unknown model permission.")
+		default:
+			adminError(w, 500, "database_error", "Could not update permissions.")
+		}
 		return
 	}
+	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
 }

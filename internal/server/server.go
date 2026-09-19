@@ -377,13 +377,23 @@ func (s *Server) scope(r *http.Request) *store.Scope {
 	if accountID == "" {
 		accountID = database.LocalAccountID
 	}
-	return s.store.For(accountID)
+	return s.storeHandle().For(accountID)
 }
 
 // scopeFor returns an account-scoped handle for background work that runs
 // outside a request context.
 func (s *Server) scopeFor(accountID string) *store.Scope {
-	return s.store.For(accountID)
+	return s.storeHandle().For(accountID)
+}
+
+// storeHandle returns the configured tenant store, or a thin wrapper over the
+// server's DB when a Server was constructed directly (tests). Production always
+// goes through New, which sets store.
+func (s *Server) storeHandle() *store.Store {
+	if s.store == nil {
+		return store.New(s.db.SQL)
+	}
+	return s.store
 }
 
 func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
