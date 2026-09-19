@@ -33,8 +33,8 @@ type Server struct {
 	db     *database.DB
 	// store is the single boundary for tenant-table SQL. Handlers obtain an
 	// account-scoped handle via s.scope(r) or s.store.For(accountID).
-	store  *store.Store
-	clients *auth.ClientAuthenticator
+	store    *store.Store
+	clients  *auth.ClientAuthenticator
 	sessions *auth.SessionStore
 	// secretHasher is the token hasher used when generating client keys
 	// (bcrypt in production; a fast hasher in tests).
@@ -360,11 +360,11 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			return
 		}
 		// Phase 1 local mode: the env-admin session owns the single implicit
-	// local account. Hosted mode (Phase 3) will resolve the account owned by
-	// the authenticated user instead.
-	ctx := context.WithValue(r.Context(), adminSessionKey, session)
-	ctx = context.WithValue(ctx, accountKey, database.LocalAccountID)
-	next.ServeHTTP(w, r.WithContext(ctx))
+		// local account. Hosted mode (Phase 3) will resolve the account owned by
+		// the authenticated user instead.
+		ctx := context.WithValue(r.Context(), adminSessionKey, session)
+		ctx = context.WithValue(ctx, accountKey, database.LocalAccountID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -415,11 +415,11 @@ func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
 			inferenceError(w, 401, "authentication_error", "invalid_api_key", "Invalid API key.", anthropic)
 			return
 		}
-	s.clientSelectorLimiter.success(selector)
-	s.clientAddressLimiter.success(address)
-	ctx := context.WithValue(r.Context(), clientKey, identity)
-	ctx = context.WithValue(ctx, accountKey, identity.AccountID)
-	next.ServeHTTP(w, r.WithContext(ctx))
+		s.clientSelectorLimiter.success(selector)
+		s.clientAddressLimiter.success(address)
+		ctx := context.WithValue(r.Context(), clientKey, identity)
+		ctx = context.WithValue(ctx, accountKey, identity.AccountID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

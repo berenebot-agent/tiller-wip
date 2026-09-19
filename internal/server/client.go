@@ -571,9 +571,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// built up as the request progresses and written once, synchronously, in a
 	// deferred best-effort insert that never fails the request.
 	row := &logRow{
-		accountID: identity.AccountID,
-		clientKeyID: identity.ID,
-		clientName: identity.Name,
+		accountID:       identity.AccountID,
+		clientKeyID:     identity.ID,
+		clientName:      identity.Name,
 		requestedModel:  requested,
 		routeStatus:     "unresolved",
 		protocol:        string(incoming),

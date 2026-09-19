@@ -15,9 +15,9 @@ import (
 // as the request progresses and written once, synchronously, before the
 // handler returns.
 type logRow struct {
-	accountID   string
-	clientKeyID string
-	clientName string
+	accountID                string
+	clientKeyID              string
+	clientName               string
 	requestedModel           string
 	exposedModel             *string
 	routeKind                *string

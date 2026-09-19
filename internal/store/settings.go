@@ -9,20 +9,20 @@ import (
 )
 
 const (
-	SettingDefaultLoggingEnabled           = "default_logging_enabled"
-	SettingDefaultRetentionDays            = "default_retention_days"
-	SettingLogErrorBodies                  = "log_error_bodies"
-	SettingFallbackTimeoutSeconds          = "fallback_timeout_seconds"
-	SettingNotificationsEnabled            = "notifications_enabled"
-	SettingNotificationsWebhookURL         = "notifications_webhook_url"
-	SettingNotificationsEventFallback      = "notifications_event_fallback"
-	SettingNotificationsEventAllFailed     = "notifications_event_all_failed"
-	SettingNotificationsAuthHeader         = "notifications_auth_header"
-	SettingNotificationsCooldownSeconds    = "notifications_cooldown_seconds"
+	SettingDefaultLoggingEnabled              = "default_logging_enabled"
+	SettingDefaultRetentionDays               = "default_retention_days"
+	SettingLogErrorBodies                     = "log_error_bodies"
+	SettingFallbackTimeoutSeconds             = "fallback_timeout_seconds"
+	SettingNotificationsEnabled               = "notifications_enabled"
+	SettingNotificationsWebhookURL            = "notifications_webhook_url"
+	SettingNotificationsEventFallback         = "notifications_event_fallback"
+	SettingNotificationsEventAllFailed        = "notifications_event_all_failed"
+	SettingNotificationsAuthHeader            = "notifications_auth_header"
+	SettingNotificationsCooldownSeconds       = "notifications_cooldown_seconds"
 	SettingNotificationsEventClientKeyCreated = "notifications_event_client_key_created"
 	SettingNotificationsEventClientKeyDeleted = "notifications_event_client_key_deleted"
-	SettingNotificationsEventAdminLogin    = "notifications_event_admin_login"
-	SettingFallbackCooldownSeconds         = "fallback_cooldown_seconds"
+	SettingNotificationsEventAdminLogin       = "notifications_event_admin_login"
+	SettingFallbackCooldownSeconds            = "fallback_cooldown_seconds"
 )
 
 // GetSetting returns the raw string value for an account settings key.
