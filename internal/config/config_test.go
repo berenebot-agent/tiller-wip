@@ -49,6 +49,50 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 	}
 }
 
+func TestDebugPprofFlag(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+
+	// Off by default: telemetry is env-required.
+	t.Setenv("TILLER_DEBUG_PPROF", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DebugPprof {
+		t.Error("DebugPprof should default to false")
+	}
+
+	// Explicitly on.
+	t.Setenv("TILLER_DEBUG_PPROF", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.DebugPprof {
+		t.Error("DebugPprof should be true when TILLER_DEBUG_PPROF=true")
+	}
+
+	// Explicitly off.
+	t.Setenv("TILLER_DEBUG_PPROF", "false")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DebugPprof {
+		t.Error("DebugPprof should be false when TILLER_DEBUG_PPROF=false")
+	}
+
+	// An invalid value is a hard configuration error, not a silent default.
+	t.Setenv("TILLER_DEBUG_PPROF", "banana")
+	if _, err := Load(); err == nil {
+		t.Error("TILLER_DEBUG_PPROF=banana should fail to load")
+	}
+}
+
 func TestLogLevel(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")

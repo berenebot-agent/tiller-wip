@@ -21,6 +21,10 @@ type Config struct {
 	TrustedProxy      netip.Prefix
 	ModelsDevEnabled  bool
 	LogLevel          string
+	// DebugPprof enables the admin-gated memory/pprof debug endpoints. It is
+	// off by default and only turns on when TILLER_DEBUG_PPROF is explicitly
+	// true, so a normal deployment never exposes profiling surfaces.
+	DebugPprof bool
 }
 
 func Load() (Config, error) {
@@ -80,6 +84,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_MODELS_DEV_ENABLED: %w", err)
 		}
 		c.ModelsDevEnabled = v
+	}
+	if raw := os.Getenv("TILLER_DEBUG_PPROF"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_DEBUG_PPROF: %w", err)
+		}
+		c.DebugPprof = v
 	}
 	if c.AdminUsername == "" || c.AdminPassword == "" {
 		return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD are required")

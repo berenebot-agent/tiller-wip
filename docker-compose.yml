@@ -32,6 +32,11 @@ services:
       # proxy's IP/CIDR so the router trusts the proxy-supplied client IP.
       # Leave unset to disable proxy-header trust.
       TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
+
+      # Admin-only memory/pprof debug endpoints (GET /api/admin/debug/memory and
+      # /api/admin/debug/pprof/*). Off by default; enable only while diagnosing.
+      # Never leave enabled on an exposed deployment.
+      TILLER_DEBUG_PPROF: ${TILLER_DEBUG_PPROF:-false}
     volumes:
       - ./data:/data
     # Default hardening (adoption-first posture). The image starts as root so
@@ -61,5 +66,5 @@ services:
   # fail with ErrDataDirUnwritable, and `cap_drop: [ALL]` removes the
   # setuid/setgid/chown capabilities the drop requires.
   #
-  #   cap_drop: [ALL]
-  #   user: "${TILLER_RUN_UID:-65532}:${TILLER_RUN_GID:-65532}"
+  # cap_drop: [ALL]
+  # user: "${TILLER_RUN_UID:-65532}:${TILLER_RUN_GID:-65532}"
