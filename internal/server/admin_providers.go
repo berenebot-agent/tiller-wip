@@ -356,9 +356,9 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	// Clean up in-memory OAuth state only after the transaction commits.
 	if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
 		s.oauthDeviceMu.Lock()
-		delete(s.oauthDevices, providerID)
+		delete(s.oauthDevices, tenantKey(sc.AccountID(), providerID))
 		s.oauthDeviceMu.Unlock()
-		s.oauthFlows.Cancel(providerID)
+		s.oauthFlows.Cancel(sc.AccountID(), providerID)
 	}
 	// Drop the per-provider refresh lock so the map does not grow without
 	// bound as providers are created and deleted.

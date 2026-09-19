@@ -79,8 +79,8 @@ type Server struct {
 	// in-memory state (last outcomes, cooldowns, in-flight) is never cached, so
 	// it stays fresh even while the expensive request_logs scans are reused.
 	usageAggMu sync.Mutex
-	usageAgg   *usageAggregates
-	usageAggAt time.Time
+	usageAgg   map[string]*usageAggregates
+	usageAggAt map[string]time.Time
 	// usageCacheTTL bounds how long a computed usage aggregate is reused. Zero
 	// disables caching (tests use this for determinism).
 	usageCacheTTL time.Duration
@@ -173,7 +173,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, store: store.New(db.SQL), clients: clients, sessions: sessions, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: store.New(db.SQL), clients: clients, sessions: sessions, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
@@ -455,6 +455,12 @@ func (s *Server) secureRequest(r *http.Request) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
+}
+
+// tenantKey joins an account id with a tenant-variable cache/state key so a
+// value for one account can never be served to another.
+func tenantKey(accountID, id string) string {
+	return accountID + "\x00" + id
 }
 
 func boolInt(v bool) int {

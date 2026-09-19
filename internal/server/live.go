@@ -45,29 +45,41 @@ type liveTimings struct {
 	sessionCheck time.Duration
 }
 
-// liveHub holds the subscriber set and the outcome delta channel. The
+// outcomeEvent and activityEvent tag a live delta with the account that
+// produced it so fan-out can be restricted to that account's subscribers.
+type outcomeEvent struct {
+	AccountID string
+	Delta     map[string]lastOutcome
+}
+
+type activityEvent struct {
+	AccountID string
+	Delta     inflightDelta
+}
+
+// liveHub holds the per-account subscriber sets and the delta channels. The
 // dispatcher goroutine lifecycle is driven by subscribe/unsubscribe.
 type liveHub struct {
 	mu         sync.Mutex
-	subs       map[chan []byte]struct{}
-	outcomeCh  chan map[string]lastOutcome
-	activityCh chan inflightDelta
+	subs       map[string]map[chan []byte]struct{}
+	outcomeCh  chan outcomeEvent
+	activityCh chan activityEvent
 	cancel     context.CancelFunc
 	timings    liveTimings
-	// snapshot recomputes the full usage/health envelope. It is bound to the
-	// owning Server so the dispatcher and the /api/admin/usage endpoint share
-	// one source of truth.
-	snapshot func(context.Context) (liveSnapshot, error)
+	// snapshot recomputes the full usage/health envelope for one account. It is
+	// bound to the owning Server so the dispatcher and the /api/admin/usage
+	// endpoint share one source of truth.
+	snapshot func(context.Context, string) (liveSnapshot, error)
 }
 
-func (h *liveHub) emitActivity(delta inflightDelta) {
+func (h *liveHub) emitActivity(accountID string, delta inflightDelta) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.subs) == 0 {
+	if len(h.subs[accountID]) == 0 {
 		return
 	}
 	select {
-	case h.activityCh <- delta:
+	case h.activityCh <- activityEvent{AccountID: accountID, Delta: delta}:
 	default:
 	}
 }
@@ -75,14 +87,14 @@ func (h *liveHub) emitActivity(delta inflightDelta) {
 // emitOutcome publishes only while a live subscriber exists. The subscriber
 // check and channel send share the hub lock so an outcome cannot be queued
 // after the last subscriber leaves.
-func (h *liveHub) emitOutcome(delta map[string]lastOutcome) {
+func (h *liveHub) emitOutcome(accountID string, delta map[string]lastOutcome) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if len(h.subs) == 0 {
+	if len(h.subs[accountID]) == 0 {
 		return
 	}
 	select {
-	case h.outcomeCh <- delta:
+	case h.outcomeCh <- outcomeEvent{AccountID: accountID, Delta: delta}:
 	default:
 	}
 }
@@ -105,16 +117,20 @@ type liveSnapshot struct {
 	Modules map[string]any `json:"modules"`
 }
 
-// subscribe registers a new subscriber and lazily starts the dispatcher if this
-// is the first one. The returned channel receives pre-marshalled SSE messages.
-func (h *liveHub) subscribe() chan []byte {
+// subscribe registers a new subscriber for one account and lazily starts the
+// dispatcher if this is the first one. The returned channel receives
+// pre-marshalled SSE messages.
+func (h *liveHub) subscribe(accountID string) chan []byte {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.subs == nil {
-		h.subs = make(map[chan []byte]struct{})
+		h.subs = make(map[string]map[chan []byte]struct{})
+	}
+	if h.subs[accountID] == nil {
+		h.subs[accountID] = make(map[chan []byte]struct{})
 	}
 	ch := make(chan []byte, 8)
-	h.subs[ch] = struct{}{}
+	h.subs[accountID][ch] = struct{}{}
 	if h.cancel == nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		h.cancel = cancel
@@ -126,22 +142,25 @@ func (h *liveHub) subscribe() chan []byte {
 // unsubscribe removes a subscriber and stops the dispatcher when the last one
 // leaves. A brief overlap with a freshly-started dispatcher is harmless: both
 // only broadcast snapshots, and the old one exits on its cancelled context.
-// The overlap window is bounded by the time it takes the old dispatcher to
-// observe ctx.Done() — typically microseconds — and produces at most one
-// duplicate snapshot event, which the client reconciles idempotently.
-func (h *liveHub) unsubscribe(ch chan []byte) {
+func (h *liveHub) unsubscribe(accountID string, ch chan []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	delete(h.subs, ch)
+	if set := h.subs[accountID]; set != nil {
+		delete(set, ch)
+		if len(set) == 0 {
+			delete(h.subs, accountID)
+		}
+	}
 	if len(h.subs) == 0 && h.cancel != nil {
 		h.cancel()
 		h.cancel = nil
 	}
 }
 
-// broadcast formats one SSE message and fans it out to every subscriber. A
-// full or slow subscriber drops the message; the next snapshot reconciles it.
-func (h *liveHub) broadcast(event string, payload any) {
+// broadcast formats one SSE message and fans it out to the account's
+// subscribers. A full or slow subscriber drops the message; the next snapshot
+// reconciles it.
+func (h *liveHub) broadcast(accountID, event string, payload any) {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return
@@ -149,7 +168,7 @@ func (h *liveHub) broadcast(event string, payload any) {
 	msg := []byte("event: " + event + "\ndata: " + string(data) + "\n\n")
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	for ch := range h.subs {
+	for ch := range h.subs[accountID] {
 		select {
 		case ch <- msg:
 		default:
@@ -172,14 +191,14 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 	idle := time.NewTicker(t.idle)
 	defer idle.Stop()
 	defer debounce.Stop()
-	dirty := false
+	dirty := map[string]bool{}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case outcomes := <-h.outcomeCh:
-			h.broadcast("outcome", outcomes)
-			dirty = true
+			h.broadcast(outcomes.AccountID, "outcome", outcomes.Delta)
+			dirty[outcomes.AccountID] = true
 			if !debounce.Stop() {
 				select {
 				case <-debounce.C:
@@ -188,30 +207,39 @@ func (h *liveHub) dispatcher(ctx context.Context) {
 			}
 			debounce.Reset(t.debounce)
 		case delta := <-h.activityCh:
-			h.broadcast("activity", delta)
+			h.broadcast(delta.AccountID, "activity", delta.Delta)
 		case <-debounce.C:
-			if dirty {
-				h.broadcastSnapshot(ctx)
-				dirty = false
+			for accountID := range dirty {
+				h.broadcastSnapshot(ctx, accountID)
 			}
+			dirty = map[string]bool{}
 		case <-idle.C:
-			h.broadcastSnapshot(ctx)
-			dirty = false
+			h.mu.Lock()
+			accounts := make([]string, 0, len(h.subs))
+			for accountID := range h.subs {
+				accounts = append(accounts, accountID)
+			}
+			h.mu.Unlock()
+			for _, accountID := range accounts {
+				h.broadcastSnapshot(ctx, accountID)
+			}
+			dirty = map[string]bool{}
 		}
 	}
 }
 
-// broadcastSnapshot recomputes and pushes the full envelope. It is the
-// self-healing source of truth; a dropped outcome delta is corrected here.
-func (h *liveHub) broadcastSnapshot(ctx context.Context) {
+// broadcastSnapshot recomputes and pushes the full envelope for one account.
+// It is the self-healing source of truth; a dropped outcome delta is
+// corrected here.
+func (h *liveHub) broadcastSnapshot(ctx context.Context, accountID string) {
 	if h.snapshot == nil {
 		return
 	}
-	snap, err := h.snapshot(ctx)
+	snap, err := h.snapshot(ctx, accountID)
 	if err != nil {
 		return
 	}
-	h.broadcast("snapshot", snap)
+	h.broadcast(accountID, "snapshot", snap)
 }
 
 // live is the SSE handler. It is admin-gated (GET, cookie auth, CSRF-exempt).
@@ -227,8 +255,9 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	ch := s.liveHub.subscribe()
-	defer s.liveHub.unsubscribe(ch)
+	accountID := s.scope(r).AccountID()
+	ch := s.liveHub.subscribe(accountID)
+	defer s.liveHub.unsubscribe(accountID, ch)
 	cookie, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return
@@ -241,7 +270,7 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 
 	// Baseline snapshot on connect (and reconnect) so the client reconciles
 	// anything it may have missed while disconnected.
-	if snap, err := s.buildUsageSnapshot(r.Context()); err == nil {
+	if snap, err := s.buildUsageSnapshot(r.Context(), accountID); err == nil {
 		if data, err := json.Marshal(snap); err == nil {
 			_, _ = w.Write([]byte("event: snapshot\ndata: " + string(data) + "\n\n"))
 			flusher.Flush()

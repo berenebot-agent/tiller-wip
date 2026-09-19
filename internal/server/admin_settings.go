@@ -144,7 +144,7 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			s.providers.Registry().SetResponseHeaderTimeout(time.Duration(*input.FallbackTimeoutSeconds) * time.Second)
 		}
 		if u.key == store.SettingFallbackCooldownSeconds && *input.FallbackCooldownSeconds == 0 {
-			s.cooldown.clear()
+			s.cooldown.clearFor(sc.AccountID())
 		}
 	}
 	w.WriteHeader(204)

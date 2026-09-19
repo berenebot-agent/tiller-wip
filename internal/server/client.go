@@ -552,10 +552,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		// clientEnd carries the route ID, so an empty RouteModelID here
 		// (resolution failed before tracking started) emits nothing.
 		if clientTracked {
-			s.inflight.clientEnd(row.clientKeyID, route.RouteModelID, streamed)
+			s.inflight.clientEnd(row.accountID, row.clientKeyID, route.RouteModelID, streamed)
 		}
 		if activeTargetID != "" {
-			s.inflight.targetEnd(route.RouteModelID, activeTargetID)
+			s.inflight.targetEnd(row.accountID, route.RouteModelID, activeTargetID)
 		}
 		s.writeLog(context.Background(), row)
 	}()
@@ -583,7 +583,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
-	s.inflight.clientStart(row.clientKeyID, route.RouteModelID, requested)
+	s.inflight.clientStart(row.accountID, row.clientKeyID, route.RouteModelID, requested)
 	clientTracked = true
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
@@ -642,14 +642,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			if !candidate.Available {
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unavailable")
+				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unavailable")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
-			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
+			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(row.accountID, candidate.ProviderModelID, attemptStart) {
 				skippedCooled = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "cooldown")
+				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "cooldown")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -668,7 +668,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "free_model_requires_keyless")
+				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "free_model_requires_keyless")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -677,7 +677,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				protocolUnavailable = true
 				nonTranslationFailure = true
 				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "protocol_unavailable")
+				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "protocol_unavailable")
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				continue
 			}
@@ -702,7 +702,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					}
 					translationFailureClass = code
 					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
-					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, code)
+					s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, code)
 					continue
 				}
 				// After translation, re-apply the canonical selector for the target.
@@ -728,7 +728,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 							return
 						}
 						row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
-						s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
+						s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
 						continue
 					}
 					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
@@ -782,7 +782,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						return
 					}
 					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
-					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
+					s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
 					continue
 				}
 			}
@@ -861,10 +861,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// Target-level tracking covers direct real-model routes too: for a
 			// real route this is the single 1:1 leg, so the Activity graph can
 			// light it (and dim it on failure) while the request is in flight.
-			s.inflight.targetStart(route.RouteModelID, targetID)
+			s.inflight.targetStart(row.accountID, route.RouteModelID, targetID)
 			response, e := s.providers.Registry().HTTPClient().Do(req)
 			if e != nil {
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				attemptCancel()
 				class := "upstream_unreachable"
 				if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
@@ -931,7 +931,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			idleBody := response.Body
 			response.Body = bufferedReadCloser{Reader: &idleReader{reader: idleBody, timer: idle}, closer: idleBody}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				class := fmt.Sprintf("http_%d", response.StatusCode)
 				// Always read a bounded copy: it is persisted only under opt-in
 				// detailed error logging, but a sanitized summary is always used
@@ -1068,7 +1068,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				} else {
 					logCodexResponse(0)
 				}
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				response.Body.Close()
 				idle.Stop()
 				attemptCancel()
@@ -1132,7 +1132,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					}
 				}
 				if class != "" {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
+					s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 					response.Body.Close()
 					idle.Stop()
 					attemptCancel()
@@ -1224,12 +1224,12 @@ routeDone:
 	defer cancel()
 	clearSelectedCooldown := func() {
 		if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && selected.ProviderModelID != "" {
-			s.cooldown.remove(selected.ProviderModelID)
+			s.cooldown.remove(row.accountID, selected.ProviderModelID)
 		}
 	}
 	row.resolvedProvider = &selected.Provider.Name
 	row.resolvedModel = &selected.UpstreamModelID
-	s.inflight.clientResolved(row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
+	s.inflight.clientResolved(row.accountID, row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
 	if v := resp.Header.Get("Request-Id"); v != "" {
@@ -1271,7 +1271,7 @@ routeDone:
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
-			s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
+			s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 			ensureStreamKeepalive()
 		}
 		if streamKeepalive == nil {
@@ -1306,7 +1306,7 @@ routeDone:
 	if isStreamingResponse(resp) {
 		streamed = true
 		row.streaming = true
-		s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
+		s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 		ensureStreamKeepalive()
 		row.httpStatus = resp.StatusCode
 		if err := rewriteSSE(w, streamKeepalive, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
@@ -1841,7 +1841,7 @@ func rewriteModel(value any, upstream, requested string) {
 func (s *Server) openCooldown(candidate resolvedRoute, class string, row *logRow, cooldownSeconds int, message string) {
 	failedAt := time.Now()
 	until := failedAt.Add(time.Duration(cooldownSeconds) * time.Second)
-	s.cooldown.set(candidate.ProviderModelID, failedAt, until, candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, message)
+	s.cooldown.set(row.accountID, candidate.ProviderModelID, failedAt, until, candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, message)
 	if s.logger != nil {
 		s.logger.Warn("target cooled down",
 			"provider", candidate.Provider.Name,
@@ -1890,7 +1890,7 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 		// log it at Info (visible at the default level) with the origin of the
 		// failure that opened the cooldown so the skip explains itself.
 		if s.cooldown != nil {
-			if entry, ok := s.cooldown.statusByName(attempt.provider, attempt.model, time.Now()); ok {
+			if entry, ok := s.cooldown.statusByName(row.accountID, attempt.provider, attempt.model, time.Now()); ok {
 				attrs = append(attrs,
 					"cooldown_origin_request_id", entry.originRequestLogID,
 					"cooldown_origin_error_class", entry.originErrorClass,

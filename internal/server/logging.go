@@ -210,7 +210,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		}
 		delta[attempt.providerModelID] = out
 		if out.Degrading {
-			s.lastOutcome[attempt.providerModelID] = out
+			s.lastOutcome[tenantKey(row.accountID, attempt.providerModelID)] = out
 		}
 	}
 	s.lastOutcomeMu.Unlock()
@@ -218,7 +218,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	// buffer drops the delta, which the next snapshot self-heals. Never blocks
 	// the inference path.
 	if len(delta) > 0 && s.liveHub != nil {
-		s.liveHub.emitOutcome(delta)
+		s.liveHub.emitOutcome(row.accountID, delta)
 	}
 }
 
@@ -236,7 +236,7 @@ func clientCausedFailure(attempt requestAttempt) bool {
 // window. Runs at startup and hourly.
 func (s *Server) pruneRequestLogs(ctx context.Context) {
 	_ = s.storeHandle().PruneRequestLogs(ctx, time.Now())
-	s.invalidateUsageAggregates()
+	s.invalidateAllUsageAggregates()
 }
 
 // usageCapture accumulates token counts extracted from a response body in

@@ -73,7 +73,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectURI := s.oauthRedirectURI(r)
-	flow, err := s.oauthFlows.Begin(id, redirectURI)
+	flow, err := s.oauthFlows.Begin(s.scope(r).AccountID(), id, redirectURI)
 	if errors.Is(err, oauth.ErrFlowActive) {
 		adminError(w, 409, "oauth_flow_active", "An OAuth connection is already in progress.")
 		return
@@ -136,7 +136,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_oauth_callback", "Paste the complete redirected callback URL.")
 		return
 	}
-	flow, err := s.oauthFlows.Consume(id, callback.State)
+	flow, err := s.oauthFlows.Consume(s.scope(r).AccountID(), id, callback.State)
 	if err != nil {
 		if s.recordOAuthFailure(r, s.oauthCallbackLimiter) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
@@ -177,20 +177,20 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (github.DeviceCode, error) {
 	s.oauthDeviceMu.Lock()
-	if existing := s.oauthDevices[id]; existing != nil && existing.Status == "pending" {
+	if existing := s.oauthDevices[tenantKey(accountID, id)]; existing != nil && existing.Status == "pending" {
 		device := existing.Device
 		s.oauthDeviceMu.Unlock()
 		return device, nil
 	}
-	s.oauthDevices[id] = &oauthDeviceState{Status: "pending"}
+	s.oauthDevices[tenantKey(accountID, id)] = &oauthDeviceState{Status: "pending"}
 	s.oauthDeviceMu.Unlock()
 	device, err := github.RequestDeviceCode(ctx, s.providers.Registry().HTTPClient())
 	if err != nil {
-		s.finishDevice(id, "failed", err)
+		s.finishDevice(accountID, id, "failed", err)
 		return github.DeviceCode{}, err
 	}
 	s.oauthDeviceMu.Lock()
-	if state := s.oauthDevices[id]; state != nil {
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil {
 		state.Device = device
 	}
 	s.oauthDeviceMu.Unlock()
@@ -199,14 +199,14 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		tokens, err := github.PollToken(pollCtx, s.providers.Registry().HTTPClient(), device)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.finishDevice(id, "failed", err)
+				s.finishDevice(accountID, id, "failed", err)
 			}
 			return
 		}
 		user, _ := github.FetchUser(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		copilot, _, err := github.FetchCopilotToken(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		if err != nil {
-			s.finishDevice(id, "failed", err)
+			s.finishDevice(accountID, id, "failed", err)
 			return
 		}
 		for key, value := range copilot.ProviderData {
@@ -219,15 +219,15 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		tokens.AccountEmail, tokens.AccountPlan = user.Email, user.Login
 		record, err := oauth.MergeToken(oauth.TokenRecord{ProviderID: id}, tokens, time.Now().UTC())
 		if err != nil {
-			s.finishDevice(id, "failed", err)
+			s.finishDevice(accountID, id, "failed", err)
 			return
 		}
 		if err := s.scopeFor(accountID).PutOAuthToken(pollCtx, oauth.TokenToStore(record)); err != nil {
-			s.finishDevice(id, "failed", err)
+			s.finishDevice(accountID, id, "failed", err)
 			return
 		}
 		s.oauthDeviceMu.Lock()
-		if state := s.oauthDevices[id]; state != nil {
+		if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil {
 			state.Status, state.Token = "connected", record
 		}
 		s.oauthDeviceMu.Unlock()
@@ -235,10 +235,10 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 	return device, nil
 }
 
-func (s *Server) finishDevice(id, status string, err error) {
+func (s *Server) finishDevice(accountID, id, status string, err error) {
 	s.oauthDeviceMu.Lock()
 	defer s.oauthDeviceMu.Unlock()
-	if state := s.oauthDevices[id]; state != nil {
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil {
 		state.Status = status
 		if err != nil {
 			state.Err = "GitHub OAuth connection failed."
@@ -249,7 +249,7 @@ func (s *Server) finishDevice(id, status string, err error) {
 func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.oauthDeviceMu.Lock()
-	state := s.oauthDevices[id]
+	state := s.oauthDevices[tenantKey(s.scope(r).AccountID(), id)]
 	s.oauthDeviceMu.Unlock()
 	if state != nil {
 		result := map[string]any{"status": state.Status}
@@ -308,8 +308,8 @@ func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.oauthDeviceMu.Lock()
-	delete(s.oauthDevices, id)
+	delete(s.oauthDevices, tenantKey(s.scope(r).AccountID(), id))
 	s.oauthDeviceMu.Unlock()
-	s.oauthFlows.Cancel(id)
+	s.oauthFlows.Cancel(s.scope(r).AccountID(), id)
 	writeJSON(w, 200, map[string]any{"status": "disconnected"})
 }

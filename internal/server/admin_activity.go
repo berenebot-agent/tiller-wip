@@ -171,7 +171,7 @@ func (s *Server) clearActivity(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not clear activity.")
 		return
 	}
-	s.invalidateUsageAggregates()
+	s.invalidateUsageAggregates(sc.AccountID())
 	w.WriteHeader(204)
 }
 

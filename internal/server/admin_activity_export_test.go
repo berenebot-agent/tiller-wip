@@ -554,7 +554,7 @@ func TestLogAttemptCooldownSkipIsInfo(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	s := &Server{logger: logger, cooldown: newCooldownStore()}
 	now := time.Now()
-	s.cooldown.set("pm-1", now, now.Add(time.Minute), "provider-a", "model-a", "origin-req", "http_429", "HTTP 429: Too Many Requests")
+	s.cooldown.set(database.LocalAccountID, "pm-1", now, now.Add(time.Minute), "provider-a", "model-a", "origin-req", "http_429", "HTTP 429: Too Many Requests")
 
 	s.logAttempt(&logRow{clientRequestID: "req-1", requestedModel: "main/virtual"}, requestAttempt{provider: "provider-a", model: "model-a", result: "skipped", failureClass: "cooldown"})
 	if !strings.Contains(buf.String(), "provider request skipped") {

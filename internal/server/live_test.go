@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"github.com/tiller-router/tiller-router/internal/database"
 	"io"
 	"net/http"
 	"strings"
@@ -167,12 +168,13 @@ func TestLiveBroadcastFanout(t *testing.T) {
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	h := api.server.liveHub
 
-	ch1 := h.subscribe()
-	ch2 := h.subscribe()
-	defer h.unsubscribe(ch1)
-	defer h.unsubscribe(ch2)
+	acct := database.LocalAccountID
+	ch1 := h.subscribe(acct)
+	ch2 := h.subscribe(acct)
+	defer h.unsubscribe(acct, ch1)
+	defer h.unsubscribe(acct, ch2)
 
-	h.broadcast("outcome", map[string]lastOutcome{"pm": {IsSuccess: true}})
+	h.broadcast(acct, "outcome", map[string]lastOutcome{"pm": {IsSuccess: true}})
 
 	for _, ch := range []chan []byte{ch1, ch2} {
 		select {
@@ -187,8 +189,8 @@ func TestLiveBroadcastFanout(t *testing.T) {
 }
 
 func TestLiveOutcomeIsDroppedWithoutSubscribers(t *testing.T) {
-	h := &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), timings: liveTimings{debounce: 10 * time.Millisecond, idle: 10 * time.Millisecond, sessionCheck: time.Millisecond}}
-	h.emitOutcome(map[string]lastOutcome{"pm": {IsSuccess: true}})
+	h := &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), timings: liveTimings{debounce: 10 * time.Millisecond, idle: 10 * time.Millisecond, sessionCheck: time.Millisecond}}
+	h.emitOutcome(database.LocalAccountID, map[string]lastOutcome{"pm": {IsSuccess: true}})
 
 	select {
 	case <-h.outcomeCh:
@@ -196,9 +198,9 @@ func TestLiveOutcomeIsDroppedWithoutSubscribers(t *testing.T) {
 	default:
 	}
 
-	ch := h.subscribe()
-	defer h.unsubscribe(ch)
-	h.emitOutcome(map[string]lastOutcome{"pm": {IsSuccess: true}})
+	ch := h.subscribe(database.LocalAccountID)
+	defer h.unsubscribe(database.LocalAccountID, ch)
+	h.emitOutcome(database.LocalAccountID, map[string]lastOutcome{"pm": {IsSuccess: true}})
 	select {
 	case msg := <-ch:
 		if !strings.Contains(string(msg), "event: outcome") {
