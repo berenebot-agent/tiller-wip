@@ -145,6 +145,208 @@ func TestCacheTTLFlags(t *testing.T) {
 	}
 }
 
+func TestModeAndPublicURL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_PUBLIC_URL", "")
+	t.Setenv("TILLER_MODE", "")
+
+	// Unset mode defaults to local, and local does not require a public URL.
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Mode != ModeLocal {
+		t.Errorf("Mode = %q, want local by default", c.Mode)
+	}
+	if c.PublicURL != "" {
+		t.Errorf("PublicURL = %q, want empty in local mode", c.PublicURL)
+	}
+
+	// Explicit local is accepted.
+	t.Setenv("TILLER_MODE", "local")
+	if c, err = Load(); err != nil || c.Mode != ModeLocal {
+		t.Fatalf("TILLER_MODE=local: mode=%q err=%v", c.Mode, err)
+	}
+
+	// Hosted without a public URL is a hard error.
+	t.Setenv("TILLER_MODE", "hosted")
+	if _, err := Load(); err == nil {
+		t.Error("hosted mode without TILLER_PUBLIC_URL should fail")
+	}
+
+	// Hosted with a valid origin succeeds and preserves the origin.
+	t.Setenv("TILLER_PUBLIC_URL", "https://app.example.com")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("hosted with public URL should load: %v", err)
+	}
+	if c.Mode != ModeHosted || c.PublicURL != "https://app.example.com" {
+		t.Errorf("mode=%q publicURL=%q", c.Mode, c.PublicURL)
+	}
+
+	// An invalid mode is a hard error.
+	t.Setenv("TILLER_MODE", "banana")
+	if _, err := Load(); err == nil {
+		t.Error("TILLER_MODE=banana should fail to load")
+	}
+}
+
+func TestPublicURLValidation(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_MODE", "hosted")
+
+	bad := []string{
+		"http://app.example.com",
+		"https://app.example.com/path",
+		"https://app.example.com/?q=1",
+		"https://app.example.com/#frag",
+		"https://user:pass@app.example.com",
+		"https://*.example.com",
+		"not a url",
+		"https://",
+	}
+	for _, raw := range bad {
+		t.Setenv("TILLER_PUBLIC_URL", raw)
+		if _, err := Load(); err == nil {
+			t.Errorf("TILLER_PUBLIC_URL=%q should fail to load", raw)
+		}
+	}
+
+	// A trailing slash is normalized away.
+	t.Setenv("TILLER_PUBLIC_URL", "https://app.example.com/")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.PublicURL != "https://app.example.com" {
+		t.Errorf("PublicURL = %q, want normalized origin", c.PublicURL)
+	}
+}
+
+func TestUserSessionTTL(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_MODE", "")
+	t.Setenv("TILLER_PUBLIC_URL", "")
+
+	t.Setenv("TILLER_USER_SESSION_TTL", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UserSessionTTL != 30*24*time.Hour {
+		t.Errorf("UserSessionTTL default = %v, want 720h", c.UserSessionTTL)
+	}
+
+	t.Setenv("TILLER_USER_SESSION_TTL", "48h")
+	if c, err = Load(); err != nil || c.UserSessionTTL != 48*time.Hour {
+		t.Fatalf("override: ttl=%v err=%v", c.UserSessionTTL, err)
+	}
+
+	for _, bad := range []string{"0s", "-1h", "banana"} {
+		t.Setenv("TILLER_USER_SESSION_TTL", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("TILLER_USER_SESSION_TTL=%q should fail to load", bad)
+		}
+	}
+}
+
+func TestMailBootstrap(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_MODE", "")
+	t.Setenv("TILLER_PUBLIC_URL", "")
+	clearMailEnv := func() {
+		for _, k := range []string{"TILLER_MAIL_PROVIDER", "TILLER_MAIL_FROM", "TILLER_MAIL_RESEND_API_KEY", "TILLER_MAIL_SMTP_HOST", "TILLER_MAIL_SMTP_PORT", "TILLER_MAIL_SMTP_USERNAME", "TILLER_MAIL_SMTP_PASSWORD", "TILLER_MAIL_SMTP_MODE"} {
+			t.Setenv(k, "")
+		}
+	}
+	clearMailEnv()
+
+	// No mail settings: zero value, no error.
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Mail.Configured() {
+		t.Error("mail should not be configured by default")
+	}
+
+	// Resend requires a from address and API key.
+	clearMailEnv()
+	t.Setenv("TILLER_MAIL_PROVIDER", "resend")
+	t.Setenv("TILLER_MAIL_FROM", "Tiller <no-reply@example.com>")
+	t.Setenv("TILLER_MAIL_RESEND_API_KEY", "re_test")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("resend mail should load: %v", err)
+	}
+	if c.Mail.Provider != "resend" || c.Mail.ResendAPIKey != "re_test" {
+		t.Errorf("mail = %+v", c.Mail)
+	}
+
+	// SMTP defaults to port 587/starttls.
+	clearMailEnv()
+	t.Setenv("TILLER_MAIL_PROVIDER", "smtp")
+	t.Setenv("TILLER_MAIL_FROM", "no-reply@example.com")
+	t.Setenv("TILLER_MAIL_SMTP_HOST", "smtp.example.com")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("smtp mail should load: %v", err)
+	}
+	if c.Mail.SMTPPort != 587 || c.Mail.SMTPMode != "starttls" {
+		t.Errorf("smtp defaults = %+v", c.Mail)
+	}
+
+	// Implicit TLS defaults to port 465.
+	clearMailEnv()
+	t.Setenv("TILLER_MAIL_PROVIDER", "ses")
+	t.Setenv("TILLER_MAIL_FROM", "no-reply@example.com")
+	t.Setenv("TILLER_MAIL_SMTP_HOST", "email-smtp.us-east-1.amazonaws.com")
+	t.Setenv("TILLER_MAIL_SMTP_MODE", "implicit")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("ses mail should load: %v", err)
+	}
+	if c.Mail.SMTPPort != 465 || c.Mail.SMTPMode != "implicit" {
+		t.Errorf("ses implicit = %+v", c.Mail)
+	}
+
+	// A half-configured / invalid mail config fails loud.
+	cases := []map[string]string{
+		{"TILLER_MAIL_PROVIDER": "pigeon", "TILLER_MAIL_FROM": "x@y.z"},
+		{"TILLER_MAIL_PROVIDER": "resend", "TILLER_MAIL_FROM": "x@y.z"},
+		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z"},
+		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_SMTP_HOST": "h"},
+		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_MODE": "plain"},
+		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_PORT": "70000"},
+		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_USERNAME": "u"},
+	}
+	for i, env := range cases {
+		clearMailEnv()
+		for k, v := range env {
+			t.Setenv(k, v)
+		}
+		if _, err := Load(); err == nil {
+			t.Errorf("mail case %d (%v) should fail to load", i, env)
+		}
+	}
+}
+
 func TestLogLevel(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
