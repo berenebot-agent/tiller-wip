@@ -365,6 +365,8 @@ func failureMessage(class string, httpStatus int) string {
 		return "protocol not supported"
 	case "free_model_requires_keyless":
 		return "requires keyless provider"
+	case "free_tier_rejected":
+		return "free-tier policy rejection"
 	case "invalid_upstream":
 		return "invalid upstream"
 	case "upstream_unreachable":

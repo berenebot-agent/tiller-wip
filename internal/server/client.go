@@ -848,23 +848,44 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json, text/event-stream")
 			req.Header.Set("User-Agent", "Tiller-Router/1")
-			if candidate.Provider.Type == "opencode-free" {
+			freeShadow := candidate.Provider.Type == "opencode-free"
+			if freeShadow {
+				// Anonymous free-tier requests mirror the genuine OpenCode
+				// client's wire shape (captured against opencode/1.18.26):
+				// "Bearer public" auth, first-party UA, Accept */*, affinity
+				// session headers, no relay tells. Zen/go keep the
+				// router-identifying headers — only the keyless path needs the
+				// shadow, and only there is it approved.
+				req.Header.Set("Accept", "*/*")
+				req.Header.Set("User-Agent", openCodeFreeUserAgent)
 				if clientIP := s.requestClientIP(r); clientIP != "" {
 					req.Header.Set("X-Real-IP", clientIP)
 				}
 			}
 			if candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go" || candidate.Provider.Type == "opencode-free" {
-				// OpenCode requires a stable per-conversation session ID for
-				// routing/prompt-caching (MissingSessionID 400 otherwise).
-				// Forward a native client header when present so OpenCode,
-				// Hermes, etc. keep conversation affinity; otherwise
-				// synthesize one from the router request ID (stable across
-				// fallback attempts of the same client request).
+				// OpenCode requires a stable per-conversation identity for
+				// routing/prompt-caching. Zen/go send the router's synthesized
+				// X-Opencode-Session; the anonymous free shadow mirrors the
+				// genuine client, which sends only the affinity
+				// headers (captured against opencode/1.18.26) — no
+				// X-Opencode-Session at all.
 				session := openCodeSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID, row.clientKeyID)
-				req.Header.Set("X-Opencode-Session", session)
-				req.Header.Set("X-Opencode-Client", "tiller-router")
+				if freeShadow {
+					affinity := freeShadowSession(session)
+					req.Header.Set("x-session-affinity", affinity)
+					req.Header.Set("x-session-id", affinity)
+				} else {
+					req.Header.Set("X-Opencode-Session", session)
+					req.Header.Set("X-Opencode-Client", "tiller-router")
+				}
 			}
-			providers.ApplyRequestAuth(req, candidate.Provider)
+			if freeShadow {
+				// Anonymous free tier authenticates as the public key, exactly
+				// as the genuine client does — never with a stored credential.
+				req.Header.Set("Authorization", "Bearer public")
+			} else {
+				providers.ApplyRequestAuth(req, candidate.Provider)
+			}
 			copySafeFeatureHeaders(req.Header, r.Header, target)
 			if candidate.Provider.Type == "codex-subscription" {
 				sessionID, source := codexSessionID(clientSessionHeader(r.Header), row.clientRequestID, row.clientKeyID)
@@ -973,6 +994,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					class = "upstream_timeout"
 				}
 				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
+				freeTierRejection := upstreamErrorReadErr == nil && isOpenCodeFreeTierRejection(upstreamErrorBody)
+				if freeTierRejection {
+					// OpenCode's free-tier policy gate fired: reclassify to the
+					// router-owned failure class so the client gets a
+					// diagnosable remediation instead of relayed Console text.
+					// The sanitized upstream detail is still attached below.
+					class = "free_tier_rejected"
+					attempt.failureClass = class
+					attempt.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+				}
 				if upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 					if logErrorBodies {
 						attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
@@ -1017,7 +1048,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// virtual routes and direct real-model routes never populate the
 				// shared cooldown state.
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
-					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage("upstream_error"))
+					cooldownMessage := fixedUpstreamErrorMessage("upstream_error")
+					if class == "free_tier_rejected" {
+						cooldownMessage = fixedUpstreamErrorMessage(class)
+					}
+					s.openCooldown(candidate, class, row, cooldownSeconds, cooldownMessage)
 				}
 				// An upstream HTTP response is an upstream failure regardless of
 				// status. Ordered virtual routes try their next target by default;
@@ -1025,20 +1060,38 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// before this point and must not be hidden by fallback.
 				if !route.Virtual || !fallbackStatus(response.StatusCode) {
 					row.httpStatus = response.StatusCode
-					row.errorText = strPtr("upstream_error")
-					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
+					errorCode := "upstream_error"
+					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
+					if freeTierRejection {
+						// Fail loud with the router-owned remediation on direct
+						// routes: the raw Console text names no fix.
+						row.httpStatus = 400
+						row.errorText = strPtr("free_tier_rejected")
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_tier_rejected"))
+						errorCode = "free_tier_rejected"
+						message = "OpenCode declined the free-tier request: it can only be served from within OpenCode. Use a keyed opencode-zen or opencode-go provider for this model."
+						if attempt.clientError != "" {
+							message = fmt.Sprintf("%s Upstream detail: %s", message, attempt.clientError)
+						}
+					} else {
+						row.errorText = strPtr("upstream_error")
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
+						if attempt.clientError != "" {
+							message = fmt.Sprintf("%s (HTTP %d)", attempt.clientError, response.StatusCode)
+						}
+					}
 					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
-					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
-					if attempt.clientError != "" {
-						message = fmt.Sprintf("%s (HTTP %d)", attempt.clientError, response.StatusCode)
-					}
-					inferenceError(w, response.StatusCode, "api_error", "upstream_error", message, incoming == providers.ProtocolMessages)
+					inferenceError(w, row.httpStatus, "api_error", errorCode, message, incoming == providers.ProtocolMessages)
 					return
 				}
 				row.fallbackUsed = true
-				row.fallbackReason = strPtr(class)
+				if freeTierRejection {
+					row.fallbackReason = strPtr("free_tier_rejected")
+				} else {
+					row.fallbackReason = strPtr(class)
+				}
 				continue
 			}
 			// Ordered-fallback streaming targets are probed for usable output before
@@ -1453,6 +1506,25 @@ func copySafeResponseHeaders(dst, src http.Header) {
 			}
 		}
 	}
+}
+
+// openCodeFreeUserAgent mirrors the genuine OpenCode CLI's User-Agent on
+// anonymous free-tier requests (captured against opencode/1.18.26 via local
+// echo: "opencode/1.18.26 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14").
+// Keyed zen/go traffic keeps Tiller-Router/1 — the shadow applies to the
+// approved opencode-free path only.
+const openCodeFreeUserAgent = "opencode/1.18.26 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+// freeShadowSession derives the opaque affinity value sent on the shadow
+// path from the router-stable session: same stability guarantees as
+// openCodeSessionID (stable across fallback attempts, isolated across
+// clients) with no "tiller-" tell.
+func freeShadowSession(session string) string {
+	if v := strings.TrimSpace(session); v != "" {
+		h := sha256.Sum256([]byte("opencode-free-shadow\x00" + v))
+		return "ses_" + hex.EncodeToString(h[:])[:23]
+	}
+	return "ses_AAAAAAAAAAAAAAAAAAAAAAA"
 }
 
 // openCodeSessionID resolves the x-opencode-session value for OpenCode

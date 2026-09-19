@@ -22,6 +22,7 @@ type upstreamErrorDetail struct {
 	Message string
 	Code    string
 	Param   string
+	Type    string
 }
 
 // parseUpstreamErrorDetail extracts a bounded, client-safe summary from an
@@ -57,6 +58,7 @@ func parseUpstreamErrorDetail(body []byte, contentType string) upstreamErrorDeta
 					Message: sanitizeErrorText(obj.Message),
 					Code:    decodeErrorCode(obj.Code),
 					Param:   sanitizeErrorText(obj.Param),
+					Type:    sanitizeErrorText(obj.Type),
 				}
 				if detail.clientMessage() != "" {
 					return detail
@@ -76,6 +78,23 @@ func parseUpstreamErrorDetail(body []byte, contentType string) upstreamErrorDeta
 		return upstreamErrorDetail{Message: sanitizeErrorText(trimmed)}
 	}
 	return upstreamErrorDetail{}
+}
+
+// isOpenCodeFreeTierRejection reports whether an upstream error body is
+// OpenCode's Console-wrapped free-tier policy rejection ("from within
+// OpenCode"). The inner FreeTierError type is matched directly; the message
+// substring is a fallback so minor upstream rewording still trips detection.
+// Matching is case-insensitive and confined to OpenCode's explicit gate text —
+// ordinary provider errors never contain it.
+func isOpenCodeFreeTierRejection(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	lowered := strings.ToLower(string(body))
+	if !strings.Contains(lowered, "from within opencode") {
+		return false
+	}
+	return strings.Contains(lowered, "freetiererror") || strings.Contains(lowered, "free tier")
 }
 
 func decodeErrorCode(raw json.RawMessage) string {

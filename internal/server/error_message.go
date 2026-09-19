@@ -41,6 +41,8 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "No compatible protocol is available for this request"
 	case "free_model_requires_keyless":
 		return "This OpenCode free-tier model must be served without a credential"
+	case "free_tier_rejected":
+		return "OpenCode declined the free-tier request for third-party relay"
 	case "virtual_model_unavailable":
 		return "All targets for the virtual model are currently unavailable"
 	case "model_unavailable":
