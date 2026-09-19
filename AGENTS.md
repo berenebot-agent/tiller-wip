@@ -97,8 +97,9 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 
 ## Tenancy invariants (hosted / multi-tenant work)
 
-These are load-bearing. See `docs/hosted_decisions.md` for the decision record and
-`docs/sass_tech.md` for the full roadmap.
+These are load-bearing. See `docs/hosted_decisions.md` for the decision record,
+`docs/hosted_status.md` for current implementation status (Phase 0/1 partial —
+pick up remaining work there), and `docs/sass_tech.md` for the full roadmap.
 
 1. Every tenant-owned object belongs to exactly one account.
 2. Account authority is derived from an authenticated principal, never trusted from URL, body, or header input.
