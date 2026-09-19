@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -561,7 +562,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
-	logErrorBodies, _ := s.scope(r).GetLogErrorBodies(r.Context())
+	logErrorBodies := false
+	if s.config.Mode != config.ModeHosted {
+		logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
+	}
 	originalBody := append([]byte(nil), body...)
 	// Extract the canonical reasoning selector once from the original request.
 	// It is recomputed for each candidate against that target's capabilities.

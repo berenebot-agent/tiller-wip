@@ -29,8 +29,8 @@ interface private, use HTTPS at the edge, protect `./data`, and never commit
 the direct proxy peer is restricted with `TILLER_TRUSTED_PROXY`.
 
 **Recoverable provider credentials are encrypted at rest (always on).**
-Provider API credentials, OAuth access/refresh/id tokens and `provider_data`, and
-the notification auth header are sealed with AES-256-GCM (versioned `enc:v1:`
+Provider API credentials, OAuth access/refresh/id tokens and `provider_data`, the
+notification auth header, and hosted mail credentials are sealed with AES-256-GCM (versioned `enc:v1:`
 format, unique nonce per value, associated data binding the account/record/field)
 at the `internal/store` boundary. The master key is kept **outside the database**:
 set `TILLER_MASTER_KEY` (base64 of 32 random bytes) or `TILLER_MASTER_KEY_FILE`
@@ -72,6 +72,14 @@ is therefore a *cross-instance* revocation bound — with a single process it ha
 no security effect, and the sliding cache exists to keep hash-verification cost
 proportional to the rate of distinct/expired keys rather than request volume.
 Both caches are periodically swept and capped so they cannot grow unbounded.
+
+**Hosted identity.** `TILLER_MODE=hosted` enables email/password accounts. Human
+passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
+single-use, short-lived, and hash-only at rest. Customer sessions and platform
+operator sessions use separate host-only Secure/HttpOnly/SameSite cookies and
+CSRF tokens. Account suspension immediately revokes customer sessions and
+blocks client-key traffic. Hosted detailed body logging is unavailable even if
+the account settings request attempts to enable it.
 
 **Detailed error logging (opt-in).** Activity is metadata-only by default. If the
 administrator enables the Detailed Error Logging setting, failed request bodies

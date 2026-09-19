@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/config"
+	"github.com/tiller-router/tiller-router/internal/identity"
 )
 
 // Live SSE refresh for the admin UI.
@@ -258,14 +260,25 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	accountID := s.scope(r).AccountID()
 	ch := s.liveHub.subscribe(accountID)
 	defer s.liveHub.unsubscribe(accountID, ch)
-	cookie, err := r.Cookie(sessionCookie)
+	cookieName := sessionCookie
+	if s.config.Mode == config.ModeHosted {
+		cookieName = userSessionCookie
+	}
+	cookie, err := r.Cookie(cookieName)
 	if err != nil {
 		return
 	}
-	session := r.Context().Value(adminSessionKey).(auth.Session)
+	var expiresAt time.Time
+	if s.config.Mode == config.ModeHosted {
+		session := r.Context().Value(userSessionKey).(identity.UserSession)
+		expiresAt = session.ExpiresAt
+	} else {
+		session := r.Context().Value(adminSessionKey).(auth.Session)
+		expiresAt = session.ExpiresAt
+	}
 	validate := time.NewTicker(s.liveHub.timings.sessionCheck)
 	defer validate.Stop()
-	expires := time.NewTimer(time.Until(session.ExpiresAt))
+	expires := time.NewTimer(time.Until(expiresAt))
 	defer expires.Stop()
 
 	// Baseline snapshot on connect (and reconnect) so the client reconciles
@@ -284,7 +297,15 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 		case <-expires.C:
 			return
 		case <-validate.C:
-			current, ok := s.sessions.Validate(cookie.Value)
+			var currentExpires time.Time
+			var ok bool
+			if s.config.Mode == config.ModeHosted {
+				current, valid := s.identity.GetUserSession(r.Context(), cookie.Value)
+				ok, currentExpires = valid, current.ExpiresAt
+			} else {
+				current, valid := s.sessions.Validate(cookie.Value)
+				ok, currentExpires = valid, current.ExpiresAt
+			}
 			if !ok {
 				return
 			}
@@ -294,7 +315,7 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 				default:
 				}
 			}
-			expires.Reset(time.Until(current.ExpiresAt))
+			expires.Reset(time.Until(currentExpires))
 		case msg, ok := <-ch:
 			if !ok {
 				return

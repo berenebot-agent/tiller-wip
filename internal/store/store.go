@@ -32,6 +32,7 @@ func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 // Store owns the database handles and hands out account-scoped handles.
 type Store struct {
 	db       *sql.DB
+	audit    *sql.DB
 	activity *activityFiles
 	cipher   SecretCipher
 }
@@ -58,6 +59,13 @@ func WithCipher(c SecretCipher) Option {
 	}
 }
 
+// WithAuditDB enables the separate central audit database. Audit methods are
+// no-ops only when no audit handle is supplied (for tests that exercise tenant
+// resources without audit persistence).
+func WithAuditDB(db *sql.DB) Option {
+	return func(s *Store) { s.audit = db }
+}
+
 func New(db *sql.DB, opts ...Option) *Store {
 	s := &Store{db: db, cipher: disabledCipher{}}
 	for _, opt := range opts {
@@ -71,10 +79,22 @@ func New(db *sql.DB, opts ...Option) *Store {
 // tables must not be queried through it.
 func (s *Store) DB() *sql.DB { return s.db }
 
+// AuditDB exposes the separate central audit handle for platform-only jobs
+// such as retention pruning. Tenant audit reads/writes use Scope methods.
+func (s *Store) AuditDB() *sql.DB { return s.audit }
+
+// DeleteAccountActivity removes the account's separate Activity file.
+func (s *Store) DeleteAccountActivity(accountID string) error {
+	if s.activity == nil {
+		return errNoActivityStore
+	}
+	return s.activity.Delete(accountID)
+}
+
 // For returns a handle scoped to one account. accountID must come from a
 // verified principal.
 func (s *Store) For(accountID string) *Scope {
-	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity, cipher: s.cipher}
+	return &Scope{db: s.db, q: s.db, audit: s.audit, accountID: accountID, activity: s.activity, cipher: s.cipher}
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx so a Scope works inside and
@@ -94,6 +114,7 @@ var errNestedTx = errors.New("store: cannot begin transaction within a transacti
 type Scope struct {
 	db        *sql.DB
 	q         querier
+	audit     *sql.DB
 	accountID string
 	activity  *activityFiles
 	cipher    SecretCipher
@@ -117,7 +138,7 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	}
 	activeTenantTxs.Add(1)
 	defer activeTenantTxs.Add(-1)
-	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher}
+	child := &Scope{db: nil, q: tx, audit: s.audit, accountID: s.accountID, activity: s.activity, cipher: s.cipher}
 	if err := fn(child); err != nil {
 		_ = tx.Rollback()
 		return err

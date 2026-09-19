@@ -128,10 +128,11 @@ func ParseKey(key string) (selector, secret string, ok bool) {
 }
 
 type ClientIdentity struct {
-	ID        string
-	AccountID string
-	Name      string
-	Enabled   bool
+	ID            string
+	AccountID     string
+	AccountStatus string
+	Name          string
+	Enabled       bool
 }
 
 type cacheEntry struct {
@@ -214,7 +215,7 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 		entry.expires = now.Add(a.ttl)
 		a.entries[cacheKey] = entry
 		a.mu.Unlock()
-		return entry.identity, entry.identity.Enabled, true
+		return entry.identity, entry.identity.Enabled && entry.identity.AccountStatus == "active", true
 	}
 	if found {
 		delete(a.entries, cacheKey)
@@ -234,8 +235,8 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	var identity ClientIdentity
 	var hash string
 	row, err := a.store.ClientKeyBySelector(ctx, selector)
-	identity.ID, identity.AccountID, identity.Name, identity.Enabled, hash = row.ID, row.AccountID, row.Name, row.Enabled, row.SecretHash
-	if err != nil || !identity.Enabled || !a.hasher.Verify(secret, hash) {
+	identity.ID, identity.AccountID, identity.AccountStatus, identity.Name, identity.Enabled, hash = row.ID, row.AccountID, row.AccountStatus, row.Name, row.Enabled, row.SecretHash
+	if err != nil || !identity.Enabled || identity.AccountStatus != "active" || !a.hasher.Verify(secret, hash) {
 		return ClientIdentity{}, false, true
 	}
 	// Lazy migration: a successful verify of a legacy argon2id key upgrades the
@@ -310,6 +311,14 @@ func (a *ClientAuthenticator) Invalidate(clientID string) {
 	a.invalidateLocked(clientID)
 }
 
+// InvalidateAccount immediately drops every cached key for an account. Account
+// suspension/deletion uses this so containment does not wait for cache expiry.
+func (a *ClientAuthenticator) InvalidateAccount(accountID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.invalidateAccountLocked(accountID)
+}
+
 // InvalidateWith publishes a client mutation while cache publication is
 // excluded, so verification begun against the old database state cannot
 // authorize after the mutation commits.
@@ -327,6 +336,15 @@ func (a *ClientAuthenticator) invalidateLocked(clientID string) {
 	atomic.AddUint64(&a.rev, 1)
 	for key, entry := range a.entries {
 		if entry.identity.ID == clientID {
+			delete(a.entries, key)
+		}
+	}
+}
+
+func (a *ClientAuthenticator) invalidateAccountLocked(accountID string) {
+	atomic.AddUint64(&a.rev, 1)
+	for key, entry := range a.entries {
+		if entry.identity.AccountID == accountID {
 			delete(a.entries, key)
 		}
 	}

@@ -13,6 +13,11 @@ services:
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
 
+      # Hosted mode is opt-in. Leave unset for the existing local appliance.
+      TILLER_MODE: ${TILLER_MODE:-local}
+      TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:-}
+      TILLER_USER_SESSION_TTL: ${TILLER_USER_SESSION_TTL:-720h}
+
       # Force the admin session cookie's Secure attribute. Set to "true" when
       # serving the admin UI over HTTPS (behind a reverse proxy or with TLS at
       # the edge) so the cookie is only sent over secure connections. Defaults
@@ -43,7 +48,18 @@ services:
       # longer window only reduces hash-verification work. Defaults: client key
       # 15m, session 5m. Bounded to <=24h.
 TILLER_CLIENT_KEY_CACHE_TTL: ${TILLER_CLIENT_KEY_CACHE_TTL:-15m}
-TILLER_SESSION_CACHE_TTL: ${TILLER_SESSION_CACHE_TTL:-5m}
+      TILLER_SESSION_CACHE_TTL: ${TILLER_SESSION_CACHE_TTL:-5m}
+
+      # Optional one-time mail bootstrap. Hosted operators can change these
+      # from the platform dashboard after startup; dashboard values win.
+      TILLER_MAIL_PROVIDER: ${TILLER_MAIL_PROVIDER:-}
+      TILLER_MAIL_FROM: ${TILLER_MAIL_FROM:-}
+      TILLER_MAIL_RESEND_API_KEY: ${TILLER_MAIL_RESEND_API_KEY:-}
+      TILLER_MAIL_SMTP_HOST: ${TILLER_MAIL_SMTP_HOST:-}
+      TILLER_MAIL_SMTP_PORT: ${TILLER_MAIL_SMTP_PORT:-}
+      TILLER_MAIL_SMTP_MODE: ${TILLER_MAIL_SMTP_MODE:-}
+      TILLER_MAIL_SMTP_USERNAME: ${TILLER_MAIL_SMTP_USERNAME:-}
+      TILLER_MAIL_SMTP_PASSWORD: ${TILLER_MAIL_SMTP_PASSWORD:-}
 
 # Provider credentials, OAuth tokens, and webhook auth headers are encrypted
 # at rest (AES-256-GCM). Leave both unset and the app generates a key once at

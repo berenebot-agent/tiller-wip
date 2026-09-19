@@ -57,6 +57,10 @@ func secretSettingKeys() []string {
 	return []string{SettingNotificationsAuthHeader}
 }
 
+func platformSecretSettingKeys() []string {
+	return []string{PlatformSettingMailResendAPIKey, PlatformSettingMailSMTPPassword}
+}
+
 // secretAAD builds the associated data binding a secret to its account, record
 // kind, record id, and field.
 func secretAAD(accountID, kind, id, field string) []byte {
@@ -191,6 +195,32 @@ func listSecrets(ctx context.Context, db querier) ([]secretRecord, error) {
 		return nil, err
 	}
 	rows.Close()
+
+	platformKeys := platformSecretSettingKeys()
+	sort.Strings(platformKeys)
+	placeholders = strings.TrimRight(strings.Repeat("?,", len(platformKeys)), ",")
+	args = args[:0]
+	for _, k := range platformKeys {
+		args = append(args, k)
+	}
+	rows, err = db.QueryContext(ctx, `SELECT key,value FROM platform_settings WHERE value<>'' AND key IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var rec secretRecord
+		if err := rows.Scan(&rec.id, &rec.value); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rec.accountID, rec.kind, rec.field = "platform", "setting", "value"
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
 	return out, nil
 }
 
@@ -217,6 +247,10 @@ func applySecret(ctx context.Context, db querier, rec secretRecord, newValue str
 		_, err := db.ExecContext(ctx, query, newValue, rec.id, rec.accountID)
 		return err
 	case "setting":
+		if rec.accountID == "platform" {
+			_, err := db.ExecContext(ctx, `UPDATE platform_settings SET value=? WHERE key=?`, newValue, rec.id)
+			return err
+		}
 		_, err := db.ExecContext(ctx, `UPDATE settings SET value=? WHERE account_id=? AND key=?`, newValue, rec.accountID, rec.id)
 		return err
 	default:
@@ -259,8 +293,12 @@ func HasEncryptedSecrets(ctx context.Context, db *sql.DB) (bool, error) {
 	query := `
 SELECT
  (SELECT count(*) FROM providers WHERE credential_secret LIKE 'enc:v1:%')
-+ (SELECT count(*) FROM provider_oauth_tokens WHERE access_token LIKE 'enc:v1:%' OR refresh_token LIKE 'enc:v1:%' OR id_token LIKE 'enc:v1:%' OR provider_data LIKE 'enc:v1:%')
-+ (SELECT count(*) FROM settings WHERE value LIKE 'enc:v1:%' AND key IN (` + placeholders + `))`
+ + (SELECT count(*) FROM provider_oauth_tokens WHERE access_token LIKE 'enc:v1:%' OR refresh_token LIKE 'enc:v1:%' OR id_token LIKE 'enc:v1:%' OR provider_data LIKE 'enc:v1:%')
+ + (SELECT count(*) FROM settings WHERE value LIKE 'enc:v1:%' AND key IN (` + placeholders + `))
+ + (SELECT count(*) FROM platform_settings WHERE value LIKE 'enc:v1:%' AND key IN (` + strings.TrimRight(strings.Repeat("?,", len(platformSecretSettingKeys())), ",") + `))`
+	for _, key := range platformSecretSettingKeys() {
+		args = append(args, key)
+	}
 	var n int
 	if err := db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return false, err

@@ -343,6 +343,34 @@ func (s *Scope) DeleteProvider(ctx context.Context, providerID string) error {
 	})
 }
 
+// DeleteAccountResources removes all tenant control-plane rows for an account
+// in dependency order. Activity is deleted separately because it lives in a
+// per-account database file.
+func (s *Scope) DeleteAccountResources(ctx context.Context) error {
+	return s.RunTx(ctx, nil, func(tx *Scope) error {
+		statements := []string{
+			`DELETE FROM client_single_bindings WHERE account_id=?`,
+			`DELETE FROM client_model_permissions WHERE account_id=?`,
+			`DELETE FROM client_group_defaults WHERE account_id=?`,
+			`DELETE FROM client_keys WHERE account_id=?`,
+			`DELETE FROM provider_oauth_tokens WHERE account_id=?`,
+			`DELETE FROM virtual_model_targets WHERE account_id=?`,
+			`DELETE FROM virtual_models WHERE account_id=?`,
+			`DELETE FROM virtual_provider_groups WHERE account_id=?`,
+			`DELETE FROM provider_models WHERE account_id=?`,
+			`DELETE FROM providers WHERE account_id=?`,
+			`DELETE FROM namespaces WHERE account_id=?`,
+			`DELETE FROM settings WHERE account_id=?`,
+		}
+		for _, statement := range statements {
+			if _, err := tx.q.ExecContext(ctx, statement, tx.accountID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // AdminHealthCounts summarizes catalogue health for the account.
 type AdminHealthCounts struct {
 	Providers           int

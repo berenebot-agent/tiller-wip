@@ -19,6 +19,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/identity"
+	"github.com/tiller-router/tiller-router/internal/mailer"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -26,7 +28,11 @@ import (
 	webassets "github.com/tiller-router/tiller-router/internal/web"
 )
 
-const sessionCookie = "tiller_admin_session"
+const (
+	sessionCookie         = "tiller_admin_session"
+	userSessionCookie     = "__Host-tiller_session"
+	platformSessionCookie = "__Host-tiller_platform_session"
+)
 
 type Server struct {
 	config config.Config
@@ -40,6 +46,8 @@ type Server struct {
 	secretCipher store.SecretCipher
 	clients      *auth.ClientAuthenticator
 	sessions     *auth.SessionStore
+	identity     *identity.Store
+	mailer       *mailer.Manager
 	// adminAccount resolves the account owned by an authenticated admin
 	// session. Nil means the single implicit local account (Phase 1); Phase 3
 	// wires hosted users in here. Tests inject a non-local account.
@@ -65,6 +73,9 @@ type Server struct {
 	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
 	loginLimiter          *loginLimiter
+	userLoginLimiter      *loginLimiter
+	signupLimiter         *loginLimiter
+	recoveryLimiter       *loginLimiter
 	clientSelectorLimiter *loginLimiter
 	clientAddressLimiter  *loginLimiter
 	oauthStartLimiter     *loginLimiter
@@ -148,8 +159,11 @@ type lastOutcome struct {
 type contextKey string
 
 const (
-	adminSessionKey contextKey = "admin-session"
-	clientKey       contextKey = "client"
+	adminSessionKey    contextKey = "admin-session"
+	userSessionKey     contextKey = "user-session"
+	platformSessionKey contextKey = "platform-session"
+	userKey            contextKey = "user"
+	clientKey          contextKey = "client"
 	// accountKey carries the verified AccountID for the request. It is set by
 	// the authentication middleware from the authenticated principal only —
 	// never from request input.
@@ -164,6 +178,7 @@ type serverOptions struct {
 	// fingerprint, which keeps the memory-hard KDF.
 	tokenHasher      auth.SecretHasher
 	credentialHasher auth.SecretHasher
+	passwordHasher   auth.SecretHasher
 	// adminAccount overrides the account owned by an admin session. Unexported
 	// so only in-package tests can inject a non-local admin principal; Phase 1
 	// production always owns the implicit local account.
@@ -201,11 +216,12 @@ func withSecretHasher(h auth.SecretHasher) serverOption {
 	return func(o *serverOptions) {
 		o.tokenHasher = h
 		o.credentialHasher = h
+		o.passwordHasher = h
 	}
 }
 
 func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...serverOption) (*Server, error) {
-	options := serverOptions{tokenHasher: auth.BcryptHasher{}, credentialHasher: auth.Argon2Hasher{}}
+	options := serverOptions{tokenHasher: auth.BcryptHasher{}, credentialHasher: auth.Argon2Hasher{}, passwordHasher: auth.Argon2Hasher{}}
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -213,24 +229,52 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := auth.NewSessionStoreTiered(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL, options.tokenHasher, options.credentialHasher)
-	if err != nil {
-		return nil, err
+	var sessions *auth.SessionStore
+	if cfg.Mode != config.ModeHosted {
+		sessions, err = auth.NewSessionStoreTiered(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL, options.tokenHasher, options.credentialHasher)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// Configured TTLs are optional: a zero value (e.g. a test config literal)
 	// leaves the auth package defaults in place.
 	clients.SetCacheTTL(cfg.ClientKeyCacheTTL)
-	sessions.SetCacheTTL(cfg.SessionCacheTTL)
+	if sessions != nil {
+		sessions.SetCacheTTL(cfg.SessionCacheTTL)
+	}
 	registry := providers.NewRegistry()
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	storeOpts := []store.Option{store.WithActivityDir(db.ActivityDir)}
+	storeOpts := []store.Option{store.WithActivityDir(db.ActivityDir), store.WithAuditDB(db.Audit)}
 	if options.cipher != nil {
 		storeOpts = append(storeOpts, store.WithCipher(options.cipher))
 	}
 	st := store.New(db.SQL, storeOpts...)
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	identityStore, err := identity.New(db.SQL, options.passwordHasher, options.tokenHasher, options.credentialHasher, cfg.UserSessionTTL)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Mode == config.ModeHosted {
+		if err := identityStore.SyncPlatformCredential(cfg.AdminUsername, cfg.AdminPassword); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.Mail.Configured() {
+		if err := st.SeedPlatformMailSettings(context.Background(), platformMailSettings(cfg.Mail)); err != nil && !errors.Is(err, store.ErrSecretsLocked) {
+			return nil, err
+		}
+	}
+	mailManager, err := mailer.NewManager(mailer.Config{})
+	if err != nil {
+		return nil, err
+	}
+	if saved, loadErr := st.GetPlatformMailSettings(context.Background()); loadErr == nil && saved.Provider != "" {
+		if err := mailManager.Update(mailer.Config{Provider: saved.Provider, From: saved.From, ResendAPIKey: saved.ResendAPIKey, SMTPHost: saved.SMTPHost, SMTPPort: parseMailPort(saved.SMTPPort), SMTPUsername: saved.SMTPUsername, SMTPPassword: saved.SMTPPassword, SMTPMode: saved.SMTPMode}); err != nil {
+			return nil, err
+		}
+	}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, mailer: mailManager, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryLimiter: newLoginLimiter(5, time.Hour, time.Hour), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
@@ -242,7 +286,12 @@ func (s *Server) StartBackground(ctx context.Context) {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
 	s.clients.StartSweeper(ctx)
-	s.sessions.StartSweeper(ctx)
+	if s.sessions != nil {
+		s.sessions.StartSweeper(ctx)
+	}
+	if s.identity != nil {
+		s.identity.StartSweeper(ctx)
+	}
 	go s.startLogPruner(ctx)
 	s.startLogWriter(ctx)
 	go s.startBackupScheduler(ctx)
@@ -273,12 +322,38 @@ func (s *Server) startLogPruner(ctx context.Context) {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/runtime", s.runtime)
 	mux.HandleFunc("GET /health/live", s.liveHealth)
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.HandleFunc("GET /health/version", s.versionHealth)
-	mux.HandleFunc("POST /api/admin/session", s.login)
-	mux.Handle("GET /api/admin/session", s.requireAdmin(http.HandlerFunc(s.sessionStatus)))
-	mux.Handle("DELETE /api/admin/session", s.requireAdmin(http.HandlerFunc(s.logout)))
+	if s.config.Mode == config.ModeHosted {
+		mux.HandleFunc("POST /api/auth/signup", s.signup)
+		mux.HandleFunc("POST /api/auth/login", s.userLogin)
+		mux.Handle("GET /api/auth/session", s.requireUser(http.HandlerFunc(s.userSessionStatus)))
+		mux.Handle("DELETE /api/auth/session", s.requireUser(http.HandlerFunc(s.userLogout)))
+		mux.HandleFunc("POST /api/auth/verify-email", s.verifyEmail)
+		mux.HandleFunc("POST /api/auth/verification/resend", s.resendVerification)
+		mux.HandleFunc("POST /api/auth/password-reset/request", s.requestPasswordReset)
+		mux.HandleFunc("POST /api/auth/password-reset/confirm", s.confirmPasswordReset)
+		mux.HandleFunc("POST /api/platform/session", s.platformLogin)
+		mux.Handle("GET /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformSessionStatus)))
+		mux.Handle("DELETE /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformLogout)))
+		mux.Handle("GET /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.platformSettings)))
+		mux.Handle("PUT /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.updatePlatformSettings)))
+		mux.Handle("GET /api/platform/users", s.requirePlatform(http.HandlerFunc(s.platformUsers)))
+		mux.Handle("GET /api/platform/audit", s.requirePlatform(http.HandlerFunc(s.platformAudit)))
+		mux.Handle("POST /api/platform/accounts/{id}/suspend", s.requirePlatform(http.HandlerFunc(s.suspendAccount)))
+		mux.Handle("POST /api/platform/accounts/{id}/unsuspend", s.requirePlatform(http.HandlerFunc(s.unsuspendAccount)))
+		mux.Handle("POST /api/platform/accounts/{id}/sessions/revoke", s.requirePlatform(http.HandlerFunc(s.revokeAccountSessions)))
+		mux.Handle("DELETE /api/platform/accounts/{id}", s.requirePlatform(http.HandlerFunc(s.deleteAccount)))
+	} else {
+		mux.HandleFunc("POST /api/admin/session", s.login)
+		mux.Handle("GET /api/admin/session", s.requireAdmin(http.HandlerFunc(s.sessionStatus)))
+		mux.Handle("DELETE /api/admin/session", s.requireAdmin(http.HandlerFunc(s.logout)))
+	}
+	if s.config.Mode == config.ModeHosted {
+		mux.Handle("GET /api/admin/audit", s.requireUser(http.HandlerFunc(s.accountAudit)))
+	}
 	mux.Handle("GET /api/admin/provider-types", s.requireAdmin(http.HandlerFunc(s.providerTypes)))
 	mux.Handle("GET /api/admin/providers", s.requireAdmin(http.HandlerFunc(s.listProviders)))
 	mux.Handle("POST /api/admin/providers", s.requireAdmin(http.HandlerFunc(s.createProvider)))
@@ -410,6 +485,9 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireAdmin(next http.Handler) http.Handler {
+	if s.config.Mode == config.ModeHosted {
+		return s.requireUser(next)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(sessionCookie)
 		if err != nil {
@@ -463,7 +541,11 @@ func (s *Server) scopeFor(accountID string) *store.Scope {
 // goes through New, which sets store.
 func (s *Server) storeHandle() *store.Store {
 	if s.store == nil {
-		return store.New(s.db.SQL, store.WithActivityDir(s.db.ActivityDir))
+		opts := []store.Option{store.WithActivityDir(s.db.ActivityDir), store.WithAuditDB(s.db.Audit)}
+		if s.secretCipher != nil {
+			opts = append(opts, store.WithCipher(s.secretCipher))
+		}
+		return store.New(s.db.SQL, opts...)
 	}
 	return s.store
 }

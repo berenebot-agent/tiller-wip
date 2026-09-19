@@ -97,11 +97,12 @@ WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.accoun
 
 // ClientKeyAuthRow is the principal lookup row used by authentication.
 type ClientKeyAuthRow struct {
-	ID         string
-	AccountID  string
-	Name       string
-	Enabled    bool
-	SecretHash string
+	ID            string
+	AccountID     string
+	AccountStatus string
+	Name          string
+	Enabled       bool
+	SecretHash    string
 }
 
 // ClientKeyBySelector looks up a client key by its public selector. It is the
@@ -110,7 +111,7 @@ type ClientKeyAuthRow struct {
 func (s *Store) ClientKeyBySelector(ctx context.Context, selector string) (ClientKeyAuthRow, error) {
 	var v ClientKeyAuthRow
 	var enabled int
-	err := s.db.QueryRowContext(ctx, `SELECT id,account_id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).Scan(&v.ID, &v.AccountID, &v.Name, &enabled, &v.SecretHash)
+	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.account_id,a.status,c.name,c.enabled,c.secret_hash FROM client_keys c JOIN accounts a ON a.id=c.account_id WHERE c.selector=?`, selector).Scan(&v.ID, &v.AccountID, &v.AccountStatus, &v.Name, &enabled, &v.SecretHash)
 	if err != nil {
 		return ClientKeyAuthRow{}, err
 	}

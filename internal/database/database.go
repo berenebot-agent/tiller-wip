@@ -22,8 +22,10 @@ import (
 var migrations embed.FS
 
 type DB struct {
-	SQL  *sql.DB
-	Path string
+	SQL       *sql.DB
+	Path      string
+	Audit     *sql.DB
+	AuditPath string
 	// ActivityDir holds the per-account Activity database files. It is always
 	// a sibling of the central database file under the data directory.
 	ActivityDir string
@@ -92,6 +94,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
+	d.AuditPath = filepath.Join(filepath.Dir(path), AuditFileName)
+	d.Audit, err = OpenAudit(ctx, d.AuditPath)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open audit database: %w", err)
+	}
 	return d, nil
 }
 
@@ -121,7 +129,15 @@ func restrictFileMode(path string) error {
 	return nil
 }
 
-func (d *DB) Close() error { return d.SQL.Close() }
+func (d *DB) Close() error {
+	if d.Audit != nil {
+		if err := d.Audit.Close(); err != nil {
+			_ = d.SQL.Close()
+			return err
+		}
+	}
+	return d.SQL.Close()
+}
 
 func (d *DB) Migrate(ctx context.Context) error {
 	if _, err := d.SQL.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL) STRICT`); err != nil {
@@ -217,16 +233,22 @@ func (d *DB) Ready(ctx context.Context) error {
 }
 
 func (d *DB) Backup(ctx context.Context, dir string) (string, error) {
+	return BackupNamed(ctx, d.SQL, dir, "tiller-router-")
+}
+
+// BackupNamed creates a consistent SQLite snapshot with a caller-supplied
+// filename prefix. It is used for the core and separate audit databases.
+func BackupNamed(ctx context.Context, source *sql.DB, dir, prefix string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	name := "tiller-router-" + time.Now().UTC().Format("20060102T150405.000000000Z") + ".db"
+	name := prefix + time.Now().UTC().Format("20060102T150405.000000000Z") + ".db"
 	path := filepath.Join(dir, name)
 	if !strings.HasPrefix(path, filepath.Clean(dir)+string(os.PathSeparator)) {
 		return "", errors.New("invalid backup path")
 	}
 	quoted := strings.ReplaceAll(path, "'", "''")
-	if _, err := d.SQL.ExecContext(ctx, `VACUUM INTO '`+quoted+`'`); err != nil {
+	if _, err := source.ExecContext(ctx, `VACUUM INTO '`+quoted+`'`); err != nil {
 		return "", fmt.Errorf("sqlite backup: %w", err)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
@@ -274,6 +296,11 @@ func Verify(ctx context.Context, path string) error {
 // files matching the backup naming convention, so unrelated files in the
 // backup directory are left alone.
 func PruneBackups(dir string, retention time.Duration, now time.Time) (int, error) {
+	return PrunePrefixedBackups(dir, retention, now, BackupPrefix)
+}
+
+// PrunePrefixedBackups removes snapshots matching prefix older than retention.
+func PrunePrefixedBackups(dir string, retention time.Duration, now time.Time, prefix string) (int, error) {
 	if retention <= 0 {
 		return 0, nil
 	}
@@ -291,7 +318,7 @@ func PruneBackups(dir string, retention time.Duration, now time.Time) (int, erro
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasPrefix(name, BackupPrefix) || !strings.HasSuffix(name, BackupSuffix) {
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, BackupSuffix) {
 			continue
 		}
 		info, err := entry.Info()

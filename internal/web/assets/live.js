@@ -69,7 +69,7 @@ export class LiveStream {
         this._authTimer = null;
         if (!this.enabled || !current()) return;
         try {
-          const res = await fetch('/api/admin/session', { credentials: 'same-origin' });
+          const res = await fetch((location.pathname.startsWith('/platform') ? '/api/platform/session' : location.pathname.startsWith('/login') || location.pathname.startsWith('/signup') ? '/api/auth/session' : '/api/admin/session'), { credentials: 'same-origin' });
           if (res.status === 401 && this.enabled && this.onAuthFailure) this.onAuthFailure();
         } catch {
           // Network failure: do not assume auth failure. EventSource keeps retrying.

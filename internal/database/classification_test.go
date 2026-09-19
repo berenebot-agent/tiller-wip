@@ -79,20 +79,18 @@ func TestTenantTableClassification(t *testing.T) {
 		}
 	}
 	verifyActivitySchema(t, db)
-	verifyAuditSchema(t, filepath.Join(filepath.Dir(db.Path), AuditFileName))
+	verifyAuditSchema(t, db.Audit)
 }
 
 // verifyAuditSchema opens the central audit database and checks its table
 // classification and account_id coverage, mirroring the Activity guard. Audit
 // tables live outside the core database so security events are not lost when
 // the core backup policy or an account deletion is applied.
-func verifyAuditSchema(t *testing.T, path string) {
+func verifyAuditSchema(t *testing.T, adb *sql.DB) {
 	t.Helper()
-	adb, err := OpenAudit(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
+	if adb == nil {
+		t.Fatal("audit database is not open")
 	}
-	defer adb.Close()
 
 	rows, err := adb.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {

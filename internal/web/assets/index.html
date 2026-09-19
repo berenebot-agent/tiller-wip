@@ -16,12 +16,63 @@
     <section class="login-card" aria-labelledby="login-title">
       <h1 id="login-title" class="login-brand"><img class="login-mark" src="/media/tiller-mark.svg" alt=""><span>Tiller <b>Router</b></span></h1>
       <form id="login-form" class="stack-form">
-        <label>Administrator <input name="username" autocomplete="username" required autofocus></label>
+        <label id="login-identity-label">Administrator <input name="username" autocomplete="username" required autofocus></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
         <p class="form-error" id="login-error" role="alert"></p>
-        <button class="btn btn-primary btn-wide" type="submit">Enter control panel</button>
+        <button class="btn btn-primary btn-wide" id="login-submit" type="submit">Enter control panel</button>
       </form>
-      <p class="login-foot">Session state is local to this router process.</p>
+      <div id="hosted-auth-links" class="auth-links" hidden>
+        <button class="btn-link" id="show-signup" type="button">Create an account</button>
+        <button class="btn-link" id="show-forgot-password" type="button">Forgot password?</button>
+      </div>
+      <form id="signup-form" class="stack-form" hidden>
+        <p class="eyebrow">CREATE ACCOUNT</p>
+        <label>Email <input name="email" type="email" autocomplete="email" required></label>
+        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <p class="form-error" id="signup-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" type="submit">Create account</button>
+        <button class="btn-link" id="show-login-from-signup" type="button">Back to sign in</button>
+      </form>
+      <form id="forgot-form" class="stack-form" hidden>
+        <p class="eyebrow">PASSWORD RECOVERY</p>
+        <label>Email <input name="email" type="email" autocomplete="email" required></label>
+        <p class="form-error" id="forgot-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" type="submit">Send reset link</button>
+        <button class="btn-link" id="show-login-from-forgot" type="button">Back to sign in</button>
+      </form>
+      <section id="verify-panel" class="stack-form" hidden>
+        <p class="eyebrow">EMAIL VERIFICATION</p><h2>Check your email</h2>
+        <p id="verify-message">Verifying your link…</p>
+        <p class="form-error" id="verify-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" id="verify-login" type="button" hidden>Continue to sign in</button>
+      </section>
+      <form id="reset-form" class="stack-form" hidden>
+        <p class="eyebrow">RESET PASSWORD</p>
+        <label>New password <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <p class="form-error" id="reset-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" type="submit">Set new password</button>
+      </form>
+      <div id="platform-entry" class="auth-links" hidden><button class="btn-link" id="show-platform-login" type="button">Platform operator sign in</button></div>
+      <form id="platform-login-form" class="stack-form" hidden>
+        <p class="eyebrow">PLATFORM OPERATOR</p>
+        <label>Username <input name="username" autocomplete="username" required></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+        <p class="form-error" id="platform-login-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" type="submit">Open platform dashboard</button>
+        <button class="btn-link" id="show-customer-login" type="button">Back to customer sign in</button>
+      </form>
+      <p class="login-foot" id="login-foot">Session state is local to this router process.</p>
+    </section>
+  </div>
+
+  <div class="platform-shell" id="platform-shell" hidden>
+    <section class="platform-card">
+      <header class="platform-header"><div><p class="eyebrow">PLATFORM CONTROL</p><h1>Hosted operations</h1></div><button class="btn-link" id="platform-logout" type="button">Sign out</button></header>
+      <div class="platform-grid">
+        <article class="system-card"><h2>Signup and mail</h2><form id="platform-settings-form" class="stack-form"><label class="check-label"><input type="checkbox" name="hosted_signup_enabled"> Allow public signup</label><label>Audit retention (days) <input name="audit_retention_days" type="number" min="1" required></label><label>Mail provider <select name="mail_provider"><option value="">Disabled</option><option value="resend">Resend</option><option value="ses">SES via SMTP</option><option value="smtp">SMTP</option></select></label><label>From address <input name="mail_from" type="text" autocomplete="off"></label><label>Resend API key <input name="mail_resend_api_key" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label>SMTP host <input name="mail_smtp_host" type="text" autocomplete="off"></label><label>SMTP port <input name="mail_smtp_port" type="number" min="1" max="65535"></label><label>SMTP mode <select name="mail_smtp_mode"><option value="starttls">STARTTLS</option><option value="implicit">Implicit TLS</option></select></label><label>SMTP username <input name="mail_smtp_username" type="text" autocomplete="off"></label><label>SMTP password <input name="mail_smtp_password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><p class="form-error" id="platform-settings-error" role="alert"></p><button class="btn btn-primary" type="submit">Save platform settings</button></form><p class="meta-line" id="platform-mail-status"></p></article>
+        <article class="system-card"><h2>Hosted accounts</h2><label class="search-field platform-search"><span>Search</span><input id="platform-user-search" type="search" placeholder="Email or account ID"></label><div class="platform-list" id="platform-users-list"></div><p class="form-error" id="platform-users-error" role="alert"></p></article>
+        <article class="system-card"><h2>Platform audit</h2><div class="platform-list" id="platform-audit-list"></div><p class="form-error" id="platform-audit-error" role="alert"></p></article>
+      </div>
     </section>
   </div>
 

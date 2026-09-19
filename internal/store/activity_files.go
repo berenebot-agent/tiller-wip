@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -78,6 +79,36 @@ func (m *activityFiles) release(accountID string) {
 		f.lastUsed = time.Now()
 	}
 	m.mu.Unlock()
+}
+
+// Delete removes an account's Activity file after all active handles have
+// drained. Account deletion is an operator-only, synchronous operation, so a
+// live handle is closed before the file is unlinked.
+func (m *activityFiles) Delete(accountID string) error {
+	if m == nil || m.dir == "" {
+		return errNoActivityStore
+	}
+	if err := database.ValidateAccountID(accountID); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	f := m.files[accountID]
+	if f != nil && f.refs != 0 {
+		m.mu.Unlock()
+		return errors.New("store: account Activity database is busy")
+	}
+	if f != nil {
+		_ = f.db.Close()
+		delete(m.files, accountID)
+	}
+	m.mu.Unlock()
+	path := filepath.Join(m.dir, accountID+".db")
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // evictLocked closes the least-recently-used idle handle when the open-file cap

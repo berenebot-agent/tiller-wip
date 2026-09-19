@@ -21,6 +21,12 @@ func Handler() http.Handler {
 			strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css") {
 			w.Header().Set("Cache-Control", "no-store")
 		}
+		if r.URL.Path != "/" && r.URL.Path != "/index.html" && !strings.HasPrefix(r.URL.Path, "/api/") && !strings.HasPrefix(r.URL.Path, "/health/") && !strings.Contains(r.URL.Path, ".") {
+			clone := r.Clone(r.Context())
+			clone.URL.Path = "/index.html"
+			fileServer.ServeHTTP(w, clone)
+			return
+		}
 		fileServer.ServeHTTP(w, r)
 	})
 }
