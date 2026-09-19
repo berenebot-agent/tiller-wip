@@ -2,24 +2,19 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"net/http"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
-// usageWindows holds total tokens (input + output) for the three lookback
-// windows surfaced in the table views.
-type usageWindows struct {
-	H1  int64 `json:"1h"`
-	H24 int64 `json:"24h"`
-	D7  int64 `json:"7d"`
-}
-
-type targetResolutionHealth struct {
-	Success1h  bool `json:"success_1h"`
-	Failure1h  bool `json:"failure_1h"`
-	Success24h bool `json:"success_24h"`
-}
+// usageWindows, cacheWindows and targetResolutionHealth are the store's
+// account-scoped aggregate types; aliased here so the JSON envelope is
+// unchanged.
+type usageWindows = store.UsageWindows
+type cacheWindows = store.CacheWindows
+type targetResolutionHealth = store.TargetHealth
 
 // usage returns token totals per client key, virtual model, and real model for
 // the last hour, last 24 hours, and last week. Read-only aggregation over
@@ -131,32 +126,32 @@ func (s *Server) computeUsageAggregates(ctx context.Context, now time.Time) (usa
 	cut1h := now.Add(-time.Hour).Format(time.RFC3339Nano)
 	cut24h := now.Add(-24 * time.Hour).Format(time.RFC3339Nano)
 	cut7d := now.Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
-
-	clientKeys, err := s.usageByClient(ctx, cut1h, cut24h, cut7d)
+	sc := s.scopeFor(database.LocalAccountID)
+	clientKeys, err := sc.UsageByClient(ctx, cut1h, cut24h, cut7d)
 	if err != nil {
 		return usageAggregates{}, err
 	}
-	virtualModels, err := s.usageByVirtual(ctx, cut1h, cut24h, cut7d)
+	virtualModels, err := sc.UsageByVirtual(ctx, cut1h, cut24h, cut7d)
 	if err != nil {
 		return usageAggregates{}, err
 	}
-	targetHealth, err := s.targetResolutionHealth(ctx, cut1h, cut24h)
+	targetHealth, err := sc.TargetResolutionHealth(ctx, cut1h, cut24h)
 	if err != nil {
 		return usageAggregates{}, err
 	}
-	realModels, err := s.usageByReal(ctx, cut1h, cut24h, cut7d)
+	realModels, err := sc.UsageByReal(ctx, cut1h, cut24h, cut7d)
 	if err != nil {
 		return usageAggregates{}, err
 	}
-	clientCache, err := s.cacheByClient(ctx, cut1h, cut24h, cut7d)
+	clientCache, err := sc.CacheByClient(ctx, cut1h, cut24h, cut7d)
 	if err != nil {
 		return usageAggregates{}, err
 	}
-	virtualCache, err := s.cacheByVirtual(ctx, cut1h, cut24h, cut7d)
+	virtualCache, err := sc.CacheByVirtual(ctx, cut1h, cut24h, cut7d)
 	if err != nil {
 		return usageAggregates{}, err
 	}
-	realCache, err := s.cacheByReal(ctx, cut1h, cut24h, cut7d)
+	realCache, err := sc.CacheByReal(ctx, cut1h, cut24h, cut7d)
 	if err != nil {
 		return usageAggregates{}, err
 	}
@@ -181,220 +176,4 @@ func (s *Server) lastOutcomeSnapshot() map[string]lastOutcome {
 		out[k] = v
 	}
 	return out
-}
-
-// targetResolutionHealth reports request outcomes for each target that was
-// attempted (final attempt resolution + every fallback attempt).
-//
-// The final, resolved target is read from request_logs (resolved_provider,
-// resolved_model — populated for the row that ultimately served the
-// request). Every attempted target, including ones that failed and were
-// then replaced by a fallback, is read from request_attempts. This covers
-// two cases the request_logs row alone misses:
-//
-//   - A fallback target that failed but where a later target succeeded:
-//     the row's resolved_provider/resolved_model point at the later target,
-//     so the failed target would otherwise be invisible.
-//   - A virtual model whose entire fallback chain exhausted: the row is
-//     logged with NULL resolved_provider/resolved_model, so neither the
-//     failed nor any other target appears in target_health without the
-//     attempts join.
-//
-// Target health is per-target and independent of the logical request's
-// outcome: a failed attempt marks that target unhealthy even when a later
-// fallback served the request. A skipped attempt (the router declined to call
-// the target) and a client-caused failure (cancel/timeout) are not target
-// failures. Logs are metadata-only and may be disabled per key.
-func (s *Server) targetResolutionHealth(ctx context.Context, c1, c24 string) (map[string]targetResolutionHealth, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT key,
-		max(success_1h), max(failure_1h), max(success_24h)
-		FROM (
-			SELECT l.resolved_provider||'/'||l.resolved_model AS key,
-				CASE WHEN l.created_at >= ? AND l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END AS success_1h,
-				CASE WHEN l.created_at >= ? AND NOT (l.http_status >= 200 AND l.http_status < 300) THEN 1 ELSE 0 END AS failure_1h,
-				CASE WHEN l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END AS success_24h
-			FROM request_logs l
-			JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id) vm
-			  ON `+virtualAttributionJoin()+`
-			WHERE l.created_at >= ? AND l.resolved_provider IS NOT NULL AND l.resolved_model IS NOT NULL
-			UNION ALL
-			SELECT a.provider||'/'||a.model AS key,
-				CASE WHEN a.created_at >= ? AND a.result='success' THEN 1 ELSE 0 END AS success_1h,
-				CASE WHEN a.created_at >= ? AND a.result='failed'
-				AND a.failure_class NOT IN ('client_cancelled','client_timeout') THEN 1 ELSE 0 END AS failure_1h,
-				CASE WHEN a.result='success' THEN 1 ELSE 0 END AS success_24h
-			FROM request_attempts a
-			WHERE a.created_at >= ?
-		)
-		GROUP BY key`, c1, c1, c24, c1, c1, c24)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]targetResolutionHealth{}
-	for rows.Next() {
-		var id string
-		var success1h, failure1h, success24h int
-		if err := rows.Scan(&id, &success1h, &failure1h, &success24h); err != nil {
-			return nil, err
-		}
-		out[id] = targetResolutionHealth{Success1h: success1h == 1, Failure1h: failure1h == 1, Success24h: success24h == 1}
-	}
-	return out, rows.Err()
-}
-
-const usageSelect = `coalesce(sum(CASE WHEN created_at >= ? THEN coalesce(input_tokens,0)+coalesce(output_tokens,0) ELSE 0 END),0),
-	coalesce(sum(CASE WHEN created_at >= ? THEN coalesce(input_tokens,0)+coalesce(output_tokens,0) ELSE 0 END),0),
-	coalesce(sum(CASE WHEN created_at >= ? THEN coalesce(input_tokens,0)+coalesce(output_tokens,0) ELSE 0 END),0)`
-
-func (s *Server) usageByClient(ctx context.Context, c1, c24, c7 string) (map[string]usageWindows, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT client_key_id, `+usageSelect+` FROM request_logs WHERE created_at >= ? GROUP BY client_key_id`, c1, c24, c7, c7)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]usageWindows{}
-	for rows.Next() {
-		var id string
-		var w usageWindows
-		if err := rows.Scan(&id, &w.H1, &w.H24, &w.D7); err != nil {
-			return nil, err
-		}
-		out[id] = w
-	}
-	return out, rows.Err()
-}
-
-func (s *Server) usageByVirtual(ctx context.Context, c1, c24, c7 string) (map[string]usageWindows, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT vm.canonical, `+usageSelect+` FROM request_logs l JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON `+virtualAttributionJoin()+` WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c24, c7, c7)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]usageWindows{}
-	for rows.Next() {
-		var id string
-		var w usageWindows
-		if err := rows.Scan(&id, &w.H1, &w.H24, &w.D7); err != nil {
-			return nil, err
-		}
-		out[id] = w
-	}
-	return out, rows.Err()
-}
-
-func (s *Server) usageByReal(ctx context.Context, c1, c24, c7 string) (map[string]usageWindows, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT resolved_provider, resolved_model, `+usageSelect+` FROM request_logs WHERE created_at >= ? AND resolved_provider IS NOT NULL GROUP BY resolved_provider, resolved_model`, c1, c24, c7, c7)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]usageWindows{}
-	for rows.Next() {
-		var provider, model string
-		var w usageWindows
-		if err := rows.Scan(&provider, &model, &w.H1, &w.H24, &w.D7); err != nil {
-			return nil, err
-		}
-		out[provider+"/"+model] = w
-	}
-	return out, rows.Err()
-}
-
-// cacheWindows holds prompt-cache hit percentages (0-100) for the three
-// lookback windows. Values are nil when no cache data was recorded, so callers
-// can render "—" rather than a fabricated 0%.
-type cacheWindows struct {
-	H1  *float64 `json:"1h"`
-	H24 *float64 `json:"24h"`
-	D7  *float64 `json:"7d"`
-}
-
-// cachePct computes cache_read / total_input as a percentage. Both read and
-// input must be present and input non-zero; otherwise nil signals "no cache
-// data", never a misleading 0.
-func cachePct(read, input sql.NullFloat64) *float64 {
-	if !read.Valid || !input.Valid || input.Float64 <= 0 {
-		return nil
-	}
-	p := read.Float64 / input.Float64 * 100
-	return &p
-}
-
-// cacheSelect returns, per window, the summed cache_read_input_tokens and
-// input_tokens restricted to cache-valid rows (those that actually reported
-// prompt-cache data). Both sums are NULL when a window has no cache-valid row,
-// so callers can render "n.a." rather than a misleading 0%.
-const cacheSelect = `sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
-	sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN input_tokens ELSE 0 END)`
-
-func (s *Server) cacheByClient(ctx context.Context, c1, c24, c7 string) (map[string]cacheWindows, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT client_key_id, `+cacheSelect+` FROM request_logs WHERE created_at >= ? GROUP BY client_key_id`, c1, c1, c24, c24, c7, c7, c7)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanCache(rows, 0)
-}
-
-func (s *Server) cacheByVirtual(ctx context.Context, c1, c24, c7 string) (map[string]cacheWindows, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT vm.canonical, `+cacheSelect+` FROM request_logs l JOIN (SELECT v.id,g.name||'/'||v.name AS canonical FROM virtual_models v JOIN virtual_provider_groups g ON g.id = v.virtual_group_id) vm ON `+virtualAttributionJoin()+` WHERE l.created_at >= ? GROUP BY vm.canonical`, c1, c1, c24, c24, c7, c7, c7)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanCache(rows, 0)
-}
-
-func (s *Server) cacheByReal(ctx context.Context, c1, c24, c7 string) (map[string]cacheWindows, error) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT resolved_provider, resolved_model, `+cacheSelect+` FROM request_logs WHERE created_at >= ? AND resolved_provider IS NOT NULL GROUP BY resolved_provider, resolved_model`, c1, c1, c24, c24, c7, c7, c7)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanCache(rows, 1)
-}
-
-// scanCache scans the windowed cache read/input sums into each row's keyed
-// cacheWindows. keyCols is the number of leading group-by columns preceding the
-// cache sums (0 for client/virtual, 1 for the composite provider/model key).
-func scanCache(rows *sql.Rows, keyCols int) (map[string]cacheWindows, error) {
-	out := map[string]cacheWindows{}
-	var cols []any
-	if keyCols == 1 {
-		cols = []any{new(string), new(string)}
-	} else {
-		cols = []any{new(string)}
-	}
-	var sums [6]sql.NullFloat64
-	for i := range sums {
-		cols = append(cols, &sums[i])
-	}
-	for rows.Next() {
-		var key string
-		if keyCols == 1 {
-			var provider, model string
-			cols[0] = &provider
-			cols[1] = &model
-			if err := rows.Scan(cols...); err != nil {
-				return nil, err
-			}
-			key = provider + "/" + model
-		} else {
-			if err := rows.Scan(cols...); err != nil {
-				return nil, err
-			}
-			key = *cols[0].(*string)
-		}
-		out[key] = cacheWindows{
-			H1:  cachePct(sums[0], sums[1]),
-			H24: cachePct(sums[2], sums[3]),
-			D7:  cachePct(sums[4], sums[5]),
-		}
-	}
-	return out, rows.Err()
 }

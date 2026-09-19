@@ -1,14 +1,14 @@
 package server
 
 import (
-	"context"
-	"database/sql"
 	"encoding/csv"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 type requestAttemptView struct {
@@ -25,31 +25,16 @@ type requestAttemptView struct {
 	CreatedAt          string  `json:"created_at"`
 }
 
-func activitySearchClause(alias, pattern string) (string, []any) {
-	return `(` + alias + `requested_model LIKE ? OR coalesce(` + alias + `exposed_model,'') LIKE ? OR coalesce(` + alias + `route_model,'') LIKE ? OR coalesce(` + alias + `resolved_provider,'') LIKE ? OR coalesce(` + alias + `resolved_model,'') LIKE ? OR coalesce(` + alias + `resolved_provider,'') || '/' || coalesce(` + alias + `resolved_model,'') LIKE ? OR CAST(` + alias + `http_status AS TEXT) LIKE ? OR coalesce(` + alias + `client_request_id,'') LIKE ? OR coalesce(` + alias + `provider_request_id,'') LIKE ? OR coalesce(` + alias + `error_text,'') LIKE ? OR coalesce(` + alias + `error_message,'') LIKE ?)`, []any{pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern}
-}
-
 func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at FROM request_attempts WHERE request_log_id=? ORDER BY attempt_number`, r.PathValue("id"))
+	rows, err := s.scope(r).ListRequestAttempts(r.Context(), r.PathValue("id"))
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load request attempts.")
 		return
 	}
-	defer rows.Close()
-	data := []requestAttemptView{}
-	for rows.Next() {
-		var item requestAttemptView
-		var truncated int
-		if err := rows.Scan(&item.AttemptNumber, &item.Provider, &item.Model, &item.Result, &item.HTTPStatus, &item.FailureClass, &item.ErrorMessage, &item.ErrorBody, &truncated, &item.LatencyMs, &item.CreatedAt); err != nil {
-			adminError(w, 500, "database_error", "Could not load request attempts.")
-			return
-		}
-		item.ErrorBodyTruncated = scanBool(truncated)
-		data = append(data, item)
-	}
-	if err := rows.Err(); err != nil {
-		adminError(w, 500, "database_error", "Could not load request attempts.")
-		return
+	data := make([]requestAttemptView, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		data = append(data, requestAttemptView{AttemptNumber: row.AttemptNumber, Provider: row.Provider, Model: row.Model, Result: row.Result, HTTPStatus: row.HTTPStatus, FailureClass: row.FailureClass, ErrorMessage: row.ErrorMessage, ErrorBody: row.ErrorBody, ErrorBodyTruncated: row.ErrorBodyTruncated, LatencyMs: row.LatencyMs, CreatedAt: row.CreatedAt})
 	}
 	writeJSON(w, 200, map[string]any{"data": data})
 }
@@ -86,72 +71,68 @@ type activityView struct {
 	CreatedAt                string  `json:"created_at"`
 }
 
-// scanActivityRow scans one request_logs row into v. When withClient is true the
-// query additionally selects rl.client_key_id (for global activity) or ck.name
-// (for exports) as the final column; clientKeyID and clientName are then
-// populated. The streaming/fallback int columns are converted to bools here so
-// every scan loop shares the same single column list.
-func scanActivityRow(scan func(dest ...any) error, v *activityView, withClient bool, clientKeyID, clientName *string) error {
-	var streaming, fallback, requestBodyTruncated, errorBodyTruncated int
-	dest := []any{&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.CacheCreationInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.ErrorMessage, &v.RequestBody, &requestBodyTruncated, &v.ErrorBody, &errorBodyTruncated, &v.AttemptCount, &v.AttemptRows, &fallback, &v.FallbackReason, &v.CreatedAt}
-	if withClient {
-		if clientKeyID != nil {
-			dest = append(dest, clientKeyID)
-		}
-		if clientName != nil {
-			dest = append(dest, clientName)
-		}
+func activityViewFromStore(row store.ActivityRow) activityView {
+	return activityView{
+		ID:                       row.ID,
+		RequestedModel:           row.RequestedModel,
+		ExposedModel:             row.ExposedModel,
+		RouteKind:                row.RouteKind,
+		RouteModelID:             row.RouteModelID,
+		RouteModel:               row.RouteModel,
+		ResolvedProvider:         row.ResolvedProvider,
+		ResolvedModel:            row.ResolvedModel,
+		Protocol:                 row.Protocol,
+		Streaming:                row.Streaming,
+		HTTPStatus:               row.HTTPStatus,
+		LatencyMs:                row.LatencyMs,
+		InputTokens:              row.InputTokens,
+		OutputTokens:             row.OutputTokens,
+		CacheReadInputTokens:     row.CacheReadInputTokens,
+		CacheCreationInputTokens: row.CacheCreationInputTokens,
+		ProviderRequestID:        row.ProviderRequestID,
+		ClientRequestID:          row.ClientRequestID,
+		ErrorText:                row.ErrorText,
+		ErrorMessage:             row.ErrorMessage,
+		RequestBody:              row.RequestBody,
+		RequestBodyTruncated:     row.RequestBodyTruncated,
+		ErrorBody:                row.ErrorBody,
+		ErrorBodyTruncated:       row.ErrorBodyTruncated,
+		AttemptCount:             row.AttemptCount,
+		AttemptRows:              row.AttemptRows,
+		FallbackUsed:             row.FallbackUsed,
+		FallbackReason:           row.FallbackReason,
+		CreatedAt:                row.CreatedAt,
 	}
-	if err := scan(dest...); err != nil {
-		return err
-	}
-	v.Streaming, v.FallbackUsed = scanBool(streaming), scanBool(fallback)
-	v.RequestBodyTruncated, v.ErrorBodyTruncated = scanBool(requestBodyTruncated), scanBool(errorBodyTruncated)
-	return nil
 }
 
 func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
 	limit, offset, search := pagination(r)
-	pattern := "%" + search + "%"
-	var exists int
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM client_keys WHERE id=?`, clientID).Scan(&exists); err != nil || exists == 0 {
-		adminError(w, 404, "not_found", "Client key not found.")
-		return
-	}
-	searchClause, searchArgs := activitySearchClause("", pattern)
-	queryArgs := append([]any{clientID}, searchArgs...)
-	queryArgs = append(queryArgs, limit, offset)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=request_logs.id),fallback_used,fallback_reason,created_at FROM request_logs WHERE client_key_id=? AND `+searchClause+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, queryArgs...)
+	sc := s.scope(r)
+	exists, err := sc.ClientKeyExists(r.Context(), clientID)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
 	}
-	defer rows.Close()
-	data := []activityView{}
-	for rows.Next() {
-		var v activityView
-		if err := scanActivityRow(rows.Scan, &v, false, nil, nil); err != nil {
-			adminError(w, 500, "database_error", "Could not load activity.")
-			return
-		}
-		data = append(data, v)
+	if !exists {
+		adminError(w, 404, "not_found", "Client key not found.")
+		return
 	}
-	// Guard: rows.Next() can terminate early on a row-iteration error without
-	// surfacing it via Scan. Check rows.Err() so a partial result set is never
-	// returned as a 200 "success". (Not unit-tested: forcing an iteration
-	// failure would require weakening production code.)
-	if err := rows.Err(); err != nil {
+	rows, err := sc.ListClientActivity(r.Context(), clientID, search, limit, offset)
+	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
+	}
+	data := make([]activityView, 0, len(rows))
+	for i := range rows {
+		data = append(data, activityViewFromStore(rows[i]))
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
 // globalActivityView extends activityView with the client identity so the
 // workspace-free Global Activity endpoint can report which client key each
-// request belongs to. It reuses the activityView field definitions rather than
-// duplicating incompatible row-scanning logic.
+// request belongs to.
 type globalActivityView struct {
 	activityView
 	ClientKeyID string `json:"client_key_id"`
@@ -162,45 +143,31 @@ type globalActivityView struct {
 // newest first, with a deterministic id secondary sort.
 func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
-	pattern := "%" + search + "%"
-	searchClause, searchArgs := activitySearchClause("rl.", pattern)
-	searchClause = "(ck.name LIKE ? OR " + searchClause + ")"
-	searchArgs = append([]any{pattern}, searchArgs...)
-	queryArgs := append(searchArgs, limit, offset)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := s.scope(r).ListGlobalActivity(r.Context(), search, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
 	}
-	defer rows.Close()
-	data := []globalActivityView{}
-	for rows.Next() {
-		var v globalActivityView
-		if err := scanActivityRow(rows.Scan, &v.activityView, true, &v.ClientKeyID, &v.ClientName); err != nil {
-			adminError(w, 500, "database_error", "Could not load activity.")
-			return
-		}
-		data = append(data, v)
-	}
-	// Guard: rows.Next() can terminate early on a row-iteration error without
-	// surfacing it via Scan. Check rows.Err() so a partial result set is never
-	// returned as a 200 "success". (Not unit-tested: forcing an iteration
-	// failure would require weakening production code.)
-	if err := rows.Err(); err != nil {
-		adminError(w, 500, "database_error", "Could not load activity.")
-		return
+	data := make([]globalActivityView, 0, len(rows))
+	for i := range rows {
+		data = append(data, globalActivityView{activityView: activityViewFromStore(rows[i]), ClientKeyID: rows[i].ClientKeyID, ClientName: rows[i].ClientName})
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
 func (s *Server) clearActivity(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
-	var exists int
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM client_keys WHERE id=?`, clientID).Scan(&exists); err != nil || exists == 0 {
+	sc := s.scope(r)
+	exists, err := sc.ClientKeyExists(r.Context(), clientID)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not clear activity.")
+		return
+	}
+	if !exists {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
-	if _, err := s.db.SQL.ExecContext(r.Context(), `DELETE FROM request_logs WHERE client_key_id=?`, clientID); err != nil {
+	if err := sc.ClearClientActivity(r.Context(), clientID); err != nil {
 		adminError(w, 500, "database_error", "Could not clear activity.")
 		return
 	}
@@ -208,74 +175,40 @@ func (s *Server) clearActivity(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-// activityExportRow is the metadata captured for one CSV row. It mirrors the
-// request_logs columns plus the owning client's name (via JOIN) so both the
-// client-scoped and virtual-model-scoped exports can include it.
-type activityExportRow struct {
-	activityView
-	ClientName string
-}
-
-// queryActivityExport runs a SELECT over request_logs joined to
-// client_keys, applying the given WHERE clause and optional search pattern, and
-// returns one row per inference request ordered newest-first. It is shared by
-// the client-key and virtual-model CSV export handlers so the column set cannot
-// drift between them.
-func (s *Server) queryActivityExport(ctx context.Context, where string, args []any, beforeCreated, beforeID string) (*sql.Rows, error) {
-	if beforeCreated != "" {
-		where += ` AND (rl.created_at < ? OR (rl.created_at = ? AND rl.id < ?))`
-		args = append(args, beforeCreated, beforeCreated, beforeID)
-	}
-	args = append(args, activityExportBatchSize)
-	return s.db.SQL.QueryContext(ctx, `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id),rl.fallback_used,rl.fallback_reason,rl.created_at,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ?`, args...)
-}
-
-// exportClientActivityCSV streams a CSV of the client key's
-// activity, honouring the active search filter. One inference request = one row.
+// exportClientActivityCSV streams a CSV of the client key's activity, honouring
+// the active search filter. One inference request = one row.
 func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
-	var name string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT name FROM client_keys WHERE id=?`, clientID).Scan(&name); err != nil {
+	sc := s.scope(r)
+	name, err := sc.ClientKeyName(r.Context(), clientID)
+	if err != nil {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
-	where := `rl.client_key_id=?`
-	args := []any{clientID}
-	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
-		pattern := "%" + search + "%"
-		searchClause, searchArgs := activitySearchClause("rl.", pattern)
-		where += ` AND ` + searchClause
-		args = append(args, searchArgs...)
-	}
-	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
-	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(name)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", where, args); err != nil {
-		if s.logger != nil {
-			s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
-		}
-		return
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	cutoff := periodCutoffString(r.URL.Query().Get("period"))
+	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(name)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
+		return sc.ExportClientActivity(r.Context(), clientID, search, cutoff, fn)
+	}); err != nil && s.logger != nil {
+		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
 }
 
-// exportVirtualActivityCSV streams a CSV of activity attributable
-// to a virtual model, honouring the active search filter. It matches new rows by
-// route_model_id and legacy rows (route_kind NULL) by canonical name. One
-// inference request = one row.
+// exportVirtualActivityCSV streams a CSV of activity attributable to a virtual
+// model, honouring the active search filter.
 func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
-	var canonical string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, modelID).Scan(&canonical); err != nil {
+	sc := s.scope(r)
+	canonical, err := sc.VirtualModelCanonical(r.Context(), modelID)
+	if err != nil {
 		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	}
-	where, args := virtualAttribution(modelID, canonical)
-	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
-		pattern := "%" + search + "%"
-		searchClause, searchArgs := activitySearchClause("rl.", pattern)
-		where += ` AND ` + searchClause
-		args = append(args, searchArgs...)
-	}
-	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
-	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", where, args); err != nil && s.logger != nil {
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	cutoff := periodCutoffString(r.URL.Query().Get("period"))
+	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
+		return sc.ExportVirtualActivity(r.Context(), modelID, canonical, search, cutoff, fn)
+	}); err != nil && s.logger != nil {
 		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
 }
@@ -284,20 +217,17 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 // model, honouring the active search filter. One inference request = one row.
 func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
-	var provider, upstream string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT p.name,m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, modelID).Scan(&provider, &upstream); err != nil {
+	sc := s.scope(r)
+	provider, upstream, err := sc.RealModelCanonical(r.Context(), modelID)
+	if err != nil {
 		adminError(w, 404, "not_found", "Model not found.")
 		return
 	}
-	where, args := realAttribution(modelID, provider, upstream)
-	if search := strings.TrimSpace(r.URL.Query().Get("search")); search != "" {
-		pattern := "%" + search + "%"
-		searchClause, searchArgs := activitySearchClause("rl.", pattern)
-		where += ` AND ` + searchClause
-		args = append(args, searchArgs...)
-	}
-	where, args = applyExportPeriod(where, args, r.URL.Query().Get("period"))
-	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(provider+"/"+upstream)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", where, args); err != nil && s.logger != nil {
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	cutoff := periodCutoffString(r.URL.Query().Get("period"))
+	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(provider+"/"+upstream)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
+		return sc.ExportRealActivity(r.Context(), modelID, provider, upstream, search, cutoff, fn)
+	}); err != nil && s.logger != nil {
 		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
 }
@@ -305,15 +235,7 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 // writeActivityCSV streams the export rows as a UTF-8 CSV attachment. Only
 // metadata is written; unknown values stay blank. A BOM is prepended so Excel
 // detects UTF-8 correctly.
-const activityExportBatchSize = 256
-
-func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filename, where string, args []any) error {
-	rows, err := s.queryActivityExport(r.Context(), where, append([]any(nil), args...), "", "")
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not export activity.")
-		return err
-	}
-	defer func() { _ = rows.Close() }()
+func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filename string, run func(fn func(store.ActivityRow) error) error) error {
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 	w.Header().Set("Cache-Control", "no-store")
@@ -336,134 +258,80 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 	}); err != nil {
 		return err
 	}
-	beforeCreated, beforeID := "", ""
-	for {
-		count := 0
-		for rows.Next() {
-			if err := r.Context().Err(); err != nil {
-				rows.Close()
-				return err
-			}
-			var row activityExportRow
-			if err := scanActivityRow(rows.Scan, &row.activityView, true, nil, &row.ClientName); err != nil {
-				rows.Close()
-				return err
-			}
-			virtualModel := ""
-			if row.RouteKind != nil && *row.RouteKind == "virtual" && row.RouteModel != nil {
-				virtualModel = *row.RouteModel
-			}
-			if err := write([]string{
-				row.CreatedAt, neutralizeCSVField(row.ClientName), neutralizeCSVField(row.RequestedModel),
-				neutralizeCSVField(strPtrOrEmpty(row.ExposedModel)), neutralizeCSVField(virtualModel),
-				neutralizeCSVField(strPtrOrEmpty(row.RouteModel)), neutralizeCSVField(strPtrOrEmpty(row.ResolvedProvider)),
-				neutralizeCSVField(strPtrOrEmpty(row.ResolvedModel)), row.Protocol,
-				strconv.FormatBool(row.Streaming), strconv.Itoa(row.HTTPStatus), strconv.FormatInt(row.LatencyMs, 10),
-				int64PtrOrEmpty(row.InputTokens), int64PtrOrEmpty(row.OutputTokens), int64PtrOrEmpty(row.CacheReadInputTokens),
-				int64PtrOrEmpty(row.CacheCreationInputTokens), strconv.Itoa(row.AttemptCount), strconv.FormatBool(row.FallbackUsed),
-				strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
-				neutralizeCSVField(strPtrOrEmpty(row.RequestBody)), strconv.FormatBool(row.RequestBodyTruncated),
-				neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)), strconv.FormatBool(row.ErrorBodyTruncated),
-				neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID, strPtrOrEmpty(row.RouteKind),
-			}); err != nil {
-				rows.Close()
-				return err
-			}
-			beforeCreated, beforeID = row.CreatedAt, row.ID
-			count++
-			if count%64 == 0 {
-				cw.Flush()
-				if err := cw.Error(); err != nil {
-					rows.Close()
-					return err
-				}
-			}
+	written := 0
+	if err := run(func(row store.ActivityRow) error {
+		virtualModel := ""
+		if row.RouteKind != nil && *row.RouteKind == "virtual" && row.RouteModel != nil {
+			virtualModel = *row.RouteModel
 		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
+		if err := write([]string{
+			row.CreatedAt, neutralizeCSVField(row.ClientName), neutralizeCSVField(row.RequestedModel),
+			neutralizeCSVField(strPtrOrEmpty(row.ExposedModel)), neutralizeCSVField(virtualModel),
+			neutralizeCSVField(strPtrOrEmpty(row.RouteModel)), neutralizeCSVField(strPtrOrEmpty(row.ResolvedProvider)),
+			neutralizeCSVField(strPtrOrEmpty(row.ResolvedModel)), row.Protocol,
+			strconv.FormatBool(row.Streaming), strconv.Itoa(row.HTTPStatus), strconv.FormatInt(row.LatencyMs, 10),
+			int64PtrOrEmpty(row.InputTokens), int64PtrOrEmpty(row.OutputTokens), int64PtrOrEmpty(row.CacheReadInputTokens),
+			int64PtrOrEmpty(row.CacheCreationInputTokens), strconv.Itoa(row.AttemptCount), strconv.FormatBool(row.FallbackUsed),
+			strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
+			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)), strconv.FormatBool(row.RequestBodyTruncated),
+			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)), strconv.FormatBool(row.ErrorBodyTruncated),
+			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID, strPtrOrEmpty(row.RouteKind),
+		}); err != nil {
 			return err
 		}
-		if err := rows.Close(); err != nil {
-			return err
+		written++
+		if written%64 == 0 {
+			cw.Flush()
+			return cw.Error()
 		}
-		if count < activityExportBatchSize {
-			break
-		}
-		rows, err = s.queryActivityExport(r.Context(), where, append([]any(nil), args...), beforeCreated, beforeID)
-		if err != nil {
-			return err
-		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	cw.Flush()
 	return cw.Error()
 }
 
-// listScopedActivity returns metadata for requests matching the given WHERE
-// clause (e.g. a specific real or virtual model), newest first, with the same
-// search and pagination as the client-key activity endpoint. It verifies the
-// scoping entity exists first.
-func (s *Server) listScopedActivity(w http.ResponseWriter, r *http.Request, where string, args []any, existsQuery string, existsArgs []any, notFoundMsg string) {
-	var exists int
-	if err := s.db.SQL.QueryRowContext(r.Context(), existsQuery, existsArgs...).Scan(&exists); err != nil || exists == 0 {
-		adminError(w, 404, "not_found", notFoundMsg)
+func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
+	modelID := r.PathValue("id")
+	sc := s.scope(r)
+	canonical, err := sc.VirtualModelCanonical(r.Context(), modelID)
+	if err != nil {
+		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	}
 	limit, offset, search := pagination(r)
-	pattern := "%" + search + "%"
-	searchClause, searchArgs := activitySearchClause("rl.", pattern)
-	queryArgs := append([]any{}, args...)
-	queryArgs = append(queryArgs, searchArgs...)
-	queryArgs = append(queryArgs, limit, offset)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id WHERE `+where+` AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := sc.ListVirtualActivity(r.Context(), modelID, canonical, search, limit, offset)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load activity.")
 		return
 	}
-	defer rows.Close()
-	data := []globalActivityView{}
-	for rows.Next() {
-		var v globalActivityView
-		if err := scanActivityRow(rows.Scan, &v.activityView, true, &v.ClientKeyID, &v.ClientName); err != nil {
-			adminError(w, 500, "database_error", "Could not load activity.")
-			return
-		}
-		data = append(data, v)
-	}
-	if err := rows.Err(); err != nil {
-		adminError(w, 500, "database_error", "Could not load activity.")
-		return
+	data := make([]globalActivityView, 0, len(rows))
+	for i := range rows {
+		data = append(data, globalActivityView{activityView: activityViewFromStore(rows[i]), ClientKeyID: rows[i].ClientKeyID, ClientName: rows[i].ClientName})
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
-// listVirtualActivity returns metadata for requests attributable to a virtual
-// model, newest first, with the same search and pagination as the client-key
-// activity endpoint. It matches new rows by route_model_id and legacy rows
-// (route_kind NULL) by the virtual model's canonical name.
-func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
-	modelID := r.PathValue("id")
-	var canonical string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, modelID).Scan(&canonical); err != nil {
-		adminError(w, 404, "not_found", "Virtual model not found.")
-		return
-	}
-	where, args := virtualAttribution(modelID, canonical)
-	s.listScopedActivity(w, r, where, args, `SELECT count(*) FROM virtual_models WHERE id=?`, []any{modelID}, "Virtual model not found.")
-}
-
-// listRealModelActivity returns metadata for requests that resolved to a real
-// model (resolved_provider + resolved_model), newest first, with the same search
-// and pagination as the client-key activity endpoint. Scoping by resolved names
-// (not route_model_id) keeps legacy rows and virtual-routed requests visible.
 func (s *Server) listRealModelActivity(w http.ResponseWriter, r *http.Request) {
 	modelID := r.PathValue("id")
-	var provider, upstream string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT p.name,m.upstream_model_id FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, modelID).Scan(&provider, &upstream); err != nil {
+	sc := s.scope(r)
+	provider, upstream, err := sc.RealModelCanonical(r.Context(), modelID)
+	if err != nil {
 		adminError(w, 404, "not_found", "Model not found.")
 		return
 	}
-	where, args := realAttribution(modelID, provider, upstream)
-	s.listScopedActivity(w, r, where, args, `SELECT count(*) FROM provider_models WHERE id=?`, []any{modelID}, "Model not found.")
+	limit, offset, search := pagination(r)
+	rows, err := sc.ListRealModelActivity(r.Context(), modelID, provider, upstream, search, limit, offset)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load activity.")
+		return
+	}
+	data := make([]globalActivityView, 0, len(rows))
+	for i := range rows {
+		data = append(data, globalActivityView{activityView: activityViewFromStore(rows[i]), ClientKeyID: rows[i].ClientKeyID, ClientName: rows[i].ClientName})
+	}
+	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
 func strPtrOrEmpty(v *string) string {
@@ -507,27 +375,17 @@ func neutralizeCSVField(s string) string {
 	return s
 }
 
-// periodCutoff returns the UTC cutoff for a CSV export period, and whether a
-// filter applies. "all" (or empty/unknown) returns no filter.
-func periodCutoff(period string) (time.Time, bool) {
+// periodCutoffString returns the UTC cutoff for a CSV export period as an
+// RFC3339Nano string, or "" when no period filter applies.
+func periodCutoffString(period string) string {
 	switch strings.TrimSpace(period) {
 	case "24h":
-		return time.Now().UTC().Add(-24 * time.Hour), true
+		return time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
 	case "7d":
-		return time.Now().UTC().Add(-7 * 24 * time.Hour), true
+		return time.Now().UTC().Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
 	case "30d":
-		return time.Now().UTC().Add(-30 * 24 * time.Hour), true
+		return time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano)
 	default:
-		return time.Time{}, false
+		return ""
 	}
-}
-
-// applyExportPeriod appends a created_at cutoff to the export WHERE clause for
-// the given period query param. Returns the updated where/args.
-func applyExportPeriod(where string, args []any, period string) (string, []any) {
-	if cutoff, ok := periodCutoff(period); ok {
-		where += ` AND rl.created_at >= ?`
-		args = append(args, cutoff.Format(time.RFC3339Nano))
-	}
-	return where, args
 }
