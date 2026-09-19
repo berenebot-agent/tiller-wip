@@ -122,10 +122,12 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 			LatencyMs:          attempt.latencyMs,
 		})
 	}
-	// One transaction per logical request: the request_logs row and all of its
-	// attempt rows commit together or not at all, so a single SQLite fsync (the
-	// implicit-transaction commit) covers the whole write instead of 1+N.
-	_ = s.scopeFor(row.accountID).InsertRequestLog(ctx, store.RequestLogInsert{
+	// One transaction per account batch: the request_logs row and all of its
+	// attempt rows commit together or not at all. When the asynchronous writer
+	// is running the row is queued and the request path never waits on the
+	// commit; tests and direct Server construction fall back to a synchronous
+	// best-effort insert.
+	insert := store.RequestLogInsert{
 		ID:                       row.clientRequestID,
 		ClientKeyID:              row.clientKeyID,
 		ClientName:               row.clientName,
@@ -157,7 +159,12 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		FallbackReason:           row.fallbackReason,
 		CreatedAt:                row.createdAt,
 		Attempts:                 attempts,
-	})
+	}
+	if s.logWriter != nil {
+		s.logWriter.enqueue(logWrite{accountID: row.accountID, row: insert})
+		return
+	}
+	_ = s.scopeFor(row.accountID).InsertRequestLog(ctx, insert)
 }
 
 // recordLastOutcome updates operational target status from actual attempts.

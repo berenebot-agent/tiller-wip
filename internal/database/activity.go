@@ -107,11 +107,18 @@ CREATE INDEX IF NOT EXISTS request_attempts_account ON request_attempts(account_
 
 // servicePragmas are the pragmas shared by the central database and every
 // per-account Activity database.
+//
+// synchronous=NORMAL under WAL removes the per-commit fsync: transactions are
+// durable at the next checkpoint rather than on every commit. A power loss can
+// lose the most recent commits but cannot corrupt the database. Activity is
+// best-effort telemetry and the control plane is small, so this is the right
+// trade for keeping the request path off the disk-flush critical path.
 func servicePragmas() url.Values {
 	q := url.Values{}
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", "busy_timeout(5000)")
 	q.Add("_pragma", "journal_mode(WAL)")
+	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "temp_store(MEMORY)")
 	return q
 }

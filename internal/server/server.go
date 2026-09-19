@@ -93,6 +93,10 @@ type Server struct {
 	// production default (sseKeepaliveInterval); tests set it short so the
 	// silence path is exercised without waiting.
 	sseKeepalive time.Duration
+	// logWriter batch-writes Activity rows off the request path. It is nil
+	// until StartBackground runs; while nil, writeLog writes synchronously so
+	// tests and direct Server construction stay deterministic.
+	logWriter *logWriter
 }
 
 // keepaliveInterval returns the streaming keepalive cadence, honouring the
@@ -201,6 +205,16 @@ func (s *Server) StartBackground(ctx context.Context) {
 	s.clients.StartSweeper(ctx)
 	s.sessions.StartSweeper(ctx)
 	go s.startLogPruner(ctx)
+	s.startLogWriter(ctx)
+}
+
+// startLogWriter launches the asynchronous Activity writer. It runs only in
+// the real deployment (StartBackground); tests that need deterministic reads
+// keep the synchronous write path.
+func (s *Server) startLogWriter(ctx context.Context) {
+	w := newLogWriter(s.scopeFor, s.logger)
+	s.logWriter = w
+	w.start(ctx)
 }
 
 func (s *Server) startLogPruner(ctx context.Context) {
