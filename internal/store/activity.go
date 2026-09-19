@@ -18,14 +18,6 @@ func virtualAttribution(virtualID, canonical string) (string, []any) {
 		[]any{virtualID, canonical, canonical}
 }
 
-// virtualAttributionJoin returns the JOIN ON clause matching a request_logs row
-// (aliased l) to a virtual model row (aliased vm). It expresses the same
-// semantics as virtualAttribution so usage aggregation and activity cannot
-// drift.
-func virtualAttributionJoin() string {
-	return `(l.route_kind='virtual' AND l.route_model_id=vm.id) OR (l.route_status='legacy' AND l.route_kind IS NULL AND l.requested_model=vm.canonical) OR (l.route_status='legacy' AND l.route_kind IS NULL AND l.route_model=vm.canonical)`
-}
-
 // realAttribution returns the predicate + args that match rows resolved to a
 // real model. Callers must alias request_logs as "rl".
 func realAttribution(modelID, provider, upstream string) (string, []any) {
@@ -142,51 +134,71 @@ func (s *Scope) ListClientActivity(ctx context.Context, clientID, search string,
 	searchClause, searchArgs := activitySearchClause("rl.", "%"+search+"%")
 	args := append([]any{s.accountID, clientID}, searchArgs...)
 	args = append(args, limit, offset)
-	rows, err := s.q.QueryContext(ctx, `SELECT `+activityColumns+` FROM request_logs rl WHERE rl.account_id=? AND rl.client_key_id=? AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	return s.scanActivityRows(rows, false, false)
+	var out []ActivityRow
+	err := s.withActivity(ctx, func(q querier) error {
+		rows, err := q.QueryContext(ctx, `SELECT `+activityColumns+` FROM request_logs rl WHERE rl.account_id=? AND rl.client_key_id=? AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
+		if err != nil {
+			return err
+		}
+		out, err = s.scanActivityRows(rows, false, false)
+		return err
+	})
+	return out, err
 }
 
 func (s *Scope) ListGlobalActivity(ctx context.Context, search string, limit, offset int) ([]ActivityRow, error) {
 	pattern := "%" + search + "%"
 	searchClause, searchArgs := activitySearchClause("rl.", pattern)
-	searchClause = "(ck.name LIKE ? OR " + searchClause + ")"
+	searchClause = "(rl.client_name LIKE ? OR " + searchClause + ")"
 	searchArgs = append([]any{pattern}, searchArgs...)
-	args := append([]any{s.accountID, s.accountID}, searchArgs...)
+	args := append([]any{s.accountID}, searchArgs...)
 	args = append(args, limit, offset)
-	rows, err := s.q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id AND ck.account_id=rl.account_id WHERE rl.account_id=? AND ck.account_id=? AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	return s.scanActivityRows(rows, true, true)
+	var out []ActivityRow
+	err := s.withActivity(ctx, func(q querier) error {
+		rows, err := q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_key_id,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
+		if err != nil {
+			return err
+		}
+		out, err = s.scanActivityRows(rows, true, true)
+		return err
+	})
+	return out, err
 }
 
 func (s *Scope) ListVirtualActivity(ctx context.Context, virtualID, canonical, search string, limit, offset int) ([]ActivityRow, error) {
 	where, whereArgs := virtualAttribution(virtualID, canonical)
 	searchClause, searchArgs := activitySearchClause("rl.", "%"+search+"%")
-	args := append([]any{s.accountID, s.accountID}, whereArgs...)
+	args := append([]any{s.accountID}, whereArgs...)
 	args = append(args, searchArgs...)
 	args = append(args, limit, offset)
-	rows, err := s.q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id AND ck.account_id=rl.account_id WHERE rl.account_id=? AND ck.account_id=? AND `+where+` AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	return s.scanActivityRows(rows, true, true)
+	var out []ActivityRow
+	err := s.withActivity(ctx, func(q querier) error {
+		rows, err := q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_key_id,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND `+where+` AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
+		if err != nil {
+			return err
+		}
+		out, err = s.scanActivityRows(rows, true, true)
+		return err
+	})
+	return out, err
 }
 
 func (s *Scope) ListRealModelActivity(ctx context.Context, modelID, provider, upstream, search string, limit, offset int) ([]ActivityRow, error) {
 	where, whereArgs := realAttribution(modelID, provider, upstream)
 	searchClause, searchArgs := activitySearchClause("rl.", "%"+search+"%")
-	args := append([]any{s.accountID, s.accountID}, whereArgs...)
+	args := append([]any{s.accountID}, whereArgs...)
 	args = append(args, searchArgs...)
 	args = append(args, limit, offset)
-	rows, err := s.q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_key_id,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id AND ck.account_id=rl.account_id WHERE rl.account_id=? AND ck.account_id=? AND `+where+` AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
-	if err != nil {
-		return nil, err
-	}
-	return s.scanActivityRows(rows, true, true)
+	var out []ActivityRow
+	err := s.withActivity(ctx, func(q querier) error {
+		rows, err := q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_key_id,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND `+where+` AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
+		if err != nil {
+			return err
+		}
+		out, err = s.scanActivityRows(rows, true, true)
+		return err
+	})
+	return out, err
 }
 
 const activityExportBatchSize = 256
@@ -205,11 +217,15 @@ func (s *Scope) exportActivity(ctx context.Context, where string, args []any, cu
 			batchArgs = append(batchArgs, beforeCreated, beforeCreated, beforeID)
 		}
 		batchArgs = append(batchArgs, activityExportBatchSize)
-		rows, err := s.q.QueryContext(ctx, `SELECT `+activityColumns+`,ck.name FROM request_logs rl JOIN client_keys ck ON ck.id=rl.client_key_id AND ck.account_id=rl.account_id WHERE rl.account_id=? AND ck.account_id=? AND `+batchWhere+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ?`, append([]any{s.accountID, s.accountID}, batchArgs...)...)
-		if err != nil {
+		var page []ActivityRow
+		err := s.withActivity(ctx, func(q querier) error {
+			rows, err := q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND `+batchWhere+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ?`, append([]any{s.accountID}, batchArgs...)...)
+			if err != nil {
+				return err
+			}
+			page, err = s.scanActivityRows(rows, false, true)
 			return err
-		}
-		page, err := s.scanActivityRows(rows, false, true)
+		})
 		if err != nil {
 			return err
 		}
@@ -264,25 +280,31 @@ func (s *Scope) ExportRealActivity(ctx context.Context, modelID, provider, upstr
 
 // ClearClientActivity deletes a client key's request logs.
 func (s *Scope) ClearClientActivity(ctx context.Context, clientID string) error {
-	_, err := s.q.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id=? AND account_id=?`, clientID, s.accountID)
-	return err
+	return s.withActivity(ctx, func(q querier) error {
+		_, err := q.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id=? AND account_id=?`, clientID, s.accountID)
+		return err
+	})
 }
 
 func (s *Scope) ListRequestAttempts(ctx context.Context, requestLogID string) ([]RequestAttemptRow, error) {
-	rows, err := s.q.QueryContext(ctx, `SELECT attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at FROM request_attempts WHERE request_log_id=? AND account_id=? ORDER BY attempt_number`, requestLogID, s.accountID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := []RequestAttemptRow{}
-	for rows.Next() {
-		var v RequestAttemptRow
-		var truncated int
-		if err := rows.Scan(&v.AttemptNumber, &v.Provider, &v.Model, &v.Result, &v.HTTPStatus, &v.FailureClass, &v.ErrorMessage, &v.ErrorBody, &truncated, &v.LatencyMs, &v.CreatedAt); err != nil {
-			return nil, err
+	var out []RequestAttemptRow
+	err := s.withActivity(ctx, func(q querier) error {
+		rows, err := q.QueryContext(ctx, `SELECT attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at FROM request_attempts WHERE request_log_id=? AND account_id=? ORDER BY attempt_number`, requestLogID, s.accountID)
+		if err != nil {
+			return err
 		}
-		v.ErrorBodyTruncated = truncated != 0
-		out = append(out, v)
-	}
-	return out, rows.Err()
+		defer rows.Close()
+		out = []RequestAttemptRow{}
+		for rows.Next() {
+			var v RequestAttemptRow
+			var truncated int
+			if err := rows.Scan(&v.AttemptNumber, &v.Provider, &v.Model, &v.Result, &v.HTTPStatus, &v.FailureClass, &v.ErrorMessage, &v.ErrorBody, &truncated, &v.LatencyMs, &v.CreatedAt); err != nil {
+				return err
+			}
+			v.ErrorBodyTruncated = truncated != 0
+			out = append(out, v)
+		}
+		return rows.Err()
+	})
+	return out, err
 }

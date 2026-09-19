@@ -16,8 +16,8 @@ const (
 	ClassTenant
 )
 
-// TableClassification is the authoritative table inventory for the tenancy
-// boundary. Keys are SQLite table names.
+// TableClassification is the authoritative table inventory for the central
+// (control-plane) database's tenancy boundary. Keys are SQLite table names.
 var TableClassification = map[string]TableClass{
 	// Platform-global.
 	"schema_migrations": ClassPlatform,
@@ -37,18 +37,46 @@ var TableClassification = map[string]TableClass{
 	"client_group_defaults":    ClassTenant,
 	"client_model_permissions": ClassTenant,
 	"client_single_bindings":   ClassTenant,
-	"request_logs":             ClassTenant,
-	"request_attempts":         ClassTenant,
 	"settings":                 ClassTenant,
 }
 
-// TenantTables returns the tenant-owned table names.
-func TenantTables() []string {
+// ActivityTableClassification is the table inventory for each per-account
+// Activity database file. Activity tables live outside the central database so
+// the central backup never contains logs; they are still account-scoped.
+var ActivityTableClassification = map[string]TableClass{
+	"activity_schema_migrations": ClassPlatform,
+	"request_logs":               ClassTenant,
+	"request_attempts":           ClassTenant,
+}
+
+// MainTenantTables returns the tenant-owned table names in the central
+// database.
+func MainTenantTables() []string {
 	out := make([]string, 0, len(TableClassification))
 	for name, class := range TableClassification {
 		if class == ClassTenant {
 			out = append(out, name)
 		}
 	}
+	return out
+}
+
+// ActivityTenantTables returns the tenant-owned table names in the per-account
+// Activity database.
+func ActivityTenantTables() []string {
+	out := make([]string, 0, len(ActivityTableClassification))
+	for name, class := range ActivityTableClassification {
+		if class == ClassTenant {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// TenantTables returns every tenant-owned table name across the central and
+// Activity databases. The SQL-boundary guard uses this union so tenant SQL
+// cannot escape internal/store regardless of which database it targets.
+func TenantTables() []string {
+	out := append(MainTenantTables(), ActivityTenantTables()...)
 	return out
 }

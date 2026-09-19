@@ -128,6 +128,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	_ = s.scopeFor(row.accountID).InsertRequestLog(ctx, store.RequestLogInsert{
 		ID:                       row.clientRequestID,
 		ClientKeyID:              row.clientKeyID,
+		ClientName:               row.clientName,
 		RequestedModel:           row.requestedModel,
 		ExposedModel:             row.exposedModel,
 		RouteKind:                row.routeKind,

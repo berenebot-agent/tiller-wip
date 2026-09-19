@@ -27,6 +27,7 @@ type RequestAttemptInsert struct {
 type RequestLogInsert struct {
 	ID                       string
 	ClientKeyID              string
+	ClientName               string
 	RequestedModel           string
 	ExposedModel             *string
 	RouteKind                *string
@@ -72,8 +73,34 @@ func nullStringValue(v string) any {
 }
 
 // InsertRequestLog writes a request log and all of its attempt rows in one
-// transaction under the scope's account.
+// transaction in the account's Activity database, so a single request's logs
+// commit together.
 func (s *Scope) InsertRequestLog(ctx context.Context, in RequestLogInsert) error {
+	return s.runActivityTx(ctx, func(q querier) error {
+		return insertRequestLogRow(ctx, q, s.accountID, &in)
+	})
+}
+
+// InsertRequestLogs writes a batch of request logs, one transaction per
+// account, in the account's Activity database. It exists for the asynchronous
+// Activity writer so many completed requests share a single commit.
+func (s *Scope) InsertRequestLogs(ctx context.Context, rows []RequestLogInsert) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	return s.runActivityTx(ctx, func(q querier) error {
+		for i := range rows {
+			if err := insertRequestLogRow(ctx, q, s.accountID, &rows[i]); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// insertRequestLogRow inserts one request log and its attempts using q. It is
+// shared by the single and batched insert paths so they cannot drift.
+func insertRequestLogRow(ctx context.Context, q querier, accountID string, in *RequestLogInsert) error {
 	routeStatus := in.RouteStatus
 	if routeStatus == "" {
 		routeStatus = "legacy"
@@ -84,48 +111,78 @@ func (s *Scope) InsertRequestLog(ctx context.Context, in RequestLogInsert) error
 			attempts++
 		}
 	}
-	return s.RunTx(ctx, nil, func(tx *Scope) error {
-		if _, err := tx.q.ExecContext(ctx, `INSERT INTO request_logs(id,account_id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			in.ID, tx.accountID, in.ClientKeyID, in.RequestedModel, in.ExposedModel, in.RouteKind, in.RouteModelID, in.RouteModel, routeStatus, in.ResolvedProvider, in.ResolvedModel, in.Protocol, boolInt(in.Streaming), in.HTTPStatus, in.LatencyMs, in.InputTokens, in.OutputTokens, in.CacheReadInputTokens, in.CacheCreationInputTokens, in.ProviderRequestID, in.ClientRequestID, in.ErrorText, in.ErrorMessage, in.RequestBody, boolInt(in.RequestBodyTruncated), in.ErrorBody, boolInt(in.ErrorBodyTruncated), attempts, boolInt(in.FallbackUsed), in.FallbackReason, in.CreatedAt); err != nil {
+	if _, err := q.ExecContext(ctx, `INSERT INTO request_logs(id,account_id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		in.ID, accountID, in.ClientKeyID, in.ClientName, in.RequestedModel, in.ExposedModel, in.RouteKind, in.RouteModelID, in.RouteModel, routeStatus, in.ResolvedProvider, in.ResolvedModel, in.Protocol, boolInt(in.Streaming), in.HTTPStatus, in.LatencyMs, in.InputTokens, in.OutputTokens, in.CacheReadInputTokens, in.CacheCreationInputTokens, in.ProviderRequestID, in.ClientRequestID, in.ErrorText, in.ErrorMessage, in.RequestBody, boolInt(in.RequestBodyTruncated), in.ErrorBody, boolInt(in.ErrorBodyTruncated), attempts, boolInt(in.FallbackUsed), in.FallbackReason, in.CreatedAt); err != nil {
+		return err
+	}
+	for i, attempt := range in.Attempts {
+		attemptID, err := id.New()
+		if err != nil {
+			continue
+		}
+		if _, err := q.ExecContext(ctx, `INSERT INTO request_attempts(id,account_id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, accountID, in.ID, i+1, attempt.Provider, attempt.Model, attempt.Result, nullIntValue(attempt.HTTPStatus), nullStringValue(attempt.FailureClass), attempt.ErrorMessage, attempt.ErrorBody, boolInt(attempt.ErrorBodyTruncated), attempt.LatencyMs, in.CreatedAt); err != nil {
 			return err
 		}
-		for i, attempt := range in.Attempts {
-			attemptID, err := id.New()
-			if err != nil {
-				continue
-			}
-			if _, err := tx.q.ExecContext(ctx, `INSERT INTO request_attempts(id,account_id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, tx.accountID, in.ID, i+1, attempt.Provider, attempt.Model, attempt.Result, nullIntValue(attempt.HTTPStatus), nullStringValue(attempt.FailureClass), attempt.ErrorMessage, attempt.ErrorBody, boolInt(attempt.ErrorBodyTruncated), attempt.LatencyMs, in.CreatedAt); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // PruneRequestLogs deletes request logs older than each client key's retention
 // window. It is platform-level maintenance and deliberately spans all
-// accounts, so it lives on Store rather than an account Scope.
+// accounts, so it lives on Store rather than an account Scope. Each account's
+// prune runs against that account's Activity file.
 func (s *Store) PruneRequestLogs(ctx context.Context, now time.Time) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT retention_days FROM client_keys`)
+	if s.activity == nil {
+		return nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, account_id, retention_days FROM client_keys`)
 	if err != nil {
 		return err
 	}
-	var days []int
+	byAccount := map[string][]retentionKey{}
 	for rows.Next() {
-		var d int
-		if rows.Scan(&d) == nil {
-			days = append(days, d)
+		var id, account string
+		var days int
+		if err := rows.Scan(&id, &account, &days); err != nil {
+			rows.Close()
+			return err
 		}
+		byAccount[account] = append(byAccount[account], retentionKey{id: id, days: days})
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	for _, d := range days {
-		cutoff := now.UTC().Add(-time.Duration(d) * 24 * time.Hour).Format(time.RFC3339Nano)
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id IN (SELECT id FROM client_keys WHERE retention_days=?) AND created_at < ?`, d, cutoff); err != nil {
-			return fmt.Errorf("prune request logs (retention %d): %w", d, err)
+	for account, keys := range byAccount {
+		if err := s.pruneAccountRequestLogs(ctx, account, keys, now); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// retentionKey pairs a client key with its configured retention window (days).
+type retentionKey struct {
+	id   string
+	days int
+}
+
+func (s *Store) pruneAccountRequestLogs(ctx context.Context, account string, keys []retentionKey, now time.Time) error {
+	db, release, err := s.activity.acquire(ctx, account)
+	if err != nil {
+		return err
+	}
+	defer release()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		cutoff := now.UTC().Add(-time.Duration(key.days) * 24 * time.Hour).Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM request_logs WHERE account_id=? AND client_key_id=? AND created_at < ?`, account, key.id, cutoff); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("prune request logs (retention %d): %w", key.days, err)
+		}
+	}
+	return tx.Commit()
 }

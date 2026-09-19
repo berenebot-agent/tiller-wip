@@ -69,6 +69,18 @@ func openRawMigrationDB(t *testing.T, path string) *sql.DB {
 	return raw
 }
 
+// openFixtureActivity opens the local account's Activity database for a
+// migrated fixture. It mirrors the store's lazy open path.
+func openFixtureActivity(t *testing.T, db *DB) *sql.DB {
+	t.Helper()
+	adb, err := OpenActivity(context.Background(), filepath.Join(db.ActivityDir, LocalAccountID+".db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { adb.Close() })
+	return adb
+}
+
 type migrationEntry struct {
 	name string
 	body string
@@ -199,6 +211,9 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				t.Fatalf("fixture data changed: provider=%q model=%q virtual=%q permission=%q", providerName, model, virtualName, permission)
 			}
 			if checkpoint >= 3 {
+				// Activity rows now live in the per-account Activity database; the
+				// move happens during Open, so query the local account's file.
+				activity := openFixtureActivity(t, db)
 				var routeKind, routeModel, routeStatus sql.NullString
 				query := `SELECT route_kind,route_model FROM request_logs WHERE id='log1'`
 				if checkpoint >= 24 {
@@ -206,9 +221,9 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				}
 				var err error
 				if checkpoint >= 24 {
-					err = db.SQL.QueryRow(query).Scan(&routeKind, &routeModel, &routeStatus)
+					err = activity.QueryRow(query).Scan(&routeKind, &routeModel, &routeStatus)
 				} else {
-					err = db.SQL.QueryRow(query).Scan(&routeKind, &routeModel)
+					err = activity.QueryRow(query).Scan(&routeKind, &routeModel)
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -226,21 +241,21 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				if checkpoint == 18 {
 					var errorText string
 					var errorMessage sql.NullString
-					if err := db.SQL.QueryRow(`SELECT error_text,error_message FROM request_logs WHERE id='log1'`).Scan(&errorText, &errorMessage); err != nil {
+					if err := activity.QueryRow(`SELECT error_text,error_message FROM request_logs WHERE id='log1'`).Scan(&errorText, &errorMessage); err != nil {
 						t.Fatal(err)
 					}
 					if errorText != "upstream_error" || errorMessage.Valid {
 						t.Fatalf("request failure metadata changed: error_text=%q error_message=%q", errorText, errorMessage.String)
 					}
 					var failureClass string
-					if err := db.SQL.QueryRow(`SELECT failure_class FROM request_attempts WHERE id='attempt1'`).Scan(&failureClass); err != nil {
+					if err := activity.QueryRow(`SELECT failure_class FROM request_attempts WHERE id='attempt1'`).Scan(&failureClass); err != nil {
 						t.Fatal(err)
 					}
 					if failureClass != "http_502" {
 						t.Fatalf("attempt failure class = %q, want http_502", failureClass)
 					}
 					var attemptMessage sql.NullString
-					if err := db.SQL.QueryRow(`SELECT error_message FROM request_attempts WHERE id='attempt1'`).Scan(&attemptMessage); err != nil {
+					if err := activity.QueryRow(`SELECT error_message FROM request_attempts WHERE id='attempt1'`).Scan(&attemptMessage); err != nil {
 						t.Fatal(err)
 					}
 					if attemptMessage.Valid {

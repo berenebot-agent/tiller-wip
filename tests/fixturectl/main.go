@@ -22,14 +22,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
 )
 
 const (
-	requestLogInsert = `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-	attemptInsert    = `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`
+	requestLogInsert = `INSERT INTO request_logs(id,account_id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+	attemptInsert    = `INSERT INTO request_attempts(id,account_id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`
 )
 
 func main() {
@@ -84,12 +85,20 @@ func runActivity(args []string) error {
 	defer db.Close()
 
 	var enabled int
-	if err := db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, *clientID).Scan(&enabled); err != nil {
+	var accountID, clientName string
+	if err := db.SQL.QueryRowContext(ctx, `SELECT logging_enabled,account_id,name FROM client_keys WHERE id=?`, *clientID).Scan(&enabled, &accountID, &clientName); err != nil {
 		return fmt.Errorf("client %q not found or not readable: %w", *clientID, err)
 	}
 	if enabled == 0 {
 		return fmt.Errorf("client %q has logging disabled; activity rows would be meaningless", *clientID)
 	}
+
+	// Activity lives in the per-account Activity database, not the central one.
+	activity, err := database.OpenActivity(ctx, filepath.Join(db.ActivityDir, accountID+".db"))
+	if err != nil {
+		return fmt.Errorf("open activity database: %w", err)
+	}
+	defer activity.Close()
 
 	short := *clientID
 	if len(short) > 8 {
@@ -97,7 +106,7 @@ func runActivity(args []string) error {
 	}
 	base := time.Now().UTC()
 
-	tx, err := db.SQL.BeginTx(ctx, nil)
+	tx, err := activity.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -159,14 +168,14 @@ func runActivity(args []string) error {
 
 		requested := "fixture-provider/mock-model-a"
 		if _, err := tx.ExecContext(ctx, requestLogInsert,
-			id, *clientID, requested, nil, "real", nil, nil, provider, m, "chat", 0, httpStatus, latency,
+			id, accountID, *clientID, clientName, requested, nil, "real", nil, nil, provider, m, "chat", 0, httpStatus, latency,
 			input, output, nil, nil, nil, id, errorText, len(attempts), boolInt(fallbackUsed), fallbackReason, createdAt,
 		); err != nil {
 			return fmt.Errorf("insert request_logs row %d: %w", seq, err)
 		}
 		for ai, a := range attempts {
 			if _, err := tx.ExecContext(ctx, attemptInsert,
-				fmt.Sprintf("%s-a%d", id, ai+1), id, ai+1, a.provider, a.model, a.result,
+				fmt.Sprintf("%s-a%d", id, ai+1), accountID, id, ai+1, a.provider, a.model, a.result,
 				nullInt(a.httpStatus), nullString(a.failureClass), latency, createdAt,
 			); err != nil {
 				return fmt.Errorf("insert request_attempts row %d.%d: %w", seq, ai+1, err)

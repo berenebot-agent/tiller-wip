@@ -34,10 +34,22 @@ func getCSV(t *testing.T, api *testAPI, path string) (int, string) {
 // deterministically.
 func insertVirtualLogRow(t *testing.T, db *database.DB, id, clientKeyID, virtualID, routeModel, resolvedProvider, resolvedModel, createdAt string) {
 	t.Helper()
-	_, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,provider_request_id,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, clientKeyID, "main", "main", "virtual", virtualID, routeModel, resolvedProvider, resolvedModel, "chat", 0, 200, 10, "upstream-"+id, "req-"+id, createdAt)
+	clientName := clientNameFor(t, db, clientKeyID)
+	_, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,provider_request_id,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, clientKeyID, clientName, "main", "main", "virtual", virtualID, routeModel, resolvedProvider, resolvedModel, "chat", 0, 200, 10, "upstream-"+id, "req-"+id, createdAt)
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+// clientNameFor resolves a client key's name from the central database, the
+// denormalized value the Activity write path stores.
+func clientNameFor(t *testing.T, db *database.DB, clientKeyID string) string {
+	t.Helper()
+	var name string
+	if err := db.SQL.QueryRow(`SELECT name FROM client_keys WHERE id=?`, clientKeyID).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	return name
 }
 
 func TestClientActivityCSVExport(t *testing.T) {
@@ -285,7 +297,8 @@ func realModelID(t *testing.T, api *testAPI) string {
 // deterministically.
 func insertRealLogRow(t *testing.T, db *database.DB, id, clientKeyID, realModelID, routeModel, resolvedProvider, resolvedModel, createdAt string) {
 	t.Helper()
-	_, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,provider_request_id,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, clientKeyID, routeModel, routeModel, "real", realModelID, routeModel, resolvedProvider, resolvedModel, "chat", 0, 200, 10, "upstream-"+id, "req-"+id, createdAt)
+	clientName := clientNameFor(t, db, clientKeyID)
+	_, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,provider_request_id,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, clientKeyID, clientName, routeModel, routeModel, "real", realModelID, routeModel, resolvedProvider, resolvedModel, "chat", 0, 200, 10, "upstream-"+id, "req-"+id, createdAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,20 +396,20 @@ func TestRealModelActivityIncludesFailedAttempts(t *testing.T) {
 	failedAt := now.Add(-3 * time.Minute).Format(time.RFC3339Nano)
 	skippedAt := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
 
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,error_text,attempt_count,fallback_used,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,error_text,attempt_count,fallback_used,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"row-failed", clientID, "main/virtual", "main/virtual", "virtual", "some-virtual-id", "main/virtual", nil, nil, "chat", 0, 502, 10, "upstream_read_error", 1, 1, "row-failed", failedAt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		"a-failed", "row-failed", 1, "provider-a", "model-a", "failed", 0, "upstream_read_error", 5, failedAt); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,error_text,attempt_count,fallback_used,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,error_text,attempt_count,fallback_used,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"row-skipped", clientID, "main/virtual", "main/virtual", "virtual", "some-virtual-id", "main/virtual", nil, nil, "chat", 0, 503, 10, "virtual_model_unavailable", 1, 1, "row-skipped", skippedAt); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		"a-skipped", "row-skipped", 1, "provider-a", "model-a", "skipped", nil, "cooldown", 0, skippedAt); err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +545,7 @@ func TestWriteLogInvariant(t *testing.T) {
 	// A 2xx row with NULL resolved target must still be written but must warn.
 	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "req-invariant", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: database.Now()})
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='req-invariant'`).Scan(&count); err != nil || count != 1 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE id='req-invariant'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("2xx row with NULL resolved was not written: count=%d err=%v", count, err)
 	}
 	if !strings.Contains(buf.String(), "resolved") {
@@ -596,6 +609,12 @@ func TestAttributionHelperConsistency(t *testing.T) {
 	insertVirtualLogRow(t, db, "row-new", clientID, virtualID, "virtual/coding", "provider-a", "model-a", now.Add(-time.Minute).Format(time.RFC3339Nano))
 	insertLogRow(t, db, "row-legacy-1", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(100), int64Ptr(0), "up-a", "req-l1", nil, now.Add(-2*time.Minute).Format(time.RFC3339Nano))
 	insertLogRow(t, db, "row-legacy-2", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(200), int64Ptr(0), "up-b", "req-l2", nil, now.Add(-3*time.Minute).Format(time.RFC3339Nano))
+	// Legacy (route_kind NULL) rows carry their canonical in route_model after
+	// migration 014; usage aggregation now groups on that denormalized column
+	// rather than joining the control plane.
+	if _, err := activityDB(t, db).Exec(`UPDATE request_logs SET route_model='virtual/coding' WHERE id IN ('row-legacy-1','row-legacy-2')`); err != nil {
+		t.Fatal(err)
+	}
 	insertVirtualLogRow(t, db, "row-other", clientID, "some-other-id", "virtual/other", "provider-a", "model-a", now.Add(-4*time.Minute).Format(time.RFC3339Nano))
 
 	// List.
@@ -677,8 +696,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 	if _, err := db.SQL.Exec(`UPDATE client_keys SET name=? WHERE id=?`, "align-client", clientID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_message,request_body,request_body_truncated,error_body,error_body_truncated,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"row-align", clientID, "main", "main", "virtual", "vm-1", "vm-1/main", "prov-a", "model-a", "chat", 1, 200, 10, int64Ptr(5), int64Ptr(3), int64Ptr(1), int64Ptr(2), "upstream-align", "req-align", "boom", "the request body", 1, "the error body", 1, "2026-01-01T00:00:01Z"); err != nil {
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_message,request_body,request_body_truncated,error_body,error_body_truncated,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"row-align", clientID, "align-client", "main", "main", "virtual", "vm-1", "vm-1/main", "prov-a", "model-a", "chat", 1, 200, 10, int64Ptr(5), int64Ptr(3), int64Ptr(1), int64Ptr(2), "upstream-align", "req-align", "boom", "the request body", 1, "the error body", 1, "2026-01-01T00:00:01Z"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -754,7 +773,7 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 func TestActivityExposesCacheCreationTokensAndEmptyExport(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	insertLogRow(t, db, "row-cache-creation", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(10), int64Ptr(2), "upstream-cache", "req-cache", nil, "2026-01-01T00:00:01Z")
-	if _, err := db.SQL.Exec(`UPDATE request_logs SET cache_creation_input_tokens=42 WHERE id=?`, "row-cache-creation"); err != nil {
+	if _, err := activityDB(t, db).Exec(`UPDATE request_logs SET cache_creation_input_tokens=42 WHERE id=?`, "row-cache-creation"); err != nil {
 		t.Fatal(err)
 	}
 	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,6 +23,9 @@ var migrations embed.FS
 type DB struct {
 	SQL  *sql.DB
 	Path string
+	// ActivityDir holds the per-account Activity database files. It is always
+	// a sibling of the central database file under the data directory.
+	ActivityDir string
 }
 
 // LocalAccountID is the fixed, well-known identifier of the single implicit
@@ -53,11 +55,6 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
 		return nil, mapDataDirChmodErr(filepath.Dir(path), err)
 	}
-	dsnURL := url.URL{Scheme: "file", Path: path}
-	query := dsnURL.Query()
-	query.Add("_pragma", "foreign_keys(1)")
-	query.Add("_pragma", "busy_timeout(5000)")
-	query.Add("_pragma", "journal_mode(WAL)")
 	// Keep SQLite's scratch/temp files entirely in memory and never on a disk
 	// temp path. Without this, a large catalogue UPSERT can trigger a temp-file
 	// spill, and on constrained CI runners the temp path is intermittently
@@ -66,10 +63,8 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	// initial discovery failed"). This DB is small (a few hundred provider
 	// models at most), so an in-memory temp store is a negligible cost and
 	// removes the whole temp-path failure class. The on-disk DB and WAL are
-	// unaffected.
-	query.Add("_pragma", "temp_store(MEMORY)")
-	dsnURL.RawQuery = query.Encode()
-	dsn := dsnURL.String()
+	// unaffected. See servicePragmas for the shared pragma set.
+	dsn := sqliteDSN(path, servicePragmas())
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -87,8 +82,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
-	d := &DB{SQL: db, Path: path}
+	d := &DB{SQL: db, Path: path, ActivityDir: filepath.Join(filepath.Dir(path), ActivityDirName)}
 	if err := d.Migrate(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := d.migrateActivity(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}

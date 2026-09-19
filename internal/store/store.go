@@ -17,13 +17,28 @@ import (
 	"time"
 )
 
-// Store owns the database handle and hands out account-scoped handles.
+// Store owns the database handles and hands out account-scoped handles.
 type Store struct {
-	db *sql.DB
+	db       *sql.DB
+	activity *activityFiles
 }
 
-func New(db *sql.DB) *Store {
-	return &Store{db: db}
+// Option configures a Store.
+type Option func(*Store)
+
+// WithActivityDir enables per-account Activity database access under dir. A
+// Store without it can still serve control-plane queries but any Activity
+// method returns errNoActivityStore.
+func WithActivityDir(dir string) Option {
+	return func(s *Store) { s.activity = newActivityFiles(dir) }
+}
+
+func New(db *sql.DB, opts ...Option) *Store {
+	s := &Store{db: db}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // DB exposes the underlying pool for platform-global tables only
@@ -34,7 +49,7 @@ func (s *Store) DB() *sql.DB { return s.db }
 // For returns a handle scoped to one account. accountID must come from a
 // verified principal.
 func (s *Store) For(accountID string) *Scope {
-	return &Scope{db: s.db, q: s.db, accountID: accountID}
+	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity}
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx so a Scope works inside and
@@ -55,6 +70,7 @@ type Scope struct {
 	db        *sql.DB
 	q         querier
 	accountID string
+	activity  *activityFiles
 }
 
 // AccountID returns the account this scope is bound to.
@@ -73,8 +89,39 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	if err != nil {
 		return err
 	}
-	child := &Scope{db: nil, q: tx, accountID: s.accountID}
+	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity}
 	if err := fn(child); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+// withActivity runs fn against the account's Activity database. The handle is
+// released (and may be evicted) when fn returns.
+func (s *Scope) withActivity(ctx context.Context, fn func(q querier) error) error {
+	db, release, err := s.activity.acquire(ctx, s.accountID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return fn(db)
+}
+
+// runActivityTx runs fn inside a transaction on the account's Activity
+// database. request_logs and request_attempts are written in one transaction,
+// so a single request's log and its attempts commit together.
+func (s *Scope) runActivityTx(ctx context.Context, fn func(q querier) error) error {
+	db, release, err := s.activity.acquire(ctx, s.accountID)
+	if err != nil {
+		return err
+	}
+	defer release()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
 		_ = tx.Rollback()
 		return err
 	}

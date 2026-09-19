@@ -55,11 +55,15 @@ func TestUsageEndpointPerWindowTotals(t *testing.T) {
 		in := r.total / 2
 		out := r.total - in
 		requested := "provider-a/model-a"
+		var routeKind, routeModel any
 		if r.kind == "virtual" {
 			requested = "virtual/coding"
+			// Attribute the row as the write path does: route_kind plus the
+			// canonical captured at request time.
+			routeKind, routeModel = "virtual", "virtual/coding"
 		}
-		if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			fmt.Sprintf("row%d", i), clientID, requested, "provider-a", "model-a", "chat", 0, 200, 1, in, out, "req-x", created); err != nil {
+		if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,route_kind,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			fmt.Sprintf("row%d", i), clientID, requested, routeKind, routeModel, "provider-a", "model-a", "chat", 0, 200, 1, in, out, "req-x", created); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -365,7 +369,7 @@ func TestUsageCacheHitWindows(t *testing.T) {
 		} else {
 			cacheRead = r.cacheRead
 		}
-		if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			fmt.Sprintf("cache%d", i), clientID, req, "provider-a", resolvedModel, "chat", 0, 200, 1, r.in, r.out, cacheRead, "req-c", created); err != nil {
 			t.Fatal(err)
 		}
@@ -403,17 +407,17 @@ func TestUsageTargetHealthIncludesFailedAttempts(t *testing.T) {
 
 	// Virtual model whose fallback chain exhausted: both targets failed,
 	// no resolved_provider/resolved_model on the parent row.
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,attempt_count,fallback_used,fallback_reason,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,attempt_count,fallback_used,fallback_reason,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"exhausted", clientID, "virtual/coding", "virtual/coding", "virtual", "v1", "virtual/coding", nil, nil, "chat", 0, 503, 10, 2, 1, "upstream_error", "req-exhausted", now.Add(-5*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	// Failed attempt on target A (provider-a/model-a, 401).
-	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		"a-failed", "exhausted", 1, "provider-a", "model-a", "failed", 401, "http_401", 5, now.Add(-5*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	// Skipped attempt on target B (provider-a/model-b, disabled).
-	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		"b-skipped", "exhausted", 2, "provider-a", "model-b", "skipped", nil, "unavailable", 0, now.Add(-5*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -421,11 +425,11 @@ func TestUsageTargetHealthIncludesFailedAttempts(t *testing.T) {
 	// Successful run on a different target (provider-b/model-c) so we have a
 	// confirmed-success entry as well, sanity-checking that the union does
 	// not double-count.
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"happy", clientID, "provider-b/model-c", "provider-b/model-c", "real", "rb1", "provider-b/model-c", "provider-b", "model-c", "chat", 0, 200, 7, "req-happy", now.Add(-2*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 		"c-success", "happy", 1, "provider-b", "model-c", "success", 200, 7, now.Add(-2*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -473,17 +477,17 @@ func TestUsageTargetHealthCountsFailedTargetOnResolvedRequest(t *testing.T) {
 	// The logical request was served by provider-b/model-c (http_status 200,
 	// resolved_provider/resolved_model point at the fallback), but the primary
 	// target provider-a/model-a failed first.
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,attempt_count,fallback_used,fallback_reason,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,attempt_count,fallback_used,fallback_reason,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"resolved", clientID, "virtual/coding", "virtual/coding", "virtual", "v1", "virtual/coding", "provider-b", "model-c", "chat", 0, 200, 12, 2, 1, "upstream_error", "req-resolved", now.Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	// Failed primary attempt (500).
-	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		"a-failed", "resolved", 1, "provider-a", "model-a", "failed", 500, "upstream_error", 4, now.Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	// Successful fallback attempt.
-	if _, err := db.SQL.Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
 		"c-success", "resolved", 2, "provider-b", "model-c", "success", 200, 8, now.Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}

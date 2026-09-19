@@ -194,7 +194,7 @@ func TestRequestLoggingMetadataAndClientRequestID(t *testing.T) {
 	}
 	// No prompt/response body may ever land in the log.
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE requested_model LIKE '%hello%' OR requested_model LIKE '%ok%'`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE requested_model LIKE '%hello%' OR requested_model LIKE '%ok%'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("prompt/response body leaked into request_logs: count=%d err=%v", count, err)
 	}
 }
@@ -350,7 +350,7 @@ func TestWriteLogBestEffort(t *testing.T) {
 	// returns without writing.
 	s.writeLog(context.Background(), &logRow{clientKeyID: "does-not-exist", clientRequestID: "req-x", requestedModel: "m", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: "now"})
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("best-effort writeLog wrote rows: count=%d err=%v", count, err)
 	}
 }
@@ -496,7 +496,7 @@ func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
 	}
 	var requestBody, errorBody *string
 	var requestTruncated, errorTruncated int
-	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=?`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+	if err := activityDB(t, db).QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=?`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
 		t.Fatal(err)
 	}
 	if requestBody != nil || errorBody != nil || requestTruncated != 0 || errorTruncated != 0 {
@@ -538,7 +538,7 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 	}
 	var requestBody, errorBody *string
 	var requestTruncated, errorTruncated int
-	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+	if err := activityDB(t, db).QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
 		t.Fatal(err)
 	}
 	if requestBody == nil || !strings.Contains(*requestBody, requestMarker) {
@@ -567,7 +567,7 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 	}
 	var bigError *string
 	var bigTruncated int
-	if err := db.SQL.QueryRow(`SELECT error_body,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&bigError, &bigTruncated); err != nil {
+	if err := activityDB(t, db).QueryRow(`SELECT error_body,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&bigError, &bigTruncated); err != nil {
 		t.Fatal(err)
 	}
 	if bigTruncated != 1 {
@@ -594,16 +594,16 @@ func mustJSON(t *testing.T, value any) []byte {
 func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
 	_, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := database.Now()
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('dup-req',?,'provider-a/model-a','chat',0,200,1,'dup-req',?)`, clientID, now); err != nil {
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('dup-req',?,'provider-a/model-a','chat',0,200,1,'dup-req',?)`, clientID, now); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{db: db}
 	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "dup-req", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: now, attempts: []requestAttempt{{providerModelID: "pm-a", provider: "provider-a", model: "model-a", result: "success", httpStatus: 200, latencyMs: 1}}})
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_attempts WHERE request_log_id='dup-req'`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_attempts WHERE request_log_id='dup-req'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("failed transaction left attempt rows: count=%d err=%v", count, err)
 	}
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='dup-req'`).Scan(&count); err != nil || count != 1 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE id='dup-req'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("request_logs rows for dup-req = %d, want 1 (no duplicate): err=%v", count, err)
 	}
 }
@@ -614,10 +614,16 @@ func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
 // with a request id. writeLog never fails the request.
 func TestInferenceUnaffectedWhenActivityPersistenceFails(t *testing.T) {
 	api, db, _, secret := loggingTestHarness(t, mockUpstream(t))
-	if _, err := db.SQL.Exec(`DROP TABLE request_attempts`); err != nil {
+	// Warm the store's Activity handle with a first request so it is cached;
+	// otherwise dropping the tables would be undone by the lazy open path
+	// re-running CREATE TABLE IF NOT EXISTS on the next write.
+	warmup, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "warm"}}})
+	_, _ = io.Copy(io.Discard, warmup.Body)
+	warmup.Body.Close()
+	if _, err := activityDB(t, db).Exec(`DROP TABLE request_attempts`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`DROP TABLE request_logs`); err != nil {
+	if _, err := activityDB(t, db).Exec(`DROP TABLE request_logs`); err != nil {
 		t.Fatal(err)
 	}
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "still works"}}})
@@ -712,7 +718,7 @@ func TestPrunerDeletesByRetention(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Insert a log row with an old timestamp directly.
 	old := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339Nano)
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('old1',?,'provider-a/model-a','chat',0,200,1,'req-old',?)`, clientID, old); err != nil {
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('old1',?,'provider-a/model-a','chat',0,200,1,'req-old',?)`, clientID, old); err != nil {
 		t.Fatal(err)
 	}
 	// Set the client's retention to 30 days.
@@ -723,7 +729,7 @@ func TestPrunerDeletesByRetention(t *testing.T) {
 	app := &Server{db: db}
 	app.pruneRequestLogs(context.Background())
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='old1'`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE id='old1'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("old log not pruned: count=%d err=%v", count, err)
 	}
 }

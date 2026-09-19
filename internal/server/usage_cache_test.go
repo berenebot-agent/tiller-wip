@@ -21,7 +21,7 @@ func TestUsageAggregatesReusedWithinTTL(t *testing.T) {
 	insert := func(id string, total int64) {
 		in := total / 2
 		out := total - in
-		if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			id, clientID, "provider-a/model-a", "provider-a", "model-a", "chat", 0, 200, 1, in, out, "req-"+id, now.Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +89,7 @@ func TestUsageAggregatesConcurrentCoalesce(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	s := api.server
 	s.usageCacheTTL = time.Minute
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"conc", clientID, "provider-a/model-a", "provider-a", "model-a", "chat", 0, 200, 1, 42, 8, "req-conc", time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
