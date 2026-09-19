@@ -1,7 +1,7 @@
 package server
 
 import (
-	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -9,6 +9,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 type virtualTargetInput struct {
@@ -47,24 +48,12 @@ func validateVirtualTargets(mode string, targets []virtualTargetInput) error {
 	return nil
 }
 
-func replaceVirtualTargets(r *http.Request, tx *sql.Tx, virtualID string, targets []virtualTargetInput, now string) error {
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM virtual_model_targets WHERE virtual_model_id=?`, virtualID); err != nil {
-		return err
+func toStoreTargets(targets []virtualTargetInput) []store.VirtualTargetInput {
+	out := make([]store.VirtualTargetInput, 0, len(targets))
+	for _, t := range targets {
+		out = append(out, store.VirtualTargetInput{ProviderModelID: t.ProviderModelID, Enabled: t.Enabled})
 	}
-	for i, target := range targets {
-		var exists int
-		if err := tx.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE id=?`, target.ProviderModelID).Scan(&exists); err != nil || exists != 1 {
-			return fmt.Errorf("invalid target model")
-		}
-		targetID, err := id.New()
-		if err != nil {
-			return err
-		}
-		if _, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_model_targets(id,virtual_model_id,provider_model_id,position,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`, targetID, virtualID, target.ProviderModelID, i+1, boolInt(target.Enabled), now, now); err != nil {
-			return err
-		}
-	}
-	return nil
+	return out
 }
 
 type virtualGroupView struct {
@@ -77,20 +66,15 @@ type virtualGroupView struct {
 
 func (s *Server) listVirtualGroups(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT g.id,g.name,g.created_at,g.updated_at,count(v.id) FROM virtual_provider_groups g LEFT JOIN virtual_models v ON v.virtual_group_id=g.id WHERE g.name LIKE ? GROUP BY g.id ORDER BY g.name LIMIT ? OFFSET ?`, "%"+search+"%", limit, offset)
+	rows, err := s.scope(r).ListVirtualGroups(r.Context(), store.ListFilter{Search: search, Limit: limit, Offset: offset})
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list virtual groups.")
 		return
 	}
-	defer rows.Close()
-	data := []virtualGroupView{}
-	for rows.Next() {
-		var v virtualGroupView
-		if rows.Scan(&v.ID, &v.Name, &v.CreatedAt, &v.UpdatedAt, &v.ModelCount) != nil {
-			adminError(w, 500, "database_error", "Could not list virtual groups.")
-			return
-		}
-		data = append(data, v)
+	data := make([]virtualGroupView, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		data = append(data, virtualGroupView{ID: row.ID, Name: row.Name, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, ModelCount: row.ModelCount})
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
@@ -109,21 +93,7 @@ func (s *Server) createVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(input.Name)
-	now := database.Now()
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not create virtual group.")
-		return
-	}
-	defer tx.Rollback()
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'virtual',?)`, name, groupID)
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_provider_groups(id,name,created_at,updated_at) VALUES(?,?,?,?)`, groupID, name, now, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'virtual',?,0,? FROM client_keys`, groupID, now)
-	}
-	if err != nil || tx.Commit() != nil {
+	if err := s.scope(r).CreateVirtualGroup(r.Context(), groupID, name); err != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
 		} else {
@@ -144,19 +114,25 @@ func (s *Server) updateVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	groupID := r.PathValue("id")
-	var oldName string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT name FROM namespaces WHERE entity_id=? AND kind='virtual'`, groupID).Scan(&oldName); err == sql.ErrNoRows {
+	sc := s.scope(r)
+	oldName, err := sc.VirtualGroupName(r.Context(), groupID)
+	if errors.Is(err, store.ErrVirtualGroupNotFound) {
 		adminError(w, 404, "not_found", "Virtual group not found.")
 		return
 	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not rename virtual group.")
 		return
 	}
-	if strings.TrimSpace(input.Name) != oldName && !input.ConfirmBreaking {
+	name := strings.TrimSpace(input.Name)
+	if name != oldName && !input.ConfirmBreaking {
 		adminError(w, 409, "breaking_change_confirmation_required", "Renaming changes every client-facing virtual model ID. Confirm the breaking change.")
 		return
 	}
-	result, err := s.db.SQL.ExecContext(r.Context(), `UPDATE namespaces SET name=? WHERE entity_id=? AND kind='virtual'`, strings.TrimSpace(input.Name), groupID)
+	err = sc.UpdateVirtualGroup(r.Context(), groupID, name)
+	if errors.Is(err, store.ErrVirtualGroupNotFound) {
+		adminError(w, 404, "not_found", "Virtual group not found.")
+		return
+	}
 	if err != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "That provider-group name is already in use.")
@@ -165,40 +141,19 @@ func (s *Server) updateVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
-		adminError(w, 404, "not_found", "Virtual group not found.")
-		return
-	}
-	_, _ = s.db.SQL.ExecContext(r.Context(), `UPDATE virtual_provider_groups SET updated_at=? WHERE id=?`, database.Now(), r.PathValue("id"))
 	w.WriteHeader(204)
 }
 
 func (s *Server) deleteVirtualGroup(w http.ResponseWriter, r *http.Request) {
-	groupID := r.PathValue("id")
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not delete virtual group.")
-		return
-	}
-	defer tx.Rollback()
-	var count int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models WHERE virtual_group_id=?`, groupID).Scan(&count); err != nil {
-		adminError(w, 500, "database_error", "Could not delete virtual group.")
-		return
-	}
-	if count > 0 {
+	err := s.scope(r).DeleteVirtualGroup(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, store.ErrVirtualGroupNotEmpty):
 		adminError(w, 409, "group_not_empty", "Delete the group's virtual models first.")
 		return
-	}
-	_, err = tx.ExecContext(r.Context(), `DELETE FROM client_group_defaults WHERE group_kind='virtual' AND group_id=?`, groupID)
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM virtual_provider_groups WHERE id=?`, groupID)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM namespaces WHERE entity_id=? AND kind='virtual'`, groupID)
-	}
-	if err != nil || tx.Commit() != nil {
+	case errors.Is(err, store.ErrVirtualGroupNotFound):
+		adminError(w, 404, "not_found", "Virtual group not found.")
+		return
+	case err != nil:
 		adminError(w, 500, "database_error", "Could not delete virtual group.")
 		return
 	}
@@ -254,33 +209,16 @@ type virtualTargetView struct {
 
 func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
-	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT v.id,g.id,g.name,v.name,g.name||'/'||v.name,v.routing_mode,v.created_at,v.updated_at FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE g.name LIKE ? OR v.name LIKE ? OR g.name||'/'||v.name LIKE ? OR EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND (p.name LIKE ? OR m.upstream_model_id LIKE ? OR p.name||'/'||m.upstream_model_id LIKE ?)) ORDER BY g.name,v.name LIMIT ? OFFSET ?`, pattern, pattern, pattern, pattern, pattern, pattern, limit, offset)
+	sc := s.scope(r)
+	rows, err := sc.ListVirtualModels(r.Context(), store.ListFilter{Search: search, Limit: limit, Offset: offset})
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list virtual models.")
 		return
 	}
-	data := []virtualModelView{}
-	for rows.Next() {
-		var v virtualModelView
-		if err := rows.Scan(&v.ID, &v.GroupID, &v.GroupName, &v.Name, &v.CanonicalModelID, &v.RoutingMode, &v.CreatedAt, &v.UpdatedAt); err != nil {
-			rows.Close()
-			adminError(w, 500, "database_error", "Could not list virtual models.")
-			return
-		}
-		data = append(data, v)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		adminError(w, 500, "database_error", "Could not list virtual models.")
-		return
-	}
-	if err := rows.Close(); err != nil {
-		adminError(w, 500, "database_error", "Could not list virtual models.")
-		return
-	}
-	for i := range data {
-		v := &data[i]
+	data := make([]virtualModelView, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		v := virtualModelView{ID: row.ID, GroupID: row.GroupID, GroupName: row.GroupName, Name: row.Name, CanonicalModelID: row.CanonicalModelID, RoutingMode: row.RoutingMode, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}
 		v.Targets, err = s.virtualTargets(r, v.ID)
 		if err != nil {
 			adminError(w, 500, "database_error", "Could not list virtual models.")
@@ -312,37 +250,43 @@ func (s *Server) listVirtualModels(w http.ResponseWriter, r *http.Request) {
 		v.SupportsReasoning = aggregated.SupportsReasoning
 		v.SupportsStructuredOutput = aggregated.SupportsStructuredOutput
 		v.ReasoningCapabilities = aggregated.ReasoningCapabilities
+		data = append(data, v)
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
 func (s *Server) virtualTargets(r *http.Request, virtualID string) ([]virtualTargetView, error) {
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT t.id,t.provider_model_id,p.id,p.name,m.upstream_model_id,coalesce(m.native_protocol,''),t.position,t.enabled,(p.enabled=1 AND m.available=1),CASE WHEN t.enabled=0 THEN 'Target is disabled' WHEN p.enabled=0 THEN 'Target provider is disabled' WHEN m.available=0 THEN 'Target model is retired' ELSE '' END,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities,m.input_modalities,m.output_modalities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? ORDER BY t.position`, virtualID)
+	rows, err := s.scope(r).VirtualTargets(r.Context(), virtualID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	data := []virtualTargetView{}
-	for rows.Next() {
-		var v virtualTargetView
-		var enabled, available int
-		var tools, vision, reasoning, structured sql.NullInt64
-		var reasoningCaps sql.NullString
-		var inputMod, outputMod sql.NullString
-		if err := rows.Scan(&v.ID, &v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.NativeProtocol, &v.Position, &enabled, &available, &v.Warning, &v.ContextLength, &v.MaxOutputTokens, &tools, &vision, &reasoning, &structured, &reasoningCaps, &inputMod, &outputMod); err != nil {
-			return nil, err
+	data := make([]virtualTargetView, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		v := virtualTargetView{
+			ID:              row.ID,
+			ProviderModelID: row.ProviderModelID,
+			ProviderID:      row.ProviderID,
+			ProviderName:    row.ProviderName,
+			UpstreamModelID: row.UpstreamModelID,
+			NativeProtocol:  row.NativeProtocol,
+			Position:        row.Position,
+			Enabled:         row.Enabled,
+			Available:       row.Available,
+			Warning:         row.Warning,
+			ContextLength:   row.ContextLength,
+			MaxOutputTokens: row.MaxOutputTokens,
 		}
-		v.Enabled, v.Available = scanBool(enabled), scanBool(available)
-		v.SupportsTools = triBoolFromInt(tools)
-		v.SupportsVision = triBoolFromInt(vision)
-		v.SupportsReasoning = triBoolFromInt(reasoning)
-		v.SupportsStructuredOutput = triBoolFromInt(structured)
-		v.ReasoningCapabilities = decodeReasoningCapabilities(reasoningCaps)
-		v.InputModalities = decodeModalities(inputMod)
-		v.OutputModalities = decodeModalities(outputMod)
+		v.SupportsTools = triBoolFromInt(row.SupportsTools)
+		v.SupportsVision = triBoolFromInt(row.SupportsVision)
+		v.SupportsReasoning = triBoolFromInt(row.SupportsReasoning)
+		v.SupportsStructuredOutput = triBoolFromInt(row.SupportsStructuredOutput)
+		v.ReasoningCapabilities = decodeReasoningCapabilities(row.ReasoningCapabilities)
+		v.InputModalities = decodeModalities(row.InputModalities)
+		v.OutputModalities = decodeModalities(row.OutputModalities)
 		data = append(data, v)
 	}
-	return data, rows.Err()
+	return data, nil
 }
 
 func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
@@ -374,60 +318,43 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "internal_error", "Could not create virtual model.")
 		return
 	}
-	now := database.Now()
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not create virtual model.")
-		return
-	}
-	defer tx.Rollback()
 	groupID := input.GroupID
+	newGroupID := ""
+	groupName := ""
 	if groupID == "" {
-		groupName := strings.TrimSpace(input.GroupName)
+		groupName = strings.TrimSpace(input.GroupName)
 		if groupName == "" {
 			adminError(w, 400, "invalid_request", "A virtual group is required; provide group_id or group_name.")
 			return
 		}
-		groupID, err = id.New()
+		newGroupID, err = id.New()
 		if err != nil {
 			adminError(w, 500, "internal_error", "Could not create virtual model.")
 			return
 		}
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'virtual',?)`, groupName, groupID)
-		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_provider_groups(id,name,created_at,updated_at) VALUES(?,?,?,?)`, groupID, groupName, now, now)
-		}
-		if err == nil {
-			_, err = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'virtual',?,0,? FROM client_keys`, groupID, now)
-		}
-		if err != nil {
-			if database.IsConstraint(err) {
-				adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
-			} else {
-				adminError(w, 500, "database_error", "Could not create virtual model.")
-			}
-			return
-		}
 	}
-	primary := input.Targets[0].ProviderModelID
-	var primaryProvider string
-	if err = tx.QueryRowContext(r.Context(), `SELECT provider_id FROM provider_models WHERE id=?`, primary).Scan(&primaryProvider); err != nil {
+	err = s.scope(r).CreateVirtualModel(r.Context(), store.CreateVirtualModelInput{
+		ID:          virtualID,
+		GroupID:     groupID,
+		NewGroupID:  newGroupID,
+		GroupName:   groupName,
+		Name:        input.Name,
+		RoutingMode: input.RoutingMode,
+		Targets:     toStoreTargets(input.Targets),
+	})
+	switch {
+	case errors.Is(err, store.ErrVirtualTargetNotFound):
 		adminError(w, 400, "invalid_target", "Target model does not exist.")
 		return
-	}
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO virtual_models(id,virtual_group_id,name,target_provider_id,target_provider_model_id,routing_mode,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`, virtualID, groupID, input.Name, primaryProvider, primary, input.RoutingMode, now, now)
-	if err == nil {
-		err = replaceVirtualTargets(r, tx, virtualID, input.Targets, now)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at) SELECT c.id,'virtual',?,coalesce(d.new_models_enabled,0),?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='virtual' AND d.group_id=?`, virtualID, now, now, groupID)
-	}
-	if err != nil || tx.Commit() != nil {
-		if database.IsConstraint(err) {
-			adminError(w, 409, "model_conflict", "That virtual model name already exists in the group.")
+	case err != nil && database.IsConstraint(err):
+		if newGroupID != "" {
+			adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
 		} else {
-			adminError(w, 500, "database_error", "Could not create virtual model.")
+			adminError(w, 409, "model_conflict", "That virtual model name already exists in the group.")
 		}
+		return
+	case err != nil:
+		adminError(w, 500, "database_error", "Could not create virtual model.")
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": virtualID})
@@ -448,20 +375,17 @@ func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	modelID := r.PathValue("id")
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not update virtual model.")
-		return
-	}
-	defer tx.Rollback()
-	var oldName, currentProvider, currentModel, currentMode string
-	if err = tx.QueryRowContext(r.Context(), `SELECT name,target_provider_id,target_provider_model_id,routing_mode FROM virtual_models WHERE id=?`, modelID).Scan(&oldName, &currentProvider, &currentModel, &currentMode); err == sql.ErrNoRows {
+	sc := s.scope(r)
+	current, err := sc.GetVirtualModelEditable(r.Context(), modelID)
+	if errors.Is(err, store.ErrVirtualModelNotFound) {
 		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not update virtual model.")
 		return
 	}
+	oldName := current.Name
+	currentProvider, currentModel, currentMode := current.TargetProviderID, current.TargetModelID, current.RoutingMode
 	if input.Name != nil && *input.Name != oldName && !input.ConfirmBreaking {
 		adminError(w, 409, "breaking_change_confirmation_required", "Renaming changes the client-facing model ID. Confirm the breaking change.")
 		return
@@ -494,70 +418,47 @@ func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		currentModel = input.Targets[0].ProviderModelID
-		if err = tx.QueryRowContext(r.Context(), `SELECT provider_id FROM provider_models WHERE id=?`, currentModel).Scan(&currentProvider); err != nil {
-			adminError(w, 400, "invalid_target", "Target model does not exist.")
-			return
-		}
 	}
 	newName := oldName
 	if input.Name != nil {
 		newName = *input.Name
 	}
-	now := database.Now()
-	_, err = tx.ExecContext(r.Context(), `UPDATE virtual_models SET name=?,target_provider_id=?,target_provider_model_id=?,routing_mode=?,updated_at=? WHERE id=?`, newName, currentProvider, currentModel, newMode, now, modelID)
-	if err == nil && len(input.Targets) > 0 {
-		err = replaceVirtualTargets(r, tx, modelID, input.Targets, now)
-	}
-	if err != nil || tx.Commit() != nil {
-		if database.IsConstraint(err) {
-			adminError(w, 409, "model_conflict", "That virtual model name already exists in the group.")
-		} else {
-			adminError(w, 500, "database_error", "Could not update virtual model.")
-		}
+	err = sc.UpdateVirtualModel(r.Context(), store.UpdateVirtualModelInput{
+		ID:             modelID,
+		Name:           newName,
+		TargetProvider: currentProvider,
+		TargetModel:    currentModel,
+		RoutingMode:    newMode,
+		ReplaceTargets: len(input.Targets) > 0,
+		Targets:        toStoreTargets(input.Targets),
+	})
+	switch {
+	case errors.Is(err, store.ErrVirtualTargetNotFound):
+		adminError(w, 400, "invalid_target", "Target model does not exist.")
+		return
+	case errors.Is(err, store.ErrVirtualModelNotFound):
+		adminError(w, 404, "not_found", "Virtual model not found.")
+		return
+	case err != nil && database.IsConstraint(err):
+		adminError(w, 409, "model_conflict", "That virtual model name already exists in the group.")
+		return
+	case err != nil:
+		adminError(w, 500, "database_error", "Could not update virtual model.")
 		return
 	}
 	w.WriteHeader(204)
 }
 
 func (s *Server) deleteVirtualModel(w http.ResponseWriter, r *http.Request) {
-	modelID := r.PathValue("id")
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not delete virtual model.")
-		return
-	}
-	defer tx.Rollback()
-	var bindings int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings b JOIN client_keys c ON c.id = b.client_key_id WHERE b.virtual_model_id=? AND c.key_type='single'`, modelID).Scan(&bindings); err != nil {
-		adminError(w, 500, "database_error", "Could not delete virtual model.")
-		return
-	}
-	if bindings > 0 {
+	err := s.scope(r).DeleteVirtualModel(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, store.ErrVirtualBindingInUse):
 		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this virtual model first.")
 		return
-	}
-	// Catalogue-type client keys may carry a stale client_single_bindings row
-	// from a prior Single-key configuration. Such rows are inert (catalogue
-	// keys are resolved through client_model_permissions, not the binding),
-	// but their ON DELETE RESTRICT foreign key would otherwise block this
-	// delete. Drop them explicitly so the spec's "Single keys" intent wins.
-	if _, err = tx.ExecContext(r.Context(), `DELETE FROM client_single_bindings WHERE virtual_model_id=? AND client_key_id IN (SELECT id FROM client_keys WHERE key_type='catalogue')`, modelID); err != nil {
-		adminError(w, 500, "database_error", "Could not delete virtual model.")
+	case errors.Is(err, store.ErrVirtualModelNotFound):
+		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
-	}
-	_, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='virtual' AND model_id=?`, modelID)
-	if err == nil {
-		result, e := tx.ExecContext(r.Context(), `DELETE FROM virtual_models WHERE id=?`, modelID)
-		err = e
-		if err == nil {
-			n, _ := result.RowsAffected()
-			if n == 0 {
-				adminError(w, 404, "not_found", "Virtual model not found.")
-				return
-			}
-		}
-	}
-	if err != nil || tx.Commit() != nil {
+	case err != nil:
 		adminError(w, 500, "database_error", "Could not delete virtual model.")
 		return
 	}
