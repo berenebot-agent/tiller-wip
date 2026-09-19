@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -449,6 +450,18 @@ func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requeste
 	return route, nil
 }
 
+// upstreamHTTPClient returns the HTTP client carrying the account's configured
+// time-to-first-header bound. An account with no explicit setting uses the
+// registry's default client.
+func (s *Server) upstreamHTTPClient(r *http.Request) *http.Client {
+	if raw, err := s.scope(r).GetSetting(r.Context(), store.SettingFallbackTimeoutSeconds); err == nil {
+		if seconds, perr := strconv.Atoi(raw); perr == nil && seconds > 0 {
+			return s.providers.Registry().ClientFor(time.Duration(seconds) * time.Second)
+		}
+	}
+	return s.providers.Registry().HTTPClient()
+}
+
 func routeTargetToResolved(t store.RouteTarget) resolvedRoute {
 	var target resolvedRoute
 	target.ProviderModelID = t.ProviderModelID
@@ -862,7 +875,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// real route this is the single 1:1 leg, so the Activity graph can
 			// light it (and dim it on failure) while the request is in flight.
 			s.inflight.targetStart(row.accountID, route.RouteModelID, targetID)
-			response, e := s.providers.Registry().HTTPClient().Do(req)
+			response, e := s.upstreamHTTPClient(r).Do(req)
 			if e != nil {
 				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				attemptCancel()

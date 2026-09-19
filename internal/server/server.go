@@ -167,9 +167,6 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	clients.SetCacheTTL(cfg.ClientKeyCacheTTL)
 	sessions.SetCacheTTL(cfg.SessionCacheTTL)
 	registry := providers.NewRegistry()
-	if t, err := store.New(db.SQL).For(database.LocalAccountID).GetFallbackTimeout(context.Background()); err == nil {
-		registry.SetResponseHeaderTimeout(time.Duration(t) * time.Second)
-	}
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}

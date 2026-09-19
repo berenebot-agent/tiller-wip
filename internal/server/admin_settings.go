@@ -5,7 +5,6 @@ import (
 	"net/url"
 	"reflect"
 	"strconv"
-	"time"
 
 	"github.com/tiller-router/tiller-router/internal/store"
 )
@@ -139,9 +138,6 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		if err := sc.SetSetting(r.Context(), u.key, value); err != nil {
 			adminError(w, 500, "database_error", "Could not update settings.")
 			return
-		}
-		if u.key == store.SettingFallbackTimeoutSeconds {
-			s.providers.Registry().SetResponseHeaderTimeout(time.Duration(*input.FallbackTimeoutSeconds) * time.Second)
 		}
 		if u.key == store.SettingFallbackCooldownSeconds && *input.FallbackCooldownSeconds == 0 {
 			s.cooldown.clearFor(sc.AccountID())

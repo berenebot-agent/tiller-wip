@@ -338,6 +338,7 @@ func nativeProtocol(providerType, modelID string) Protocol {
 
 type Registry struct {
 	client           *http.Client
+	clients          map[time.Duration]*http.Client
 	mu               sync.Mutex
 	modelsDev        modelsDevDataset
 	modelsDevEnabled bool
@@ -357,7 +358,30 @@ func NewRegistry() *Registry {
 		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: time.Second, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second,
 	}
-	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, modelsDevEnabled: true}
+	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, clients: map[time.Duration]*http.Client{}, modelsDevEnabled: true}
+}
+
+// ClientFor returns an immutable HTTP client whose per-attempt
+// time-to-first-header bound is timeout. Clients are cached by duration so
+// concurrent requests for the same account setting share one transport. A
+// non-positive timeout falls back to the default client.
+func (r *Registry) ClientFor(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		return r.HTTPClient()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.clients[timeout]; ok {
+		return c
+	}
+	replacement := *r.client
+	if t, ok := r.client.Transport.(*http.Transport); ok {
+		clone := t.Clone()
+		clone.ResponseHeaderTimeout = timeout
+		replacement.Transport = clone
+	}
+	r.clients[timeout] = &replacement
+	return &replacement
 }
 
 // SetResponseHeaderTimeout updates the per-attempt time-to-first-header bound by
