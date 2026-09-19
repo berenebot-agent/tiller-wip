@@ -140,7 +140,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	if hasMailUpdate(input) {
 		current, err := st.GetPlatformMailSettings(r.Context())
-		if err != nil && !errors.Is(err, store.ErrSecretsLocked) {
+		if err != nil {
 			adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
 			return
 		}

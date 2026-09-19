@@ -36,6 +36,7 @@ type logWriter struct {
 	dropped     atomic.Int64
 	lastDropLog atomic.Int64
 	done        chan struct{}
+	flushCh     chan chan struct{}
 	wg          sync.WaitGroup
 }
 
@@ -45,6 +46,7 @@ func newLogWriter(scopeFor func(string) *store.Scope, logger *slog.Logger) *logW
 		scopeFor: scopeFor,
 		logger:   logger,
 		done:     make(chan struct{}),
+		flushCh:  make(chan chan struct{}),
 	}
 }
 
@@ -108,11 +110,39 @@ func (w *logWriter) run(ctx context.Context) {
 			if total >= logWriteBatchSize {
 				flush()
 			}
+		case ack := <-w.flushCh:
+			flush()
+			close(ack)
 		case <-ticker.C:
 			if total > 0 {
 				flush()
 			}
 		}
+	}
+}
+
+// flush waits until all rows queued before the call are committed. Inference
+// stays asynchronous, while an immediate Activity read (for example the
+// dashboard after a request) observes the completed request deterministically.
+func (w *logWriter) flush(ctx context.Context) error {
+	if w == nil {
+		return nil
+	}
+	ack := make(chan struct{})
+	select {
+	case w.flushCh <- ack:
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case <-ack:
+		return nil
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

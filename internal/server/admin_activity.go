@@ -106,6 +106,7 @@ func activityViewFromStore(row store.ActivityRow) activityView {
 }
 
 func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
+	_ = s.flushActivity(r.Context())
 	clientID := r.PathValue("id")
 	limit, offset, search := pagination(r)
 	sc := s.scope(r)
@@ -142,6 +143,7 @@ type globalActivityView struct {
 // listGlobalActivity returns recent request metadata across all client keys,
 // newest first, with a deterministic id secondary sort.
 func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
+	_ = s.flushActivity(r.Context())
 	limit, offset, search := pagination(r)
 	rows, err := s.scope(r).ListGlobalActivity(r.Context(), search, limit, offset)
 	if err != nil {
@@ -293,6 +295,7 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 }
 
 func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
+	_ = s.flushActivity(r.Context())
 	modelID := r.PathValue("id")
 	sc := s.scope(r)
 	canonical, err := sc.VirtualModelCanonical(r.Context(), modelID)
@@ -314,6 +317,7 @@ func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listRealModelActivity(w http.ResponseWriter, r *http.Request) {
+	_ = s.flushActivity(r.Context())
 	modelID := r.PathValue("id")
 	sc := s.scope(r)
 	provider, upstream, err := sc.RealModelCanonical(r.Context(), modelID)

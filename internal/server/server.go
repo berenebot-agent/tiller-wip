@@ -306,6 +306,13 @@ func (s *Server) startLogWriter(ctx context.Context) {
 	w.start(ctx)
 }
 
+func (s *Server) flushActivity(ctx context.Context) error {
+	if s.logWriter == nil {
+		return nil
+	}
+	return s.logWriter.flush(ctx)
+}
+
 func (s *Server) startLogPruner(ctx context.Context) {
 	s.pruneRequestLogs(ctx) // run once at startup
 	ticker := time.NewTicker(time.Hour)
