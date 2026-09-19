@@ -19,6 +19,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 const maxUpstreamNonStreamBytes int64 = 64 << 20
@@ -36,98 +37,73 @@ var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	var keyType string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT key_type FROM client_keys WHERE id=?`, identity.ID).Scan(&keyType); err != nil {
+	sc := s.scope(r)
+	keyType, err := sc.ClientKeyType(r.Context(), identity.ID)
+	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
 	anthropic := isAnthropicRequest(r)
 	if keyType == "single" {
-		var modelName, realID, virtualID string
-		var real, virtual sql.NullString
-		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				inferenceError(w, 500, "server_error", "invalid_single_binding", "No binding configured for this API key.", false)
-			} else {
-				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-			}
+		binding, found, err := sc.GetSingleBinding(r.Context(), identity.ID)
+		if err != nil {
+			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 			return
 		}
-		realID, virtualID = real.String, virtual.String
+		if !found {
+			inferenceError(w, 500, "server_error", "invalid_single_binding", "No binding configured for this API key.", false)
+			return
+		}
 		var contextLength, maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
 		var reasoningCaps *providers.ReasoningCapabilities
-		if real.Valid {
-			var reasoningRaw sql.NullString
-			if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw); err != nil {
-				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-				return
-			}
-			reasoningCaps = decodeReasoningCapabilities(reasoningRaw)
-		} else {
-			aggregated, err := s.loadVirtualCapabilities(r.Context(), []string{virtualID})
+		if binding.RealModelID.Valid {
+			pc, err := sc.ProviderModelCapsByID(r.Context(), binding.RealModelID.String)
 			if err != nil {
 				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 				return
 			}
-			contextLength, maxOutputTokens, caps, reasoningCaps = catalogueCapabilityFields(aggregated[virtualID])
+			contextLength, maxOutputTokens = pc.ContextLength, pc.MaxOutputTokens
+			caps = modelCapabilities{Tools: pc.SupportsTools, Vision: pc.SupportsVision, Reasoning: pc.SupportsReasoning, StructuredOutput: pc.SupportsStructuredOutput}
+			reasoningCaps = decodeReasoningCapabilities(pc.ReasoningCapabilities)
+		} else {
+			aggregated, err := s.loadVirtualCapabilities(r.Context(), identity.AccountID, []string{binding.VirtualModelID.String})
+			if err != nil {
+				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+				return
+			}
+			contextLength, maxOutputTokens, caps, reasoningCaps = catalogueCapabilityFields(aggregated[binding.VirtualModelID.String])
 		}
-		entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic)
+		entry := buildCatalogueEntry(binding.ModelName, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
 		return
 	}
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output, reasoning_capabilities, virtual_model_id FROM (
-	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output, m.reasoning_capabilities, NULL virtual_model_id FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
-	UNION ALL
-	SELECT g.name||'/'||v.name canonical, NULL, NULL, NULL, NULL, NULL, NULL, NULL, v.id virtual_model_id FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)
-	) ORDER BY canonical`, identity.ID, identity.ID)
+	entries, err := sc.ListCatalogueEntries(r.Context(), identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
-	type catalogueRow struct {
-		modelID                        string
-		contextLength, maxOutputTokens sql.NullInt64
-		caps                           modelCapabilities
-		reasoningRaw, virtualID        sql.NullString
-	}
-	catalogueRows := []catalogueRow{}
-	for rows.Next() {
-		var row catalogueRow
-		if err := rows.Scan(&row.modelID, &row.contextLength, &row.maxOutputTokens, &row.caps.Tools, &row.caps.Vision, &row.caps.Reasoning, &row.caps.StructuredOutput, &row.reasoningRaw, &row.virtualID); err != nil {
-			rows.Close()
-			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-			return
-		}
-		catalogueRows = append(catalogueRows, row)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-		return
-	}
-	if err := rows.Close(); err != nil {
-		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-		return
-	}
 	virtualIDs := make([]string, 0)
-	for _, row := range catalogueRows {
-		if row.virtualID.Valid {
-			virtualIDs = append(virtualIDs, row.virtualID.String)
+	for i := range entries {
+		if entries[i].VirtualModelID.Valid {
+			virtualIDs = append(virtualIDs, entries[i].VirtualModelID.String)
 		}
 	}
-	aggregated, err := s.loadVirtualCapabilities(r.Context(), virtualIDs)
+	aggregated, err := s.loadVirtualCapabilities(r.Context(), identity.AccountID, virtualIDs)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
 	data := []map[string]any{}
-	for _, row := range catalogueRows {
-		reasoningCaps := decodeReasoningCapabilities(row.reasoningRaw)
-		if row.virtualID.Valid {
-			row.contextLength, row.maxOutputTokens, row.caps, reasoningCaps = catalogueCapabilityFields(aggregated[row.virtualID.String])
+	for i := range entries {
+		row := &entries[i]
+		contextLength, maxOutputTokens := row.ContextLength, row.MaxOutputTokens
+		caps := modelCapabilities{Tools: row.SupportsTools, Vision: row.SupportsVision, Reasoning: row.SupportsReasoning, StructuredOutput: row.SupportsStructuredOutput}
+		reasoningCaps := decodeReasoningCapabilities(row.ReasoningCapabilities)
+		if row.VirtualModelID.Valid {
+			contextLength, maxOutputTokens, caps, reasoningCaps = catalogueCapabilityFields(aggregated[row.VirtualModelID.String])
 		}
-		data = append(data, buildCatalogueEntry(row.modelID, row.contextLength, row.maxOutputTokens, row.caps, reasoningCaps, anthropic))
+		data = append(data, buildCatalogueEntry(row.Canonical, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic))
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
@@ -137,8 +113,9 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 // inference requests.
 func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	var keyType string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT key_type FROM client_keys WHERE id=?`, identity.ID).Scan(&keyType); err != nil {
+	sc := s.scope(r)
+	keyType, err := sc.ClientKeyType(r.Context(), identity.ID)
+	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model metadata.", false)
 		return
 	}
@@ -146,32 +123,32 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", false)
 		return
 	}
-	var modelName, realID, virtualID string
-	var real, virtual sql.NullString
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
+	binding, found, err := sc.GetSingleBinding(r.Context(), identity.ID)
+	if err != nil || !found {
 		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model binding.", false)
 		return
 	}
-	realID, virtualID = real.String, virtual.String
 	var contextLength, maxOutputTokens sql.NullInt64
 	var caps modelCapabilities
-	if real.Valid {
-		var reasoningRaw sql.NullString
-		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw); err != nil {
+	if binding.RealModelID.Valid {
+		pc, err := sc.ProviderModelCapsByID(r.Context(), binding.RealModelID.String)
+		if err != nil {
 			inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 			return
 		}
-		entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, decodeReasoningCapabilities(reasoningRaw), isAnthropicRequest(r))
+		contextLength, maxOutputTokens = pc.ContextLength, pc.MaxOutputTokens
+		caps = modelCapabilities{Tools: pc.SupportsTools, Vision: pc.SupportsVision, Reasoning: pc.SupportsReasoning, StructuredOutput: pc.SupportsStructuredOutput}
+		entry := buildCatalogueEntry(binding.ModelName, contextLength, maxOutputTokens, caps, decodeReasoningCapabilities(pc.ReasoningCapabilities), isAnthropicRequest(r))
 		writeJSON(w, 200, entry)
 		return
 	}
-	aggregated, err := s.loadVirtualCapabilities(r.Context(), []string{virtualID})
+	aggregated, err := s.loadVirtualCapabilities(r.Context(), identity.AccountID, []string{binding.VirtualModelID.String})
 	if err != nil {
 		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 		return
 	}
-	contextLength, maxOutputTokens, caps, reasoningCaps := catalogueCapabilityFields(aggregated[virtualID])
-	entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, reasoningCaps, isAnthropicRequest(r))
+	contextLength, maxOutputTokens, caps, reasoningCaps := catalogueCapabilityFields(aggregated[binding.VirtualModelID.String])
+	entry := buildCatalogueEntry(binding.ModelName, contextLength, maxOutputTokens, caps, reasoningCaps, isAnthropicRequest(r))
 	writeJSON(w, 200, entry)
 }
 
@@ -262,34 +239,24 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	}
 }
 
-func (s *Server) loadVirtualCapabilities(ctx context.Context, virtualModelIDs []string) (map[string]aggregatedVirtualCapabilities, error) {
+func (s *Server) loadVirtualCapabilities(ctx context.Context, accountID string, virtualModelIDs []string) (map[string]aggregatedVirtualCapabilities, error) {
 	result := make(map[string]aggregatedVirtualCapabilities, len(virtualModelIDs))
 	if len(virtualModelIDs) == 0 {
 		return result, nil
 	}
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(virtualModelIDs)), ",")
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT t.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id IN (`+placeholders+`) AND t.enabled=1 AND m.available=1 AND p.enabled=1`, stringSliceToAny(virtualModelIDs)...)
+	rows, err := s.scopeFor(accountID).VirtualTargetCapabilities(ctx, virtualModelIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	targets := make(map[string][]virtualTargetCapabilities, len(virtualModelIDs))
-	for rows.Next() {
-		var virtualID string
-		var contextLength, maxOutputTokens, tools, vision, reasoning, structured sql.NullInt64
-		var reasoningRaw sql.NullString
-		if err := rows.Scan(&virtualID, &contextLength, &maxOutputTokens, &tools, &vision, &reasoning, &structured, &reasoningRaw); err != nil {
-			return nil, err
-		}
-		targets[virtualID] = append(targets[virtualID], virtualTargetCapabilities{
-			ContextLength: nullInt64Ptr(contextLength), MaxOutputTokens: nullInt64Ptr(maxOutputTokens),
-			SupportsTools: triBoolFromInt(tools), SupportsVision: triBoolFromInt(vision),
-			SupportsReasoning: triBoolFromInt(reasoning), SupportsStructuredOutput: triBoolFromInt(structured),
-			ReasoningCapabilities: decodeReasoningCapabilities(reasoningRaw),
+	for i := range rows {
+		row := &rows[i]
+		targets[row.VirtualModelID] = append(targets[row.VirtualModelID], virtualTargetCapabilities{
+			ContextLength: nullInt64Ptr(row.ContextLength), MaxOutputTokens: nullInt64Ptr(row.MaxOutputTokens),
+			SupportsTools: triBoolFromInt(row.SupportsTools), SupportsVision: triBoolFromInt(row.SupportsVision),
+			SupportsReasoning: triBoolFromInt(row.SupportsReasoning), SupportsStructuredOutput: triBoolFromInt(row.SupportsStructuredOutput),
+			ReasoningCapabilities: decodeReasoningCapabilities(row.ReasoningCapabilities),
 		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	for _, virtualID := range virtualModelIDs {
 		result[virtualID] = aggregateVirtualCapabilities(targets[virtualID])
@@ -324,14 +291,6 @@ func catalogueCapabilityFields(aggregated aggregatedVirtualCapabilities) (sql.Nu
 		Tools: toCapability(aggregated.SupportsTools), Vision: toCapability(aggregated.SupportsVision),
 		Reasoning: toCapability(aggregated.SupportsReasoning), StructuredOutput: toCapability(aggregated.SupportsStructuredOutput),
 	}, aggregated.ReasoningCapabilities
-}
-
-func stringSliceToAny(values []string) []any {
-	args := make([]any, len(values))
-	for i, value := range values {
-		args[i] = value
-	}
-	return args
 }
 
 func buildCatalogueEntry(modelID string, contextLength, maxOutputTokens sql.NullInt64, caps modelCapabilities, reasoningCaps *providers.ReasoningCapabilities, anthropic bool) map[string]any {
@@ -385,134 +344,127 @@ type resolvedRoute struct {
 }
 
 func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requested string) (resolvedRoute, error) {
-	tx, err := s.db.SQL.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	sc := s.scopeFor(accountID)
+	var route resolvedRoute
+	var clientModel string
+	err := sc.RunTx(ctx, &sql.TxOptions{ReadOnly: true}, func(tx *store.Scope) error {
+		keyType, err := tx.ClientKeyType(ctx, clientID)
+		if err != nil {
+			return err
+		}
+		clientModel = requested
+		if keyType == "single" {
+			binding, found, err := tx.GetSingleBinding(ctx, clientID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return sql.ErrNoRows
+			}
+			clientModel = binding.ModelName
+			if binding.RealModelID.Valid {
+				route.RouteKind, route.RouteModelID = "real", binding.RealModelID.String
+				route.ProviderModelID = binding.RealModelID.String
+				info, err := tx.RealModelForID(ctx, binding.RealModelID.String)
+				if err != nil {
+					return err
+				}
+				route.RouteModel = info.Canonical
+				route.MaxOutputTokens = info.MaxOutputTokens
+				route.ReasoningCapabilities = decodeReasoningCapabilities(info.ReasoningCapabilities)
+			} else {
+				route.RouteKind, route.RouteModelID = "virtual", binding.VirtualModelID.String
+				canonical, err := tx.VirtualModelCanonical(ctx, binding.VirtualModelID.String)
+				if err != nil {
+					return err
+				}
+				route.RouteModel = canonical
+			}
+		} else {
+			info, err := tx.PermittedRealModel(ctx, clientID, requested)
+			if err == nil {
+				route.RouteKind, route.RouteModelID, route.RouteModel = "real", info.ModelID, info.Canonical
+				route.MaxOutputTokens = info.MaxOutputTokens
+				route.ReasoningCapabilities = decodeReasoningCapabilities(info.ReasoningCapabilities)
+			} else if errors.Is(err, sql.ErrNoRows) {
+				virtualID, canonical, verr := tx.PermittedVirtualModel(ctx, clientID, requested)
+				if verr != nil {
+					return verr
+				}
+				route.RouteKind, route.RouteModelID, route.RouteModel = "virtual", virtualID, canonical
+			} else {
+				return err
+			}
+		}
+		if route.RouteKind == "virtual" {
+			mode, err := tx.VirtualRoutingMode(ctx, route.RouteModelID)
+			if err != nil {
+				return err
+			}
+			route.RoutingMode = mode
+			targets, err := tx.VirtualRouteTargets(ctx, route.RouteModelID)
+			if err != nil {
+				return err
+			}
+			for i := range targets {
+				target := routeTargetToResolved(targets[i])
+				target.Virtual, target.RequestedModel = true, clientModel
+				target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
+				route.Targets = append(route.Targets, target)
+			}
+			route.Virtual, route.RequestedModel = true, clientModel
+			if len(route.Targets) > 0 {
+				route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
+			}
+			return nil
+		}
+		route.ProviderModelID = route.RouteModelID
+		target, err := tx.RealRouteTarget(ctx, route.RouteModelID)
+		if err != nil {
+			return err
+		}
+		resolved := routeTargetToResolved(target)
+		route.Provider = resolved.Provider
+		route.UpstreamModelID = resolved.UpstreamModelID
+		route.NativeProtocol = resolved.NativeProtocol
+		route.ReasoningCapabilities = resolved.ReasoningCapabilities
+		route.RequestedModel = clientModel
+		route.Virtual = false
+		route.Available = resolved.Available
+		return nil
+	})
 	if err != nil {
 		return resolvedRoute{}, err
 	}
-	defer tx.Rollback()
-	var keyType string
-	if err = tx.QueryRowContext(ctx, `SELECT key_type FROM client_keys WHERE id=?`, clientID).Scan(&keyType); err != nil {
-		return resolvedRoute{}, err
-	}
-	var route resolvedRoute
-	clientModel := requested
-	if keyType == "single" {
-		var realID, virtualID sql.NullString
-		if err = tx.QueryRowContext(ctx, `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, clientID).Scan(&clientModel, &realID, &virtualID); err != nil {
-			return resolvedRoute{}, err
-		}
-		if realID.Valid {
-			route.RouteKind, route.RouteModelID = "real", realID.String
-			route.ProviderModelID = realID.String
-			var reasoningRaw sql.NullString
-			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel, &reasoningRaw, &route.MaxOutputTokens); err != nil {
-				return resolvedRoute{}, err
-			}
-			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-		} else {
-			route.RouteKind, route.RouteModelID = "virtual", virtualID.String
-			if err = tx.QueryRowContext(ctx, `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, virtualID.String).Scan(&route.RouteModel); err != nil {
-				return resolvedRoute{}, err
-			}
-		}
-	} else {
-		var reasoningRaw sql.NullString
-		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel, &reasoningRaw, &route.MaxOutputTokens)
-		if err == nil {
-			route.RouteKind = "real"
-			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-		} else if err == sql.ErrNoRows {
-			err = tx.QueryRowContext(ctx, `SELECT v.id,g.name||'/'||v.name FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
-			if err != nil {
-				return resolvedRoute{}, err
-			}
-			route.RouteKind = "virtual"
-		} else {
-			return resolvedRoute{}, err
-		}
-	}
+	// OAuth hydration happens outside the transaction: Current() can trigger a
+	// network token refresh, and holding a SQLite read tx across that
+	// serializes all other DB access.
 	if route.RouteKind == "virtual" {
-		// Capture the routing mode so cooldown applies only to ordered
-		// fallback virtual models (fixed virtual routes and direct real-model
-		// routes must never populate or consult the shared cooldown state).
-		if err := tx.QueryRowContext(ctx, `SELECT routing_mode FROM virtual_models WHERE id=?`, route.RouteModelID).Scan(&route.RoutingMode); err != nil {
-			return resolvedRoute{}, err
-		}
-		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
-		if e != nil {
-			return resolvedRoute{}, e
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var target resolvedRoute
-			var protocols string
-			var enabled, available int
-			var nativeProtocol sql.NullString
-			var reasoningRaw sql.NullString
-			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available, &reasoningRaw, &target.MaxOutputTokens); e != nil {
-				return resolvedRoute{}, e
-			}
-			target.Provider.Enabled = scanBool(enabled)
-			target.Provider.Protocols = providers.DecodeProtocols(protocols)
-			if d, ok := providers.Lookup(target.Provider.Type); ok {
-				target.Provider.MinOutputTokens = d.MinOutputTokens
-			}
-			// OAuth hydration happens after commit (see below) so the
-			// SQLite read tx is never held across network refresh calls.
-			if nativeProtocol.Valid {
-				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
-			}
-			target.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-			target.Available = target.Provider.Enabled && scanBool(available)
-			target.Virtual, target.RequestedModel = true, clientModel
-			target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
-			route.Targets = append(route.Targets, target)
-		}
-		if e = rows.Err(); e != nil {
-			return resolvedRoute{}, e
-		}
-		if err := tx.Commit(); err != nil {
-			return resolvedRoute{}, err
-		}
-		// Hydrate OAuth credentials outside the transaction: Current() can
-		// trigger a network token refresh, and holding a SQLite read tx
-		// across that serializes all other DB access.
 		for i := range route.Targets {
 			s.providers.HydrateOAuth(ctx, accountID, &route.Targets[i].Provider)
 		}
-		route.Virtual, route.RequestedModel = true, clientModel
-		if len(route.Targets) > 0 {
-			route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
-		}
-		return route, nil
+	} else {
+		s.providers.HydrateOAuth(ctx, accountID, &route.Provider)
 	}
-	var protocols string
-	var enabled, modelAvailable int
-	var nativeProtocol sql.NullString
-	var reasoningRaw sql.NullString
-	route.ProviderModelID = route.RouteModelID
-	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, route.RouteModelID).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable, &reasoningRaw)
-	if err != nil {
-		return resolvedRoute{}, err
-	}
-	route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-	route.Provider.Enabled = scanBool(enabled)
-	route.Provider.Protocols = providers.DecodeProtocols(protocols)
-	if d, ok := providers.Lookup(route.Provider.Type); ok {
-		route.Provider.MinOutputTokens = d.MinOutputTokens
-	}
-	if nativeProtocol.Valid {
-		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
-	}
-	route.RequestedModel = clientModel
-	route.Virtual = false
-	route.Available = route.Provider.Enabled && scanBool(modelAvailable)
-	if err := tx.Commit(); err != nil {
-		return resolvedRoute{}, err
-	}
-	// OAuth hydration outside the transaction (see virtual branch above).
-	s.providers.HydrateOAuth(ctx, accountID, &route.Provider)
 	return route, nil
+}
+
+func routeTargetToResolved(t store.RouteTarget) resolvedRoute {
+	var target resolvedRoute
+	target.ProviderModelID = t.ProviderModelID
+	target.Provider = providers.Instance{ID: t.ProviderID, Name: t.ProviderName, Type: t.ProviderType, BaseURL: t.BaseURL, Credential: t.Credential, Enabled: t.ProviderEnabled}
+	target.Provider.Protocols = providers.DecodeProtocols(t.Protocols)
+	if d, ok := providers.Lookup(t.ProviderType); ok {
+		target.Provider.MinOutputTokens = d.MinOutputTokens
+	}
+	if t.NativeProtocol.Valid {
+		target.NativeProtocol = providers.Protocol(t.NativeProtocol.String)
+	}
+	target.ReasoningCapabilities = decodeReasoningCapabilities(t.ReasoningCapabilities)
+	target.Available = t.Available
+	target.MaxOutputTokens = t.MaxOutputTokens
+	target.UpstreamModelID = t.UpstreamModelID
+	return target
 }
 
 // idleTimeout is how long a successful upstream response may sit silent
