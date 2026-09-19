@@ -67,9 +67,9 @@ type Server struct {
 	oauthCallbackLimiter  *loginLimiter
 	backgroundCtx         context.Context
 	// lastOutcome holds the most recent request outcome per real model, keyed
-	// by "provider_name/upstream_model_id". It lives in RAM (never persisted) so
-	// it is cleared on restart. Written on each routed request; read by the
-	// admin usage endpoint to drive the per-target resolution dots.
+	// by account + provider_model_id. It lives in RAM (never persisted) so it
+	// is cleared on restart. Written on each routed request; read by the admin
+	// usage endpoint to drive the per-target resolution dots.
 	lastOutcomeMu sync.RWMutex
 	lastOutcome   map[string]lastOutcome
 	// live is the SSE hub that pushes outcome deltas and usage snapshots to
@@ -77,7 +77,8 @@ type Server struct {
 	liveHub  *liveHub
 	inflight *inflightTracker
 	// cooldown holds the in-memory per-target fallback cooldown state keyed by
-	// provider_model_id. It lives in RAM only and is cleared on restart.
+	// account + provider_model_id. It lives in RAM only and is cleared on
+	// restart.
 	cooldown *cooldownStore
 	// usageAggMu guards the cached DB-derived usage aggregates. The live
 	// in-memory state (last outcomes, cooldowns, in-flight) is never cached, so

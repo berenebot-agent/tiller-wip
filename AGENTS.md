@@ -114,7 +114,7 @@ pick up remaining work there), and `docs/sass_tech.md` for the full roadmap.
 11. A new tenant-owned table requires account scope, tenant-isolation tests, and (from Phase 2) PostgreSQL RLS classification.
 12. Cross-account background discovery may use a narrowly privileged path, but each tenant job must execute with explicit account scope.
 13. A hosted provider OAuth/subscription authentication mode is enabled only after its provider terms are reviewed for that hosted use.
-14. `internal/store` is the single boundary for tenant-table SQL. Do not add tenant queries to `internal/server`, `internal/providers`, or elsewhere; a guard test enforces the table classification.
+14. `internal/store` is the single boundary for tenant-table SQL. Do not add tenant queries to `internal/server`, `internal/providers`, or elsewhere; a guard test enforces the table classification, and `internal/database/sql_boundary_test.go` fails if a tenant table reappears after a SQL verb outside `internal/store`/`internal/database`.
 15. `TILLER_MODE` is deferred to Phase 3. Tenancy is built unconditionally; do not add ad-hoc `if hosted` checks.
 
 ## Model metadata — discover, never hardcode
