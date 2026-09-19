@@ -36,6 +36,10 @@ type Server struct {
 	store    *store.Store
 	clients  *auth.ClientAuthenticator
 	sessions *auth.SessionStore
+	// adminAccount resolves the account owned by an authenticated admin
+	// session. Nil means the single implicit local account (Phase 1); Phase 3
+	// wires hosted users in here. Tests inject a non-local account.
+	adminAccount func(auth.Session) string
 	// secretHasher is the token hasher used when generating client keys
 	// (bcrypt in production; a fast hasher in tests).
 	secretHasher  auth.SecretHasher
@@ -137,6 +141,18 @@ type serverOptions struct {
 	// fingerprint, which keeps the memory-hard KDF.
 	tokenHasher      auth.SecretHasher
 	credentialHasher auth.SecretHasher
+	// adminAccount overrides the account owned by an admin session. Unexported
+	// so only in-package tests can inject a non-local admin principal; Phase 1
+	// production always owns the implicit local account.
+	adminAccount func(auth.Session) string
+}
+
+// withAdminAccount injects an admin-principal account resolver. Unexported so
+// only in-package tests can use it.
+func withAdminAccount(fn func(auth.Session) string) serverOption {
+	return func(o *serverOptions) {
+		o.adminAccount = fn
+	}
 }
 
 // withSecretHasher sets a single SecretHasher for both token hashing and the
@@ -170,7 +186,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, store: store.New(db.SQL), clients: clients, sessions: sessions, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: store.New(db.SQL), clients: clients, sessions: sessions, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
@@ -358,9 +374,13 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		}
 		// Phase 1 local mode: the env-admin session owns the single implicit
 		// local account. Hosted mode (Phase 3) will resolve the account owned by
-		// the authenticated user instead.
+		// the authenticated user instead; an injected resolver (tests) stands in.
+		accountID := database.LocalAccountID
+		if s.adminAccount != nil {
+			accountID = s.adminAccount(session)
+		}
 		ctx := context.WithValue(r.Context(), adminSessionKey, session)
-		ctx = context.WithValue(ctx, accountKey, database.LocalAccountID)
+		ctx = context.WithValue(ctx, accountKey, accountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

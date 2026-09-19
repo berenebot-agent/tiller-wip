@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/store"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -150,7 +151,7 @@ const (
 )
 
 type ClientAuthenticator struct {
-	db      *sql.DB
+	store   *store.Store
 	key     []byte
 	ttl     time.Duration
 	hasher  SecretHasher
@@ -172,7 +173,7 @@ func NewClientAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) (*ClientA
 	if hasher == nil {
 		hasher = BcryptHasher{}
 	}
-	return &ClientAuthenticator{db: db, key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]cacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4)}, nil
+	return &ClientAuthenticator{store: store.New(db), key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]cacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4)}, nil
 }
 
 // SetCacheTTL overrides the verified-key cache TTL. It is called once at
@@ -232,8 +233,8 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	generation := atomic.LoadUint64(&a.rev)
 	var identity ClientIdentity
 	var hash string
-	err := a.db.QueryRowContext(ctx, `SELECT id,account_id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).
-		Scan(&identity.ID, &identity.AccountID, &identity.Name, &identity.Enabled, &hash)
+	row, err := a.store.ClientKeyBySelector(ctx, selector)
+	identity.ID, identity.AccountID, identity.Name, identity.Enabled, hash = row.ID, row.AccountID, row.Name, row.Enabled, row.SecretHash
 	if err != nil || !identity.Enabled || !a.hasher.Verify(secret, hash) {
 		return ClientIdentity{}, false, true
 	}
@@ -243,8 +244,7 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	// rotation (the update becomes a no-op if secret_hash already changed).
 	if a.hasher.NeedsRehash(hash) {
 		if upgraded, herr := a.hasher.Hash(secret); herr == nil {
-			_, _ = a.db.ExecContext(ctx, `UPDATE client_keys SET secret_hash=?, updated_at=? WHERE id=? AND secret_hash=?`,
-				upgraded, formatUTC(time.Now()), identity.ID, hash)
+			_ = a.store.UpdateClientKeySecretHash(ctx, identity.ID, hash, upgraded, formatUTC(time.Now()))
 		}
 	}
 	a.mu.Lock()

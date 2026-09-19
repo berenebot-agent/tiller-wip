@@ -95,6 +95,37 @@ WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.accoun
 	return out, rows.Err()
 }
 
+// ClientKeyAuthRow is the principal lookup row used by authentication.
+type ClientKeyAuthRow struct {
+	ID         string
+	AccountID  string
+	Name       string
+	Enabled    bool
+	SecretHash string
+}
+
+// ClientKeyBySelector looks up a client key by its public selector. It is the
+// pre-account authentication path (the key determines the account), so it is
+// deliberately platform-level rather than account-scoped.
+func (s *Store) ClientKeyBySelector(ctx context.Context, selector string) (ClientKeyAuthRow, error) {
+	var v ClientKeyAuthRow
+	var enabled int
+	err := s.db.QueryRowContext(ctx, `SELECT id,account_id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).Scan(&v.ID, &v.AccountID, &v.Name, &enabled, &v.SecretHash)
+	if err != nil {
+		return ClientKeyAuthRow{}, err
+	}
+	v.Enabled = enabled != 0
+	return v, nil
+}
+
+// UpdateClientKeySecretHash lazily migrates a client key's stored hash after a
+// successful verify. The compare-and-swap keeps it safe against concurrent
+// rotation.
+func (s *Store) UpdateClientKeySecretHash(ctx context.Context, id, oldHash, newHash, updatedAt string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE client_keys SET secret_hash=?, updated_at=? WHERE id=? AND secret_hash=?`, newHash, updatedAt, id, oldHash)
+	return err
+}
+
 // ClientKeyEditable is the mutable field set read before an update so the
 // handler can merge a PATCH.
 type ClientKeyEditable struct {
