@@ -42,6 +42,12 @@ type Config struct {
 	// BackupRetention is how long snapshots are kept before pruning. Off-host
 	// copies are the operator's responsibility (see docs/backup_restore_runbook.md).
 	BackupRetention time.Duration
+	// MasterKey is the raw TILLER_MASTER_KEY value (base64 of 32 random
+	// bytes). MasterKeyFile is the raw TILLER_MASTER_KEY_FILE path. The file
+	// takes precedence. When both are empty, the key is loaded from
+	// <DataDir>/master.key or generated there (see internal/crypto).
+	MasterKey     string
+	MasterKeyFile string
 }
 
 func Load() (Config, error) {
@@ -61,6 +67,8 @@ func Load() (Config, error) {
 		LogLevel:          envDefault("TILLER_LOG_LEVEL", "info"),
 		BackupInterval:    6 * time.Hour,
 		BackupRetention:   7 * 24 * time.Hour,
+		MasterKey:         os.Getenv("TILLER_MASTER_KEY"),
+		MasterKeyFile:     os.Getenv("TILLER_MASTER_KEY_FILE"),
 	}
 	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {
 	case "debug", "info", "warn", "error":

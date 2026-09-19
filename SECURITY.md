@@ -28,20 +28,31 @@ interface private, use HTTPS at the edge, protect `./data`, and never commit
 `.env` or provider credentials. Proxy-header trust must remain disabled unless
 the direct proxy peer is restricted with `TILLER_TRUSTED_PROXY`.
 
-**Provider credentials are not encrypted at rest.** They are stored in
-recoverable form in the SQLite database (`./data`) so Tiller can authenticate
-upstream requests, and credential encryption at rest is a future-roadmap
-consideration. Take care with where you store the persistent database and any
-backups of it — treat `./data` and its backups as secrets, since anyone who can
-read the database file can recover your provider keys.
+**Recoverable provider credentials are encrypted at rest (always on).**
+Provider API credentials, OAuth access/refresh/id tokens and `provider_data`, and
+the notification auth header are sealed with AES-256-GCM (versioned `enc:v1:`
+format, unique nonce per value, associated data binding the account/record/field)
+at the `internal/store` boundary. The master key is kept **outside the database**:
+set `TILLER_MASTER_KEY` (base64 of 32 random bytes) or `TILLER_MASTER_KEY_FILE`
+(takes precedence), or let Tiller generate one at `<data dir>/master.key` (0600)
+on first start. **Back the master key up separately from `./data`** — without it,
+existing encrypted credentials cannot be recovered. A database dump therefore
+does not reveal provider credentials; a full `./data` archive does include the
+generated key and must be protected as a secret. Rotate the key with
+`tiller-router rotate-master-key` (service stopped; new key via
+`TILLER_MASTER_KEY_NEW` or `TILLER_MASTER_KEY_NEW_FILE`). If encrypted values
+exist but the key is missing or wrong, Tiller starts in a **locked** state:
+credential-bearing providers are unavailable and no plaintext credential can be
+written until the correct key is restored.
 
 Migration 024 clears request and provider response body columns from the live
 database; it is not secure erasure. SQLite pages, WAL files, snapshots, and old
 backups may still contain historic sensitive data, so they must continue to be
 protected as sensitive material.
 
-**Secret hashing is entropy-tiered.** Secrets are hash-only at rest; plaintext
-is never stored. The admin credential fingerprint is human-chosen and
+**Secret hashing is entropy-tiered.** Non-recoverable secrets (client API keys,
+admin session tokens, the admin credential fingerprint) are hash-only at rest;
+plaintext is never stored. The admin credential fingerprint is human-chosen and
 low-entropy, so it is protected with a memory-hard KDF (**argon2id, 64 MiB**).
 Client API keys and admin session tokens are 256-bit uniformly random, where
 offline brute force is infeasible regardless of hash speed; those use

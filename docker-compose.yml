@@ -42,8 +42,16 @@ services:
       # renewed on use; any key/session mutation invalidates immediately, so a
       # longer window only reduces hash-verification work. Defaults: client key
       # 15m, session 5m. Bounded to <=24h.
-      TILLER_CLIENT_KEY_CACHE_TTL: ${TILLER_CLIENT_KEY_CACHE_TTL:-15m}
-      TILLER_SESSION_CACHE_TTL: ${TILLER_SESSION_CACHE_TTL:-5m}
+TILLER_CLIENT_KEY_CACHE_TTL: ${TILLER_CLIENT_KEY_CACHE_TTL:-15m}
+TILLER_SESSION_CACHE_TTL: ${TILLER_SESSION_CACHE_TTL:-5m}
+
+# Provider credentials, OAuth tokens, and webhook auth headers are encrypted
+# at rest (AES-256-GCM). Leave both unset and the app generates a key once at
+# ./data/master.key. Set TILLER_MASTER_KEY (base64 of 32 random bytes) or, for
+# stricter custody, TILLER_MASTER_KEY_FILE to a Docker secret path (takes
+# precedence). Back the key up separately from ./data.
+TILLER_MASTER_KEY: ${TILLER_MASTER_KEY:-}
+TILLER_MASTER_KEY_FILE: ${TILLER_MASTER_KEY_FILE:-}
     volumes:
       - ./data:/data
     # Default hardening (adoption-first posture). The image starts as root so

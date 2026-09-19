@@ -33,9 +33,13 @@ type Server struct {
 	db     *database.DB
 	// store is the single boundary for tenant-table SQL. Handlers obtain an
 	// account-scoped handle via s.scope(r) or s.store.For(accountID).
-	store    *store.Store
-	clients  *auth.ClientAuthenticator
-	sessions *auth.SessionStore
+	store *store.Store
+	// secretCipher is the resolved recoverable-secret cipher. nil means the
+	// passthrough default; it is reported as "disabled" to the admin status
+	// API. Locked is reported when the cipher holds no usable key.
+	secretCipher store.SecretCipher
+	clients      *auth.ClientAuthenticator
+	sessions     *auth.SessionStore
 	// adminAccount resolves the account owned by an authenticated admin
 	// session. Nil means the single implicit local account (Phase 1); Phase 3
 	// wires hosted users in here. Tests inject a non-local account.
@@ -99,6 +103,20 @@ type Server struct {
 	logWriter *logWriter
 }
 
+// secretEncryptionState reports the credential-encryption state for the admin
+// status API: "enabled", "disabled" (no cipher configured; tests/hash-only),
+// or "locked" (the master key is missing or does not match the stored
+// ciphertext). It never exposes key material, fingerprints, or nonces.
+func (s *Server) secretEncryptionState() string {
+	return store.SecretsState(s.secretCipher)
+}
+
+// secretsLocked reports whether the recoverable-secret cipher is in the locked
+// state.
+func (s *Server) secretsLocked() bool {
+	return s.secretCipher != nil && s.secretCipher.Locked()
+}
+
 // keepaliveInterval returns the streaming keepalive cadence, honouring the
 // test override when set.
 func (s *Server) keepaliveInterval() time.Duration {
@@ -150,6 +168,22 @@ type serverOptions struct {
 	// so only in-package tests can inject a non-local admin principal; Phase 1
 	// production always owns the implicit local account.
 	adminAccount func(auth.Session) string
+	// cipher encrypts recoverable tenant secrets. nil means the passthrough
+	// default (tests and hash-only paths). Production injects the resolved
+	// master-key cipher via WithSecretCipher.
+	cipher store.SecretCipher
+}
+
+// WithSecretCipher injects the resolved master-key cipher used to encrypt and
+// decrypt provider credentials, OAuth tokens, and secret settings. It is
+// exported because the composition root (cmd/tiller-router) resolves the key
+// from config and the data directory before constructing the server.
+func WithSecretCipher(c store.SecretCipher) serverOption {
+	return func(o *serverOptions) {
+		if c != nil {
+			o.cipher = c
+		}
+	}
 }
 
 // withAdminAccount injects an admin-principal account resolver. Unexported so
@@ -191,7 +225,12 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, store: store.New(db.SQL, store.WithActivityDir(db.ActivityDir)), clients: clients, sessions: sessions, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	storeOpts := []store.Option{store.WithActivityDir(db.ActivityDir)}
+	if options.cipher != nil {
+		storeOpts = append(storeOpts, store.WithCipher(options.cipher))
+	}
+	st := store.New(db.SQL, storeOpts...)
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil

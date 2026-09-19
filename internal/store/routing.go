@@ -153,17 +153,22 @@ func (s *Scope) VirtualRoutingMode(ctx context.Context, virtualID string) (strin
 // RouteTarget is a resolved provider/model target for an inference request,
 // including the credential-bearing provider fields.
 type RouteTarget struct {
-	ProviderModelID       string
-	ProviderID            string
-	ProviderName          string
-	ProviderType          string
-	BaseURL               string
-	Credential            string
-	ProviderEnabled       bool
-	Protocols             string
-	NativeProtocol        sql.NullString
-	UpstreamModelID       string
-	Available             bool
+	ProviderModelID string
+	ProviderID      string
+	ProviderName    string
+	ProviderType    string
+	BaseURL         string
+	Credential      string
+	ProviderEnabled bool
+	Protocols       string
+	NativeProtocol  sql.NullString
+	UpstreamModelID string
+	Available       bool
+	// Locked reports that the target's credential could not be decrypted
+	// because the master key is missing or wrong. The target is marked
+	// unavailable so fallback can continue, but the caller can distinguish
+	// this from an ordinary outage.
+	Locked                bool
 	ReasoningCapabilities sql.NullString
 	MaxOutputTokens       sql.NullInt64
 }
@@ -183,6 +188,18 @@ func (s *Scope) VirtualRouteTargets(ctx context.Context, virtualID string) ([]Ro
 		}
 		v.ProviderEnabled = enabled != 0
 		v.Available = enabled != 0 && available != 0
+		credential, derr := s.decryptSecret(secretAAD(s.accountID, "provider", v.ProviderID, "credential_secret"), v.Credential)
+		if derr != nil {
+			if errors.Is(derr, ErrSecretsLocked) {
+				v.Credential = ""
+				v.Available = false
+				v.Locked = true
+			} else {
+				return nil, derr
+			}
+		} else {
+			v.Credential = credential
+		}
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -196,7 +213,21 @@ func (s *Scope) RealRouteTarget(ctx context.Context, modelID string) (RouteTarge
 	if errors.Is(err, sql.ErrNoRows) {
 		return RouteTarget{}, sql.ErrNoRows
 	}
+	if err != nil {
+		return RouteTarget{}, err
+	}
 	v.ProviderEnabled = enabled != 0
 	v.Available = enabled != 0 && available != 0
-	return v, err
+	credential, derr := s.decryptSecret(secretAAD(s.accountID, "provider", v.ProviderID, "credential_secret"), v.Credential)
+	if derr != nil {
+		if errors.Is(derr, ErrSecretsLocked) {
+			v.Credential = ""
+			v.Available = false
+			v.Locked = true
+			return v, nil
+		}
+		return RouteTarget{}, derr
+	}
+	v.Credential = credential
+	return v, nil
 }

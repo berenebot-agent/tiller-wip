@@ -33,6 +33,7 @@ func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 type Store struct {
 	db       *sql.DB
 	activity *activityFiles
+	cipher   SecretCipher
 }
 
 // Option configures a Store.
@@ -45,8 +46,20 @@ func WithActivityDir(dir string) Option {
 	return func(s *Store) { s.activity = newActivityFiles(dir) }
 }
 
+// WithCipher injects the recoverable-secret cipher used to encrypt and decrypt
+// provider credentials, OAuth tokens, and secret settings. Without it the
+// store passes secrets through in plaintext, which is only appropriate for
+// tests and hash-only paths; production always injects one.
+func WithCipher(c SecretCipher) Option {
+	return func(s *Store) {
+		if c != nil {
+			s.cipher = c
+		}
+	}
+}
+
 func New(db *sql.DB, opts ...Option) *Store {
-	s := &Store{db: db}
+	s := &Store{db: db, cipher: disabledCipher{}}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -61,7 +74,7 @@ func (s *Store) DB() *sql.DB { return s.db }
 // For returns a handle scoped to one account. accountID must come from a
 // verified principal.
 func (s *Store) For(accountID string) *Scope {
-	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity}
+	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity, cipher: s.cipher}
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx so a Scope works inside and
@@ -83,6 +96,7 @@ type Scope struct {
 	q         querier
 	accountID string
 	activity  *activityFiles
+	cipher    SecretCipher
 }
 
 // AccountID returns the account this scope is bound to.
@@ -103,7 +117,7 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	}
 	activeTenantTxs.Add(1)
 	defer activeTenantTxs.Add(-1)
-	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity}
+	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher}
 	if err := fn(child); err != nil {
 		_ = tx.Rollback()
 		return err

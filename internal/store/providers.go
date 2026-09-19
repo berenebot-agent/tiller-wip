@@ -90,7 +90,11 @@ func (s *Scope) CreateProvider(ctx context.Context, in CreateProviderInput) erro
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO namespaces(account_id,name,kind,entity_id) VALUES(?,?,'real',?)`, tx.accountID, in.Name, in.ID); err != nil {
 			return err
 		}
-		if _, err := tx.q.ExecContext(ctx, `INSERT INTO providers(id,account_id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, in.ID, tx.accountID, in.Name, in.Type, in.BaseURL, nullableStoreString(in.Credential), boolInt(in.Enabled), in.Protocols, now, now); err != nil {
+		credential, err := tx.encryptSecret(secretAAD(tx.accountID, "provider", in.ID, "credential_secret"), in.Credential)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `INSERT INTO providers(id,account_id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, in.ID, tx.accountID, in.Name, in.Type, in.BaseURL, nullableStoreString(credential), boolInt(in.Enabled), in.Protocols, now, now); err != nil {
 			return err
 		}
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'real',?,0,?,? FROM client_keys WHERE account_id=?`, in.ID, now, tx.accountID, tx.accountID); err != nil {
@@ -161,7 +165,11 @@ func (s *Scope) ProviderType(ctx context.Context, id string) (string, error) {
 // ReplaceProviderCredential sets a provider's API credential. found is false
 // when no provider in the account matched.
 func (s *Scope) ReplaceProviderCredential(ctx context.Context, id, credential string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `UPDATE providers SET credential_secret=?,updated_at=? WHERE id=? AND account_id=?`, credential, now(), id, s.accountID)
+	stored, err := s.encryptSecret(secretAAD(s.accountID, "provider", id, "credential_secret"), credential)
+	if err != nil {
+		return false, err
+	}
+	res, err := s.q.ExecContext(ctx, `UPDATE providers SET credential_secret=?,updated_at=? WHERE id=? AND account_id=?`, stored, now(), id, s.accountID)
 	if err != nil {
 		return false, err
 	}
@@ -194,6 +202,10 @@ func (s *Scope) LoadProvider(ctx context.Context, id string) (ProviderLoad, erro
 	if errors.Is(err, sql.ErrNoRows) {
 		return ProviderLoad{}, ErrProviderNotFound
 	}
+	if err != nil {
+		return ProviderLoad{}, err
+	}
+	v.Credential, err = s.decryptSecret(secretAAD(s.accountID, "provider", v.ID, "credential_secret"), v.Credential)
 	if err != nil {
 		return ProviderLoad{}, err
 	}

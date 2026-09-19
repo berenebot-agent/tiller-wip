@@ -47,8 +47,13 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := make([]providerView, 0, len(rows))
+	locked := s.secretsLocked()
 	for i := range rows {
 		row := &rows[i]
+		authState := row.AuthState
+		if locked && row.CredentialConfigured {
+			authState = "locked"
+		}
 		data = append(data, providerView{
 			ID:                   row.ID,
 			Name:                 row.Name,
@@ -57,7 +62,7 @@ func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 			Enabled:              row.Enabled,
 			Protocols:            providers.DecodeProtocols(row.Protocols),
 			CredentialConfigured: row.CredentialConfigured,
-			AuthState:            row.AuthState,
+			AuthState:            authState,
 			LastRefreshAt:        row.LastRefreshAt,
 			NextRefreshAt:        row.NextRefreshAt,
 			LastRefreshError:     row.LastRefreshError,

@@ -10,13 +10,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
+	cryptosecret "github.com/tiller-router/tiller-router/internal/crypto"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/privdrop"
 	"github.com/tiller-router/tiller-router/internal/server"
+	"github.com/tiller-router/tiller-router/internal/store"
 	buildversion "github.com/tiller-router/tiller-router/internal/version"
 )
 
@@ -119,12 +122,18 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	switch command {
 	case "migrate":
 		return nil
+	case "rotate-master-key":
+		return rotateMasterKey(ctx, cfg, db, logger)
 	case "serve":
 	default:
-		return fmt.Errorf("unknown command %q (expected serve, migrate, or healthcheck)", command)
+		return fmt.Errorf("unknown command %q (expected serve, migrate, rotate-master-key, or healthcheck)", command)
+	}
+	cipher, err := prepareSecrets(ctx, cfg, db, logger)
+	if err != nil {
+		return err
 	}
 	logger.Info("tiller-router starting", "version", buildversion.Version, "commit", buildversion.Commit)
-	app, err := server.New(cfg, db, logger)
+	app, err := server.New(cfg, db, logger, server.WithSecretCipher(cipher))
 	if err != nil {
 		return err
 	}
@@ -150,4 +159,128 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		}
 	}
 	return nil
+}
+
+// prepareSecrets resolves the master key, encrypts any remaining plaintext
+// credentials in place, and returns the cipher to inject into the store. It
+// returns a locked cipher when existing ciphertext cannot be decrypted, so the
+// service starts in the locked state rather than exposing or overwriting
+// credentials.
+func prepareSecrets(ctx context.Context, cfg config.Config, db *database.DB, logger *slog.Logger) (store.SecretCipher, error) {
+	hasEncrypted, err := store.HasEncryptedSecrets(ctx, db.SQL)
+	if err != nil {
+		return nil, fmt.Errorf("inspect stored secrets: %w", err)
+	}
+	key, source, err := cryptosecret.Resolve(cfg.DataDir, cfg.MasterKey, cfg.MasterKeyFile, hasEncrypted)
+	if err != nil {
+		return nil, err
+	}
+	var cipher store.SecretCipher = cryptosecret.Locked()
+	if key != nil {
+		c, err := cryptosecret.New(key)
+		if err != nil {
+			return nil, err
+		}
+		cipher = c
+	}
+	migrated, locked, err := store.MigrateSecrets(ctx, db.SQL, cipher)
+	if err != nil {
+		return nil, fmt.Errorf("migrate provider credentials: %w", err)
+	}
+	if locked {
+		cipher = cryptosecret.Locked()
+	}
+	logger.Info("provider credential encryption ready",
+		"state", store.SecretsState(cipher),
+		"key_source", string(source),
+		"migrated", migrated,
+	)
+	return cipher, nil
+}
+
+// rotateMasterKey re-encrypts every recoverable secret from the active key to a
+// new key supplied via TILLER_MASTER_KEY_NEW or TILLER_MASTER_KEY_NEW_FILE.
+// The new key is written to <DataDir>/master.key. It must be run with the
+// service stopped.
+func rotateMasterKey(ctx context.Context, cfg config.Config, db *database.DB, logger *slog.Logger) error {
+	hasEncrypted, err := store.HasEncryptedSecrets(ctx, db.SQL)
+	if err != nil {
+		return fmt.Errorf("inspect stored secrets: %w", err)
+	}
+	if !hasEncrypted {
+		return errors.New("no encrypted credentials found; nothing to rotate")
+	}
+	oldKey, source, err := cryptosecret.Resolve(cfg.DataDir, cfg.MasterKey, cfg.MasterKeyFile, true)
+	if err != nil {
+		return err
+	}
+	if oldKey == nil {
+		return errors.New("current master key is unavailable; cannot rotate")
+	}
+	newKey, err := resolveNewMasterKey()
+	if err != nil {
+		return err
+	}
+	oldCipher, err := cryptosecret.New(oldKey)
+	if err != nil {
+		return err
+	}
+	newCipher, err := cryptosecret.New(newKey)
+	if err != nil {
+		return err
+	}
+	// When the active key is the data-directory file, stage the new key file
+	// before rotating so a rotation failure can restore it. When the active key
+	// comes from env/file, that source shadows the data file, so only warn.
+	keyPath := filepath.Join(cfg.DataDir, cryptosecret.MasterKeyFileName)
+	writeDataKey := source == cryptosecret.SourceDataFile || source == cryptosecret.SourceGenerated
+	var previousKeyFile []byte
+	hadPreviousKeyFile := false
+	if writeDataKey {
+		if raw, rerr := os.ReadFile(keyPath); rerr == nil {
+			previousKeyFile, hadPreviousKeyFile = raw, true
+		}
+		if err := cryptosecret.WriteKeyFile(keyPath, newKey); err != nil {
+			return fmt.Errorf("write new master key: %w", err)
+		}
+	}
+	rotated, err := store.RotateSecrets(ctx, db.SQL, oldCipher, newCipher)
+	if err != nil {
+		if writeDataKey {
+			if hadPreviousKeyFile {
+				_ = os.WriteFile(keyPath, previousKeyFile, 0o600)
+			} else {
+				_ = os.Remove(keyPath)
+			}
+		}
+		return fmt.Errorf("rotate credentials: %w", err)
+	}
+	logger.Info("master key rotated", "rotated", rotated, "previous_source", string(source))
+	if writeDataKey {
+		logger.Info("new master key written", "key_file", keyPath)
+	}
+	if strings.TrimSpace(cfg.MasterKey) != "" {
+		logger.Warn("TILLER_MASTER_KEY is set and takes precedence over the data-directory key file; update it to the new key before restarting")
+	}
+	if strings.TrimSpace(cfg.MasterKeyFile) != "" {
+		logger.Warn("TILLER_MASTER_KEY_FILE is set and takes precedence over the data-directory key file; update that secret to the new key before restarting")
+	}
+	return nil
+}
+
+// resolveNewMasterKey reads the rotation target key only. It never falls back
+// to the active key, so a missing new key cannot silently re-encrypt with the
+// old one.
+func resolveNewMasterKey() ([]byte, error) {
+	if f := strings.TrimSpace(os.Getenv("TILLER_MASTER_KEY_NEW_FILE")); f != "" {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("read TILLER_MASTER_KEY_NEW_FILE: %w", err)
+		}
+		return cryptosecret.ParseKey(string(raw))
+	}
+	if raw := os.Getenv("TILLER_MASTER_KEY_NEW"); strings.TrimSpace(raw) != "" {
+		return cryptosecret.ParseKey(raw)
+	}
+	return nil, errors.New("set TILLER_MASTER_KEY_NEW or TILLER_MASTER_KEY_NEW_FILE to the new master key")
 }

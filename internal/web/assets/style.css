@@ -421,3 +421,5 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
   .activity-mobile-head{align-items:flex-start;flex-direction:column}
   .activity-mobile-head .btn{width:100%}
 }
+#encryption-state[data-state="enabled"]{color:var(--green)}
+#encryption-state[data-state="locked"]{color:var(--red);font-weight:600}

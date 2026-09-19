@@ -2,7 +2,6 @@ package providers
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net"
@@ -35,8 +34,7 @@ type Manager struct {
 	locks    map[string]*sync.Mutex
 }
 
-func NewManager(db *sql.DB, registry *Registry) *Manager {
-	st := store.New(db)
+func NewManager(st *store.Store, registry *Registry) *Manager {
 	return &Manager{store: st, registry: registry, oauth: oauth.NewManager(st, 5*time.Minute), locks: make(map[string]*sync.Mutex)}
 }
 

@@ -18,7 +18,7 @@ Guardrails for any coding agent working in this repository. This file describes 
     at `internal/web/assets/D3-LICENSE`, notice row in `THIRD_PARTY_NOTICES.md`,
     license copy in the image under `/licenses/d3-LICENSE`.
 - Do not "clean up" the deferred-work backlog's phase ordering or scope on your own initiative. Backlog sequencing is a human decision.
-- If a task requires touching something explicitly marked deferred (e.g. credential encryption or provider-health infrastructure) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
+- If a task requires touching something explicitly marked deferred (e.g. provider-health infrastructure) to complete the immediate ask, surface it and get sign-off rather than quietly building the deferred piece too.
 
 ## Deployment model
 
@@ -80,13 +80,14 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 ## Security guardrails
 
 - Never re-display, log, or expose provider credentials or client API keys in plaintext after creation — including in error messages, stack traces, and debug output.
-- Secrets are hash-only at rest; never store a secret in plaintext. Hashing is tiered by secret entropy:
-  - The **admin credential fingerprint** (`settings.admin_credential_hash`) is low-entropy and human-chosen and **must use a memory-hard KDF (argon2id, 64 MiB/3/4)**.
-  - **High-entropy machine tokens** (client API keys, admin session tokens — 256-bit uniformly random) use **bcrypt at cost ≥ 10**. Their brute-force resistance comes from entropy, so a memory-hard KDF adds no meaningful protection, while argon2id's 64 MiB working set per verify parked the process at ~170–300 MB under concurrent verification (measured 2026-09-19). This entropy tiering is an explicit product/security decision (Ben, 2026-09-19); do not revert machine tokens to a memory-hard KDF without an equivalent memory measurement and sign-off.
-  - bcrypt is the **floor**, not a licence to go fast: never swap in a fast hash (SHA-256, MD5, etc.) for "simplicity" or test convenience — including in tests, unless the test explicitly mocks the hashing layer.
-  - Legacy argon2id rows must keep verifying (prefix dispatch) and upgrade lazily (bcrypt on next successful auth) rather than requiring a forced migration.
+- Non-recoverable secrets are hash-only at rest; never store them in plaintext. Hashing is tiered by secret entropy:
+- The **admin credential fingerprint** (`settings.admin_credential_hash`) is low-entropy and human-chosen and **must use a memory-hard KDF (argon2id, 64 MiB/3/4)**.
+- **High-entropy machine tokens** (client API keys, admin session tokens — 256-bit uniformly random) use **bcrypt at cost ≥ 10**. Their brute-force resistance comes from entropy, so a memory-hard KDF adds no meaningful protection, while argon2id's 64 MiB working set per verify parked the process at ~170–300 MB under concurrent verification (measured 2026-09-19). This entropy tiering is an explicit product/security decision (Ben, 2026-09-19); do not revert machine tokens to a memory-hard KDF without an equivalent memory measurement and sign-off.
+- bcrypt is the **floor**, not a licence to go fast: never swap in a fast hash (SHA-256, MD5, etc.) for "simplicity" or test convenience — including in tests, unless the test explicitly mocks the hashing layer.
+- Legacy argon2id rows must keep verifying (prefix dispatch) and upgrade lazily (bcrypt on next successful auth) rather than requiring a forced migration.
+- Recoverable provider credentials, OAuth access/refresh/id tokens, OAuth `provider_data`, and the notification auth header are **encrypted at rest** (AES-256-GCM, `internal/crypto`) at the `internal/store` boundary, always-on in both modes. The master key lives outside the database (`TILLER_MASTER_KEY` / `TILLER_MASTER_KEY_FILE`, else a generated `<data>/master.key`). Never store these in plaintext, never log or expose the key or decrypted values, and never weaken the always-on posture or the entropy tiering above. Rotation is `tiller-router rotate-master-key` (versioned `enc:v1:` format, decrypt-with-previous support).
 - Never log prompt or response bodies, tool arguments, or reasoning content in default logging — not even at debug/trace level, not even temporarily "to help debug." The sole exception is the opt-in Detailed Error Logging setting (default off, bounded to 1 MiB, admin-gated), which stores failed request bodies and provider error bodies as documented in SECURITY.md. Any code that writes body content must be gated behind that setting and must never weaken the admin-auth gate on Activity/export endpoints.
-- Backup/export files contain recoverable provider credentials until credential encryption at rest ships (deferred). Any code that touches export/download must not weaken or bypass the admin-auth gate on that endpoint.
+- Backup/export files contain encrypted provider credentials; the master key is stored outside the database and is required to recover them. Back the key up separately from `./data`. Any code that touches export/download must not weaken or bypass the admin-auth gate on that endpoint.
 - Treat any new admin-facing endpoint as requiring authentication by default. If you're unsure whether a new route needs auth, it needs auth.
 
 ## Behavioral guardrails for routing logic
@@ -108,7 +109,7 @@ pick up remaining work there), and `docs/sass_tech.md` for the full roadmap.
 5. Tenant-variable cache and live-state keys include account scope.
 6. A tenant-scoped database transaction must never be held across external network I/O, long polling, or client streaming.
 7. Hosted custom outbound URLs are supported only through the shared safe transport, and may connect only to validated public HTTPS destinations; every redirect and the actual dial target are revalidated (submission-time validation alone is insufficient).
-8. Hosted recoverable provider credentials must be encrypted at rest with key material outside the database. This is currently **deferred** — see the conflict recorded in `docs/hosted_decisions.md`; do not build it without explicit sign-off.
+8. Recoverable provider credentials, OAuth tokens, OAuth `provider_data`, and the notification auth header are encrypted at rest with key material outside the database (AES-256-GCM; `internal/crypto` at the `internal/store` boundary). Implemented 2026-09-19 — see `docs/roadmap_credential_encryption.md`. The earlier deferral (`docs/hosted_decisions.md` §5) is revoked.
 9. Hosted mode does not persist prompt or response bodies.
 10. Self-hosted local mode must retain LAN/private-provider functionality; SSRF restrictions are hosted-mode controls.
 11. A new tenant-owned table requires account scope, tenant-isolation tests, and (once the deferred PostgreSQL phase lands) PostgreSQL RLS classification. PostgreSQL is deferred; see `docs/hosted_decisions.md` §3.

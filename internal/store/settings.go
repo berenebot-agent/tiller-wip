@@ -25,20 +25,46 @@ const (
 	SettingFallbackCooldownSeconds            = "fallback_cooldown_seconds"
 )
 
-// GetSetting returns the raw string value for an account settings key.
+// GetSetting returns the raw string value for an account settings key. Secret
+// settings are decrypted transparently.
 func (s *Scope) GetSetting(ctx context.Context, key string) (string, error) {
 	var value string
 	err := s.q.QueryRowContext(ctx, `SELECT value FROM settings WHERE account_id=? AND key=?`, s.accountID, key).Scan(&value)
-	return value, err
+	if err != nil {
+		return "", err
+	}
+	if secretSettingKey(key) {
+		return s.decryptSecret(secretAAD(s.accountID, "setting", key, "value"), value)
+	}
+	return value, nil
 }
 
-// SetSetting upserts an account settings key.
+// SetSetting upserts an account settings key. Secret settings are encrypted
+// before they are written.
 func (s *Scope) SetSetting(ctx context.Context, key, value string) error {
+	stored := value
+	if secretSettingKey(key) {
+		enc, err := s.encryptSecret(secretAAD(s.accountID, "setting", key, "value"), value)
+		if err != nil {
+			return err
+		}
+		stored = enc
+	}
 	_, err := s.q.ExecContext(ctx,
 		`INSERT INTO settings(account_id,key,value,updated_at) VALUES(?,?,?,?)
-		 ON CONFLICT(account_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
-		s.accountID, key, value, now())
+ON CONFLICT(account_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+		s.accountID, key, stored, now())
 	return err
+}
+
+// secretSettingKey reports whether a settings key holds a recoverable secret.
+func secretSettingKey(key string) bool {
+	for _, k := range secretSettingKeys() {
+		if k == key {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Scope) GetBool(ctx context.Context, key string) (bool, error) {
@@ -175,7 +201,11 @@ func (s *Scope) GetNotificationSettingsBatch(ctx context.Context) (NotificationS
 		return ns, err
 	}
 	if value, ok := values[SettingNotificationsAuthHeader]; ok {
-		ns.AuthHeader = value
+		decrypted, err := s.decryptSecret(secretAAD(s.accountID, "setting", SettingNotificationsAuthHeader, "value"), value)
+		if err != nil {
+			return ns, err
+		}
+		ns.AuthHeader = decrypted
 	}
 	if value, ok := values[SettingNotificationsCooldownSeconds]; ok {
 		parsed, err := strconv.Atoi(value)

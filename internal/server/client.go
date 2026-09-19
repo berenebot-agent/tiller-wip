@@ -338,6 +338,9 @@ type resolvedRoute struct {
 	RoutingMode                         string
 	Targets                             []resolvedRoute
 	RouteKind, RouteModelID, RouteModel string
+	// CredentialsLocked reports that this target's credential could not be
+	// decrypted because the master key is missing or wrong.
+	CredentialsLocked bool
 	// ReasoningCapabilities holds the normalized selector metadata for this
 	// real target. nil when unknown.
 	ReasoningCapabilities *providers.ReasoningCapabilities
@@ -407,15 +410,24 @@ func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requeste
 			if err != nil {
 				return err
 			}
+			locked := 0
 			for i := range targets {
 				target := routeTargetToResolved(targets[i])
 				target.Virtual, target.RequestedModel = true, clientModel
 				target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
+				if target.CredentialsLocked {
+					locked++
+				}
 				route.Targets = append(route.Targets, target)
 			}
 			route.Virtual, route.RequestedModel = true, clientModel
 			if len(route.Targets) > 0 {
 				route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
+			}
+			// Every target is locked, so no fallback can serve the request.
+			// Surface the explicit credentials-locked condition.
+			if len(route.Targets) > 0 && locked == len(route.Targets) {
+				return store.ErrSecretsLocked
 			}
 			return nil
 		}
@@ -425,6 +437,9 @@ func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requeste
 			return err
 		}
 		resolved := routeTargetToResolved(target)
+		if resolved.CredentialsLocked {
+			return store.ErrSecretsLocked
+		}
 		route.Provider = resolved.Provider
 		route.UpstreamModelID = resolved.UpstreamModelID
 		route.NativeProtocol = resolved.NativeProtocol
@@ -475,6 +490,7 @@ func routeTargetToResolved(t store.RouteTarget) resolvedRoute {
 	}
 	target.ReasoningCapabilities = decodeReasoningCapabilities(t.ReasoningCapabilities)
 	target.Available = t.Available
+	target.CredentialsLocked = t.Locked
 	target.MaxOutputTokens = t.MaxOutputTokens
 	target.UpstreamModelID = t.UpstreamModelID
 	return target
@@ -580,6 +596,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		row.errorText = strPtr("model_not_found")
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("model_not_found"))
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", incoming == providers.ProtocolMessages)
+		return
+	} else if errors.Is(err, store.ErrSecretsLocked) {
+		row.httpStatus = 503
+		row.errorText = strPtr("provider_credentials_locked")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("provider_credentials_locked"))
+		inferenceError(w, 503, "api_error", "provider_credentials_locked", "Provider credentials are unavailable: the encryption key is missing or does not match. An administrator must restore the master key.", incoming == providers.ProtocolMessages)
 		return
 	} else if err != nil {
 		if s.logger != nil {

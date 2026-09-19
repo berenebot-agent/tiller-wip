@@ -16,6 +16,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // routingTransport redirects OAuth token requests (to auth.openai.com) to a
@@ -217,7 +218,7 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 
 	registry := providers.NewRegistry()
 	registry.SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: oauthServer}})
-	mgr := providers.NewManager(db.SQL, registry)
+	mgr := providers.NewManager(store.New(db.SQL), registry)
 
 	err = mgr.ForceOAuthRefresh(context.Background(), database.LocalAccountID, &providers.Instance{ID: "provider-dead", Type: "codex-subscription"})
 	if err == nil {

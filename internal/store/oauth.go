@@ -43,7 +43,22 @@ func (s *Scope) GetOAuthToken(ctx context.Context, providerID string) (OAuthToke
 	if err != nil {
 		return OAuthTokenRow{}, err
 	}
+	var decErr error
+	if r.AccessToken, decErr = s.decryptSecret(secretAAD(s.accountID, "oauth", providerID, "access_token"), r.AccessToken); decErr != nil {
+		return OAuthTokenRow{}, decErr
+	}
+	if r.RefreshToken, decErr = s.decryptSecret(secretAAD(s.accountID, "oauth", providerID, "refresh_token"), r.RefreshToken); decErr != nil {
+		return OAuthTokenRow{}, decErr
+	}
+	if r.IDToken, decErr = s.decryptSecret(secretAAD(s.accountID, "oauth", providerID, "id_token"), r.IDToken); decErr != nil {
+		return OAuthTokenRow{}, decErr
+	}
 	if providerData.Valid && providerData.String != "" {
+		decrypted, derr := s.decryptSecret(secretAAD(s.accountID, "oauth", providerID, "provider_data"), providerData.String)
+		if derr != nil {
+			return OAuthTokenRow{}, derr
+		}
+		providerData.String = decrypted
 		if err := json.Unmarshal([]byte(providerData.String), &r.ProviderData); err != nil {
 			return OAuthTokenRow{}, errors.New("invalid OAuth provider metadata")
 		}
@@ -84,7 +99,27 @@ func (s *Scope) PutOAuthToken(ctx context.Context, r OAuthTokenRow) error {
 	if r.UpdatedAt.IsZero() {
 		r.UpdatedAt = r.CreatedAt
 	}
-	_, err := s.q.ExecContext(ctx, `INSERT INTO provider_oauth_tokens(account_id,provider_id,access_token,refresh_token,token_type,expires_at,refresh_expires_at,id_token,scope,account_email,account_plan,auth_state,last_refresh_at,created_at,updated_at,provider_data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET access_token=excluded.access_token,refresh_token=excluded.refresh_token,token_type=excluded.token_type,expires_at=excluded.expires_at,refresh_expires_at=excluded.refresh_expires_at,id_token=excluded.id_token,scope=excluded.scope,account_email=excluded.account_email,account_plan=excluded.account_plan,auth_state=excluded.auth_state,last_refresh_at=excluded.last_refresh_at,updated_at=excluded.updated_at,provider_data=excluded.provider_data`, s.accountID, r.ProviderID, r.AccessToken, nullableStoreString(r.RefreshToken), r.TokenType, nullableStoreTime(r.ExpiresAt), nullableStoreTime(r.RefreshExpiresAt), nullableStoreString(r.IDToken), nullableStoreString(r.Scope), nullableStoreString(r.AccountEmail), nullableStoreString(r.AccountPlan), r.AuthState, nullableStoreTime(r.LastRefreshAt), r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano), nullableStoreJSON(r.ProviderData))
+	accessToken, err := s.encryptSecret(secretAAD(s.accountID, "oauth", r.ProviderID, "access_token"), r.AccessToken)
+	if err != nil {
+		return err
+	}
+	refreshToken, err := s.encryptSecret(secretAAD(s.accountID, "oauth", r.ProviderID, "refresh_token"), r.RefreshToken)
+	if err != nil {
+		return err
+	}
+	idToken, err := s.encryptSecret(secretAAD(s.accountID, "oauth", r.ProviderID, "id_token"), r.IDToken)
+	if err != nil {
+		return err
+	}
+	var providerData any
+	if pd := nullableStoreJSON(r.ProviderData); pd != nil {
+		enc, eerr := s.encryptSecret(secretAAD(s.accountID, "oauth", r.ProviderID, "provider_data"), pd.(string))
+		if eerr != nil {
+			return eerr
+		}
+		providerData = enc
+	}
+	_, err = s.q.ExecContext(ctx, `INSERT INTO provider_oauth_tokens(account_id,provider_id,access_token,refresh_token,token_type,expires_at,refresh_expires_at,id_token,scope,account_email,account_plan,auth_state,last_refresh_at,created_at,updated_at,provider_data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET access_token=excluded.access_token,refresh_token=excluded.refresh_token,token_type=excluded.token_type,expires_at=excluded.expires_at,refresh_expires_at=excluded.refresh_expires_at,id_token=excluded.id_token,scope=excluded.scope,account_email=excluded.account_email,account_plan=excluded.account_plan,auth_state=excluded.auth_state,last_refresh_at=excluded.last_refresh_at,updated_at=excluded.updated_at,provider_data=excluded.provider_data`, s.accountID, r.ProviderID, accessToken, nullableStoreString(refreshToken), r.TokenType, nullableStoreTime(r.ExpiresAt), nullableStoreTime(r.RefreshExpiresAt), nullableStoreString(idToken), nullableStoreString(r.Scope), nullableStoreString(r.AccountEmail), nullableStoreString(r.AccountPlan), r.AuthState, nullableStoreTime(r.LastRefreshAt), r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano), providerData)
 	return err
 }
 

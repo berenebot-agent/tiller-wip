@@ -257,7 +257,7 @@ With a Single key, `main` can be redirected from the control panel without chang
 
 Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material.
 
-**Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets.
+**Recoverable provider credentials are encrypted at rest, always on.** Provider API credentials, OAuth tokens, and the notification auth header are sealed with AES-256-GCM; the master key lives outside the database (`TILLER_MASTER_KEY` / `TILLER_MASTER_KEY_FILE`, or a generated `./data/master.key`). **Back the master key up separately** — without it, existing encrypted credentials cannot be recovered. A database backup does not contain the key; a full `./data` archive does, and must be treated as secret. If encrypted values exist but the key is missing or wrong, Tiller starts in a locked state and credential-bearing providers stay unavailable until the key is restored. Rotate with `tiller-router rotate-master-key` (service stopped). Take care with **where you store `./data`** and any backups of it — keep them on storage you trust.
 
 Client API-key secrets are shown once and stored in hashed form for authentication. Activity is metadata-only by default. If you explicitly enable Detailed Error Logging, failed request bodies and provider error bodies may be stored, bounded to 1 MiB, and Activity exports containing those records must be treated as sensitive.
 
