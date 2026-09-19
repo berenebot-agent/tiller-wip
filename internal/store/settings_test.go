@@ -75,6 +75,40 @@ func TestSettingsDefaultsArePerAccount(t *testing.T) {
 	}
 }
 
+// TestRunTxCommitsAndRollsBack proves a transaction-bound scope writes for the
+// scope's own account and that an error rolls the whole transaction back.
+func TestRunTxCommitsAndRollsBack(t *testing.T) {
+	_, st := openStore(t)
+	ctx := context.Background()
+	local := st.For(database.LocalAccountID)
+
+	if err := local.RunTx(ctx, nil, func(tx *store.Scope) error {
+		if tx.AccountID() != local.AccountID() {
+			t.Fatalf("tx account = %q, want %q", tx.AccountID(), local.AccountID())
+		}
+		return tx.SetSetting(ctx, store.SettingDefaultRetentionDays, "5")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := local.GetInt(ctx, store.SettingDefaultRetentionDays); err != nil || got != 5 {
+		t.Fatalf("committed retention = %d (err %v), want 5", got, err)
+	}
+
+	wantErr := context.Canceled
+	err := local.RunTx(ctx, nil, func(tx *store.Scope) error {
+		if err := tx.SetSetting(ctx, store.SettingDefaultRetentionDays, "99"); err != nil {
+			return err
+		}
+		return wantErr
+	})
+	if err != wantErr {
+		t.Fatalf("RunTx error = %v, want %v", err, wantErr)
+	}
+	if got, err := local.GetInt(ctx, store.SettingDefaultRetentionDays); err != nil || got != 5 {
+		t.Fatalf("rolled-back retention = %d (err %v), want 5", got, err)
+	}
+}
+
 // TestNotificationSettingsAreAccountScoped proves notification config does not
 // leak across accounts.
 func TestNotificationSettingsAreAccountScoped(t *testing.T) {

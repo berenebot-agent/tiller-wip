@@ -28,13 +28,13 @@ const (
 // GetSetting returns the raw string value for an account settings key.
 func (s *Scope) GetSetting(ctx context.Context, key string) (string, error) {
 	var value string
-	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE account_id=? AND key=?`, s.accountID, key).Scan(&value)
+	err := s.q.QueryRowContext(ctx, `SELECT value FROM settings WHERE account_id=? AND key=?`, s.accountID, key).Scan(&value)
 	return value, err
 }
 
 // SetSetting upserts an account settings key.
 func (s *Scope) SetSetting(ctx context.Context, key, value string) error {
-	_, err := s.db.ExecContext(ctx,
+	_, err := s.q.ExecContext(ctx,
 		`INSERT INTO settings(account_id,key,value,updated_at) VALUES(?,?,?,?)
 		 ON CONFLICT(account_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
 		s.accountID, key, value, now())
@@ -134,7 +134,7 @@ func (s *Scope) GetNotificationSettingsBatch(ctx context.Context) (NotificationS
 	for _, k := range keys {
 		args = append(args, k)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM settings WHERE account_id=? AND key IN (`+placeholders+`)`, args...)
+	rows, err := s.q.QueryContext(ctx, `SELECT key,value FROM settings WHERE account_id=? AND key IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return ns, err
 	}
