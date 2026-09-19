@@ -1854,7 +1854,7 @@ func rewriteModel(value any, upstream, requested string) {
 func (s *Server) openCooldown(candidate resolvedRoute, class string, row *logRow, cooldownSeconds int, message string) {
 	failedAt := time.Now()
 	until := failedAt.Add(time.Duration(cooldownSeconds) * time.Second)
-	s.cooldown.set(row.accountID, candidate.ProviderModelID, failedAt, until, candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, message)
+	s.cooldown.set(rowAccountID(row), candidate.ProviderModelID, failedAt, until, candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, message)
 	if s.logger != nil {
 		s.logger.Warn("target cooled down",
 			"provider", candidate.Provider.Name,
@@ -1903,7 +1903,7 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 		// log it at Info (visible at the default level) with the origin of the
 		// failure that opened the cooldown so the skip explains itself.
 		if s.cooldown != nil {
-			if entry, ok := s.cooldown.statusByName(row.accountID, attempt.provider, attempt.model, time.Now()); ok {
+			if entry, ok := s.cooldown.statusByName(rowAccountID(row), attempt.provider, attempt.model, time.Now()); ok {
 				attrs = append(attrs,
 					"cooldown_origin_request_id", entry.originRequestLogID,
 					"cooldown_origin_error_class", entry.originErrorClass,

@@ -171,6 +171,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	if len(row.attempts) == 0 {
 		return
 	}
+	accountID := rowAccountID(row)
 	s.lastOutcomeMu.Lock()
 	if s.lastOutcome == nil {
 		s.lastOutcome = map[string]lastOutcome{}
@@ -210,7 +211,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		}
 		delta[attempt.providerModelID] = out
 		if out.Degrading {
-			s.lastOutcome[tenantKey(row.accountID, attempt.providerModelID)] = out
+			s.lastOutcome[tenantKey(accountID, attempt.providerModelID)] = out
 		}
 	}
 	s.lastOutcomeMu.Unlock()
@@ -218,7 +219,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	// buffer drops the delta, which the next snapshot self-heals. Never blocks
 	// the inference path.
 	if len(delta) > 0 && s.liveHub != nil {
-		s.liveHub.emitOutcome(row.accountID, delta)
+		s.liveHub.emitOutcome(accountID, delta)
 	}
 }
 

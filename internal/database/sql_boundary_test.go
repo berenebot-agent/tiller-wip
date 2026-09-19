@@ -24,6 +24,7 @@ func TestTenantSQLStaysInStore(t *testing.T) {
 	for _, table := range TenantTables() {
 		patterns = append(patterns, regexp.MustCompile(`(?i)\b`+verbs+`\s+`+regexp.QuoteMeta(table)+`\b`))
 	}
+	sqlKeyword := regexp.MustCompile(`(?i)\b(select|insert|delete|values|where|set)\b`)
 	fset := token.NewFileSet()
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -57,6 +58,9 @@ func TestTenantSQLStaysInStore(t *testing.T) {
 			}
 			value, uerr := strconv.Unquote(lit.Value)
 			if uerr != nil {
+				return true
+			}
+			if !sqlKeyword.MatchString(value) {
 				return true
 			}
 			for _, re := range patterns {

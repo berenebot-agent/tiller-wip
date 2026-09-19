@@ -9,6 +9,10 @@ import (
 
 const testAcct = "acct-1"
 
+// snapshotClientRouteKey builds a dashboard-visible composite key (account
+// stripped), as returned by clientRouteSnapshot.
+func snapshotClientRouteKey(id, routeID string) string { return id + "\x00" + routeID }
+
 // The route-level lane is gone (single-ticket liveness): the client ticket
 // is the only request-presence signal, so these tests cover the client
 // lifecycle carrying the route ID.
@@ -17,11 +21,11 @@ func TestInflightTrackerClientTransitions(t *testing.T) {
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(_ string, delta inflightDelta) { deltas = append(deltas, delta) }}
 
 	tracker.clientStart(testAcct, "client-1", "route-1", "main")
-	if got := tracker.clientRouteSnapshot(testAcct)[inflightClientKey(testAcct, "client-1", "route-1")]; got != (inflightState{Active: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "route-1"}) {
+	if got := tracker.clientRouteSnapshot(testAcct)[snapshotClientRouteKey("client-1", "route-1")]; got != (inflightState{Active: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "route-1"}) {
 		t.Fatalf("after client start = %+v", got)
 	}
 	tracker.clientStreaming(testAcct, "client-1", "route-1")
-	if got := tracker.clientRouteSnapshot(testAcct)[inflightClientKey(testAcct, "client-1", "route-1")]; got != (inflightState{Active: 1, Streaming: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "route-1"}) {
+	if got := tracker.clientRouteSnapshot(testAcct)[snapshotClientRouteKey("client-1", "route-1")]; got != (inflightState{Active: 1, Streaming: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "route-1"}) {
 		t.Fatalf("after client streaming = %+v", got)
 	}
 	tracker.clientEnd(testAcct, "client-1", "route-1", true)
@@ -59,10 +63,10 @@ func TestInflightTrackerKeepsConcurrentRoutesForOneClient(t *testing.T) {
 	tracker.clientStart(testAcct, "client-1", "coding", "coding")
 
 	routes := tracker.clientRouteSnapshot(testAcct)
-	if got := routes[inflightClientKey(testAcct, "client-1", "main")]; got != (inflightState{Active: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "main"}) {
+	if got := routes[snapshotClientRouteKey("client-1", "main")]; got != (inflightState{Active: 1, RequestedModel: "main", ClientID: "client-1", RouteID: "main"}) {
 		t.Fatalf("main ticket = %+v", got)
 	}
-	if got := routes[inflightClientKey(testAcct, "client-1", "coding")]; got != (inflightState{Active: 1, RequestedModel: "coding", ClientID: "client-1", RouteID: "coding"}) {
+	if got := routes[snapshotClientRouteKey("client-1", "coding")]; got != (inflightState{Active: 1, RequestedModel: "coding", ClientID: "client-1", RouteID: "coding"}) {
 		t.Fatalf("coding ticket = %+v", got)
 	}
 	if len(routes) != 2 {
@@ -74,10 +78,10 @@ func TestInflightTrackerKeepsConcurrentRoutesForOneClient(t *testing.T) {
 
 	tracker.clientEnd(testAcct, "client-1", "main", false)
 	routes = tracker.clientRouteSnapshot(testAcct)
-	if _, ok := routes[inflightClientKey(testAcct, "client-1", "coding")]; !ok {
+	if _, ok := routes[snapshotClientRouteKey("client-1", "coding")]; !ok {
 		t.Fatalf("coding ticket was torn down with main: %+v", routes)
 	}
-	if _, ok := routes[inflightClientKey(testAcct, "client-1", "main")]; ok {
+	if _, ok := routes[snapshotClientRouteKey("client-1", "main")]; ok {
 		t.Fatalf("main ticket survived its end: %+v", routes)
 	}
 	if agg := tracker.clientSnapshot(testAcct)["client-1"]; agg.Active != 1 {

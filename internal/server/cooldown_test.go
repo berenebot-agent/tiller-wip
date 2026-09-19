@@ -16,6 +16,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 func cooldownTestHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc) (*testAPI, string, string, *Server) {
@@ -542,11 +543,13 @@ func TestCooldownTimeoutOpensCooldown(t *testing.T) {
 	})
 	api, secret, canonical, app := cooldownTestHarness(t, hangA, okB)
 	t.Cleanup(func() { close(releaseA) })
-	// Shorten the router's per-attempt time-to-first-header bound so the hang
-	// is classified as upstream_timeout quickly instead of waiting 60s.
-	app.providers.Registry().SetResponseHeaderTimeout(100 * time.Millisecond)
+	// Shorten the account's per-attempt time-to-first-header bound so the hang
+	// is classified as upstream_timeout instead of waiting the default 60s.
+	if err := app.store.For(database.LocalAccountID).SetSetting(context.Background(), store.SettingFallbackTimeoutSeconds, "1"); err != nil {
+		t.Fatal(err)
+	}
 
-	apiClient := &http.Client{Timeout: 3 * time.Second}
+	apiClient := &http.Client{Timeout: 5 * time.Second}
 	body, _ := json.Marshal(map[string]any{"model": canonical, "messages": []any{}})
 	req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+secret)

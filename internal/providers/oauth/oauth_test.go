@@ -157,9 +157,6 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 		t.Fatalf("ForceRefresh error = %v, want ErrReconnectRequired", err)
 	}
 	record := testToken(t, st, "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if record.AuthState != AuthReconnectRequired {
 		t.Fatalf("auth_state = %q, want reconnect_required", record.AuthState)
 	}
@@ -172,9 +169,6 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 		t.Fatalf("ForceRefresh error = %v, want ErrAuthUnavailable", err)
 	}
 	record = testToken(t, st, "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if record.AuthState != AuthUnavailable {
 		t.Fatalf("auth_state = %q, want unavailable", record.AuthState)
 	}
@@ -187,9 +181,6 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 		t.Fatal("ForceRefresh expected error, got nil")
 	}
 	record = testToken(t, st, "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if record.AuthState != AuthUnavailable {
 		t.Fatalf("auth_state = %q, want unavailable (transient)", record.AuthState)
 	}
@@ -202,9 +193,6 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 		t.Fatalf("ForceRefresh success error = %v", err)
 	}
 	record = testToken(t, st, "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if record.AuthState != AuthConnected {
 		t.Fatalf("auth_state = %q, want connected", record.AuthState)
 	}
@@ -263,9 +251,6 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 		t.Fatalf("refresh calls = %d, want 1", calls.Load())
 	}
 	record := testToken(t, st, "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if record.RefreshToken != "rotated" {
 		t.Fatalf("stored refresh token = %q", record.RefreshToken)
 	}
@@ -305,9 +290,6 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 		t.Fatal("expected error from canceled context")
 	}
 	record := testToken(t, st, "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
 	// Auth state must remain connected — cancellation is transient.
 	if record.AuthState != AuthConnected {
 		t.Fatalf("auth_state = %q after cancellation, want connected", record.AuthState)

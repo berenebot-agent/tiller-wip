@@ -480,6 +480,16 @@ func tenantKey(accountID, id string) string {
 	return accountID + "\x00" + id
 }
 
+// rowAccountID resolves the account for a log row, defaulting a row that was
+// built without one (older code path or a unit test) to the implicit local
+// account.
+func rowAccountID(row *logRow) string {
+	if row == nil || row.accountID == "" {
+		return database.LocalAccountID
+	}
+	return row.accountID
+}
+
 func boolInt(v bool) int {
 	if v {
 		return 1

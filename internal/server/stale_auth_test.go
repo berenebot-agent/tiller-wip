@@ -225,9 +225,6 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 	}
 
 	record := getOAuthToken(t, db, "provider-dead")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if record.AuthState != oauth.AuthReconnectRequired {
 		t.Fatalf("auth_state = %q, want reconnect_required", record.AuthState)
 	}

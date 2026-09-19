@@ -90,7 +90,8 @@ func (m *Manager) Refresh(ctx context.Context, accountID, providerID string) err
 	}
 	models, discoverErr := m.registry.Discover(ctx, provider)
 	if discoverErr != nil {
-		return m.store.For(accountID).SetProviderRefreshError(ctx, providerID, safeRefreshError(discoverErr))
+		_ = m.store.For(accountID).SetProviderRefreshError(ctx, providerID, safeRefreshError(discoverErr))
+		return discoverErr
 	}
 	return m.store.For(accountID).ApplyCatalogue(ctx, providerID, toCatalogueModels(models))
 }

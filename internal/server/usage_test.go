@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"github.com/tiller-router/tiller-router/internal/database"
 	"io"
 	"testing"
 	"time"
@@ -181,7 +182,7 @@ func TestRecordLastOutcomeFailedAttempt(t *testing.T) {
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	out, ok := s.lastOutcome["pm-failed"]
+	out, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-failed"]
 	if !ok {
 		t.Fatalf("expected failed target to be recorded: %v", s.lastOutcome)
 	}
@@ -211,7 +212,7 @@ func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	if _, ok := s.lastOutcome["pm-skipped"]; ok {
+	if _, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-skipped"]; ok {
 		t.Fatalf("skipped target should not be recorded: %v", s.lastOutcome)
 	}
 }
@@ -234,11 +235,11 @@ func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	failed, ok := s.lastOutcome["pm-primary"]
+	failed, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-primary"]
 	if !ok || failed.IsSuccess || failed.Status != 503 {
 		t.Fatalf("failed primary must degrade target health: %v", s.lastOutcome)
 	}
-	success, ok := s.lastOutcome["pm-backup"]
+	success, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-backup"]
 	if !ok || !success.IsSuccess {
 		t.Fatalf("expected succeeding target green: %v", s.lastOutcome)
 	}
@@ -278,8 +279,9 @@ func TestRecordLastOutcomeDoesNotCollideForSameUpstreamNames(t *testing.T) {
 	}})
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	if len(s.lastOutcome) != 2 || s.lastOutcome["pm-one"].IsSuccess || !s.lastOutcome["pm-two"].IsSuccess {
-		t.Fatalf("outcomes were not keyed by provider model ID: %+v", s.lastOutcome)
+	snap := s.lastOutcomeSnapshot(database.LocalAccountID)
+	if len(snap) != 2 || snap["pm-one"].IsSuccess || !snap["pm-two"].IsSuccess {
+		t.Fatalf("outcomes were not keyed by provider model ID: %+v", snap)
 	}
 }
 
@@ -292,14 +294,14 @@ func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) 
 	s.recordLastOutcome(row)
 	s.lastOutcomeMu.RLock()
 	defer s.lastOutcomeMu.RUnlock()
-	primary, ok := s.lastOutcome["pm-primary"]
+	primary, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-primary"]
 	if !ok || primary.IsSuccess || primary.Status != 0 {
 		t.Fatalf("failed primary must degrade target health with status 0: %+v", s.lastOutcome)
 	}
-	if got := s.lastOutcome["pm-backup"]; got.Status != 200 || !got.IsSuccess {
+	if got := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-backup"]; got.Status != 200 || !got.IsSuccess {
 		t.Fatalf("fallback success outcome = %+v", got)
 	}
-	if got := s.lastOutcome["pm-backup"]; got.At == row.createdAt {
+	if got := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-backup"]; got.At == row.createdAt {
 		t.Fatalf("outcome timestamp used request start: %+v", got)
 	}
 }
@@ -309,7 +311,7 @@ func TestRecordLastOutcomeUsesLaterRecordingTime(t *testing.T) {
 	first := &logRow{createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{{providerModelID: "pm-model", provider: "provider", model: "model", result: "failed"}}}
 	s.recordLastOutcome(first)
 	s.lastOutcomeMu.RLock()
-	firstRecordedAt := s.lastOutcome["pm-model"].At
+	firstRecordedAt := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-model"].At
 	s.lastOutcomeMu.RUnlock()
 
 	time.Sleep(time.Millisecond)
@@ -317,7 +319,7 @@ func TestRecordLastOutcomeUsesLaterRecordingTime(t *testing.T) {
 	s.recordLastOutcome(second)
 
 	s.lastOutcomeMu.RLock()
-	got := s.lastOutcome["pm-model"]
+	got := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-model"]
 	s.lastOutcomeMu.RUnlock()
 	firstAt, err := time.Parse(time.RFC3339Nano, firstRecordedAt)
 	if err != nil {
