@@ -79,6 +79,54 @@ func TestTenantTableClassification(t *testing.T) {
 		}
 	}
 	verifyActivitySchema(t, db)
+	verifyAuditSchema(t, filepath.Join(filepath.Dir(db.Path), AuditFileName))
+}
+
+// verifyAuditSchema opens the central audit database and checks its table
+// classification and account_id coverage, mirroring the Activity guard. Audit
+// tables live outside the core database so security events are not lost when
+// the core backup policy or an account deletion is applied.
+func verifyAuditSchema(t *testing.T, path string) {
+	t.Helper()
+	adb, err := OpenAudit(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer adb.Close()
+
+	rows, err := adb.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatal(err)
+		}
+		actual[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for name := range actual {
+		if _, ok := AuditTableClassification[name]; !ok {
+			t.Errorf("audit table %q is not classified in AuditTableClassification", name)
+		}
+	}
+	for name := range AuditTableClassification {
+		if !actual[name] {
+			t.Errorf("AuditTableClassification declares %q but it is not in the audit schema", name)
+		}
+	}
+	for _, name := range AuditTenantTables() {
+		if !actual[name] {
+			continue
+		}
+		if !activityTableHasColumn(t, adb, name, "account_id") {
+			t.Errorf("audit tenant table %q is missing an account_id column", name)
+		}
+	}
 }
 
 // verifyActivitySchema opens a sample per-account Activity database and checks

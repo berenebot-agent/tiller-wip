@@ -20,10 +20,15 @@ const (
 // (control-plane) database's tenancy boundary. Keys are SQLite table names.
 var TableClassification = map[string]TableClass{
 	// Platform-global.
-	"schema_migrations": ClassPlatform,
-	"accounts":          ClassPlatform,
-	"admin_sessions":    ClassPlatform,
-	"platform_settings": ClassPlatform,
+	"schema_migrations":         ClassPlatform,
+	"accounts":                  ClassPlatform,
+	"admin_sessions":            ClassPlatform,
+	"platform_settings":         ClassPlatform,
+	"users":                     ClassPlatform,
+	"user_sessions":             ClassPlatform,
+	"email_verification_tokens": ClassPlatform,
+	"password_reset_tokens":     ClassPlatform,
+	"platform_admin_sessions":   ClassPlatform,
 
 	// Tenant-owned. Every one of these must carry account_id.
 	"namespaces":               ClassTenant,
@@ -73,10 +78,33 @@ func ActivityTenantTables() []string {
 	return out
 }
 
-// TenantTables returns every tenant-owned table name across the central and
-// Activity databases. The SQL-boundary guard uses this union so tenant SQL
-// cannot escape internal/store regardless of which database it targets.
+// AuditTableClassification is the table inventory for the central audit
+// database (one file shared by every account). Account audit events are
+// tenant-owned and carry account_id; platform audit events are global.
+var AuditTableClassification = map[string]TableClass{
+	"audit_schema_migrations": ClassPlatform,
+	"audit_meta":              ClassPlatform,
+	"account_audit_events":    ClassTenant,
+	"platform_audit_events":   ClassPlatform,
+}
+
+// AuditTenantTables returns the tenant-owned table names in the audit database.
+func AuditTenantTables() []string {
+	out := make([]string, 0, len(AuditTableClassification))
+	for name, class := range AuditTableClassification {
+		if class == ClassTenant {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
+// TenantTables returns every tenant-owned table name across the central,
+// Activity, and audit databases. The SQL-boundary guard uses this union so
+// tenant SQL cannot escape internal/store regardless of which database it
+// targets.
 func TenantTables() []string {
 	out := append(MainTenantTables(), ActivityTenantTables()...)
+	out = append(out, AuditTenantTables()...)
 	return out
 }

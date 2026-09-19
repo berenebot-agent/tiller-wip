@@ -28,6 +28,13 @@ func openMigrationFixture(t *testing.T, path string, checkpoint int) {
 
 	raw := openRawMigrationDB(t, path)
 	defer raw.Close()
+	// Mirror the production migration contract: Migrate() disables foreign-key
+	// enforcement on the connection before applying migrations, because table
+	// rebuilds drop parent tables while child tables exist. Seeding re-enables
+	// enforcement afterwards, and Open() ends with foreign_key_check.
+	if _, err := raw.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := raw.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL) STRICT`); err != nil {
 		t.Fatal(err)
 	}
@@ -50,6 +57,10 @@ func openMigrationFixture(t *testing.T, path string, checkpoint int) {
 	}
 	if checkpoint == 0 {
 		return
+	}
+	// Seed with enforcement back on so a bad fixture row is caught here.
+	if _, err := raw.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
 	}
 	seedMigrationFixture(t, raw, checkpoint)
 }
