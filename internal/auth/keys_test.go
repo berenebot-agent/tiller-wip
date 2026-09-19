@@ -17,21 +17,22 @@ func TestGenerateAndVerifyKey(t *testing.T) {
 	if !ok || selector != generated.Selector {
 		t.Fatal("generated key did not parse")
 	}
-	if !VerifySecret(secret, generated.Hash) {
+	if !VerifyEncoded(secret, generated.Hash) {
 		t.Fatal("secret did not verify")
 	}
-	if VerifySecret(secret+"x", generated.Hash) {
+	if VerifyEncoded(secret+"x", generated.Hash) {
 		t.Fatal("wrong secret verified")
 	}
-	memory, iterations, lanes, err := ArgonParameters(generated.Hash)
-	if err != nil {
-		t.Fatal(err)
+	// Client keys are high-entropy machine tokens and use the production token
+	// hasher (bcrypt), not the memory-hard credential hasher.
+	if !strings.HasPrefix(generated.Hash, "$2") {
+		t.Fatalf("expected bcrypt hash, got %q", generated.Hash)
 	}
-	if memory != 64*1024 || iterations != 3 || lanes != 4 {
-		t.Fatalf("unexpected Argon2id parameters: %d/%d/%d", memory, iterations, lanes)
+	if (BcryptHasher{}).NeedsRehash(generated.Hash) {
+		t.Fatal("freshly generated bcrypt key unexpectedly needs rehash")
 	}
 	if strings.Contains(generated.Hash, secret) {
-		t.Fatal("PHC hash contains plaintext secret")
+		t.Fatal("hash contains plaintext secret")
 	}
 }
 

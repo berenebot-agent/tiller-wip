@@ -24,13 +24,11 @@ func newTestStore(t *testing.T, username, password string, ttl time.Duration) (*
 	return store, db
 }
 
-// TestSessionStoreProductionHasher verifies the production Argon2id path: hashes
-// use the argon2id PHC prefix, parameters are 64MiB/3/4, correct/incorrect
-// secrets verify/fail, malformed PHC fails, and material is not stored
-// plaintext.
+// TestSessionStoreProductionHasher verifies the production tiered path:
+// high-entropy session tokens are bcrypt-hashed, while the low-entropy admin
+// credential fingerprint keeps the memory-hard Argon2id KDF (64MiB/3/4).
 func TestSessionStoreProductionHasher(t *testing.T) {
-	store, db := newTestStore(t, "admin", "pw", 30*24*time.Hour)
-	_ = db
+	store, _ := newTestStore(t, "admin", "pw", 30*24*time.Hour)
 	session, err := store.Create()
 	if err != nil {
 		t.Fatal(err)
@@ -40,26 +38,38 @@ func TestSessionStoreProductionHasher(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT token_hash FROM admin_sessions`).Scan(&tokenHash); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(tokenHash, "$argon2id$") {
-		t.Fatalf("expected argon2id hash, got %q", tokenHash)
+	if !strings.HasPrefix(tokenHash, "$2") {
+		t.Fatalf("expected bcrypt session token hash, got %q", tokenHash)
 	}
-	memory, iterations, lanes, err := ArgonParameters(tokenHash)
+	if !store.tokenHasher.Verify(secret, tokenHash) {
+		t.Fatal("correct secret did not verify against production session hash")
+	}
+	if store.tokenHasher.Verify(secret+"wrong", tokenHash) {
+		t.Fatal("incorrect secret verified against production session hash")
+	}
+	if store.tokenHasher.Verify(secret, "$malformed$hash") {
+		t.Fatal("malformed hash verified")
+	}
+	if tokenHash == secret {
+		t.Fatal("raw session secret stored in database")
+	}
+
+	// The admin credential fingerprint remains Argon2id.
+	var credentialHash string
+	if err := store.db.QueryRow(`SELECT value FROM settings WHERE key=?`, credentialHashKey).Scan(&credentialHash); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(credentialHash, "$argon2id$") {
+		t.Fatalf("expected argon2id credential fingerprint, got %q", credentialHash)
+	}
+	memory, iterations, lanes, err := ArgonParameters(credentialHash)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if memory != 64*1024 || iterations != 3 || lanes != 4 {
 		t.Fatalf("unexpected Argon2id parameters: %d/%d/%d", memory, iterations, lanes)
 	}
-	if !store.hasher.Verify(secret, tokenHash) {
-		t.Fatal("correct secret did not verify against production hash")
-	}
-	if store.hasher.Verify(secret+"wrong", tokenHash) {
-		t.Fatal("incorrect secret verified against production hash")
-	}
-	if store.hasher.Verify(secret, "$malformed$hash") {
-		t.Fatal("malformed PHC verified")
-	}
-	if tokenHash == secret {
-		t.Fatal("raw session secret stored in database")
+	if !store.credentialHasher.Verify("admin\x00pw", credentialHash) {
+		t.Fatal("credential fingerprint did not verify")
 	}
 }

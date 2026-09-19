@@ -60,9 +60,10 @@ func GenerateKeyWithHasher(hasher SecretHasher) (GeneratedKey, error) {
 	}, nil
 }
 
-// GenerateKey generates a client key using the production Argon2id hasher.
+// GenerateKey generates a client key using the production token hasher
+// (bcrypt; client keys are high-entropy machine tokens).
 func GenerateKey() (GeneratedKey, error) {
-	return GenerateKeyWithHasher(Argon2Hasher{})
+	return GenerateKeyWithHasher(BcryptHasher{})
 }
 
 func HashSecret(secret string) (string, error) {
@@ -155,15 +156,16 @@ func NewClientAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) (*ClientA
 		return nil, err
 	}
 	if hasher == nil {
-		hasher = Argon2Hasher{}
+		hasher = BcryptHasher{}
 	}
 	return &ClientAuthenticator{db: db, key: key, ttl: 30 * time.Second, hasher: hasher, entries: make(map[[32]byte]cacheEntry), sem: make(chan struct{}, 4)}, nil
 }
 
 // NewClientAuthenticator constructs a ClientAuthenticator using the production
-// Argon2id hasher. It is the production wrapper.
+// token hasher (bcrypt; client keys are high-entropy machine tokens). It is the
+// production wrapper.
 func NewClientAuthenticator(db *sql.DB) (*ClientAuthenticator, error) {
-	return NewClientAuthenticatorWithHasher(db, Argon2Hasher{})
+	return NewClientAuthenticatorWithHasher(db, BcryptHasher{})
 }
 
 func (a *ClientAuthenticator) Authenticate(raw string) (ClientIdentity, bool) {
@@ -205,6 +207,16 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 		Scan(&identity.ID, &identity.Name, &identity.Enabled, &hash)
 	if err != nil || !identity.Enabled || !a.hasher.Verify(secret, hash) {
 		return ClientIdentity{}, false, true
+	}
+	// Lazy migration: a successful verify of a legacy argon2id key upgrades the
+	// stored hash to the current algorithm, best-effort and outside the cache
+	// lock. The compare-and-swap on oldHash makes this safe against a concurrent
+	// rotation (the update becomes a no-op if secret_hash already changed).
+	if a.hasher.NeedsRehash(hash) {
+		if upgraded, herr := a.hasher.Hash(secret); herr == nil {
+			_, _ = a.db.ExecContext(ctx, `UPDATE client_keys SET secret_hash=?, updated_at=? WHERE id=? AND secret_hash=?`,
+				upgraded, formatUTC(time.Now()), identity.ID, hash)
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -282,36 +294,54 @@ type sessionCacheEntry struct {
 // SessionStore persists admin sessions in the database so they survive process
 // and container restarts. The raw session secret is never stored; only a hash
 // of it is persisted. A short-lived in-memory cache avoids recomputing the hash
-// on every request. The hasher is injected so tests can use a fast
-// implementation; production code uses Argon2Hasher.
+// on every request. The hashers are injected so tests can use a fast
+// implementation; production uses bcrypt for session tokens and argon2id for
+// the admin credential fingerprint.
 type SessionStore struct {
-	db     *sql.DB
-	ttl    time.Duration
-	hasher SecretHasher
-	mu     sync.Mutex
-	cache  map[string]sessionCacheEntry
-	rev    uint64
+	db  *sql.DB
+	ttl time.Duration
+	// tokenHasher hashes session tokens (high-entropy, per-login).
+	tokenHasher SecretHasher
+	// credentialHasher hashes the admin credential fingerprint (low-entropy,
+	// human-chosen), which keeps the memory-hard KDF.
+	credentialHasher SecretHasher
+	mu               sync.Mutex
+	cache            map[string]sessionCacheEntry
+	rev              uint64
 }
 
-// NewSessionStoreWithHasher constructs a SessionStore with the given hasher.
+// NewSessionStoreWithHasher constructs a SessionStore that uses the same hasher
+// for session tokens and the admin credential fingerprint. It exists for tests,
+// which inject a fast hasher; production uses NewSessionStore.
 func NewSessionStoreWithHasher(db *sql.DB, username, password string, ttl time.Duration, hasher SecretHasher) (*SessionStore, error) {
+	return NewSessionStoreTiered(db, username, password, ttl, hasher, hasher)
+}
+
+// NewSessionStoreTiered constructs a SessionStore with separate hashers for
+// session tokens and the admin credential fingerprint. Either nil falls back to
+// the production default for its role (bcrypt tokens, argon2id credential).
+func NewSessionStoreTiered(db *sql.DB, username, password string, ttl time.Duration, tokenHasher, credentialHasher SecretHasher) (*SessionStore, error) {
 	if ttl <= 0 {
 		ttl = 30 * 24 * time.Hour
 	}
-	if hasher == nil {
-		hasher = Argon2Hasher{}
+	if tokenHasher == nil {
+		tokenHasher = BcryptHasher{}
 	}
-	s := &SessionStore{db: db, ttl: ttl, hasher: hasher, cache: make(map[string]sessionCacheEntry)}
+	if credentialHasher == nil {
+		credentialHasher = Argon2Hasher{}
+	}
+	s := &SessionStore{db: db, ttl: ttl, tokenHasher: tokenHasher, credentialHasher: credentialHasher, cache: make(map[string]sessionCacheEntry)}
 	if err := s.syncCredential(username, password); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-// NewSessionStore constructs a SessionStore using the production Argon2id
-// hasher. It is the production wrapper around NewSessionStoreWithHasher.
+// NewSessionStore constructs a SessionStore using the production tiered hashers:
+// bcrypt for high-entropy session tokens and argon2id for the low-entropy admin
+// credential fingerprint.
 func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (*SessionStore, error) {
-	return NewSessionStoreWithHasher(db, username, password, ttl, Argon2Hasher{})
+	return NewSessionStoreTiered(db, username, password, ttl, BcryptHasher{}, Argon2Hasher{})
 }
 
 // syncCredential stores a fingerprint of the admin credentials and invalidates
@@ -322,7 +352,7 @@ func (s *SessionStore) syncCredential(username, password string) error {
 	var stored string
 	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, credentialHashKey).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
-		hash, err := s.hasher.Hash(material)
+		hash, err := s.credentialHasher.Hash(material)
 		if err != nil {
 			return err
 		}
@@ -332,13 +362,13 @@ func (s *SessionStore) syncCredential(username, password string) error {
 	if err != nil {
 		return err
 	}
-	if s.hasher.Verify(material, stored) {
+	if s.credentialHasher.Verify(material, stored) {
 		return nil
 	}
 	if err := s.InvalidateAll(); err != nil {
 		return err
 	}
-	hash, err := s.hasher.Hash(material)
+	hash, err := s.credentialHasher.Hash(material)
 	if err != nil {
 		return err
 	}
@@ -361,7 +391,7 @@ func (s *SessionStore) Create() (Session, error) {
 	}
 	sel := base64.RawURLEncoding.EncodeToString(selector)
 	sec := base64.RawURLEncoding.EncodeToString(secret)
-	hash, err := s.hasher.Hash(sec)
+	hash, err := s.tokenHasher.Hash(sec)
 	if err != nil {
 		return Session{}, err
 	}
@@ -406,9 +436,12 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		s.revoke(selector)
 		return Session{}, false
 	}
-	if !s.hasher.Verify(secret, tokenHash) {
+	if !s.tokenHasher.Verify(secret, tokenHash) {
 		return Session{}, false
 	}
+	// Lazy migration: upgrade a legacy argon2id session token hash after a
+	// successful verify. Best-effort; sessions also upgrade on next login.
+	s.rehashSessionToken(selector, secret, tokenHash)
 	// Sliding expiry: extend when more than half the lifetime has elapsed.
 	if now.Add(s.ttl / 2).After(exp) {
 		exp = now.Add(s.ttl)
@@ -437,10 +470,26 @@ func (s *SessionStore) Validate(token string) (Session, bool) {
 		return Session{}, false
 	}
 	exp, err := time.Parse(time.RFC3339Nano, expiresAt)
-	if err != nil || !time.Now().Before(exp) || !s.hasher.Verify(secret, tokenHash) {
+	if err != nil || !time.Now().Before(exp) || !s.tokenHasher.Verify(secret, tokenHash) {
 		return Session{}, false
 	}
+	s.rehashSessionToken(selector, secret, tokenHash)
 	return Session{CSRFToken: csrfToken, ExpiresAt: exp}, true
+}
+
+// rehashSessionToken upgrades a session's stored token hash to the store's
+// current token algorithm after a successful verify. The compare-and-swap on
+// oldHash makes it a no-op if the row already changed. Best-effort: a failure
+// only means the token is upgraded on a later verify (or on next login).
+func (s *SessionStore) rehashSessionToken(selector, secret, oldHash string) {
+	if !s.tokenHasher.NeedsRehash(oldHash) {
+		return
+	}
+	upgraded, err := s.tokenHasher.Hash(secret)
+	if err != nil {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE admin_sessions SET token_hash=? WHERE id=? AND token_hash=?`, upgraded, selector, oldHash)
 }
 
 func (s *SessionStore) Delete(token string) {

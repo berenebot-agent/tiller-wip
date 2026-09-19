@@ -28,10 +28,12 @@ import (
 const sessionCookie = "tiller_admin_session"
 
 type Server struct {
-	config        config.Config
-	db            *database.DB
-	clients       *auth.ClientAuthenticator
-	sessions      *auth.SessionStore
+	config   config.Config
+	db       *database.DB
+	clients  *auth.ClientAuthenticator
+	sessions *auth.SessionStore
+	// secretHasher is the token hasher used when generating client keys
+	// (bcrypt in production; a fast hasher in tests).
 	secretHasher  auth.SecretHasher
 	providers     *providers.Manager
 	oauthFlows    *oauth.FlowStore
@@ -122,26 +124,33 @@ const (
 type serverOption func(*serverOptions)
 
 type serverOptions struct {
-	secretHasher auth.SecretHasher
+	// tokenHasher hashes high-entropy machine tokens (client API keys, admin
+	// session tokens). credentialHasher hashes the low-entropy admin credential
+	// fingerprint, which keeps the memory-hard KDF.
+	tokenHasher      auth.SecretHasher
+	credentialHasher auth.SecretHasher
 }
 
-// withSecretHasher sets the SecretHasher for the server's authenticator and
-// session store. Unexported so only in-package tests can use it; production
-// callers get Argon2Hasher by default.
+// withSecretHasher sets a single SecretHasher for both token hashing and the
+// admin credential fingerprint. Unexported so only in-package tests can use it;
+// production uses the tiered defaults (bcrypt tokens, argon2id credential).
 func withSecretHasher(h auth.SecretHasher) serverOption {
-	return func(o *serverOptions) { o.secretHasher = h }
+	return func(o *serverOptions) {
+		o.tokenHasher = h
+		o.credentialHasher = h
+	}
 }
 
 func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...serverOption) (*Server, error) {
-	options := serverOptions{secretHasher: auth.Argon2Hasher{}}
+	options := serverOptions{tokenHasher: auth.BcryptHasher{}, credentialHasher: auth.Argon2Hasher{}}
 	for _, opt := range opts {
 		opt(&options)
 	}
-	clients, err := auth.NewClientAuthenticatorWithHasher(db.SQL, options.secretHasher)
+	clients, err := auth.NewClientAuthenticatorWithHasher(db.SQL, options.tokenHasher)
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := auth.NewSessionStoreWithHasher(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL, options.secretHasher)
+	sessions, err := auth.NewSessionStoreTiered(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL, options.tokenHasher, options.credentialHasher)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +161,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, secretHasher: options.secretHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil

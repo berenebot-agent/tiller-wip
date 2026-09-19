@@ -40,6 +40,18 @@ database; it is not secure erasure. SQLite pages, WAL files, snapshots, and old
 backups may still contain historic sensitive data, so they must continue to be
 protected as sensitive material.
 
+**Secret hashing is entropy-tiered.** Secrets are hash-only at rest; plaintext
+is never stored. The admin credential fingerprint is human-chosen and
+low-entropy, so it is protected with a memory-hard KDF (**argon2id, 64 MiB**).
+Client API keys and admin session tokens are 256-bit uniformly random, where
+offline brute force is infeasible regardless of hash speed; those use
+**bcrypt (cost ≥ 10)**, whose fixed ~4 KiB working set avoids the ~64 MiB
+per-verify memory cost that dominated the process footprint under concurrent
+authentication. Existing argon2id values keep verifying (algorithm is
+dispatched from the encoding) and are upgraded to bcrypt lazily on the next
+successful authentication, so the tiering change needs no forced migration or
+downtime.
+
 **Detailed error logging (opt-in).** Activity is metadata-only by default. If the
 administrator enables the Detailed Error Logging setting, failed request bodies
 and provider error bodies are stored (bounded to 1 MiB). Activity exports
