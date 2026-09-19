@@ -33,6 +33,15 @@ type Config struct {
 	// SessionCacheTTL is the equivalent in-memory cache window for admin
 	// sessions. Session revocation is immediate regardless of TTL.
 	SessionCacheTTL time.Duration
+	// BackupDir is where scheduled central-database snapshots are written.
+	// Defaults to <DataDir>/backups.
+	BackupDir string
+	// BackupInterval is how often a snapshot is taken. Zero disables scheduled
+	// backups.
+	BackupInterval time.Duration
+	// BackupRetention is how long snapshots are kept before pruning. Off-host
+	// copies are the operator's responsibility (see docs/backup_restore_runbook.md).
+	BackupRetention time.Duration
 }
 
 func Load() (Config, error) {
@@ -50,6 +59,8 @@ func Load() (Config, error) {
 		ListenAddr:        envDefault("TILLER_LISTEN_ADDR", ":8080"),
 		ModelsDevEnabled:  true,
 		LogLevel:          envDefault("TILLER_LOG_LEVEL", "info"),
+		BackupInterval:    6 * time.Hour,
+		BackupRetention:   7 * 24 * time.Hour,
 	}
 	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {
 	case "debug", "info", "warn", "error":
@@ -125,6 +136,29 @@ func Load() (Config, error) {
 		}
 		c.DebugPprof = v
 	}
+	if raw := os.Getenv("TILLER_BACKUP_INTERVAL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_INTERVAL: %w", err)
+		}
+		if v < 0 {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_INTERVAL must not be negative, got %q", raw)
+		}
+		c.BackupInterval = v
+	}
+	if raw := os.Getenv("TILLER_BACKUP_RETENTION"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_RETENTION: %w", err)
+		}
+		if v < 0 {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_RETENTION must not be negative, got %q", raw)
+		}
+		c.BackupRetention = v
+	}
+	if raw := os.Getenv("TILLER_BACKUP_DIR"); raw != "" {
+		c.BackupDir = raw
+	}
 	if c.AdminUsername == "" || c.AdminPassword == "" {
 		return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD are required")
 	}
@@ -136,6 +170,15 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("resolve data directory: %w", err)
 	}
 	c.DataDir = abs
+	if c.BackupDir == "" {
+		c.BackupDir = filepath.Join(c.DataDir, "backups")
+	} else {
+		absBackup, err := filepath.Abs(c.BackupDir)
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve backup directory: %w", err)
+		}
+		c.BackupDir = absBackup
+	}
 	return c, nil
 }
 

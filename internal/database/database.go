@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -232,6 +233,79 @@ func (d *DB) Backup(ctx context.Context, dir string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// BackupPrefix and BackupSuffix identify scheduled/core backup snapshots.
+const (
+	BackupPrefix = "tiller-router-"
+	BackupSuffix = ".db"
+)
+
+// Verify opens a SQLite database file read-only and checks its integrity and
+// foreign keys. It is used to prove a snapshot is a usable restore point
+// before the snapshot is trusted.
+func Verify(ctx context.Context, path string) error {
+	q := url.Values{}
+	q.Add("mode", "ro")
+	db, err := sql.Open("sqlite", sqliteDSN(path, q))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	var integrity string
+	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		return fmt.Errorf("integrity_check: %w", err)
+	}
+	if integrity != "ok" {
+		return fmt.Errorf("integrity_check: %s", integrity)
+	}
+	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("foreign_key_check: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		return errors.New("foreign_key_check: snapshot has a foreign-key violation")
+	}
+	return rows.Err()
+}
+
+// PruneBackups removes backup snapshots older than retention. It only touches
+// files matching the backup naming convention, so unrelated files in the
+// backup directory are left alone.
+func PruneBackups(dir string, retention time.Duration, now time.Time) (int, error) {
+	if retention <= 0 {
+		return 0, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	cutoff := now.Add(-retention)
+	removed := 0
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, BackupPrefix) || !strings.HasSuffix(name, BackupSuffix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return removed, err
+		}
+		if info.ModTime().Before(cutoff) {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil {
+				return removed, err
+			}
+			removed++
+		}
+	}
+	return removed, nil
 }
 
 func Now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

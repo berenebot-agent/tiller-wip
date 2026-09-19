@@ -206,6 +206,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 	s.sessions.StartSweeper(ctx)
 	go s.startLogPruner(ctx)
 	s.startLogWriter(ctx)
+	go s.startBackupScheduler(ctx)
 }
 
 // startLogWriter launches the asynchronous Activity writer. It runs only in
