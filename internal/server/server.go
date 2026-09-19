@@ -21,6 +21,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
+	"github.com/tiller-router/tiller-router/internal/store"
 	buildversion "github.com/tiller-router/tiller-router/internal/version"
 	webassets "github.com/tiller-router/tiller-router/internal/web"
 )
@@ -28,9 +29,12 @@ import (
 const sessionCookie = "tiller_admin_session"
 
 type Server struct {
-	config   config.Config
-	db       *database.DB
-	clients  *auth.ClientAuthenticator
+	config config.Config
+	db     *database.DB
+	// store is the single boundary for tenant-table SQL. Handlers obtain an
+	// account-scoped handle via s.scope(r) or s.store.For(accountID).
+	store  *store.Store
+	clients *auth.ClientAuthenticator
 	sessions *auth.SessionStore
 	// secretHasher is the token hasher used when generating client keys
 	// (bcrypt in production; a fast hasher in tests).
@@ -119,6 +123,10 @@ type contextKey string
 const (
 	adminSessionKey contextKey = "admin-session"
 	clientKey       contextKey = "client"
+	// accountKey carries the verified AccountID for the request. It is set by
+	// the authentication middleware from the authenticated principal only —
+	// never from request input.
+	accountKey contextKey = "account"
 )
 
 type serverOption func(*serverOptions)
@@ -159,13 +167,13 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	clients.SetCacheTTL(cfg.ClientKeyCacheTTL)
 	sessions.SetCacheTTL(cfg.SessionCacheTTL)
 	registry := providers.NewRegistry()
-	if t, err := db.GetFallbackTimeout(context.Background()); err == nil {
+	if t, err := store.New(db.SQL).For(database.LocalAccountID).GetFallbackTimeout(context.Background()); err == nil {
 		registry.SetResponseHeaderTimeout(time.Duration(t) * time.Second)
 	}
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	s := &Server{config: cfg, db: db, clients: clients, sessions: sessions, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: store.New(db.SQL), clients: clients, sessions: sessions, secretHasher: options.tokenHasher, providers: providers.NewManager(db.SQL, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: &http.Client{Timeout: notificationTimeout}, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan map[string]lastOutcome, liveOutcomeBuffer), activityCh: make(chan inflightDelta, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
@@ -309,7 +317,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, clientIP(r, s.config.TrustedProxy)))
+	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, clientIP(r, s.config.TrustedProxy)))
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 
@@ -351,8 +359,31 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 			adminError(w, 403, "csrf_failed", "A valid CSRF token is required.")
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), adminSessionKey, session)))
+		// Phase 1 local mode: the env-admin session owns the single implicit
+	// local account. Hosted mode (Phase 3) will resolve the account owned by
+	// the authenticated user instead.
+	ctx := context.WithValue(r.Context(), adminSessionKey, session)
+	ctx = context.WithValue(ctx, accountKey, database.LocalAccountID)
+	next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// scope returns the account-scoped store handle for the request. The account
+// is taken from the verified principal attached by the auth middleware; a
+// request that reaches a handler without one is a routing bug and is treated
+// as the local account only because Phase 1 has exactly one account.
+func (s *Server) scope(r *http.Request) *store.Scope {
+	accountID, _ := r.Context().Value(accountKey).(string)
+	if accountID == "" {
+		accountID = database.LocalAccountID
+	}
+	return s.store.For(accountID)
+}
+
+// scopeFor returns an account-scoped handle for background work that runs
+// outside a request context.
+func (s *Server) scopeFor(accountID string) *store.Scope {
+	return s.store.For(accountID)
 }
 
 func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
@@ -384,9 +415,11 @@ func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
 			inferenceError(w, 401, "authentication_error", "invalid_api_key", "Invalid API key.", anthropic)
 			return
 		}
-		s.clientSelectorLimiter.success(selector)
-		s.clientAddressLimiter.success(address)
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientKey, identity)))
+	s.clientSelectorLimiter.success(selector)
+	s.clientAddressLimiter.success(address)
+	ctx := context.WithValue(r.Context(), clientKey, identity)
+	ctx = context.WithValue(ctx, accountKey, identity.AccountID)
+	next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 

@@ -17,6 +17,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // notificationTestHarness wires up a router, an admin session, a client key,
@@ -642,9 +643,9 @@ func TestNotificationFailureDoesNotFailInference(t *testing.T) {
 	close(release)
 }
 
-func testNotificationCfg(t *testing.T, app *Server) database.NotificationSettings {
+func testNotificationCfg(t *testing.T, app *Server) store.NotificationSettings {
 	t.Helper()
-	cfg, err := app.db.GetNotificationSettings(context.Background())
+	cfg, err := app.store.For(database.LocalAccountID).GetNotificationSettings(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,12 +664,12 @@ func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *
 	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	t.Cleanup(webhook.Close)
 	for key, value := range map[string]string{
-		database.SettingNotificationsEnabled:         "true",
-		database.SettingNotificationsWebhookURL:      webhook.URL,
-		database.SettingNotificationsEventFallback:   "true",
-		database.SettingNotificationsCooldownSeconds: "0",
+		store.SettingNotificationsEnabled:         "true",
+		store.SettingNotificationsWebhookURL:      webhook.URL,
+		store.SettingNotificationsEventFallback:   "true",
+		store.SettingNotificationsCooldownSeconds: "0",
 	} {
-		if err := db.SetSetting(context.Background(), key, value); err != nil {
+		if err := app.store.For(database.LocalAccountID).SetSetting(context.Background(), key, value); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -683,13 +684,13 @@ func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
 		w.WriteHeader(int(status.Load()))
 	}))
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
-	key := eventFallback + "|" + payload.VirtualModel
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
 	for _, code := range []int{200, 204, 401, 429, 500} {
 		status.Store(int32(code))
 		app.notifyCooldownMu.Lock()
 		delete(app.notifyLastSent, key)
 		app.notifyCooldownMu.Unlock()
-		app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+		app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 		app.notifyCooldownMu.Lock()
 		_, recorded := app.notifyLastSent[key]
 		app.notifyCooldownMu.Unlock()
@@ -705,17 +706,17 @@ func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
 func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
 	var status atomic.Int32
 	var requests atomic.Int32
-	app, db, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		w.WriteHeader(int(status.Load()))
 	}))
-	if err := db.SetSetting(context.Background(), database.SettingNotificationsCooldownSeconds, "60"); err != nil {
+	if err := app.store.For(database.LocalAccountID).SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "60"); err != nil {
 		t.Fatal(err)
 	}
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
-	key := eventFallback + "|" + payload.VirtualModel
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
 	status.Store(500)
-	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 	app.notifyCooldownMu.Lock()
 	_, sentAfterFailure := app.notifyLastSent[key]
 	_, reservedAfterFailure := app.notifyInFlight[key]
@@ -724,8 +725,8 @@ func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
 		t.Fatalf("failed delivery left state: sent=%v reserved=%v", sentAfterFailure, reservedAfterFailure)
 	}
 	status.Store(200)
-	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
-	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests = %d, want failed delivery retried once then cooldown suppression", got)
 	}
@@ -750,7 +751,7 @@ func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
 	firstDone := make(chan struct{})
 	go func() {
-		app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+		app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 		close(firstDone)
 	}()
 	select {
@@ -760,7 +761,7 @@ func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
 	}
 	secondDone := make(chan struct{})
 	go func() {
-		app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+		app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 		close(secondDone)
 	}()
 	select {
@@ -779,7 +780,7 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 	var phase atomic.Int32
 	var requests atomic.Int32
 	release := make(chan struct{})
-	app, db, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		if phase.Load() == 0 {
 			<-release
@@ -788,12 +789,12 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	app.notifyClient = &http.Client{Timeout: 20 * time.Millisecond}
-	if err := db.SetSetting(context.Background(), database.SettingNotificationsCooldownSeconds, "60"); err != nil {
+	if err := app.store.For(database.LocalAccountID).SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "60"); err != nil {
 		t.Fatal(err)
 	}
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
-	key := eventFallback + "|" + payload.VirtualModel
-	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 	app.notifyCooldownMu.Lock()
 	_, sentAfterTimeout := app.notifyLastSent[key]
 	_, reservedAfterTimeout := app.notifyInFlight[key]
@@ -803,7 +804,7 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 	}
 	phase.Store(1)
 	close(release)
-	app.deliverNotification(eventFallback, payload, testNotificationCfg(t, app))
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests = %d, want timeout retry", got)
 	}

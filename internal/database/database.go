@@ -26,6 +26,13 @@ type DB struct {
 	Path string
 }
 
+// LocalAccountID is the fixed, well-known identifier of the single implicit
+// account that owns every row in a self-hosted/local installation. Hosted
+// accounts use random id.New() UUIDs instead. It is a constant (rather than a
+// generated value) so pure-SQL migrations can seed the account and backfill
+// account_id columns without a Go bootstrap step.
+const LocalAccountID = "00000000-0000-0000-0000-000000000001"
+
 // ErrDataDirUnwritable is wrapped and returned by Open when the data directory
 // is not owned by (and therefore not writable to) the runtime user — typically
 // a fresh rootful-Docker bind mount created on the host as root. Callers can
@@ -125,12 +132,33 @@ func (d *DB) Migrate(ctx context.Context) error {
 		return err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	// SQLite cannot alter constraints in place, so migrations that make
+	// uniqueness account-local rebuild their tables (create-new, copy, drop,
+	// rename). Foreign-key enforcement must be off for the duration or the
+	// drop/rename sequence fails; integrity is re-verified explicitly with
+	// foreign_key_check before the connection is returned to the pool.
+	// A dedicated *sql.Conn is used so the PRAGMA and the migrations run on
+	// the same connection (PRAGMA foreign_keys is a no-op inside a
+	// transaction and is per-connection).
+	conn, err := d.SQL.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys for migration: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`)
+	}()
+
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
 			continue
 		}
 		var exists int
-		if err := d.SQL.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=?`, entry.Name()).Scan(&exists); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=?`, entry.Name()).Scan(&exists); err != nil {
 			return err
 		}
 		if exists != 0 {
@@ -140,7 +168,7 @@ func (d *DB) Migrate(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		tx, err := d.SQL.BeginTx(ctx, nil)
+		tx, err := conn.BeginTx(ctx, nil)
 		if err != nil {
 			return err
 		}
@@ -155,7 +183,32 @@ func (d *DB) Migrate(ctx context.Context) error {
 			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
 		}
 	}
+	if err := checkForeignKeys(ctx, conn); err != nil {
+		return err
+	}
 	return nil
+}
+
+// checkForeignKeys runs PRAGMA foreign_key_check and fails if any row violates
+// a foreign-key constraint. Migrations run with enforcement disabled, so this
+// is the proof that the rebuilds left referential integrity intact.
+func checkForeignKeys(ctx context.Context, conn *sql.Conn) error {
+	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("foreign_key_check: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var table string
+		var rowid int64
+		var parent string
+		var fkid int64
+		if err := rows.Scan(&table, &rowid, &parent, &fkid); err != nil {
+			return fmt.Errorf("foreign_key_check scan: %w", err)
+		}
+		return fmt.Errorf("foreign_key_check: table %s row %d violates constraint %d referencing %s", table, rowid, fkid, parent)
+	}
+	return rows.Err()
 }
 
 func (d *DB) Ready(ctx context.Context) error {

@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // loggingTestHarness wires up a mock upstream, a router, and an admin session.
@@ -525,7 +526,7 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
 	})
 	api, db, clientID, secret := loggingTestHarness(t, upstream)
-	if err := db.SetSetting(context.Background(), database.SettingLogErrorBodies, "1"); err != nil {
+	if err := store.New(db.SQL).For(database.LocalAccountID).SetSetting(context.Background(), store.SettingLogErrorBodies, "1"); err != nil {
 		t.Fatal(err)
 	}
 	// Small-body failure: both bodies persisted verbatim, not truncated.

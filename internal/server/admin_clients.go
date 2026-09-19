@@ -176,7 +176,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "internal_error", "Could not generate client key.")
 		return
 	}
-	loggingEnabled, retentionDays, err := s.db.GetLoggingDefaults(r.Context())
+	loggingEnabled, retentionDays, err := s.scope(r).GetLoggingDefaults(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not create client key.")
 		return
@@ -222,7 +222,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]any{"id": clientID, "name": input.Name, "type": input.Type, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. It cannot be displayed again."})
-	s.notifyAdminEvent(eventClientKeyCreated, fmt.Sprintf("Client: %s\nType: %s", input.Name, input.Type))
+	s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyCreated, fmt.Sprintf("Client: %s\nType: %s", input.Name, input.Type))
 }
 
 func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
@@ -405,7 +405,7 @@ func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(204)
-	s.notifyAdminEvent(eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
+	s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
 }
 
 type permissionGroup struct {

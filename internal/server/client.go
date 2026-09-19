@@ -571,15 +571,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// built up as the request progresses and written once, synchronously, in a
 	// deferred best-effort insert that never fails the request.
 	row := &logRow{
-		clientKeyID:     identity.ID,
-		clientName:      identity.Name,
+		accountID: identity.AccountID,
+		clientKeyID: identity.ID,
+		clientName: identity.Name,
 		requestedModel:  requested,
 		routeStatus:     "unresolved",
 		protocol:        string(incoming),
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
-	logErrorBodies, _ := s.db.GetLogErrorBodies(r.Context())
+	logErrorBodies, _ := s.scope(r).GetLogErrorBodies(r.Context())
 	originalBody := append([]byte(nil), body...)
 	// Extract the canonical reasoning selector once from the original request.
 	// It is recomputed for each candidate against that target's capabilities.
@@ -650,7 +651,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	oauthRefreshed := make(map[string]bool)
 	cooldownSeconds := 0
 	if route.RoutingMode == "ordered_fallback" {
-		cooldownSeconds, _ = s.db.GetFallbackCooldownSeconds(r.Context())
+		cooldownSeconds, _ = s.scope(r).GetFallbackCooldownSeconds(r.Context())
 	}
 	skippedCooled := false
 	allAttemptedFailed := true

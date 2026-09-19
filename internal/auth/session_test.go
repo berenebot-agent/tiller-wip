@@ -56,7 +56,7 @@ func TestSessionStoreProductionHasher(t *testing.T) {
 
 	// The admin credential fingerprint remains Argon2id.
 	var credentialHash string
-	if err := store.db.QueryRow(`SELECT value FROM settings WHERE key=?`, credentialHashKey).Scan(&credentialHash); err != nil {
+	if err := store.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&credentialHash); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(credentialHash, "$argon2id$") {

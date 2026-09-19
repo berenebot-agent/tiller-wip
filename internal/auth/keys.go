@@ -127,9 +127,10 @@ func ParseKey(key string) (selector, secret string, ok bool) {
 }
 
 type ClientIdentity struct {
-	ID      string
-	Name    string
-	Enabled bool
+	ID        string
+	AccountID string
+	Name      string
+	Enabled   bool
 }
 
 type cacheEntry struct {
@@ -231,8 +232,8 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	generation := atomic.LoadUint64(&a.rev)
 	var identity ClientIdentity
 	var hash string
-	err := a.db.QueryRowContext(ctx, `SELECT id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).
-		Scan(&identity.ID, &identity.Name, &identity.Enabled, &hash)
+	err := a.db.QueryRowContext(ctx, `SELECT id,account_id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).
+		Scan(&identity.ID, &identity.AccountID, &identity.Name, &identity.Enabled, &hash)
 	if err != nil || !identity.Enabled || !a.hasher.Verify(secret, hash) {
 		return ClientIdentity{}, false, true
 	}
@@ -440,13 +441,13 @@ func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (
 func (s *SessionStore) syncCredential(username, password string) error {
 	material := username + "\x00" + password
 	var stored string
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, credentialHashKey).Scan(&stored)
+	err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		hash, err := s.credentialHasher.Hash(material)
 		if err != nil {
 			return err
 		}
-		_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)`, credentialHashKey, hash, formatUTC(time.Now()))
+		_, err = s.db.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?)`, credentialHashKey, hash, formatUTC(time.Now()))
 		return err
 	}
 	if err != nil {
@@ -462,7 +463,7 @@ func (s *SessionStore) syncCredential(username, password string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE settings SET value=?, updated_at=? WHERE key=?`, hash, formatUTC(time.Now()), credentialHashKey)
+	_, err = s.db.Exec(`UPDATE platform_settings SET value=?, updated_at=? WHERE key=?`, hash, formatUTC(time.Now()), credentialHashKey)
 	return err
 }
 
