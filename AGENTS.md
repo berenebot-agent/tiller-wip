@@ -95,6 +95,27 @@ The script resolves the container from `docker-compose.yml`, so it stays correct
 - Never let a provider-group feeder setting (`new_models_default`) retroactively touch existing per-model permissions. That distinction is load-bearing — treat any code path that blurs it as a bug.
 - Preserve the real/virtual model permission boundary exactly: a client must never be able to reach a model it isn't permitted for, even if it can guess or infer the identifier.
 
+## Tenancy invariants (hosted / multi-tenant work)
+
+These are load-bearing. See `docs/hosted_decisions.md` for the decision record and
+`docs/sass_tech.md` for the full roadmap.
+
+1. Every tenant-owned object belongs to exactly one account.
+2. Account authority is derived from an authenticated principal, never trusted from URL, body, or header input.
+3. Every tenant-owned database read and write must be account-scoped.
+4. A client API key authorises exactly one account.
+5. Tenant-variable cache and live-state keys include account scope.
+6. A tenant-scoped database transaction must never be held across external network I/O, long polling, or client streaming.
+7. Hosted custom outbound URLs are supported only through the shared safe transport, and may connect only to validated public HTTPS destinations; every redirect and the actual dial target are revalidated (submission-time validation alone is insufficient).
+8. Hosted recoverable provider credentials must be encrypted at rest with key material outside the database. This is currently **deferred** — see the conflict recorded in `docs/hosted_decisions.md`; do not build it without explicit sign-off.
+9. Hosted mode does not persist prompt or response bodies.
+10. Self-hosted local mode must retain LAN/private-provider functionality; SSRF restrictions are hosted-mode controls.
+11. A new tenant-owned table requires account scope, tenant-isolation tests, and (from Phase 2) PostgreSQL RLS classification.
+12. Cross-account background discovery may use a narrowly privileged path, but each tenant job must execute with explicit account scope.
+13. A hosted provider OAuth/subscription authentication mode is enabled only after its provider terms are reviewed for that hosted use.
+14. `internal/store` is the single boundary for tenant-table SQL. Do not add tenant queries to `internal/server`, `internal/providers`, or elsewhere; a guard test enforces the table classification.
+15. `TILLER_MODE` is deferred to Phase 3. Tenancy is built unconditionally; do not add ad-hoc `if hosted` checks.
+
 ## Model metadata — discover, never hardcode
 
 - Never hardcode model IDs, model lists, or per-model behaviour (native protocol, capabilities, reasoning levels, context windows) in code. Catalogues and capabilities must come from live provider discovery (`Registry.Discover`) or provider-reported metadata, with models.dev as fallback-only enrichment (provider data stays authoritative).
