@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"net/url"
@@ -13,6 +12,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
 	"github.com/tiller-router/tiller-router/internal/providers/github"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 const oauthRedirectPath = "/auth/callback"
@@ -50,8 +50,8 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	providerType, err := s.oauthProviderType(r.Context(), id)
-	if err == sql.ErrNoRows {
+	providerType, err := s.scope(r).ProviderType(r.Context(), id)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
@@ -60,7 +60,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if providerType == "github-copilot" {
-		device, startErr := s.startGitHubDeviceFlow(r.Context(), id)
+		device, startErr := s.startGitHubDeviceFlow(r.Context(), s.scope(r).AccountID(), id)
 		if startErr != nil {
 			adminError(w, 502, "oauth_start_failed", "Could not start GitHub OAuth.")
 			return
@@ -100,8 +100,8 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	providerType, err := s.oauthProviderType(r.Context(), id)
-	if err == sql.ErrNoRows {
+	providerType, err := s.scope(r).ProviderType(r.Context(), id)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
@@ -167,7 +167,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 502, "oauth_exchange_failed", "OAuth token exchange returned an invalid token.")
 		return
 	}
-	if err := oauth.NewStore(s.db.SQL).Put(context.Background(), record); err != nil {
+	if err := s.scope(r).PutOAuthToken(context.Background(), oauth.TokenToStore(record)); err != nil {
 		adminError(w, 500, "database_error", "Could not save OAuth connection.")
 		return
 	}
@@ -175,7 +175,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"status": "connected", "account_email": record.AccountEmail, "account_plan": record.AccountPlan})
 }
 
-func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.DeviceCode, error) {
+func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (github.DeviceCode, error) {
 	s.oauthDeviceMu.Lock()
 	if existing := s.oauthDevices[id]; existing != nil && existing.Status == "pending" {
 		device := existing.Device
@@ -222,7 +222,7 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.D
 			s.finishDevice(id, "failed", err)
 			return
 		}
-		if err := oauth.NewStore(s.db.SQL).Put(pollCtx, record); err != nil {
+		if err := s.scopeFor(accountID).PutOAuthToken(pollCtx, oauth.TokenToStore(record)); err != nil {
 			s.finishDevice(id, "failed", err)
 			return
 		}
@@ -265,8 +265,8 @@ func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, result)
 		return
 	}
-	record, err := oauth.NewStore(s.db.SQL).Get(r.Context(), id)
-	if err == oauth.ErrNoToken {
+	row, err := s.scope(r).GetOAuthToken(r.Context(), id)
+	if errors.Is(err, store.ErrNoOAuthToken) {
 		writeJSON(w, 200, map[string]any{"status": "none"})
 		return
 	}
@@ -274,6 +274,7 @@ func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load OAuth status.")
 		return
 	}
+	record := oauth.TokenFromStore(row)
 	result := map[string]any{"status": string(oauth.Classify(record, time.Now().UTC()))}
 	if record.AccountEmail != "" {
 		result["account_email"] = record.AccountEmail
@@ -284,19 +285,13 @@ func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
-func (s *Server) oauthProviderType(ctx context.Context, id string) (string, error) {
-	var providerType string
-	err := s.db.SQL.QueryRowContext(ctx, `SELECT type FROM providers WHERE id=?`, id).Scan(&providerType)
-	return providerType, err
-}
-
 // disconnectProviderOAuth removes the OAuth token and in-memory state for a
 // provider while preserving the provider configuration, models, and routing.
 // It is idempotent: disconnecting an already-disconnected provider succeeds.
 func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	providerType, err := s.oauthProviderType(r.Context(), id)
-	if err == sql.ErrNoRows {
+	providerType, err := s.scope(r).ProviderType(r.Context(), id)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
@@ -308,7 +303,7 @@ func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request)
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
-	if err := oauth.NewStore(s.db.SQL).Delete(r.Context(), id); err != nil {
+	if err := s.scope(r).DeleteOAuthToken(r.Context(), id); err != nil {
 		adminError(w, 500, "database_error", "Could not remove OAuth connection.")
 		return
 	}

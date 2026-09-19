@@ -14,6 +14,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 type providerView struct {
@@ -40,26 +41,31 @@ func (s *Server) providerTypes(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
-	pattern := "%" + search + "%"
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT p.id,p.name,p.type,p.base_url,p.enabled,p.protocols,(p.credential_secret IS NOT NULL OR EXISTS(SELECT 1 FROM provider_oauth_tokens o WHERE o.provider_id=p.id)),coalesce(o.auth_state,''),p.last_refresh_at,p.next_refresh_at,p.last_refresh_error,p.created_at,p.updated_at,count(m.id),coalesce(sum(CASE WHEN m.available=1 THEN 1 ELSE 0 END),0) FROM providers p LEFT JOIN provider_models m ON m.provider_id=p.id LEFT JOIN provider_oauth_tokens o ON o.provider_id=p.id WHERE p.name LIKE ? OR p.type LIKE ? GROUP BY p.id ORDER BY p.name LIMIT ? OFFSET ?`, pattern, pattern, limit, offset)
+	rows, err := s.scope(r).ListProviders(r.Context(), store.ProviderFilter{Search: search, Limit: limit, Offset: offset})
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list providers.")
 		return
 	}
-	defer rows.Close()
-	data := []providerView{}
-	for rows.Next() {
-		var v providerView
-		var enabled, configured int
-		var raw string
-		if err := rows.Scan(&v.ID, &v.Name, &v.Type, &v.BaseURL, &enabled, &raw, &configured, &v.AuthState, &v.LastRefreshAt, &v.NextRefreshAt, &v.LastRefreshError, &v.CreatedAt, &v.UpdatedAt, &v.ModelCount, &v.AvailableModelCount); err != nil {
-			adminError(w, 500, "database_error", "Could not list providers.")
-			return
-		}
-		v.Enabled = scanBool(enabled)
-		v.CredentialConfigured = scanBool(configured)
-		v.Protocols = providers.DecodeProtocols(raw)
-		data = append(data, v)
+	data := make([]providerView, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		data = append(data, providerView{
+			ID:                   row.ID,
+			Name:                 row.Name,
+			Type:                 row.Type,
+			BaseURL:              row.BaseURL,
+			Enabled:              row.Enabled,
+			Protocols:            providers.DecodeProtocols(row.Protocols),
+			CredentialConfigured: row.CredentialConfigured,
+			AuthState:            row.AuthState,
+			LastRefreshAt:        row.LastRefreshAt,
+			NextRefreshAt:        row.NextRefreshAt,
+			LastRefreshError:     row.LastRefreshError,
+			CreatedAt:            row.CreatedAt,
+			UpdatedAt:            row.UpdatedAt,
+			ModelCount:           row.ModelCount,
+			AvailableModelCount:  row.AvailableModelCount,
+		})
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
@@ -142,10 +148,9 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "internal_error", "Could not create provider.")
 		return
 	}
-	now := database.Now()
+	sc := s.scope(r)
 	baseName := input.Name
-	var committed bool
-	var lastErr error
+	committed := false
 	for attempt := 0; attempt < 100; attempt++ {
 		candidate := baseName
 		if attempt > 0 {
@@ -162,40 +167,24 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 			candidate = b + suffix
 		}
 		input.Name = candidate
-		tx, txErr := s.db.SQL.BeginTx(r.Context(), nil)
-		if txErr != nil {
-			adminError(w, 500, "database_error", "Could not create provider.")
-			return
-		}
-		func() {
-			defer tx.Rollback()
-			if _, lastErr = tx.ExecContext(r.Context(), `INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'real',?)`, input.Name, providerID); lastErr == nil {
-				_, lastErr = tx.ExecContext(r.Context(), `INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`, providerID, input.Name, input.Type, input.BaseURL, nullableString(input.Credential), boolInt(enabled), providers.EncodeProtocols(protocols), now, now)
-			}
-			if lastErr == nil {
-				_, lastErr = tx.ExecContext(r.Context(), `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at) SELECT id,'real',?,0,? FROM client_keys`, providerID, now)
-			}
-			if lastErr == nil {
-				lastErr = tx.Commit()
-			}
-			if lastErr == nil {
-				committed = true
-			}
-		}()
-		if committed {
+		err = sc.CreateProvider(r.Context(), store.CreateProviderInput{
+			ID:         providerID,
+			Name:       candidate,
+			Type:       input.Type,
+			BaseURL:    input.BaseURL,
+			Credential: input.Credential,
+			Enabled:    enabled,
+			Protocols:  providers.EncodeProtocols(protocols),
+		})
+		if err == nil {
+			committed = true
 			break
 		}
-		if lastErr != nil && database.IsConstraint(lastErr) {
+		if database.IsConstraint(err) {
 			continue
 		}
-		if lastErr != nil {
-			if database.IsConstraint(lastErr) {
-				adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
-			} else {
-				adminError(w, 500, "database_error", "Could not create provider.")
-			}
-			return
-		}
+		adminError(w, 500, "database_error", "Could not create provider.")
+		return
 	}
 	if !committed {
 		adminError(w, 409, "name_conflict", "Provider and virtual group names share one namespace; choose another name.")
@@ -203,7 +192,7 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	refreshCtx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
-	refreshErr := s.providers.Refresh(refreshCtx, providerID)
+	refreshErr := s.providers.Refresh(refreshCtx, sc.AccountID(), providerID)
 	status := http.StatusCreated
 	message := ""
 	if refreshErr != nil {
@@ -225,43 +214,48 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_request", err.Error())
 		return
 	}
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not update provider.")
-		return
-	}
-	defer tx.Rollback()
-	var oldName, providerType string
-	if err = tx.QueryRowContext(r.Context(), `SELECT name,type FROM providers WHERE id=?`, providerID).Scan(&oldName, &providerType); err == sql.ErrNoRows {
+	sc := s.scope(r)
+	current, err := sc.GetProviderEditable(r.Context(), providerID)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not update provider.")
 		return
 	}
-	if input.Name != nil && *input.Name != oldName {
+	if input.Name != nil && *input.Name != current.Name {
 		if !input.ConfirmBreaking {
 			adminError(w, 409, "breaking_change_confirmation_required", "Renaming changes every client-facing model ID. Confirm the breaking change.")
 			return
 		}
-		name := strings.TrimSpace(*input.Name)
-		_, err = tx.ExecContext(r.Context(), `UPDATE namespaces SET name=? WHERE entity_id=? AND kind='real'`, name, providerID)
+		current.Name = strings.TrimSpace(*input.Name)
 	}
-	if err == nil && input.BaseURL != nil {
+	if input.BaseURL != nil {
 		base := strings.TrimRight(*input.BaseURL, "/")
 		if providers.ValidateBaseURL(base) != nil {
 			adminError(w, 400, "invalid_base_url", "A valid provider base URL is required.")
 			return
 		}
-		_, err = tx.ExecContext(r.Context(), `UPDATE providers SET base_url=?,updated_at=? WHERE id=?`, base, database.Now(), providerID)
+		current.BaseURL = base
 	}
-	if err == nil && input.Enabled != nil {
-		_, err = tx.ExecContext(r.Context(), `UPDATE providers SET enabled=?,updated_at=? WHERE id=?`, boolInt(*input.Enabled), database.Now(), providerID)
+	if input.Enabled != nil {
+		current.Enabled = *input.Enabled
 	}
-	if err == nil && len(input.Protocols) > 0 && (providerType == "generic-openai" || providerType == "vllm") {
-		_, err = tx.ExecContext(r.Context(), `UPDATE providers SET protocols=?,updated_at=? WHERE id=?`, providers.EncodeProtocols(input.Protocols), database.Now(), providerID)
+	if len(input.Protocols) > 0 && (current.Type == "generic-openai" || current.Type == "vllm") {
+		current.Protocols = providers.EncodeProtocols(input.Protocols)
 	}
-	if err != nil || tx.Commit() != nil {
+	err = sc.UpdateProvider(r.Context(), store.UpdateProviderInput{
+		ID:        providerID,
+		Name:      current.Name,
+		BaseURL:   current.BaseURL,
+		Enabled:   current.Enabled,
+		Protocols: current.Protocols,
+	})
+	if errors.Is(err, store.ErrProviderNotFound) {
+		adminError(w, 404, "not_found", "Provider not found.")
+		return
+	}
+	if err != nil {
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "That provider-group name is already in use.")
 		} else {
@@ -273,8 +267,9 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Request) {
-	var providerType string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT type FROM providers WHERE id=?`, r.PathValue("id")).Scan(&providerType); err == sql.ErrNoRows {
+	sc := s.scope(r)
+	providerType, err := sc.ProviderType(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	} else if err != nil {
@@ -292,13 +287,12 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 		adminError(w, 400, "credential_required", "A non-empty credential is required.")
 		return
 	}
-	result, err := s.db.SQL.ExecContext(r.Context(), `UPDATE providers SET credential_secret=?,updated_at=? WHERE id=?`, input.Credential, database.Now(), r.PathValue("id"))
+	found, err := sc.ReplaceProviderCredential(r.Context(), r.PathValue("id"), input.Credential)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not replace credential.")
 		return
 	}
-	n, _ := result.RowsAffected()
-	if n == 0 {
+	if !found {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
@@ -308,7 +302,7 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
-	if err := s.providers.Refresh(ctx, r.PathValue("id")); err != nil {
+	if err := s.providers.Refresh(ctx, s.scope(r).AccountID(), r.PathValue("id")); err != nil {
 		adminError(w, 502, "refresh_failed", "Refresh failed; the previous catalogue and permissions were preserved.")
 		return
 	}
@@ -322,57 +316,19 @@ func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	providerID := r.PathValue("id")
-	var providerType string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT type FROM providers WHERE id=?`, providerID).Scan(&providerType); err == sql.ErrNoRows {
+	sc := s.scope(r)
+	providerType, err := sc.ProviderType(r.Context(), providerID)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
 	}
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not delete provider.")
-		return
-	}
-	defer tx.Rollback()
-	var refs int
-	if err = tx.QueryRowContext(r.Context(), `SELECT count(*) FROM client_single_bindings b JOIN client_keys c ON c.id = b.client_key_id JOIN provider_models m ON m.id = b.real_model_id WHERE m.provider_id=? AND c.key_type='single'`, providerID).Scan(&refs); err != nil {
-		adminError(w, 500, "database_error", "Could not delete provider.")
-		return
-	}
-	if refs > 0 {
-		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this provider first.")
-		return
-	}
-	// Catalogue-type client keys may carry a stale client_single_bindings row
-	// from a prior Single-key configuration. Such rows are inert (catalogue
-	// keys are resolved through client_model_permissions, not the binding),
-	// but their ON DELETE RESTRICT foreign key would otherwise block this
-	// delete. Drop them explicitly so the spec's "Single keys" intent wins.
-	if _, err = tx.ExecContext(r.Context(), `DELETE FROM client_single_bindings WHERE real_model_id IN (SELECT id FROM provider_models WHERE provider_id=?) AND client_key_id IN (SELECT id FROM client_keys WHERE key_type='catalogue')`, providerID); err != nil {
-		adminError(w, 500, "database_error", "Could not delete provider.")
-		return
-	}
-	// virtual_model_targets is the functional source of truth. This includes
-	// references in every ordered position, not only the compatibility primary
-	// columns on virtual_models. Find every virtual model that references this
-	// provider and classify whether another provider has an eligible target
-	// that can take over (non-terminal) or not (terminal: deleting it would
-	// strand the chain or dangle the legacy compatibility columns).
-	terminalVirtuals, allVirtuals, err := s.providerVirtualModelRefs(r.Context(), tx, providerID)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not delete provider.")
-		return
-	}
-	if len(terminalVirtuals) > 0 {
-		// Terminal references block deletion: at least one virtual model has
-		// this provider as its only target. Surface which chains are blocked
-		// and which could be auto-cleared so the UI can present the workflow.
-		blocked := make([]string, 0, len(terminalVirtuals))
-		for _, v := range terminalVirtuals {
-			blocked = append(blocked, v.canonical)
-		}
+	err = sc.DeleteProvider(r.Context(), providerID)
+	var inUse *store.ProviderInUseError
+	switch {
+	case errors.As(err, &inUse):
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(409)
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -380,79 +336,20 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 				"code":    "provider_in_use",
 				"message": "This provider is the last target in one or more virtual model fallback chains. Repoint those chains before deleting.",
 				"data": map[string]any{
-					"blocked":        blocked,
-					"referenced":     virtualModelCanonicals(allVirtuals),
-					"terminal_count": len(terminalVirtuals),
+					"blocked":        inUse.Blocked,
+					"referenced":     inUse.Referenced,
+					"terminal_count": len(inUse.Blocked),
 				},
 			},
 		})
 		return
-	}
-	// Non-terminal references can be cleared as part of deletion: the provider
-	// appears in chains that still have other targets, so removing it leaves
-	// each chain routable. Drop those target rows now, and if the deleted
-	// provider was the compatibility-primary target (virtual_models
-	// target_provider_id / target_provider_model_id), promote the first
-	// remaining target into those legacy columns so the ON DELETE RESTRICT
-	// foreign keys on the provider/model rows do not block the delete.
-	for _, v := range allVirtuals {
-		if _, err = tx.ExecContext(r.Context(), `DELETE FROM virtual_model_targets WHERE virtual_model_id=? AND provider_model_id IN (SELECT id FROM provider_models WHERE provider_id=?)`, v.id, providerID); err != nil {
-			adminError(w, 500, "database_error", "Could not delete provider.")
-			return
-		}
-		// Promote the first remaining target into the legacy compatibility
-		// columns if the deleted provider was the primary. The compat columns
-		// are NOT NULL and must reference a real provider/model. The deletion
-		// guard above guarantees another provider owns an eligible takeover
-		// target, so at least one remains here; prefer it so a disabled or
-		// retired target cannot become the promoted compatibility primary.
-		var promotedProvider, promotedModel sql.NullString
-		err = tx.QueryRowContext(r.Context(), `SELECT p.id,m.id FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 AND m.available=1 AND p.enabled=1 ORDER BY t.position LIMIT 1`, v.id).Scan(&promotedProvider, &promotedModel)
-		if err == sql.ErrNoRows {
-			// No remaining eligible target; leave the legacy columns as-is (the
-			// chain is now empty and will be surfaced as broken by health).
-			err = nil
-			continue
-		}
-		if err != nil {
-			adminError(w, 500, "database_error", "Could not delete provider.")
-			return
-		}
-		if _, err = tx.ExecContext(r.Context(), `UPDATE virtual_models SET target_provider_id=?,target_provider_model_id=?,updated_at=? WHERE id=?`, promotedProvider.String, promotedModel.String, database.Now(), v.id); err != nil {
-			adminError(w, 500, "database_error", "Could not delete provider.")
-			return
-		}
-	}
-	var name string
-	if err = tx.QueryRowContext(r.Context(), `SELECT name FROM providers WHERE id=?`, providerID).Scan(&name); err == sql.ErrNoRows {
+	case errors.Is(err, store.ErrSingleBindingInUse):
+		adminError(w, 409, "single_binding_in_use", "Repoint Single client keys using this provider first.")
+		return
+	case errors.Is(err, store.ErrProviderNotFound):
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
-	}
-	_, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='real' AND model_id IN (SELECT id FROM provider_models WHERE provider_id=?)`, providerID)
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM client_group_defaults WHERE group_kind='real' AND group_id=?`, providerID)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM client_single_bindings WHERE client_key_id IN (SELECT b.client_key_id FROM client_single_bindings b JOIN client_keys c ON c.id=b.client_key_id JOIN provider_models m ON m.id=b.real_model_id WHERE c.key_type='catalogue' AND m.provider_id=?)`, providerID)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_models WHERE provider_id=?`, providerID)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM providers WHERE id=?`, providerID)
-	}
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM namespaces WHERE entity_id=? AND kind='real'`, providerID)
-	}
-	// Delete absorbs disconnect: clean up OAuth material (token row) inside
-	// the transaction, after all reference checks pass. A rejected delete
-	// (409) rolls back and leaves credentials untouched.
-	if err == nil {
-		if descriptor, ok := providers.Lookup(providerType); ok && descriptor.AuthMode == providers.AuthModeOAuth {
-			_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_oauth_tokens WHERE provider_id=?`, providerID)
-		}
-	}
-	if err != nil || tx.Commit() != nil {
+	case err != nil:
 		adminError(w, 500, "database_error", "Could not delete provider.")
 		return
 	}
@@ -465,58 +362,8 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	// Drop the per-provider refresh lock so the map does not grow without
 	// bound as providers are created and deleted.
-	s.providers.DropProviderLock(providerID)
+	s.providers.DropProviderLock(sc.AccountID(), providerID)
 	w.WriteHeader(204)
-}
-
-// providerVirtualModelRef is a virtual model that references a provider, along
-// with whether that provider is the last target in the chain (terminal).
-type providerVirtualModelRef struct {
-	id        string
-	canonical string
-	terminal  bool
-}
-
-// providerVirtualModelRefs returns the set of virtual models that reference the
-// given provider, split into terminal (no other provider has an eligible
-// takeover target, so deleting it would strand the chain) and the full
-// referenced set. A chain is terminal unless some other provider owns at
-// least one enabled, available target whose provider is enabled. The
-// deleted provider's own eligibility is irrelevant: an unavailable or
-// disabled provider contributes zero eligible targets but still owns
-// target rows and legacy compatibility-primary columns that must not be
-// left dangling.
-func (s *Server) providerVirtualModelRefs(ctx context.Context, tx *sql.Tx, providerID string) ([]providerVirtualModelRef, []providerVirtualModelRef, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT v.id, g.name||'/'||v.name, (SELECT count(*) FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1 AND m.provider_id<>?) AS takeover FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id WHERE t.virtual_model_id=v.id AND m.provider_id=?)`, providerID, providerID)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer rows.Close()
-	var terminal, all []providerVirtualModelRef
-	for rows.Next() {
-		var v providerVirtualModelRef
-		var takeover int
-		if err := rows.Scan(&v.id, &v.canonical, &takeover); err != nil {
-			return nil, nil, err
-		}
-		// Terminal: no other provider has an eligible target that can take
-		// over, so deleting this provider would leave a non-routable chain
-		// (or legacy compatibility columns dangling at the deleted rows).
-		v.terminal = takeover == 0
-		all = append(all, v)
-		if v.terminal {
-			terminal = append(terminal, v)
-		}
-	}
-	return terminal, all, rows.Err()
-}
-
-func virtualModelCanonicals(refs []providerVirtualModelRef) []string {
-	out := make([]string, 0, len(refs))
-	for _, v := range refs {
-		out = append(out, v.canonical)
-	}
-	return out
 }
 
 type modelView struct {
@@ -583,7 +430,7 @@ func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
 	if !input.normalizeAndValidate(w) {
 		return
 	}
-	modelID, err := s.providers.AddManualModel(r.Context(), r.PathValue("id"), providers.ManualModelInput{
+	modelID, err := s.providers.AddManualModel(r.Context(), s.scope(r).AccountID(), r.PathValue("id"), providers.ManualModelInput{
 		UpstreamModelID: input.UpstreamModelID,
 		DisplayName:     input.DisplayName,
 		ContextLength:   input.ContextLength,
@@ -594,7 +441,7 @@ func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, providers.ErrManualModelExists):
 		adminError(w, 409, "model_exists", "That model already exists for this provider.")
 		return
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, providers.ErrProviderNotFound):
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	case err != nil:
@@ -613,9 +460,9 @@ func (s *Server) lookupManualModel(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "model_id_required", "A valid upstream model ID is required.")
 		return
 	}
-	model, err := s.providers.ResolveManualModel(r.Context(), r.PathValue("id"), upstreamID)
+	model, err := s.providers.ResolveManualModel(r.Context(), s.scope(r).AccountID(), r.PathValue("id"), upstreamID)
 	switch {
-	case errors.Is(err, sql.ErrNoRows):
+	case errors.Is(err, providers.ErrProviderNotFound):
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	case err != nil:
@@ -639,38 +486,18 @@ func positiveIntOrNil(value int) any {
 }
 
 func (s *Server) deleteManualModel(w http.ResponseWriter, r *http.Request) {
-	modelID := r.PathValue("id")
-	var origin string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT origin FROM provider_models WHERE id=?`, modelID).Scan(&origin); err == sql.ErrNoRows {
+	err := s.scope(r).DeleteManualModel(r.Context(), r.PathValue("id"))
+	switch {
+	case errors.Is(err, store.ErrModelNotFound):
 		adminError(w, 404, "not_found", "Model not found.")
 		return
-	} else if err != nil {
-		adminError(w, 500, "database_error", "Could not load model.")
-		return
-	}
-	if origin != "manual" {
+	case errors.Is(err, store.ErrModelNotManual):
 		adminError(w, 403, "model_not_manual", "Only manually-added models can be deleted here.")
 		return
-	}
-	var refs int
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT (SELECT count(*) FROM client_single_bindings WHERE real_model_id=?) + (SELECT count(*) FROM virtual_model_targets WHERE provider_model_id=?) + (SELECT count(*) FROM virtual_models WHERE target_provider_model_id=?)`, modelID, modelID, modelID).Scan(&refs); err != nil {
-		adminError(w, 500, "database_error", "Could not check model references.")
-		return
-	}
-	if refs > 0 {
+	case errors.Is(err, store.ErrModelInUse):
 		adminError(w, 409, "model_in_use", "Repoint clients and virtual models using this model first.")
 		return
-	}
-	tx, err := s.db.SQL.BeginTx(r.Context(), nil)
-	if err != nil {
-		adminError(w, 500, "database_error", "Could not delete model.")
-		return
-	}
-	defer tx.Rollback()
-	if _, err = tx.ExecContext(r.Context(), `DELETE FROM client_model_permissions WHERE model_kind='real' AND model_id=?`, modelID); err == nil {
-		_, err = tx.ExecContext(r.Context(), `DELETE FROM provider_models WHERE id=? AND origin='manual'`, modelID)
-	}
-	if err != nil || tx.Commit() != nil {
+	case err != nil:
 		adminError(w, 500, "database_error", "Could not delete model.")
 		return
 	}
@@ -678,61 +505,61 @@ func (s *Server) deleteManualModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listProviderModels(w http.ResponseWriter, r *http.Request) {
-	s.listModelsQuery(w, r, `m.provider_id=?`, []any{r.PathValue("id")})
+	s.listModelsQuery(w, r, r.PathValue("id"))
 }
 func (s *Server) listAllModels(w http.ResponseWriter, r *http.Request) {
-	s.listModelsQuery(w, r, `1=1`, nil)
+	s.listModelsQuery(w, r, "")
 }
-func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, where string, args []any) {
+func (s *Server) listModelsQuery(w http.ResponseWriter, r *http.Request, providerID string) {
 	limit, offset, search := pagination(r)
 	if r.URL.Query().Get("all") == "1" {
 		limit = 100000 // return the full catalogue (e.g. for the virtual-model target selector)
 		offset = 0
 	}
-	query := `SELECT m.id,m.provider_id,p.name,m.upstream_model_id,p.name||'/'||m.upstream_model_id,m.display_name,m.context_length,m.max_output_tokens,m.native_protocol,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities,m.input_modalities,m.output_modalities,m.available,m.first_seen_at,m.last_seen_at,m.origin FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE ` + where + ` AND (m.upstream_model_id LIKE ? OR p.name LIKE ? OR p.name||'/'||m.upstream_model_id LIKE ?) ORDER BY p.name,m.upstream_model_id LIMIT ? OFFSET ?`
-	pattern := "%" + search + "%"
-	args = append(args, pattern, pattern, pattern, limit, offset)
-	rows, err := s.db.SQL.QueryContext(r.Context(), query, args...)
+	rows, err := s.scope(r).ListModels(r.Context(), store.ModelFilter{ProviderID: providerID, Search: search, Limit: limit, Offset: offset})
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not list models.")
 		return
 	}
-	defer rows.Close()
-	data := []modelView{}
-	for rows.Next() {
-		var v modelView
-		var available int
-		var nativeProtocol sql.NullString
-		var tools, vision, reasoning, structured sql.NullInt64
-		var reasoningCaps sql.NullString
-		var inputMod, outputMod sql.NullString
-		if rows.Scan(&v.ID, &v.ProviderID, &v.ProviderName, &v.UpstreamModelID, &v.CanonicalModelID, &v.DisplayName, &v.ContextLength, &v.MaxOutputTokens, &nativeProtocol, &tools, &vision, &reasoning, &structured, &reasoningCaps, &inputMod, &outputMod, &available, &v.FirstSeenAt, &v.LastSeenAt, &v.Origin) != nil {
-			adminError(w, 500, "database_error", "Could not list models.")
-			return
+	data := make([]modelView, 0, len(rows))
+	for i := range rows {
+		row := &rows[i]
+		v := modelView{
+			ID:               row.ID,
+			ProviderID:       row.ProviderID,
+			ProviderName:     row.ProviderName,
+			UpstreamModelID:  row.UpstreamModelID,
+			CanonicalModelID: row.CanonicalModelID,
+			DisplayName:      row.DisplayName,
+			ContextLength:    row.ContextLength,
+			MaxOutputTokens:  row.MaxOutputTokens,
+			Available:        row.Available,
+			FirstSeenAt:      row.FirstSeenAt,
+			LastSeenAt:       row.LastSeenAt,
+			Origin:           row.Origin,
 		}
-		if nativeProtocol.Valid {
-			v.NativeProtocol = providers.Protocol(nativeProtocol.String)
+		if row.NativeProtocol.Valid {
+			v.NativeProtocol = providers.Protocol(row.NativeProtocol.String)
 		}
-		v.SupportsTools = triBoolFromInt(tools)
-		v.SupportsVision = triBoolFromInt(vision)
-		v.SupportsReasoning = triBoolFromInt(reasoning)
-		v.SupportsStructuredOutput = triBoolFromInt(structured)
-		v.ReasoningCapabilities = decodeReasoningCapabilities(reasoningCaps)
-		v.InputModalities = decodeModalities(inputMod)
-		v.OutputModalities = decodeModalities(outputMod)
-		v.Available = scanBool(available)
+		v.SupportsTools = triBoolFromInt(row.SupportsTools)
+		v.SupportsVision = triBoolFromInt(row.SupportsVision)
+		v.SupportsReasoning = triBoolFromInt(row.SupportsReasoning)
+		v.SupportsStructuredOutput = triBoolFromInt(row.SupportsStructuredOutput)
+		v.ReasoningCapabilities = decodeReasoningCapabilities(row.ReasoningCapabilities)
+		v.InputModalities = decodeModalities(row.InputModalities)
+		v.OutputModalities = decodeModalities(row.OutputModalities)
 		data = append(data, v)
 	}
 	writeJSON(w, 200, map[string]any{"data": data, "limit": limit, "offset": offset})
 }
 
 func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
-	var providersCount, available, retired, broken int
-	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM providers`).Scan(&providersCount)
-	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=1`).Scan(&available)
-	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM provider_models WHERE available=0`).Scan(&retired)
-	_ = s.db.SQL.QueryRowContext(r.Context(), `SELECT count(*) FROM virtual_models v WHERE NOT EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)`).Scan(&broken)
-	writeJSON(w, 200, map[string]any{"status": "ready", "providers": providersCount, "available_models": available, "retired_models": retired, "broken_virtual_models": broken})
+	counts, err := s.scope(r).AdminHealth(r.Context())
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not load health.")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"status": "ready", "providers": counts.Providers, "available_models": counts.AvailableModels, "retired_models": counts.RetiredModels, "broken_virtual_models": counts.BrokenVirtualModels})
 }
 
 // decodeReasoningCapabilities decodes a stored JSON reasoning_capabilities

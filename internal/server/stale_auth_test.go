@@ -111,8 +111,7 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 	providerID := payload["id"].(string)
 
 	expired := time.Now().Add(-time.Minute)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID:   providerID,
 		AccessToken:  "stale-token",
 		RefreshToken: "refresh-token",
@@ -121,9 +120,7 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 		AuthState:    oauth.AuthConnected,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {
@@ -200,8 +197,7 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 	}
 
 	expired := time.Now().Add(-time.Minute)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID:   "provider-dead",
 		AccessToken:  "stale",
 		RefreshToken: "dead-refresh",
@@ -210,9 +206,7 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 		AuthState:    oauth.AuthConnected,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	// Mock OAuth server that rejects all refresh attempts.
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -225,12 +219,12 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 	registry.SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: oauthServer}})
 	mgr := providers.NewManager(db.SQL, registry)
 
-	err = mgr.ForceOAuthRefresh(context.Background(), &providers.Instance{ID: "provider-dead", Type: "codex-subscription"})
+	err = mgr.ForceOAuthRefresh(context.Background(), database.LocalAccountID, &providers.Instance{ID: "provider-dead", Type: "codex-subscription"})
 	if err == nil {
 		t.Fatal("expected error from dead refresh token")
 	}
 
-	record, err := store.Get(context.Background(), "provider-dead")
+	record := getOAuthToken(t, db, "provider-dead")
 	if err != nil {
 		t.Fatal(err)
 	}

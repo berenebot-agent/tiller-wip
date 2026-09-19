@@ -147,13 +147,10 @@ func TestCodexSessionAffinityHeaderStable(t *testing.T) {
 	providerID := payload["id"].(string)
 
 	future := time.Now().Add(time.Hour)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID: providerID, AccessToken: "live-token", RefreshToken: "refresh-token", TokenType: "Bearer",
 		ExpiresAt: &future, AuthState: oauth.AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {

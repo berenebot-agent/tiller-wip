@@ -83,7 +83,7 @@ func TestResolveManualModelPrefersLiveDiscovery(t *testing.T) {
 	}}})
 	m := NewManager(db.SQL, registry)
 
-	model, err := m.ResolveManualModel(context.Background(), "provider-live", "live-model")
+	model, err := m.ResolveManualModel(context.Background(), database.LocalAccountID, "provider-live", "live-model")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestResolveManualModelFallsBackToModelsDev(t *testing.T) {
 	}}})
 	m := NewManager(db.SQL, registry)
 
-	model, err := m.ResolveManualModel(context.Background(), "provider-md", "detect-me")
+	model, err := m.ResolveManualModel(context.Background(), database.LocalAccountID, "provider-md", "detect-me")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestResolveManualModelSurvivesProbeFailure(t *testing.T) {
 	}}})
 	m := NewManager(db.SQL, registry)
 
-	model, err := m.ResolveManualModel(context.Background(), "provider-down", "detect-me")
+	model, err := m.ResolveManualModel(context.Background(), database.LocalAccountID, "provider-down", "detect-me")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +183,7 @@ func TestAddManualModelOverridesAndPersists(t *testing.T) {
 	}
 	m := NewManager(db.SQL, NewRegistry())
 	override := int64(555)
-	modelID, err := m.AddManualModel(context.Background(), "provider-add", ManualModelInput{UpstreamModelID: "override-model", ContextLength: &override, NativeProtocol: ProtocolResponses})
+	modelID, err := m.AddManualModel(context.Background(), database.LocalAccountID, "provider-add", ManualModelInput{UpstreamModelID: "override-model", ContextLength: &override, NativeProtocol: ProtocolResponses})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,10 +217,10 @@ func TestAddManualModelDuplicateReturnsConflict(t *testing.T) {
 	insertTestProvider(t, db, "provider-dupe", "dupe", "deepseek", upstream.URL+"/v1")
 	m := NewManager(db.SQL, NewRegistry())
 	ctx := context.Background()
-	if _, err := m.AddManualModel(ctx, "provider-dupe", ManualModelInput{UpstreamModelID: "dupe-model"}); err != nil {
+	if _, err := m.AddManualModel(ctx, database.LocalAccountID, "provider-dupe", ManualModelInput{UpstreamModelID: "dupe-model"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.AddManualModel(ctx, "provider-dupe", ManualModelInput{UpstreamModelID: "dupe-model"}); !errors.Is(err, ErrManualModelExists) {
+	if _, err := m.AddManualModel(ctx, database.LocalAccountID, "provider-dupe", ManualModelInput{UpstreamModelID: "dupe-model"}); !errors.Is(err, ErrManualModelExists) {
 		t.Fatalf("second add err=%v, want ErrManualModelExists", err)
 	}
 }
@@ -228,8 +228,8 @@ func TestAddManualModelDuplicateReturnsConflict(t *testing.T) {
 func TestAddManualModelUnknownProvider(t *testing.T) {
 	db := manualModelTestDB(t)
 	m := NewManager(db.SQL, NewRegistry())
-	if _, err := m.AddManualModel(context.Background(), "missing", ManualModelInput{UpstreamModelID: "x"}); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("unknown provider err=%v, want sql.ErrNoRows", err)
+	if _, err := m.AddManualModel(context.Background(), database.LocalAccountID, "missing", ManualModelInput{UpstreamModelID: "x"}); !errors.Is(err, ErrProviderNotFound) {
+		t.Fatalf("unknown provider err=%v, want ErrProviderNotFound", err)
 	}
 }
 
@@ -239,17 +239,17 @@ func TestApplyCatalogueRetainsManualModels(t *testing.T) {
 	insertTestProvider(t, db, "provider-retain", "retain", "deepseek", upstream.URL+"/v1")
 	m := NewManager(db.SQL, NewRegistry())
 	ctx := context.Background()
-	manualID, err := m.AddManualModel(ctx, "provider-retain", ManualModelInput{UpstreamModelID: "manual-model"})
+	manualID, err := m.AddManualModel(ctx, database.LocalAccountID, "provider-retain", ManualModelInput{UpstreamModelID: "manual-model"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.applyCatalogue(ctx, "provider-retain", []Model{{ID: "discovered-model"}}); err != nil {
+	if err := m.store.For(database.LocalAccountID).ApplyCatalogue(ctx, "provider-retain", toCatalogueModels([]Model{{ID: "discovered-model"}})); err != nil {
 		t.Fatal(err)
 	}
 	if _, available, _, _ := manualModelRow(t, db, manualID); available != 1 {
 		t.Fatalf("manual model retired after a non-empty refresh")
 	}
-	if err := m.applyCatalogue(ctx, "provider-retain", nil); err != nil {
+	if err := m.store.For(database.LocalAccountID).ApplyCatalogue(ctx, "provider-retain", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, available, _, _ := manualModelRow(t, db, manualID); available != 1 {

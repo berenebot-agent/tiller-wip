@@ -384,7 +384,7 @@ type resolvedRoute struct {
 	MaxOutputTokens       sql.NullInt64
 }
 
-func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
+func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requested string) (resolvedRoute, error) {
 	tx, err := s.db.SQL.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return resolvedRoute{}, err
@@ -478,7 +478,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		// trigger a network token refresh, and holding a SQLite read tx
 		// across that serializes all other DB access.
 		for i := range route.Targets {
-			s.providers.HydrateOAuth(ctx, &route.Targets[i].Provider)
+			s.providers.HydrateOAuth(ctx, accountID, &route.Targets[i].Provider)
 		}
 		route.Virtual, route.RequestedModel = true, clientModel
 		if len(route.Targets) > 0 {
@@ -511,7 +511,7 @@ func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (
 		return resolvedRoute{}, err
 	}
 	// OAuth hydration outside the transaction (see virtual branch above).
-	s.providers.HydrateOAuth(ctx, &route.Provider)
+	s.providers.HydrateOAuth(ctx, accountID, &route.Provider)
 	return route, nil
 }
 
@@ -609,7 +609,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	}()
 	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
 
-	route, err = s.resolveRoute(r.Context(), identity.ID, requested)
+	route, err = s.resolveRoute(r.Context(), identity.AccountID, identity.ID, requested)
 	if err == sql.ErrNoRows {
 		row.httpStatus = 404
 		row.errorText = strPtr("model_not_found")
@@ -1030,7 +1030,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// failure.
 				if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
 					if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
-						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
+						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), identity.AccountID, &candidate.Provider); refreshErr == nil {
 							oauthRefreshed[candidate.Provider.ID] = true
 							// Propagate the fresh credential to every candidate
 							// sharing this provider so later targets don't retry

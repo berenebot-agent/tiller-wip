@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 var (
@@ -21,19 +23,19 @@ type refreshCall struct {
 }
 
 type Manager struct {
-	store *Store
+	store *store.Store
 	lead  time.Duration
 	mu    sync.Mutex
 	calls map[string]*refreshCall
 }
 
-func NewManager(store *Store, refreshLead time.Duration) *Manager {
-	return &Manager{store: store, lead: refreshLead, calls: make(map[string]*refreshCall)}
+func NewManager(st *store.Store, refreshLead time.Duration) *Manager {
+	return &Manager{store: st, lead: refreshLead, calls: make(map[string]*refreshCall)}
 }
 
-func (m *Manager) Current(ctx context.Context, providerID string, refresh RefreshFunc) (TokenRecord, error) {
-	record, err := m.store.Get(ctx, providerID)
-	if errors.Is(err, ErrNoToken) {
+func (m *Manager) Current(ctx context.Context, accountID, providerID string, refresh RefreshFunc) (TokenRecord, error) {
+	record, err := m.get(ctx, accountID, providerID)
+	if errors.Is(err, store.ErrNoOAuthToken) {
 		return TokenRecord{}, ErrNoToken
 	}
 	if err != nil {
@@ -51,11 +53,11 @@ func (m *Manager) Current(ctx context.Context, providerID string, refresh Refres
 	if record.RefreshToken == "" {
 		return TokenRecord{}, ErrReconnectRequired
 	}
-	return m.refresh(ctx, providerID, refresh)
+	return m.refresh(ctx, accountID, providerID, refresh)
 }
 
-func (m *Manager) ForceRefresh(ctx context.Context, providerID string, refresh RefreshFunc) (TokenRecord, error) {
-	record, err := m.refresh(ctx, providerID, refresh)
+func (m *Manager) ForceRefresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc) (TokenRecord, error) {
+	record, err := m.refresh(ctx, accountID, providerID, refresh)
 	if err == nil {
 		return record, nil
 	}
@@ -68,19 +70,20 @@ func (m *Manager) ForceRefresh(ctx context.Context, providerID string, refresh R
 	now := time.Now()
 	switch {
 	case errors.Is(err, ErrReconnectRequired):
-		_ = m.store.SetState(ctx, providerID, AuthReconnectRequired, now)
+		_ = m.store.For(accountID).SetOAuthState(ctx, providerID, string(AuthReconnectRequired), now)
 	case errors.Is(err, ErrAuthUnavailable):
-		_ = m.store.SetState(ctx, providerID, AuthUnavailable, now)
+		_ = m.store.For(accountID).SetOAuthState(ctx, providerID, string(AuthUnavailable), now)
 	}
 	return record, err
 }
 
-func (m *Manager) refresh(ctx context.Context, providerID string, refresh RefreshFunc) (TokenRecord, error) {
+func (m *Manager) refresh(ctx context.Context, accountID, providerID string, refresh RefreshFunc) (TokenRecord, error) {
 	if refresh == nil {
 		return TokenRecord{}, errors.New("oauth refresh function is required")
 	}
+	key := accountID + "\x00" + providerID
 	m.mu.Lock()
-	if call := m.calls[providerID]; call != nil {
+	if call := m.calls[key]; call != nil {
 		m.mu.Unlock()
 		select {
 		case <-ctx.Done():
@@ -90,10 +93,10 @@ func (m *Manager) refresh(ctx context.Context, providerID string, refresh Refres
 		}
 	}
 	call := &refreshCall{done: make(chan struct{})}
-	m.calls[providerID] = call
+	m.calls[key] = call
 	m.mu.Unlock()
 
-	record, err := m.store.Get(ctx, providerID)
+	record, err := m.get(ctx, accountID, providerID)
 	if err == nil {
 		response, refreshErr := refresh(ctx, record)
 		if refreshErr != nil {
@@ -101,15 +104,23 @@ func (m *Manager) refresh(ctx context.Context, providerID string, refresh Refres
 		} else {
 			record, err = MergeToken(record, response, time.Now())
 			if err == nil {
-				err = m.store.Put(ctx, record)
+				err = m.store.For(accountID).PutOAuthToken(ctx, TokenToStore(record))
 			}
 		}
 	}
 
 	m.mu.Lock()
 	call.record, call.err = record, err
-	delete(m.calls, providerID)
+	delete(m.calls, key)
 	close(call.done)
 	m.mu.Unlock()
 	return record, err
+}
+
+func (m *Manager) get(ctx context.Context, accountID, providerID string) (TokenRecord, error) {
+	row, err := m.store.For(accountID).GetOAuthToken(ctx, providerID)
+	if err != nil {
+		return TokenRecord{}, err
+	}
+	return TokenFromStore(row), nil
 }
