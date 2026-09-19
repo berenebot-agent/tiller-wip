@@ -154,6 +154,10 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if err != nil {
 		return nil, err
 	}
+	// Configured TTLs are optional: a zero value (e.g. a test config literal)
+	// leaves the auth package defaults in place.
+	clients.SetCacheTTL(cfg.ClientKeyCacheTTL)
+	sessions.SetCacheTTL(cfg.SessionCacheTTL)
 	registry := providers.NewRegistry()
 	if t, err := db.GetFallbackTimeout(context.Background()); err == nil {
 		registry.SetResponseHeaderTimeout(time.Duration(t) * time.Second)
@@ -172,6 +176,8 @@ func (s *Server) StartBackground(ctx context.Context) {
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
+	s.clients.StartSweeper(ctx)
+	s.sessions.StartSweeper(ctx)
 	go s.startLogPruner(ctx)
 }
 

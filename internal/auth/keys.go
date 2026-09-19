@@ -137,6 +137,17 @@ type cacheEntry struct {
 	expires  time.Time
 }
 
+// Auth cache defaults and bounds. Entries renew on use, so a longer TTL mainly
+// reduces hash-verification work; a mutation-driven Invalidate is independent
+// of the TTL. maxAuthCacheEntries is a safety valve against unbounded growth
+// under heavy key churn (evicted keys simply re-verify on their next request).
+const (
+	defaultClientKeyCacheTTL = 15 * time.Minute
+	defaultSessionCacheTTL   = 5 * time.Minute
+	authCacheSweepInterval   = time.Minute
+	maxAuthCacheEntries      = 100000
+)
+
 type ClientAuthenticator struct {
 	db      *sql.DB
 	key     []byte
@@ -144,8 +155,10 @@ type ClientAuthenticator struct {
 	hasher  SecretHasher
 	mu      sync.Mutex
 	entries map[[32]byte]cacheEntry
-	sem     chan struct{}
-	rev     uint64
+	// maxEntries caps the cache; a test may lower it.
+	maxEntries int
+	sem        chan struct{}
+	rev        uint64
 }
 
 // NewClientAuthenticatorWithHasher constructs a ClientAuthenticator with the
@@ -158,7 +171,18 @@ func NewClientAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) (*ClientA
 	if hasher == nil {
 		hasher = BcryptHasher{}
 	}
-	return &ClientAuthenticator{db: db, key: key, ttl: 30 * time.Second, hasher: hasher, entries: make(map[[32]byte]cacheEntry), sem: make(chan struct{}, 4)}, nil
+	return &ClientAuthenticator{db: db, key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]cacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4)}, nil
+}
+
+// SetCacheTTL overrides the verified-key cache TTL. It is called once at
+// construction time, before the authenticator serves requests.
+func (a *ClientAuthenticator) SetCacheTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	a.mu.Lock()
+	a.ttl = d
+	a.mu.Unlock()
 }
 
 // NewClientAuthenticator constructs a ClientAuthenticator using the production
@@ -183,6 +207,10 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	a.mu.Lock()
 	entry, found := a.entries[cacheKey]
 	if found && now.Before(entry.expires) {
+		// Sliding expiry: an actively-used key stays warm and verifies once
+		// rather than once per TTL window.
+		entry.expires = now.Add(a.ttl)
+		a.entries[cacheKey] = entry
 		a.mu.Unlock()
 		return entry.identity, entry.identity.Enabled, true
 	}
@@ -223,8 +251,56 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	if atomic.LoadUint64(&a.rev) != generation {
 		return ClientIdentity{}, false, true
 	}
+	a.ensureCacheRoomLocked(now)
 	a.entries[cacheKey] = cacheEntry{identity: identity, expires: now.Add(a.ttl)}
 	return identity, true, true
+}
+
+// ensureCacheRoomLocked makes room for a new cache entry: it first drops
+// expired entries, then — only if still at the cap — evicts arbitrary entries.
+// Called with a.mu held.
+func (a *ClientAuthenticator) ensureCacheRoomLocked(now time.Time) {
+	if len(a.entries) < a.maxEntries {
+		return
+	}
+	a.sweepExpiredLocked(now)
+	for len(a.entries) >= a.maxEntries {
+		for key := range a.entries {
+			delete(a.entries, key)
+			break
+		}
+	}
+}
+
+// SweepExpired removes expired entries from the verified-key cache.
+func (a *ClientAuthenticator) SweepExpired() {
+	a.mu.Lock()
+	a.sweepExpiredLocked(time.Now())
+	a.mu.Unlock()
+}
+
+func (a *ClientAuthenticator) sweepExpiredLocked(now time.Time) {
+	for key, entry := range a.entries {
+		if !now.Before(entry.expires) {
+			delete(a.entries, key)
+		}
+	}
+}
+
+// StartSweeper periodically evicts expired cache entries until ctx is done.
+func (a *ClientAuthenticator) StartSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(authCacheSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.SweepExpired()
+			}
+		}
+	}()
 }
 
 func (a *ClientAuthenticator) Invalidate(clientID string) {
@@ -278,7 +354,6 @@ type Session struct {
 const (
 	sessionSelectorBytes = 16
 	sessionSecretBytes   = 32
-	sessionCacheTTL      = 5 * time.Minute
 	credentialHashKey    = "admin_credential_hash"
 )
 
@@ -305,9 +380,13 @@ type SessionStore struct {
 	// credentialHasher hashes the admin credential fingerprint (low-entropy,
 	// human-chosen), which keeps the memory-hard KDF.
 	credentialHasher SecretHasher
-	mu               sync.Mutex
-	cache            map[string]sessionCacheEntry
-	rev              uint64
+	// cacheTTL bounds how long a validated session token is cached in memory.
+	cacheTTL time.Duration
+	// maxEntries caps the cache; a test may lower it.
+	maxEntries int
+	mu         sync.Mutex
+	cache      map[string]sessionCacheEntry
+	rev        uint64
 }
 
 // NewSessionStoreWithHasher constructs a SessionStore that uses the same hasher
@@ -330,11 +409,22 @@ func NewSessionStoreTiered(db *sql.DB, username, password string, ttl time.Durat
 	if credentialHasher == nil {
 		credentialHasher = Argon2Hasher{}
 	}
-	s := &SessionStore{db: db, ttl: ttl, tokenHasher: tokenHasher, credentialHasher: credentialHasher, cache: make(map[string]sessionCacheEntry)}
+	s := &SessionStore{db: db, ttl: ttl, tokenHasher: tokenHasher, credentialHasher: credentialHasher, cacheTTL: defaultSessionCacheTTL, maxEntries: maxAuthCacheEntries, cache: make(map[string]sessionCacheEntry)}
 	if err := s.syncCredential(username, password); err != nil {
 		return nil, err
 	}
 	return s, nil
+}
+
+// SetCacheTTL overrides the validated-session cache TTL. It is called once at
+// construction time, before the store serves requests.
+func (s *SessionStore) SetCacheTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.cacheTTL = d
+	s.mu.Unlock()
 }
 
 // NewSessionStore constructs a SessionStore using the production tiered hashers:
@@ -417,6 +507,9 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) {
 			want := sha256.Sum256([]byte(secret))
 			if subtle.ConstantTimeCompare(want[:], entry.secretHash[:]) == 1 {
+				// Sliding expiry: an actively-used session stays warm.
+				entry.expires = now.Add(s.cacheTTL)
+				s.cache[selector] = entry
 				s.mu.Unlock()
 				return entry.session, true
 			}
@@ -453,8 +546,57 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	if atomic.LoadUint64(&s.rev) != generation {
 		return Session{}, false
 	}
-	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(sessionCacheTTL), secretHash: sha256.Sum256([]byte(secret))}
+	s.ensureCacheRoomLocked(now)
+	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(s.cacheTTL), secretHash: sha256.Sum256([]byte(secret))}
 	return session, true
+}
+
+// ensureCacheRoomLocked makes room for a new session cache entry: drop expired
+// entries first, then evict arbitrary entries only if still at the cap. Called
+// with s.mu held.
+func (s *SessionStore) ensureCacheRoomLocked(now time.Time) {
+	if len(s.cache) < s.maxEntries {
+		return
+	}
+	s.sweepExpiredLocked(now)
+	for len(s.cache) >= s.maxEntries {
+		for key := range s.cache {
+			delete(s.cache, key)
+			break
+		}
+	}
+}
+
+// SweepExpired removes expired entries from the session cache.
+func (s *SessionStore) SweepExpired() {
+	s.mu.Lock()
+	s.sweepExpiredLocked(time.Now())
+	s.mu.Unlock()
+}
+
+func (s *SessionStore) sweepExpiredLocked(now time.Time) {
+	for key, entry := range s.cache {
+		if !now.Before(entry.expires) {
+			delete(s.cache, key)
+		}
+	}
+}
+
+// StartSweeper periodically evicts expired session cache entries until ctx is
+// done.
+func (s *SessionStore) StartSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(authCacheSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.SweepExpired()
+			}
+		}
+	}()
 }
 
 // Validate checks the persisted session without extending its sliding expiry.

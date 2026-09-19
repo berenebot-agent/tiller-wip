@@ -3,6 +3,7 @@ package config
 import (
 	"net/netip"
 	"testing"
+	"time"
 )
 
 func TestModelsDevEnabledFlag(t *testing.T) {
@@ -90,6 +91,57 @@ func TestDebugPprofFlag(t *testing.T) {
 	t.Setenv("TILLER_DEBUG_PPROF", "banana")
 	if _, err := Load(); err == nil {
 		t.Error("TILLER_DEBUG_PPROF=banana should fail to load")
+	}
+}
+
+func TestCacheTTLFlags(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+
+	t.Setenv("TILLER_CLIENT_KEY_CACHE_TTL", "")
+	t.Setenv("TILLER_SESSION_CACHE_TTL", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClientKeyCacheTTL != 15*time.Minute {
+		t.Errorf("ClientKeyCacheTTL default = %v, want 15m", c.ClientKeyCacheTTL)
+	}
+	if c.SessionCacheTTL != 5*time.Minute {
+		t.Errorf("SessionCacheTTL default = %v, want 5m", c.SessionCacheTTL)
+	}
+
+	t.Setenv("TILLER_CLIENT_KEY_CACHE_TTL", "30m")
+	t.Setenv("TILLER_SESSION_CACHE_TTL", "90s")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClientKeyCacheTTL != 30*time.Minute {
+		t.Errorf("ClientKeyCacheTTL override = %v, want 30m", c.ClientKeyCacheTTL)
+	}
+	if c.SessionCacheTTL != 90*time.Second {
+		t.Errorf("SessionCacheTTL override = %v, want 90s", c.SessionCacheTTL)
+	}
+
+	// A too-large value is clamped rather than rejected.
+	t.Setenv("TILLER_CLIENT_KEY_CACHE_TTL", "720h")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.ClientKeyCacheTTL != 24*time.Hour {
+		t.Errorf("ClientKeyCacheTTL clamp = %v, want 24h", c.ClientKeyCacheTTL)
+	}
+
+	for _, bad := range []string{"0s", "-5m", "banana"} {
+		t.Setenv("TILLER_CLIENT_KEY_CACHE_TTL", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("TILLER_CLIENT_KEY_CACHE_TTL=%q should fail to load", bad)
+		}
 	}
 }
 

@@ -25,6 +25,14 @@ type Config struct {
 	// off by default and only turns on when TILLER_DEBUG_PPROF is explicitly
 	// true, so a normal deployment never exposes profiling surfaces.
 	DebugPprof bool
+	// ClientKeyCacheTTL is how long a verified client key is trusted by the
+	// in-memory auth cache. Verification is immediate on a cache miss and
+	// entries renew on use, so this bounds verification cost at scale. Any
+	// client-key mutation invalidates the cache regardless of TTL.
+	ClientKeyCacheTTL time.Duration
+	// SessionCacheTTL is the equivalent in-memory cache window for admin
+	// sessions. Session revocation is immediate regardless of TTL.
+	SessionCacheTTL time.Duration
 }
 
 func Load() (Config, error) {
@@ -33,6 +41,11 @@ func Load() (Config, error) {
 		AdminPassword:     os.Getenv("TILLER_ADMIN_PASSWORD"),
 		AdminCookieSecure: false,
 		AdminSessionTTL:   30 * 24 * time.Hour,
+		// Verified keys/sessions are cached in memory and renewed on use, so a
+		// longer window cuts hash-verification CPU with no revocation penalty:
+		// explicit invalidation is independent of the TTL.
+		ClientKeyCacheTTL: 15 * time.Minute,
+		SessionCacheTTL:   5 * time.Minute,
 		DataDir:           envDefault("TILLER_DATA_DIR", "/data"),
 		ListenAddr:        envDefault("TILLER_LISTEN_ADDR", ":8080"),
 		ModelsDevEnabled:  true,
@@ -56,6 +69,26 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_ADMIN_SESSION_TTL: %w", err)
 		}
 		c.AdminSessionTTL = v
+	}
+	if raw := os.Getenv("TILLER_CLIENT_KEY_CACHE_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_CLIENT_KEY_CACHE_TTL: %w", err)
+		}
+		if v <= 0 {
+			return Config{}, fmt.Errorf("TILLER_CLIENT_KEY_CACHE_TTL must be positive, got %q", raw)
+		}
+		c.ClientKeyCacheTTL = clampCacheTTL(v)
+	}
+	if raw := os.Getenv("TILLER_SESSION_CACHE_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_SESSION_CACHE_TTL: %w", err)
+		}
+		if v <= 0 {
+			return Config{}, fmt.Errorf("TILLER_SESSION_CACHE_TTL must be positive, got %q", raw)
+		}
+		c.SessionCacheTTL = clampCacheTTL(v)
 	}
 	// Setting TILLER_TRUSTED_PROXY to a CIDR is the switch that enables
 	// proxy-header trust: forwarded headers are only honoured when the direct
@@ -104,6 +137,23 @@ func Load() (Config, error) {
 	}
 	c.DataDir = abs
 	return c, nil
+}
+
+// clampCacheTTL bounds a configured auth-cache TTL so a typo cannot pin an
+// entry (and the identity it trusts) for an unbounded time. The 24h ceiling is
+// well above any sensible value; 1s is the floor for meaningful caching.
+func clampCacheTTL(v time.Duration) time.Duration {
+	const (
+		minTTL = time.Second
+		maxTTL = 24 * time.Hour
+	)
+	if v < minTTL {
+		return minTTL
+	}
+	if v > maxTTL {
+		return maxTTL
+	}
+	return v
 }
 
 func envDefault(key, fallback string) string {

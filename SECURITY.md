@@ -52,6 +52,16 @@ dispatched from the encoding) and are upgraded to bcrypt lazily on the next
 successful authentication, so the tiering change needs no forced migration or
 downtime.
 
+**Auth caches and revocation.** Verified client keys and admin sessions are
+cached in memory and the cache entry renews on use; the TTLs are configurable
+(client key 15m, session 5m by default, clamped to ≤24h). Revocation does not
+wait for the TTL: any client-key or session mutation invalidates the affected
+cache entries immediately, and credential changes revoke all sessions. The TTL
+is therefore a *cross-instance* revocation bound — with a single process it has
+no security effect, and the sliding cache exists to keep hash-verification cost
+proportional to the rate of distinct/expired keys rather than request volume.
+Both caches are periodically swept and capped so they cannot grow unbounded.
+
 **Detailed error logging (opt-in).** Activity is metadata-only by default. If the
 administrator enables the Detailed Error Logging setting, failed request bodies
 and provider error bodies are stored (bounded to 1 MiB). Activity exports

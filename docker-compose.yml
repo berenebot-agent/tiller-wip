@@ -37,6 +37,13 @@ services:
       # /api/admin/debug/pprof/*). Off by default; enable only while diagnosing.
       # Never leave enabled on an exposed deployment.
       TILLER_DEBUG_PPROF: ${TILLER_DEBUG_PPROF:-false}
+
+      # In-memory auth-cache TTLs. Verified client keys/sessions are cached and
+      # renewed on use; any key/session mutation invalidates immediately, so a
+      # longer window only reduces hash-verification work. Defaults: client key
+      # 15m, session 5m. Bounded to <=24h.
+      TILLER_CLIENT_KEY_CACHE_TTL: ${TILLER_CLIENT_KEY_CACHE_TTL:-15m}
+      TILLER_SESSION_CACHE_TTL: ${TILLER_SESSION_CACHE_TTL:-5m}
     volumes:
       - ./data:/data
     # Default hardening (adoption-first posture). The image starts as root so
