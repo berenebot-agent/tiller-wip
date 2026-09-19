@@ -14,8 +14,20 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync/atomic"
 	"time"
 )
+
+// activeTenantTxs counts currently open tenant transactions across all scopes.
+// It exists so a runtime guard test can prove no tenant transaction is held
+// across provider network I/O or client streaming (AGENTS.md tenancy invariants
+// and sass_tech.md §8.4). It is a diagnostic counter, not a control.
+var activeTenantTxs atomic.Int64
+
+// ActiveTenantTransactions reports the number of tenant transactions currently
+// open. Tests use it to assert the invariant; production code never branches on
+// it.
+func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 
 // Store owns the database handles and hands out account-scoped handles.
 type Store struct {
@@ -89,6 +101,8 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	if err != nil {
 		return err
 	}
+	activeTenantTxs.Add(1)
+	defer activeTenantTxs.Add(-1)
 	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity}
 	if err := fn(child); err != nil {
 		_ = tx.Rollback()
