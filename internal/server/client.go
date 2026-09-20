@@ -887,9 +887,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				req.Header.Set("x-codex-routing-hint", "model="+candidate.UpstreamModelID)
 				// Keep the exact value sent by codex_cli_rs for wire parity. The
 				// backend currently returns SSE for any Accept value; response-side
-				// classification, not this request header, decides streaming. See
-				// docs/roadmap_codex_sse_detection.md. Set it after ApplyRequestAuth
-				// so the Codex-specific request shape wins.
+				// classification, not this request header, decides streaming. Set it
+				// after ApplyRequestAuth so the Codex-specific request shape wins.
 				req.Header.Set("Accept", "text/event-stream")
 			}
 			targetID := candidate.ProviderModelID
