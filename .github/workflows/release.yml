@@ -41,12 +41,16 @@ jobs:
         env:
           TILLER_ADMIN_USERNAME: ci
           TILLER_ADMIN_PASSWORD: ci
+          TILLER_PLATFORM_ADMIN_USERNAME: ci-platform
+          TILLER_PLATFORM_ADMIN_PASSWORD: ci-platform-password
           TILLER_PUBLIC_URL: https://app.example.com
         run: docker compose -f docker-compose.yml -f docker-compose.hosted.yml config >/dev/null
       - name: Validate external proxy network override
         env:
           TILLER_ADMIN_USERNAME: ci
           TILLER_ADMIN_PASSWORD: ci
+          TILLER_PLATFORM_ADMIN_USERNAME: ci-platform
+          TILLER_PLATFORM_ADMIN_PASSWORD: ci-platform-password
           TILLER_PUBLIC_URL: https://app.example.com
           TILLER_INGRESS_NETWORK: ci-proxy-network
           TILLER_INGRESS_NETWORK_EXTERNAL: "true"

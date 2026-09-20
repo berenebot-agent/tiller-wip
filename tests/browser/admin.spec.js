@@ -71,7 +71,9 @@ test('insecure origin (plain HTTP): one-time-secret hides the Copy button and se
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
   await page.getByLabel('Administrator').fill(ADMIN_USER);
-  await page.getByLabel('Password').fill(ADMIN_PASS);
+  // Scope to the login form: the reset form's "New password" label also
+  // substring-matches getByLabel('Password') in strict mode.
+  await page.locator('#login-form').getByLabel('Password').fill(ADMIN_PASS);
   await page.getByRole('button', { name: 'Enter control panel' }).click();
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '+ Add client' }).click();
