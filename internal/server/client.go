@@ -885,12 +885,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				req.Header.Set("session-id", sessionID)
 				req.Header.Set("x-client-request-id", row.clientRequestID)
 				req.Header.Set("x-codex-routing-hint", "model="+candidate.UpstreamModelID)
-				// The ChatGPT Codex backend switches to SSE only when Accept is
-				// exactly text/event-stream (the official codex_cli_rs sends this
-				// exact value). A combined Accept leaves it on the buffered JSON
-				// path, which stalls long reasoning generations until a reverse
-				// proxy read timeout kills the connection. Set it after
-				// ApplyRequestAuth so the Codex-specific contract wins.
+				// Keep the exact value sent by codex_cli_rs for wire parity. The
+				// backend currently returns SSE for any Accept value; response-side
+				// classification, not this request header, decides streaming. See
+				// docs/roadmap_codex_sse_detection.md. Set it after ApplyRequestAuth
+				// so the Codex-specific request shape wins.
 				req.Header.Set("Accept", "text/event-stream")
 			}
 			targetID := candidate.ProviderModelID
@@ -943,7 +942,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				continue
 			}
 			headerLatencyMs := time.Since(attemptStart).Milliseconds()
-			streaming := isStreamingResponse(response)
+			streaming := false
 			logCodexResponse := func(firstByteLatencyMs int64) {
 				if candidate.Provider.Type != "codex-subscription" || s.logger == nil {
 					return
@@ -969,6 +968,17 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			})
 			idleBody := response.Body
 			response.Body = bufferedReadCloser{Reader: &idleReader{reader: idleBody, timer: idle}, closer: idleBody}
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				if candidate.Provider.Type == "codex-subscription" {
+					// Codex streams successful Responses replies but currently omits
+					// Content-Type. Keep this provider contract explicit so a future
+					// header change cannot put the response back on the buffered path.
+					response.Header.Set("Content-Type", "text/event-stream")
+				} else {
+					sniffAndClassify(response)
+				}
+				streaming = isStreamingResponse(response)
+			}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
 				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				class := fmt.Sprintf("http_%d", response.StatusCode)
@@ -1436,6 +1446,49 @@ type bufferedReadCloser struct {
 
 func isStreamingResponse(resp *http.Response) bool {
 	return strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+}
+
+const maxSSEDetectionPrefix = 64
+
+// sniffAndClassify peeks at a small prefix of a successful headerless response
+// and marks it as SSE when the first complete field line has SSE's shape. The
+// consumed bytes are always restored so the normal preflight and relay paths
+// receive the original body unchanged.
+func sniffAndClassify(resp *http.Response) {
+	if resp == nil || resp.Body == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || resp.ContentLength == 0 || resp.Header.Get("Content-Type") != "" {
+		return
+	}
+	prefix := make([]byte, maxSSEDetectionPrefix)
+	body := resp.Body
+	n, _ := body.Read(prefix)
+	resp.Body = bufferedReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(prefix[:n]), body),
+		closer: body,
+	}
+	if looksLikeSSE(prefix[:n]) {
+		resp.Header.Set("Content-Type", "text/event-stream")
+	}
+}
+
+func looksLikeSSE(prefix []byte) bool {
+	if len(prefix) >= 3 && bytes.Equal(prefix[:3], []byte{0xef, 0xbb, 0xbf}) {
+		prefix = prefix[3:]
+	}
+	for len(prefix) > 0 {
+		lineEnd := bytes.IndexByte(prefix, '\n')
+		if lineEnd < 0 {
+			return false
+		}
+		line := bytes.TrimSuffix(prefix[:lineEnd], []byte{'\r'})
+		if bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("data:")) {
+			return true
+		}
+		if len(line) == 0 || line[0] != ':' {
+			return false
+		}
+		prefix = prefix[lineEnd+1:]
+	}
+	return false
 }
 
 func (r bufferedReadCloser) Close() error { return r.closer.Close() }
