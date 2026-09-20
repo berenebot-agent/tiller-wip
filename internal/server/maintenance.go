@@ -33,6 +33,9 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 		dir = filepath.Join(s.config.DataDir, "backups")
 	}
 	run := func() {
+		if err := s.storeHandle().PruneAuditEvents(ctx, time.Now()); err != nil {
+			s.warnBackup("scheduled audit prune failed", err)
+		}
 		path, err := s.db.Backup(ctx, dir)
 		if err != nil {
 			s.warnBackup("scheduled backup failed", err)
