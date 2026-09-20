@@ -12,6 +12,7 @@ const (
 	PlatformSettingMailProvider        = "mail_provider"
 	PlatformSettingMailFrom            = "mail_from"
 	PlatformSettingMailResendAPIKey    = "mail_resend_api_key"
+	PlatformSettingMailBrevoAPIKey     = "mail_brevo_api_key"
 	PlatformSettingMailSMTPHost        = "mail_smtp_host"
 	PlatformSettingMailSMTPPort        = "mail_smtp_port"
 	PlatformSettingMailSMTPUsername    = "mail_smtp_username"
@@ -21,6 +22,7 @@ const (
 
 var platformSecretSettings = map[string]bool{
 	PlatformSettingMailResendAPIKey: true,
+	PlatformSettingMailBrevoAPIKey:  true,
 	PlatformSettingMailSMTPPassword: true,
 }
 
@@ -69,6 +71,7 @@ type PlatformMailSettings struct {
 	Provider     string
 	From         string
 	ResendAPIKey string
+	BrevoAPIKey  string
 	SMTPHost     string
 	SMTPPort     string
 	SMTPUsername string
@@ -79,8 +82,8 @@ type PlatformMailSettings struct {
 func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettings, error) {
 	keys := []string{
 		PlatformSettingMailProvider, PlatformSettingMailFrom, PlatformSettingMailResendAPIKey,
-		PlatformSettingMailSMTPHost, PlatformSettingMailSMTPPort, PlatformSettingMailSMTPUsername,
-		PlatformSettingMailSMTPPassword, PlatformSettingMailSMTPMode,
+		PlatformSettingMailBrevoAPIKey, PlatformSettingMailSMTPHost, PlatformSettingMailSMTPPort,
+		PlatformSettingMailSMTPUsername, PlatformSettingMailSMTPPassword, PlatformSettingMailSMTPMode,
 	}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
 	args := make([]any, 0, len(keys))
@@ -111,7 +114,8 @@ func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettin
 	}
 	return PlatformMailSettings{
 		Provider: values[PlatformSettingMailProvider], From: values[PlatformSettingMailFrom],
-		ResendAPIKey: values[PlatformSettingMailResendAPIKey], SMTPHost: values[PlatformSettingMailSMTPHost],
+		ResendAPIKey: values[PlatformSettingMailResendAPIKey], BrevoAPIKey: values[PlatformSettingMailBrevoAPIKey],
+		SMTPHost: values[PlatformSettingMailSMTPHost],
 		SMTPPort: values[PlatformSettingMailSMTPPort], SMTPUsername: values[PlatformSettingMailSMTPUsername],
 		SMTPPassword: values[PlatformSettingMailSMTPPassword], SMTPMode: values[PlatformSettingMailSMTPMode],
 	}, nil
@@ -123,7 +127,8 @@ func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettin
 func (s *Store) SeedPlatformMailSettings(ctx context.Context, settings PlatformMailSettings) error {
 	values := map[string]string{
 		PlatformSettingMailProvider: settings.Provider, PlatformSettingMailFrom: settings.From,
-		PlatformSettingMailResendAPIKey: settings.ResendAPIKey, PlatformSettingMailSMTPHost: settings.SMTPHost,
+		PlatformSettingMailResendAPIKey: settings.ResendAPIKey, PlatformSettingMailBrevoAPIKey: settings.BrevoAPIKey,
+		PlatformSettingMailSMTPHost: settings.SMTPHost,
 		PlatformSettingMailSMTPPort: settings.SMTPPort, PlatformSettingMailSMTPUsername: settings.SMTPUsername,
 		PlatformSettingMailSMTPPassword: settings.SMTPPassword, PlatformSettingMailSMTPMode: settings.SMTPMode,
 	}

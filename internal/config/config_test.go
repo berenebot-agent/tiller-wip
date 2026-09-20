@@ -151,7 +151,7 @@ func TestCacheTTLFlags(t *testing.T) {
 
 func TestModeAndPublicURL(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin@example.com")
 	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
@@ -203,7 +203,7 @@ func TestModeAndPublicURL(t *testing.T) {
 
 func TestPublicURLValidation(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
+	t.Setenv("TILLER_ADMIN_USERNAME", "admin@example.com")
 	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
@@ -279,7 +279,7 @@ func TestMailBootstrap(t *testing.T) {
 	t.Setenv("TILLER_MODE", "")
 	t.Setenv("TILLER_PUBLIC_URL", "")
 	clearMailEnv := func() {
-		for _, k := range []string{"TILLER_MAIL_PROVIDER", "TILLER_MAIL_FROM", "TILLER_MAIL_RESEND_API_KEY", "TILLER_MAIL_SMTP_HOST", "TILLER_MAIL_SMTP_PORT", "TILLER_MAIL_SMTP_USERNAME", "TILLER_MAIL_SMTP_PASSWORD", "TILLER_MAIL_SMTP_MODE"} {
+		for _, k := range []string{"TILLER_MAIL_PROVIDER", "TILLER_MAIL_FROM", "TILLER_MAIL_SMTP_HOST", "TILLER_MAIL_SMTP_PORT", "TILLER_MAIL_SMTP_USERNAME", "TILLER_MAIL_SMTP_PASSWORD", "TILLER_MAIL_SMTP_MODE"} {
 			t.Setenv(k, "")
 		}
 	}
@@ -292,19 +292,6 @@ func TestMailBootstrap(t *testing.T) {
 	}
 	if c.Mail.Configured() {
 		t.Error("mail should not be configured by default")
-	}
-
-	// Resend requires a from address and API key.
-	clearMailEnv()
-	t.Setenv("TILLER_MAIL_PROVIDER", "resend")
-	t.Setenv("TILLER_MAIL_FROM", "Tiller <no-reply@example.com>")
-	t.Setenv("TILLER_MAIL_RESEND_API_KEY", "re_test")
-	c, err = Load()
-	if err != nil {
-		t.Fatalf("resend mail should load: %v", err)
-	}
-	if c.Mail.Provider != "resend" || c.Mail.ResendAPIKey != "re_test" {
-		t.Errorf("mail = %+v", c.Mail)
 	}
 
 	// SMTP defaults to port 587/starttls.
@@ -322,16 +309,16 @@ func TestMailBootstrap(t *testing.T) {
 
 	// Implicit TLS defaults to port 465.
 	clearMailEnv()
-	t.Setenv("TILLER_MAIL_PROVIDER", "ses")
+	t.Setenv("TILLER_MAIL_PROVIDER", "smtp")
 	t.Setenv("TILLER_MAIL_FROM", "no-reply@example.com")
 	t.Setenv("TILLER_MAIL_SMTP_HOST", "email-smtp.us-east-1.amazonaws.com")
 	t.Setenv("TILLER_MAIL_SMTP_MODE", "implicit")
 	c, err = Load()
 	if err != nil {
-		t.Fatalf("ses mail should load: %v", err)
+		t.Fatalf("smtp implicit mail should load: %v", err)
 	}
 	if c.Mail.SMTPPort != 465 || c.Mail.SMTPMode != "implicit" {
-		t.Errorf("ses implicit = %+v", c.Mail)
+		t.Errorf("smtp implicit = %+v", c.Mail)
 	}
 
 	// A half-configured / invalid mail config fails loud.

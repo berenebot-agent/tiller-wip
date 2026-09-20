@@ -26,9 +26,8 @@ const (
 // mail configuration; the database is authoritative after that. Secrets here
 // are never returned by an API.
 type MailBootstrap struct {
-	Provider     string // "resend", "ses", or "smtp"
+	Provider     string // "smtp"
 	From         string
-	ResendAPIKey string
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUsername string
@@ -38,7 +37,7 @@ type MailBootstrap struct {
 
 // Configured reports whether any mail bootstrap setting was supplied.
 func (m MailBootstrap) Configured() bool {
-	return m.Provider != "" || m.From != "" || m.ResendAPIKey != "" || m.SMTPHost != ""
+	return m.Provider != "" || m.From != "" || m.SMTPHost != ""
 }
 
 type Config struct {
@@ -336,7 +335,6 @@ func loadMailBootstrap() (MailBootstrap, error) {
 	m := MailBootstrap{
 		Provider:     strings.ToLower(strings.TrimSpace(os.Getenv("TILLER_MAIL_PROVIDER"))),
 		From:         strings.TrimSpace(os.Getenv("TILLER_MAIL_FROM")),
-		ResendAPIKey: strings.TrimSpace(os.Getenv("TILLER_MAIL_RESEND_API_KEY")),
 		SMTPHost:     strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_HOST")),
 		SMTPUsername: strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_USERNAME")),
 		SMTPPassword: os.Getenv("TILLER_MAIL_SMTP_PASSWORD"),
@@ -345,23 +343,14 @@ func loadMailBootstrap() (MailBootstrap, error) {
 	if !m.Configured() {
 		return MailBootstrap{}, nil
 	}
-	switch m.Provider {
-	case "resend", "ses", "smtp":
-	default:
-		return MailBootstrap{}, fmt.Errorf("TILLER_MAIL_PROVIDER must be resend, ses, or smtp, got %q", m.Provider)
+	if m.Provider != "smtp" {
+		return MailBootstrap{}, fmt.Errorf("TILLER_MAIL_PROVIDER must be smtp, got %q", m.Provider)
 	}
 	if m.From == "" {
 		return MailBootstrap{}, errors.New("TILLER_MAIL_FROM is required when mail is configured")
 	}
-	if m.Provider == "resend" {
-		if m.ResendAPIKey == "" {
-			return MailBootstrap{}, errors.New("TILLER_MAIL_RESEND_API_KEY is required for the resend provider")
-		}
-		return m, nil
-	}
-	// "ses" delivers through the generic SMTP adapter.
 	if m.SMTPHost == "" {
-		return MailBootstrap{}, errors.New("TILLER_MAIL_SMTP_HOST is required for the ses/smtp provider")
+		return MailBootstrap{}, errors.New("TILLER_MAIL_SMTP_HOST is required for the smtp provider")
 	}
 	if m.SMTPMode == "" {
 		m.SMTPMode = "starttls"

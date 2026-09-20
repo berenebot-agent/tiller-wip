@@ -22,7 +22,7 @@ const (
 
 func platformMailSettings(m config.MailBootstrap) store.PlatformMailSettings {
 	return store.PlatformMailSettings{
-		Provider: m.Provider, From: m.From, ResendAPIKey: m.ResendAPIKey,
+		Provider: m.Provider, From: m.From,
 		SMTPHost: m.SMTPHost, SMTPPort: strconv.Itoa(m.SMTPPort),
 		SMTPUsername: m.SMTPUsername, SMTPPassword: m.SMTPPassword, SMTPMode: m.SMTPMode,
 	}

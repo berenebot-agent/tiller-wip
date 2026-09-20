@@ -32,6 +32,7 @@ type Config struct {
 	Provider     string
 	From         string
 	ResendAPIKey string
+	BrevoAPIKey  string
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUsername string
@@ -125,7 +126,7 @@ func publicConfig(cfg Config) PublicConfig {
 		Provider: cfg.Provider, From: cfg.From, SMTPHost: cfg.SMTPHost,
 		SMTPPort: cfg.SMTPPort, SMTPMode: cfg.SMTPMode,
 		Configured:       cfg.Provider != "" && cfg.From != "",
-		SecretConfigured: cfg.ResendAPIKey != "" || cfg.SMTPPassword != "" || cfg.SMTPUsername != "",
+		SecretConfigured: cfg.ResendAPIKey != "" || cfg.BrevoAPIKey != "" || cfg.SMTPPassword != "" || cfg.SMTPUsername != "",
 	}
 }
 
@@ -136,15 +137,16 @@ func build(cfg Config) (Mailer, error) {
 	switch cfg.Provider {
 	case "resend":
 		return &resendMailer{from: cfg.From, apiKey: cfg.ResendAPIKey, client: &http.Client{Timeout: 15 * time.Second}}, nil
-	case "ses", "smtp":
+	case "brevo":
+		return &brevoMailer{from: cfg.From, apiKey: cfg.BrevoAPIKey, client: &http.Client{Timeout: 15 * time.Second}}, nil
+	case "smtp":
 		return &smtpMailer{from: cfg.From, host: cfg.SMTPHost, port: cfg.SMTPPort, username: cfg.SMTPUsername, password: cfg.SMTPPassword, mode: cfg.SMTPMode, timeout: 15 * time.Second}, nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported provider", ErrInvalidConfig)
 	}
 }
 
-// Validate enforces the hosted mail transport policy. SES intentionally uses
-// the SMTP implementation and therefore has the same TLS requirements.
+// Validate enforces the hosted mail transport policy.
 func Validate(cfg Config) error {
 	if cfg.Provider == "" {
 		return nil
@@ -161,7 +163,12 @@ func Validate(cfg Config) error {
 			return fmt.Errorf("%w: resend API key is required", ErrInvalidConfig)
 		}
 		return nil
-	case "ses", "smtp":
+	case "brevo":
+		if cfg.BrevoAPIKey == "" {
+			return fmt.Errorf("%w: brevo API key is required", ErrInvalidConfig)
+		}
+		return nil
+	case "smtp":
 		if cfg.SMTPHost == "" || strings.ContainsAny(cfg.SMTPHost, "\r\n") {
 			return fmt.Errorf("%w: SMTP host is required", ErrInvalidConfig)
 		}
@@ -176,7 +183,7 @@ func Validate(cfg Config) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("%w: provider must be resend, ses, or smtp", ErrInvalidConfig)
+		return fmt.Errorf("%w: provider must be resend, brevo, or smtp", ErrInvalidConfig)
 	}
 }
 
@@ -208,6 +215,43 @@ func (m *resendMailer) Send(ctx context.Context, message Message) error {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
 		return fmt.Errorf("resend delivery returned HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+type brevoMailer struct {
+	from   string
+	apiKey string
+	client *http.Client
+}
+
+func (m *brevoMailer) Send(ctx context.Context, message Message) error {
+	if strings.ContainsAny(message.To+message.Subject, "\r\n") {
+		return errors.New("mailer: invalid message headers")
+	}
+	payload, err := json.Marshal(map[string]any{
+		"sender":      map[string]string{"email": m.from},
+		"to":          []map[string]string{{"email": message.To}},
+		"subject":     message.Subject,
+		"textContent": message.Text,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.brevo.com/v3/smtp/email", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("api-key", m.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("brevo delivery: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
+		return fmt.Errorf("brevo delivery returned HTTP %d", resp.StatusCode)
 	}
 	return nil
 }

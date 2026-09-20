@@ -58,7 +58,7 @@ func secretSettingKeys() []string {
 }
 
 func platformSecretSettingKeys() []string {
-	return []string{PlatformSettingMailResendAPIKey, PlatformSettingMailSMTPPassword}
+	return []string{PlatformSettingMailResendAPIKey, PlatformSettingMailBrevoAPIKey, PlatformSettingMailSMTPPassword}
 }
 
 // secretAAD builds the associated data binding a secret to its account, record

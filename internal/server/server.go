@@ -277,7 +277,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		return nil, err
 	}
 	if saved, loadErr := st.GetPlatformMailSettings(context.Background()); loadErr == nil && saved.Provider != "" {
-		if err := mailManager.Update(mailer.Config{Provider: saved.Provider, From: saved.From, ResendAPIKey: saved.ResendAPIKey, SMTPHost: saved.SMTPHost, SMTPPort: parseMailPort(saved.SMTPPort), SMTPUsername: saved.SMTPUsername, SMTPPassword: saved.SMTPPassword, SMTPMode: saved.SMTPMode}); err != nil {
+		if err := mailManager.Update(mailer.Config{Provider: saved.Provider, From: saved.From, ResendAPIKey: saved.ResendAPIKey, BrevoAPIKey: saved.BrevoAPIKey, SMTPHost: saved.SMTPHost, SMTPPort: parseMailPort(saved.SMTPPort), SMTPUsername: saved.SMTPUsername, SMTPPassword: saved.SMTPPassword, SMTPMode: saved.SMTPMode}); err != nil {
 			return nil, err
 		}
 	}

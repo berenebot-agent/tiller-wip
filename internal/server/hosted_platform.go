@@ -113,6 +113,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		MailProvider        *string `json:"mail_provider"`
 		MailFrom            *string `json:"mail_from"`
 		MailResendAPIKey    *string `json:"mail_resend_api_key"`
+		MailBrevoAPIKey     *string `json:"mail_brevo_api_key"`
 		MailSMTPHost        *string `json:"mail_smtp_host"`
 		MailSMTPPort        *int    `json:"mail_smtp_port"`
 		MailSMTPUsername    *string `json:"mail_smtp_username"`
@@ -152,6 +153,9 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		if input.MailResendAPIKey != nil {
 			current.ResendAPIKey = *input.MailResendAPIKey
 		}
+		if input.MailBrevoAPIKey != nil {
+			current.BrevoAPIKey = *input.MailBrevoAPIKey
+		}
 		if input.MailSMTPHost != nil {
 			current.SMTPHost = strings.TrimSpace(*input.MailSMTPHost)
 		}
@@ -167,14 +171,14 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		if input.MailSMTPMode != nil {
 			current.SMTPMode = strings.ToLower(strings.TrimSpace(*input.MailSMTPMode))
 		}
-		cfg := mailer.Config{Provider: current.Provider, From: current.From, ResendAPIKey: current.ResendAPIKey, SMTPHost: current.SMTPHost, SMTPPort: parseMailPort(current.SMTPPort), SMTPUsername: current.SMTPUsername, SMTPPassword: current.SMTPPassword, SMTPMode: current.SMTPMode}
+		cfg := mailer.Config{Provider: current.Provider, From: current.From, ResendAPIKey: current.ResendAPIKey, BrevoAPIKey: current.BrevoAPIKey, SMTPHost: current.SMTPHost, SMTPPort: parseMailPort(current.SMTPPort), SMTPUsername: current.SMTPUsername, SMTPPassword: current.SMTPPassword, SMTPMode: current.SMTPMode}
 		if cfg.Provider == "" {
 			s.mailer.Clear()
 		} else if err := s.mailer.Update(cfg); err != nil {
 			adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
 			return
 		}
-		values := map[string]string{store.PlatformSettingMailProvider: current.Provider, store.PlatformSettingMailFrom: current.From, store.PlatformSettingMailResendAPIKey: current.ResendAPIKey, store.PlatformSettingMailSMTPHost: current.SMTPHost, store.PlatformSettingMailSMTPPort: current.SMTPPort, store.PlatformSettingMailSMTPUsername: current.SMTPUsername, store.PlatformSettingMailSMTPPassword: current.SMTPPassword, store.PlatformSettingMailSMTPMode: current.SMTPMode}
+		values := map[string]string{store.PlatformSettingMailProvider: current.Provider, store.PlatformSettingMailFrom: current.From, store.PlatformSettingMailResendAPIKey: current.ResendAPIKey, store.PlatformSettingMailBrevoAPIKey: current.BrevoAPIKey, store.PlatformSettingMailSMTPHost: current.SMTPHost, store.PlatformSettingMailSMTPPort: current.SMTPPort, store.PlatformSettingMailSMTPUsername: current.SMTPUsername, store.PlatformSettingMailSMTPPassword: current.SMTPPassword, store.PlatformSettingMailSMTPMode: current.SMTPMode}
 		for key, value := range values {
 			if err := st.SetPlatformSetting(r.Context(), key, value); err != nil {
 				adminError(w, http.StatusServiceUnavailable, "mail_settings_locked", "Mail secrets could not be saved.")
@@ -192,13 +196,14 @@ func hasMailUpdate(input struct {
 	MailProvider        *string `json:"mail_provider"`
 	MailFrom            *string `json:"mail_from"`
 	MailResendAPIKey    *string `json:"mail_resend_api_key"`
+	MailBrevoAPIKey     *string `json:"mail_brevo_api_key"`
 	MailSMTPHost        *string `json:"mail_smtp_host"`
 	MailSMTPPort        *int    `json:"mail_smtp_port"`
 	MailSMTPUsername    *string `json:"mail_smtp_username"`
 	MailSMTPPassword    *string `json:"mail_smtp_password"`
 	MailSMTPMode        *string `json:"mail_smtp_mode"`
 }) bool {
-	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
+	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
 }
 
 func (s *Server) platformUsers(w http.ResponseWriter, r *http.Request) {

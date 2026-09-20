@@ -50,11 +50,11 @@ services:
       TILLER_CLIENT_KEY_CACHE_TTL: ${TILLER_CLIENT_KEY_CACHE_TTL:-15m}
       TILLER_SESSION_CACHE_TTL: ${TILLER_SESSION_CACHE_TTL:-5m}
 
-      # Optional one-time mail bootstrap. Hosted operators can change these
-      # from the platform dashboard after startup; dashboard values win.
+      # Optional one-time SMTP bootstrap. Hosted operators can change these
+      # from the platform dashboard after startup; dashboard values win. API
+      # providers (Resend, Brevo) are configured in the dashboard only.
       TILLER_MAIL_PROVIDER: ${TILLER_MAIL_PROVIDER:-}
       TILLER_MAIL_FROM: ${TILLER_MAIL_FROM:-}
-      TILLER_MAIL_RESEND_API_KEY: ${TILLER_MAIL_RESEND_API_KEY:-}
       TILLER_MAIL_SMTP_HOST: ${TILLER_MAIL_SMTP_HOST:-}
       TILLER_MAIL_SMTP_PORT: ${TILLER_MAIL_SMTP_PORT:-}
       TILLER_MAIL_SMTP_MODE: ${TILLER_MAIL_SMTP_MODE:-}

@@ -8,8 +8,8 @@ import (
 func TestValidateMailConfigs(t *testing.T) {
 	valid := []Config{
 		{Provider: "resend", From: "Tiller <no-reply@example.com>", ResendAPIKey: "re_test"},
+		{Provider: "brevo", From: "no-reply@example.com", BrevoAPIKey: "xkeysib-test"},
 		{Provider: "smtp", From: "no-reply@example.com", SMTPHost: "smtp.example.com", SMTPPort: 587, SMTPMode: "starttls"},
-		{Provider: "ses", From: "no-reply@example.com", SMTPHost: "email-smtp.example.com", SMTPPort: 465, SMTPMode: "implicit", SMTPUsername: "u", SMTPPassword: "p"},
 	}
 	for _, cfg := range valid {
 		if err := Validate(cfg); err != nil {
@@ -18,6 +18,7 @@ func TestValidateMailConfigs(t *testing.T) {
 	}
 	invalid := []Config{
 		{Provider: "resend", From: "x@y.z"},
+		{Provider: "brevo", From: "x@y.z"},
 		{Provider: "smtp", From: "x@y.z", SMTPHost: "h", SMTPPort: 587, SMTPMode: "plain"},
 		{Provider: "smtp", From: "x@y.z", SMTPHost: "h", SMTPPort: 587, SMTPMode: "starttls", SMTPUsername: "u"},
 	}
