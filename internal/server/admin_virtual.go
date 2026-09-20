@@ -353,6 +353,8 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 409, "model_conflict", "That virtual model name already exists in the group.")
 		}
 		return
+	case err != nil && writeLimitExceeded(w, err):
+		return
 	case err != nil:
 		adminError(w, 500, "database_error", "Could not create virtual model.")
 		return

@@ -237,6 +237,11 @@ type CreateVirtualModelInput struct {
 // optionally creating its group first.
 func (s *Scope) CreateVirtualModel(ctx context.Context, in CreateVirtualModelInput) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
+		if tx.enforceLimits {
+			if err := tx.EnforceVirtualModelLimit(ctx); err != nil {
+				return err
+			}
+		}
 		now := now()
 		groupID := in.GroupID
 		if groupID == "" {

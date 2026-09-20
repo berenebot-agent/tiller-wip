@@ -70,6 +70,18 @@ type SignupResult struct {
 	VerificationToken string
 }
 
+// SignupAcceptance is the optional legal acceptance captured at signup. When a
+// caller supplies one, the acceptance row is written in the same transaction as
+// the user so an account is never created without its recorded agreement.
+// TermsUpdatedAt and PrivacyUpdatedAt are the published document timestamps the
+// user agreed to.
+type SignupAcceptance struct {
+	TermsUpdatedAt   string
+	PrivacyUpdatedAt string
+	IP               string
+	UserAgent        string
+}
+
 // UserSession is the authenticated customer session. Token is populated only
 // when a session is newly created; persisted rows hold only its hash.
 type UserSession struct {
@@ -372,7 +384,11 @@ func validBootstrapEmail(email string) bool { return ValidateEmail(email) }
 // CreateSignup creates the user, pending account, and verification token in a
 // short transaction. The caller sends the returned token only after this
 // transaction commits.
-func (s *Store) CreateSignup(ctx context.Context, email, password string) (SignupResult, error) {
+//
+// acceptance is optional: when one is supplied it is recorded in the same
+// transaction as the user (legal_acceptances is platform-global, so it is
+// written through the identity store's own handle, not a tenant scope).
+func (s *Store) CreateSignup(ctx context.Context, email, password string, acceptance ...SignupAcceptance) (SignupResult, error) {
 	email = NormalizeEmail(email)
 	if email == "" {
 		return SignupResult{}, ErrNotFound
@@ -414,11 +430,36 @@ func (s *Store) CreateSignup(ctx context.Context, email, password string) (Signu
 	if err := s.enqueueMail(ctx, tx, mailoutbox.QueuedMessage{UserID: userID, Type: mailoutbox.TypeVerifyEmail, Recipient: email, Token: rawToken}); err != nil {
 		return SignupResult{}, err
 	}
+	if len(acceptance) > 0 {
+		if err := recordSignupAcceptance(ctx, tx, userID, acceptance[0], now); err != nil {
+			return SignupResult{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return SignupResult{}, err
 	}
 	s.nudgeMail()
 	return SignupResult{User: User{ID: userID, Email: email, Status: "active", AccountID: accountID, AccountStatus: "pending"}, VerificationToken: rawToken}, nil
+}
+
+// recordSignupAcceptance inserts the platform-global legal_acceptances row
+// inside the signup transaction. Values are written as NULL when empty so the
+// stored row reflects exactly what was captured.
+func recordSignupAcceptance(ctx context.Context, tx *sql.Tx, userID string, a SignupAcceptance, acceptedAt time.Time) error {
+	acceptanceID, err := id.New()
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO legal_acceptances(id,user_id,terms_updated_at,privacy_updated_at,accepted_at,ip,user_agent) VALUES(?,?,?,?,?,?,?)`,
+		acceptanceID, userID, nullableIdentityString(a.TermsUpdatedAt), nullableIdentityString(a.PrivacyUpdatedAt), formatTime(acceptedAt), nullableIdentityString(a.IP), nullableIdentityString(a.UserAgent))
+	return err
+}
+
+func nullableIdentityString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 // UserByEmail returns a user and its one owned account. It intentionally does

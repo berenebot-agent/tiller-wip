@@ -47,8 +47,9 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email       string `json:"email"`
+		Password    string `json:"password"`
+		AcceptTerms bool   `json:"accept_terms"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -58,7 +59,27 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", "Enter a valid email address.")
 		return
 	}
-	result, err := s.identity.CreateSignup(r.Context(), input.Email, input.Password)
+	if !input.AcceptTerms {
+		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
+		return
+	}
+	terms, err := s.storeHandle().GetLegalDoc(r.Context(), "terms")
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
+	}
+	privacy, err := s.storeHandle().GetLegalDoc(r.Context(), "privacy")
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
+	}
+	acceptance := identity.SignupAcceptance{
+		TermsUpdatedAt:   terms.UpdatedAt,
+		PrivacyUpdatedAt: privacy.UpdatedAt,
+		IP:               clientIP(r, s.config.TrustedProxy),
+		UserAgent:        r.UserAgent(),
+	}
+	result, err := s.identity.CreateSignup(r.Context(), input.Email, input.Password, acceptance)
 	if err != nil {
 		if errors.Is(err, identity.ErrWeakPassword) || errors.Is(err, identity.ErrPasswordTooLong) {
 			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
@@ -159,7 +180,25 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.email_verified", ActorType: "user", ActorID: u.ID})
-	writeJSON(w, http.StatusOK, map[string]any{"verified": true})
+	// Verifying an email address is a strong signal that the owner of the
+	// address is present, so mint a session for exactly the user the consumed
+	// token belongs to. A leaked link can only ever mint a session for its own
+	// user; it can never be used to authenticate as anyone else.
+	session, err := s.identity.CreateUserSession(r.Context(), u)
+	if err != nil {
+		// The address is now verified; that part succeeded and must be reported
+		// even if session creation fails. Do not fail the whole flow, but do not
+		// pretend the user is signed in either.
+		if s.logger != nil {
+			s.logger.Warn("verify-email session creation failed", "error_class", fmt.Sprintf("%T", err))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"verified": true})
+		return
+	}
+	s.setUserSessionCookie(w, r, session.Token, session.ExpiresAt)
+	payload := userSessionPayload(session)
+	payload["verified"] = true
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {

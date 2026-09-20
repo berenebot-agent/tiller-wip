@@ -194,6 +194,9 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		if database.IsConstraint(err) {
 			continue
 		}
+		if writeLimitExceeded(w, err) {
+			return
+		}
 		adminError(w, 500, "database_error", "Could not create provider.")
 		return
 	}

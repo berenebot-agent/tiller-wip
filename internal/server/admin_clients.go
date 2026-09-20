@@ -169,6 +169,8 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
 		case database.IsConstraint(err):
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")
+		case writeLimitExceeded(w, err):
+			return
 		default:
 			adminError(w, 500, "database_error", "Could not create client key.")
 		}

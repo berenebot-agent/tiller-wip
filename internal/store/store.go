@@ -40,10 +40,11 @@ func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 
 // Store owns the database handles and hands out account-scoped handles.
 type Store struct {
-	db        *sql.DB
-	activity  *sql.DB
-	cipher    SecretCipher
-	cleanupMu *sync.Mutex
+	db            *sql.DB
+	activity      *sql.DB
+	cipher        SecretCipher
+	cleanupMu     *sync.Mutex
+	enforceLimits bool
 }
 
 // Option configures a Store.
@@ -54,6 +55,13 @@ type Option func(*Store)
 // returns ErrActivityUnavailable.
 func WithActivityDB(db *sql.DB) Option {
 	return func(s *Store) { s.activity = db }
+}
+
+// WithLimitEnforcement enables plan-limit enforcement across every scope this
+// Store hands out. It is set only in hosted mode (the server wires it from
+// TILLER_MODE). Default false: local mode and tests get no enforcement.
+func WithLimitEnforcement(enabled bool) Option {
+	return func(s *Store) { s.enforceLimits = enabled }
 }
 
 // WithCipher injects the recoverable-secret cipher used to encrypt and decrypt
@@ -218,7 +226,7 @@ func (s *Scope) ActivityCleanupPending(ctx context.Context, keyID string) (bool,
 // For returns a handle scoped to one account. accountID must come from a
 // verified principal.
 func (s *Store) For(accountID string) *Scope {
-	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu}
+	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu, enforceLimits: s.enforceLimits}
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx so a Scope works inside and
@@ -236,16 +244,21 @@ var errNestedTx = errors.New("store: cannot begin transaction within a transacti
 // Scope is an account-scoped view of the tenant tables. Its methods can only
 // touch rows belonging to AccountID.
 type Scope struct {
-	db        *sql.DB
-	q         querier
-	accountID string
-	activity  *sql.DB
-	cipher    SecretCipher
-	cleanupMu *sync.Mutex
+	db            *sql.DB
+	q             querier
+	accountID     string
+	activity      *sql.DB
+	cipher        SecretCipher
+	cleanupMu     *sync.Mutex
+	enforceLimits bool
 }
 
 // AccountID returns the account this scope is bound to.
 func (s *Scope) AccountID() string { return s.accountID }
+
+// EnforcingLimits reports whether plan-limit enforcement is on for this scope.
+// It is true only in hosted mode; local mode and tests leave it false.
+func (s *Scope) EnforcingLimits() bool { return s.enforceLimits }
 
 // ActivityAvailable reports whether the Activity database is open. Callers that
 // stream output (for example CSV exports) check this before emitting any bytes
@@ -268,7 +281,7 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	}
 	activeTenantTxs.Add(1)
 	defer activeTenantTxs.Add(-1)
-	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu}
+	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu, enforceLimits: s.enforceLimits}
 	if err := fn(child); err != nil {
 		_ = tx.Rollback()
 		return err

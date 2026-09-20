@@ -86,6 +86,11 @@ type CreateProviderInput struct {
 // group default for every client key in the same account.
 func (s *Scope) CreateProvider(ctx context.Context, in CreateProviderInput) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
+		if tx.enforceLimits {
+			if err := tx.EnforceProviderLimit(ctx); err != nil {
+				return err
+			}
+		}
 		now := now()
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO namespaces(account_id,name,kind,entity_id) VALUES(?,?,'real',?)`, tx.accountID, in.Name, in.ID); err != nil {
 			return err

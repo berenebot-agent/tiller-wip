@@ -14,6 +14,10 @@ const Unlimited = -1
 // ErrPlanNotFound is returned when a plan name does not exist.
 var ErrPlanNotFound = errors.New("store: plan not found")
 
+// ErrInvalidLimits is returned when a plan cap is below the Unlimited sentinel
+// (-1). Handlers map it to a 400 invalid_limits.
+var ErrInvalidLimits = errors.New("store: plan limits must be >= -1")
+
 // ErrLimitExceeded reports that an account is at its plan's cap for a resource.
 // Kind is one of "providers", "client_keys" or "virtual_models"; Limit is the
 // plan cap. Handlers map it to a 409 with a stable payload.
@@ -29,14 +33,14 @@ func (e *LimitExceededError) Error() string {
 // Plan is one row of the plans catalogue. A Limit value of Unlimited means the
 // dimension is uncapped.
 type Plan struct {
-	Name                 string `json:"name"`
-	MaxProviders         int    `json:"max_providers"`
-	MaxClientKeys        int    `json:"max_client_keys"`
-	MaxVirtualModels     int    `json:"max_virtual_models"`
-	MaxConcurrentStreams int    `json:"max_concurrent_streams"`
-	ActivityRetentionDays int   `json:"activity_retention_days"`
-	MonthlyRequests      int    `json:"monthly_requests"`
-	UpdatedAt            string `json:"updated_at"`
+	Name                  string `json:"name"`
+	MaxProviders          int    `json:"max_providers"`
+	MaxClientKeys         int    `json:"max_client_keys"`
+	MaxVirtualModels      int    `json:"max_virtual_models"`
+	MaxConcurrentStreams  int    `json:"max_concurrent_streams"`
+	ActivityRetentionDays int    `json:"activity_retention_days"`
+	MonthlyRequests       int    `json:"monthly_requests"`
+	UpdatedAt             string `json:"updated_at"`
 }
 
 // EntitlementsForAccount resolves the plan an account is on. The local account
@@ -75,7 +79,7 @@ func (s *Store) ListPlans(ctx context.Context) ([]Plan, error) {
 func (s *Store) UpdatePlan(ctx context.Context, p Plan) error {
 	for _, v := range []int{p.MaxProviders, p.MaxClientKeys, p.MaxVirtualModels, p.MaxConcurrentStreams, p.ActivityRetentionDays, p.MonthlyRequests} {
 		if v < Unlimited {
-			return errors.New("store: plan limits must be >= -1")
+			return ErrInvalidLimits
 		}
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE plans SET max_providers=?,max_client_keys=?,max_virtual_models=?,max_concurrent_streams=?,activity_retention_days=?,monthly_requests=?,updated_at=? WHERE name=?`,
@@ -184,4 +188,22 @@ func EffectiveRetentionDays(configured, planMax int) int {
 		return configured
 	}
 	return planMax
+}
+
+// AccountResourceCounts is the current count of the capped tenant resources for
+// one account, as surfaced by GET /api/auth/account/plan.
+type AccountResourceCounts struct {
+	Providers     int `json:"providers"`
+	ClientKeys    int `json:"client_keys"`
+	VirtualModels int `json:"virtual_models"`
+}
+
+// ResourceCounts returns the account's current provider, client-key and
+// virtual-model counts. All three are read in one statement so the usage panel
+// is internally consistent.
+func (s *Scope) ResourceCounts(ctx context.Context) (AccountResourceCounts, error) {
+	var c AccountResourceCounts
+	err := s.q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM providers WHERE account_id=?), (SELECT count(*) FROM client_keys WHERE account_id=?), (SELECT count(*) FROM virtual_models WHERE account_id=?)`, s.accountID, s.accountID, s.accountID).
+		Scan(&c.Providers, &c.ClientKeys, &c.VirtualModels)
+	return c, err
 }

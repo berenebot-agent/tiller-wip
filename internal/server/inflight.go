@@ -165,6 +165,27 @@ func (t *inflightTracker) clientSnapshot(accountID string) map[string]inflightSt
 	return out
 }
 
+// activeClientTickets returns the number of live client tickets for one
+// account. Tickets are keyed by account + NUL + client key id + NUL + route id,
+// so counting entries whose key starts with the account prefix counts every
+// in-flight routed request for the account across all its client keys. The
+// returned count feeds the plan's max_concurrent_streams check.
+func (t *inflightTracker) activeClientTickets(accountID string) int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	prefix := accountID + "\x00"
+	count := 0
+	for key, state := range t.clientStates {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix && state.Active > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 func (t *inflightTracker) targetStart(accountID, routeID, targetID string) {
 	key := inflightTargetKey(accountID, routeID, targetID)
 	t.mu.Lock()

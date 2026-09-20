@@ -199,6 +199,23 @@ func (s *Store) PruneRequestLogs(ctx context.Context, now time.Time) error {
 		return err
 	}
 	for account, keys := range byAccount {
+		// In enforcement mode a plan's activity_retention_days is an upper bound
+		// on every client key's configured retention. The clamp is applied here,
+		// at prune time only: stored client rows are never rewritten, so raising
+		// a plan restores previously clamped history. A missing plan row leaves
+		// planMax at Unlimited so a misconfigured catalogue can never error the
+		// prune.
+		planMax := Unlimited
+		if s.enforceLimits {
+			var max int
+			err := s.db.QueryRowContext(ctx, `SELECT activity_retention_days FROM plans WHERE name=(SELECT plan FROM accounts WHERE id=?)`, account).Scan(&max)
+			if err == nil {
+				planMax = max
+			}
+		}
+		for i := range keys {
+			keys[i].days = EffectiveRetentionDays(keys[i].days, planMax)
+		}
 		if err := s.pruneAccountRequestLogs(ctx, account, keys, now); err != nil {
 			return err
 		}

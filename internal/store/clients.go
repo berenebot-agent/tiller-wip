@@ -248,6 +248,11 @@ type CreateClientKeyInput struct {
 // from only the calling account's own providers, groups, models and routes.
 func (s *Scope) CreateClientKey(ctx context.Context, in CreateClientKeyInput) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
+		if tx.enforceLimits {
+			if err := tx.EnforceClientKeyLimit(ctx); err != nil {
+				return err
+			}
+		}
 		if in.Type == "single" {
 			ok, err := tx.singleTargetExists(ctx, in.SingleTargetType, in.SingleTargetID)
 			if err != nil {

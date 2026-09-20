@@ -574,6 +574,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	streamed := false
 	clientTracked := false
 	activeTargetID := ""
+	quotaRejected := false
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
@@ -590,7 +591,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if activeTargetID != "" {
 			s.inflight.targetEnd(row.accountID, route.RouteModelID, activeTargetID)
 		}
-		s.writeLog(context.Background(), row)
+		// A request rejected by the plan quota is not a routed inference
+		// request: it must not reach Activity (and so must not increment the
+		// monthly counter in the async writer).
+		if !quotaRejected {
+			s.writeLog(context.Background(), row)
+		}
 	}()
 	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
 
@@ -622,6 +628,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
+	if s.enforceHostedQuotas(w, r, identity, incoming == providers.ProtocolMessages) {
+		quotaRejected = true
+		return
+	}
 	s.inflight.clientStart(row.accountID, row.clientKeyID, route.RouteModelID, requested)
 	clientTracked = true
 	candidates := []resolvedRoute{route}
@@ -1399,6 +1409,53 @@ routeDone:
 	row.httpStatus = resp.StatusCode
 	_, _ = w.Write(rewriteModelBytes(body, selected.UpstreamModelID, selected.RequestedModel))
 	clearSelectedCooldown()
+}
+
+// enforceHostedQuotas applies the plan's concurrency and monthly-request caps
+// after authentication and model resolution but before any upstream work. It
+// returns true when it has written a 429 and the caller must stop; it is a
+// no-op (false) in local mode or when enforcement is off. A plan lookup failure
+// is logged and allowed through: a quota read must never fail-open into a 500
+// for the request.
+func (s *Server) enforceHostedQuotas(w http.ResponseWriter, r *http.Request, identity auth.ClientIdentity, anthropic bool) bool {
+	if s.config.Mode != config.ModeHosted || !s.scope(r).EnforcingLimits() {
+		return false
+	}
+	sc := s.scopeFor(identity.AccountID)
+	plan, err := s.storeHandle().EntitlementsForAccount(r.Context(), identity.AccountID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("plan lookup failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+		}
+		return false
+	}
+	now := time.Now()
+	if plan.MaxConcurrentStreams != store.Unlimited {
+		if active := s.inflight.activeClientTickets(identity.AccountID); active >= plan.MaxConcurrentStreams {
+			w.Header().Set("Retry-After", "1")
+			inferenceError(w, http.StatusTooManyRequests, "rate_limited", "stream_limit_exceeded", "Too many concurrent requests for your plan. Retry shortly.", anthropic)
+			return true
+		}
+	}
+	if plan.MonthlyRequests != store.Unlimited {
+		count, err := sc.UsageCount(r.Context(), store.UsagePeriod(now))
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("usage count read failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+			}
+			return false
+		}
+		if count >= plan.MonthlyRequests {
+			seconds := int(time.Until(store.NextPeriodStart(now)).Seconds())
+			if seconds < 1 {
+				seconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			inferenceError(w, http.StatusTooManyRequests, "rate_limited", "monthly_limit_exceeded", "Monthly request limit reached. Your allowance resets at the start of next month (UTC).", anthropic)
+			return true
+		}
+	}
+	return false
 }
 
 func markLastAttemptFailed(row *logRow, class string) {
