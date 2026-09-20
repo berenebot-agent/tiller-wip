@@ -77,6 +77,7 @@ type Flow struct {
 	ProviderID  string
 	RedirectURI string
 	PKCE        PKCE
+	Generation  int64
 	CreatedAt   time.Time
 }
 
@@ -126,6 +127,10 @@ func (s *FlowStore) save() {
 }
 
 func (s *FlowStore) Begin(accountID, providerID, redirectURI string) (Flow, error) {
+	return s.BeginWithGeneration(accountID, providerID, redirectURI, 0)
+}
+
+func (s *FlowStore) BeginWithGeneration(accountID, providerID, redirectURI string, generation int64) (Flow, error) {
 	key := accountID + "\x00" + providerID
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -137,7 +142,7 @@ func (s *FlowStore) Begin(accountID, providerID, redirectURI string) (Flow, erro
 	if err != nil {
 		return Flow{}, err
 	}
-	flow := Flow{ProviderID: providerID, RedirectURI: redirectURI, PKCE: pkce, CreatedAt: now}
+	flow := Flow{ProviderID: providerID, RedirectURI: redirectURI, PKCE: pkce, Generation: generation, CreatedAt: now}
 	s.byProvider[key] = flow
 	s.save()
 	return flow, nil

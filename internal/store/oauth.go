@@ -15,6 +15,7 @@ var ErrNoOAuthToken = errors.New("store: no oauth token")
 // OAuthTokenRow is the persisted OAuth token state for one provider.
 type OAuthTokenRow struct {
 	ProviderID       string
+	Generation       int64
 	AccessToken      string
 	RefreshToken     string
 	TokenType        string
@@ -35,8 +36,8 @@ func (s *Scope) GetOAuthToken(ctx context.Context, providerID string) (OAuthToke
 	var r OAuthTokenRow
 	var expiresAt, refreshExpiresAt, lastRefreshAt, createdAt, updatedAt sql.NullString
 	var providerData sql.NullString
-	err := s.q.QueryRowContext(ctx, `SELECT provider_id,access_token,coalesce(refresh_token,''),token_type,expires_at,refresh_expires_at,coalesce(id_token,''),coalesce(scope,''),coalesce(account_email,''),coalesce(account_plan,''),auth_state,last_refresh_at,created_at,updated_at,provider_data FROM provider_oauth_tokens WHERE provider_id=? AND account_id=?`, providerID, s.accountID).
-		Scan(&r.ProviderID, &r.AccessToken, &r.RefreshToken, &r.TokenType, &expiresAt, &refreshExpiresAt, &r.IDToken, &r.Scope, &r.AccountEmail, &r.AccountPlan, &r.AuthState, &lastRefreshAt, &createdAt, &updatedAt, &providerData)
+	err := s.q.QueryRowContext(ctx, `SELECT provider_id,generation,access_token,coalesce(refresh_token,''),token_type,expires_at,refresh_expires_at,coalesce(id_token,''),coalesce(scope,''),coalesce(account_email,''),coalesce(account_plan,''),auth_state,last_refresh_at,created_at,updated_at,provider_data FROM provider_oauth_tokens WHERE provider_id=? AND account_id=?`, providerID, s.accountID).
+		Scan(&r.ProviderID, &r.Generation, &r.AccessToken, &r.RefreshToken, &r.TokenType, &expiresAt, &refreshExpiresAt, &r.IDToken, &r.Scope, &r.AccountEmail, &r.AccountPlan, &r.AuthState, &lastRefreshAt, &createdAt, &updatedAt, &providerData)
 	if errors.Is(err, sql.ErrNoRows) {
 		return OAuthTokenRow{}, ErrNoOAuthToken
 	}
@@ -86,7 +87,18 @@ func (s *Scope) GetOAuthToken(ctx context.Context, providerID string) (OAuthToke
 	return r, nil
 }
 
-func (s *Scope) PutOAuthToken(ctx context.Context, r OAuthTokenRow) error {
+var ErrOAuthGenerationChanged = errors.New("store: oauth connection generation changed")
+
+func (s *Scope) OAuthGeneration(ctx context.Context, providerID string) (int64, error) {
+	var generation int64
+	err := s.q.QueryRowContext(ctx, `SELECT generation FROM oauth_connection_generations WHERE account_id=? AND provider_id=?`, s.accountID, providerID).Scan(&generation)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return generation, err
+}
+
+func (s *Scope) PutOAuthTokenIfGeneration(ctx context.Context, r OAuthTokenRow, generation int64) error {
 	if r.TokenType == "" {
 		r.TokenType = "Bearer"
 	}
@@ -119,8 +131,30 @@ func (s *Scope) PutOAuthToken(ctx context.Context, r OAuthTokenRow) error {
 		}
 		providerData = enc
 	}
-	_, err = s.q.ExecContext(ctx, `INSERT INTO provider_oauth_tokens(account_id,provider_id,access_token,refresh_token,token_type,expires_at,refresh_expires_at,id_token,scope,account_email,account_plan,auth_state,last_refresh_at,created_at,updated_at,provider_data) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id) DO UPDATE SET access_token=excluded.access_token,refresh_token=excluded.refresh_token,token_type=excluded.token_type,expires_at=excluded.expires_at,refresh_expires_at=excluded.refresh_expires_at,id_token=excluded.id_token,scope=excluded.scope,account_email=excluded.account_email,account_plan=excluded.account_plan,auth_state=excluded.auth_state,last_refresh_at=excluded.last_refresh_at,updated_at=excluded.updated_at,provider_data=excluded.provider_data`, s.accountID, r.ProviderID, accessToken, nullableStoreString(refreshToken), r.TokenType, nullableStoreTime(r.ExpiresAt), nullableStoreTime(r.RefreshExpiresAt), nullableStoreString(idToken), nullableStoreString(r.Scope), nullableStoreString(r.AccountEmail), nullableStoreString(r.AccountPlan), r.AuthState, nullableStoreTime(r.LastRefreshAt), r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano), providerData)
-	return err
+	result, err := s.q.ExecContext(ctx, `INSERT INTO provider_oauth_tokens(account_id,provider_id,generation,access_token,refresh_token,token_type,expires_at,refresh_expires_at,id_token,scope,account_email,account_plan,auth_state,last_refresh_at,created_at,updated_at,provider_data) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE COALESCE((SELECT generation FROM oauth_connection_generations WHERE account_id=? AND provider_id=?),0)=? ON CONFLICT(provider_id) DO UPDATE SET generation=excluded.generation,access_token=excluded.access_token,refresh_token=excluded.refresh_token,token_type=excluded.token_type,expires_at=excluded.expires_at,refresh_expires_at=excluded.refresh_expires_at,id_token=excluded.id_token,scope=excluded.scope,account_email=excluded.account_email,account_plan=excluded.account_plan,auth_state=excluded.auth_state,last_refresh_at=excluded.last_refresh_at,updated_at=excluded.updated_at,provider_data=excluded.provider_data WHERE provider_oauth_tokens.account_id=? AND provider_oauth_tokens.generation=?`, s.accountID, r.ProviderID, generation, accessToken, nullableStoreString(refreshToken), r.TokenType, nullableStoreTime(r.ExpiresAt), nullableStoreTime(r.RefreshExpiresAt), nullableStoreString(idToken), nullableStoreString(r.Scope), nullableStoreString(r.AccountEmail), nullableStoreString(r.AccountPlan), r.AuthState, nullableStoreTime(r.LastRefreshAt), r.CreatedAt.UTC().Format(time.RFC3339Nano), r.UpdatedAt.UTC().Format(time.RFC3339Nano), providerData, s.accountID, r.ProviderID, generation, s.accountID, generation)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return ErrOAuthGenerationChanged
+	}
+	return nil
+}
+
+func (s *Scope) PutOAuthToken(ctx context.Context, r OAuthTokenRow) error {
+	generation, err := s.OAuthGeneration(ctx, r.ProviderID)
+	if err != nil {
+		return err
+	}
+	return s.PutOAuthTokenIfGeneration(ctx, r, generation)
+}
+
+func (s *Scope) AdvanceOAuthGeneration(ctx context.Context, providerID string) (int64, error) {
+	_, err := s.q.ExecContext(ctx, `INSERT INTO oauth_connection_generations(account_id,provider_id,generation) VALUES(?,?,1) ON CONFLICT(account_id,provider_id) DO UPDATE SET generation=generation+1`, s.accountID, providerID)
+	if err != nil {
+		return 0, err
+	}
+	return s.OAuthGeneration(ctx, providerID)
 }
 
 func (s *Scope) DeleteOAuthToken(ctx context.Context, providerID string) error {

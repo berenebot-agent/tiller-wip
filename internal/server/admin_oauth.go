@@ -43,6 +43,7 @@ type oauthDeviceState struct {
 	Device github.DeviceCode
 	Token  oauth.TokenRecord
 	Err    string
+	Cancel context.CancelFunc
 }
 
 func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +74,13 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectURI := s.oauthRedirectURI(r)
-	flow, err := s.oauthFlows.Begin(s.scope(r).AccountID(), id, redirectURI)
+	scope := s.scope(r)
+	generation, err := scope.OAuthGeneration(r.Context(), id)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not start OAuth connection.")
+		return
+	}
+	flow, err := s.oauthFlows.BeginWithGeneration(scope.AccountID(), id, redirectURI, generation)
 	if errors.Is(err, oauth.ErrFlowActive) {
 		adminError(w, 409, "oauth_flow_active", "An OAuth connection is already in progress.")
 		return
@@ -167,7 +174,13 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 502, "oauth_exchange_failed", "OAuth token exchange returned an invalid token.")
 		return
 	}
-	if err := s.scope(r).PutOAuthToken(context.Background(), oauth.TokenToStore(record)); err != nil {
+	scope := s.scope(r)
+	record.Generation = flow.Generation
+	if err := scope.PutOAuthTokenIfGeneration(r.Context(), oauth.TokenToStore(record), flow.Generation); err != nil {
+		if errors.Is(err, store.ErrOAuthGenerationChanged) {
+			adminError(w, 409, "oauth_disconnected", "OAuth connection was disconnected while it was completing.")
+			return
+		}
 		adminError(w, 500, "database_error", "Could not save OAuth connection.")
 		return
 	}
@@ -176,15 +189,20 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (github.DeviceCode, error) {
+	generation, err := s.scopeFor(accountID).OAuthGeneration(ctx, id)
+	if err != nil {
+		return github.DeviceCode{}, err
+	}
 	s.oauthDeviceMu.Lock()
 	if existing := s.oauthDevices[tenantKey(accountID, id)]; existing != nil && existing.Status == "pending" {
 		device := existing.Device
 		s.oauthDeviceMu.Unlock()
 		return device, nil
 	}
-	s.oauthDevices[tenantKey(accountID, id)] = &oauthDeviceState{Status: "pending"}
+	flowCtx, cancel := context.WithCancel(s.backgroundCtx)
+	s.oauthDevices[tenantKey(accountID, id)] = &oauthDeviceState{Status: "pending", Cancel: cancel}
 	s.oauthDeviceMu.Unlock()
-	device, err := github.RequestDeviceCode(ctx, s.providers.Registry().HTTPClient())
+	device, err := github.RequestDeviceCode(flowCtx, s.providers.Registry().HTTPClient())
 	if err != nil {
 		s.finishDevice(accountID, id, "failed", err)
 		return github.DeviceCode{}, err
@@ -194,7 +212,7 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		state.Device = device
 	}
 	s.oauthDeviceMu.Unlock()
-	pollCtx := s.backgroundCtx
+	pollCtx := flowCtx
 	go func() {
 		tokens, err := github.PollToken(pollCtx, s.providers.Registry().HTTPClient(), device)
 		if err != nil {
@@ -222,7 +240,8 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 			s.finishDevice(accountID, id, "failed", err)
 			return
 		}
-		if err := s.scopeFor(accountID).PutOAuthToken(pollCtx, oauth.TokenToStore(record)); err != nil {
+		record.Generation = generation
+		if err := s.scopeFor(accountID).PutOAuthTokenIfGeneration(pollCtx, oauth.TokenToStore(record), generation); err != nil {
 			s.finishDevice(accountID, id, "failed", err)
 			return
 		}
@@ -303,12 +322,20 @@ func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request)
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
-	if err := s.scope(r).DeleteOAuthToken(r.Context(), id); err != nil {
+	scope := s.scope(r)
+	if _, err := scope.AdvanceOAuthGeneration(r.Context(), id); err != nil {
+		adminError(w, 500, "database_error", "Could not remove OAuth connection.")
+		return
+	}
+	if err := scope.DeleteOAuthToken(r.Context(), id); err != nil {
 		adminError(w, 500, "database_error", "Could not remove OAuth connection.")
 		return
 	}
 	s.oauthDeviceMu.Lock()
-	delete(s.oauthDevices, tenantKey(s.scope(r).AccountID(), id))
+	if state := s.oauthDevices[tenantKey(scope.AccountID(), id)]; state != nil && state.Cancel != nil {
+		state.Cancel()
+	}
+	delete(s.oauthDevices, tenantKey(scope.AccountID(), id))
 	s.oauthDeviceMu.Unlock()
 	s.oauthFlows.Cancel(s.scope(r).AccountID(), id)
 	writeJSON(w, 200, map[string]any{"status": "disconnected"})

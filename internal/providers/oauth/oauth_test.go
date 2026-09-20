@@ -295,3 +295,63 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 		t.Fatalf("auth_state = %q after cancellation, want connected", record.AuthState)
 	}
 }
+
+func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t, db)
+	expired := time.Now().Add(-time.Minute)
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", ExpiresAt: &expired, AuthState: AuthConnected})); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store.New(db.SQL), time.Minute)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, refreshErr := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", func(context.Context, TokenRecord) (TokenResponse, error) {
+			close(started)
+			<-release
+			return TokenResponse{AccessToken: "late", RefreshToken: "late-refresh", ExpiresIn: 3600}, nil
+		})
+		refreshDone <- refreshErr
+	}()
+	<-started
+	generation, err := st.AdvanceOAuthGeneration(context.Background(), "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteOAuthToken(context.Background(), "provider-1"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-refreshDone; !errors.Is(err, store.ErrOAuthGenerationChanged) {
+		t.Fatalf("refresh error = %v, want generation changed", err)
+	}
+	if _, err := st.GetOAuthToken(context.Background(), "provider-1"); !errors.Is(err, store.ErrNoOAuthToken) {
+		t.Fatalf("late refresh token error = %v, want no token", err)
+	}
+	late := TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "callback", RefreshToken: "callback-refresh", AuthState: AuthConnected})
+	if err := st.PutOAuthTokenIfGeneration(context.Background(), late, generation-1); !errors.Is(err, store.ErrOAuthGenerationChanged) {
+		t.Fatalf("callback write error = %v, want generation changed", err)
+	}
+	if err := st.PutOAuthTokenIfGeneration(context.Background(), late, generation-1); !errors.Is(err, store.ErrOAuthGenerationChanged) {
+		t.Fatalf("device write error = %v, want generation changed", err)
+	}
+	if err := st.PutOAuthTokenIfGeneration(context.Background(), late, generation); err != nil {
+		t.Fatalf("new connection error = %v", err)
+	}
+	if got := testToken(t, st, "provider-1"); got.AccessToken != "callback" {
+		t.Fatalf("new connection access token = %q, want callback", got.AccessToken)
+	}
+}

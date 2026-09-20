@@ -97,14 +97,17 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 	m.mu.Unlock()
 
 	record, err := m.get(ctx, accountID, providerID)
+	var generation int64
 	if err == nil {
+		generation = record.Generation
 		response, refreshErr := refresh(ctx, record)
 		if refreshErr != nil {
 			err = refreshErr
 		} else {
 			record, err = MergeToken(record, response, time.Now())
 			if err == nil {
-				err = m.store.For(accountID).PutOAuthToken(ctx, TokenToStore(record))
+				record.Generation = generation
+				err = m.store.For(accountID).PutOAuthTokenIfGeneration(ctx, TokenToStore(record), generation)
 			}
 		}
 	}

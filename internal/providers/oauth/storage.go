@@ -32,6 +32,7 @@ type TokenResponse struct {
 
 type TokenRecord struct {
 	ProviderID       string
+	Generation       int64
 	AccessToken      string
 	RefreshToken     string
 	TokenType        string
@@ -126,6 +127,7 @@ func timePtr(v time.Time) *time.Time { v = v.UTC(); return &v }
 func TokenToStore(r TokenRecord) store.OAuthTokenRow {
 	return store.OAuthTokenRow{
 		ProviderID:       r.ProviderID,
+		Generation:       r.Generation,
 		AccessToken:      r.AccessToken,
 		RefreshToken:     r.RefreshToken,
 		TokenType:        r.TokenType,
@@ -147,6 +149,7 @@ func TokenToStore(r TokenRecord) store.OAuthTokenRow {
 func TokenFromStore(row store.OAuthTokenRow) TokenRecord {
 	return TokenRecord{
 		ProviderID:       row.ProviderID,
+		Generation:       row.Generation,
 		AccessToken:      row.AccessToken,
 		RefreshToken:     row.RefreshToken,
 		TokenType:        row.TokenType,
