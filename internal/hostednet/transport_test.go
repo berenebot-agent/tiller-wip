@@ -41,6 +41,7 @@ func TestAllowedAddressRejectsSpecialUseRanges(t *testing.T) {
 		"0.0.0.0", "10.0.0.1", "100.64.0.1", "127.0.0.1",
 		"169.254.169.254", "172.16.0.1", "192.168.1.1", "224.0.0.1",
 		"240.0.0.1", "::1", "fc00::1", "fe80::1", "ff02::1",
+		"64:ff9b::c000:0201", "64:ff9b:1::1", "2001::1", "2002::1", "fec0::1",
 	} {
 		address, err := netip.ParseAddr(raw)
 		if err != nil {
@@ -53,6 +54,10 @@ func TestAllowedAddressRejectsSpecialUseRanges(t *testing.T) {
 	public := netip.MustParseAddr("93.184.216.34")
 	if !AllowedAddress(public) {
 		t.Fatalf("AllowedAddress(%s) = false", public)
+	}
+	publicIPv6 := netip.MustParseAddr("2606:4700:4700::1111")
+	if !AllowedAddress(publicIPv6) {
+		t.Fatalf("AllowedAddress(%s) = false", publicIPv6)
 	}
 }
 

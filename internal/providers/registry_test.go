@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -54,6 +55,17 @@ func TestSetResponseHeaderTimeout(t *testing.T) {
 	}
 	if updated.ResponseHeaderTimeout != 120*time.Second {
 		t.Fatalf("ResponseHeaderTimeout after set = %v, want 120s", updated.ResponseHeaderTimeout)
+	}
+}
+
+func TestHostedRegistryDoesNotFollowRedirects(t *testing.T) {
+	client := NewHostedRegistry().HTTPClient()
+	request, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckRedirect(request, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("hosted redirect policy = %v, want http.ErrUseLastResponse", err)
 	}
 }
 

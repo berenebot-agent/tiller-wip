@@ -44,6 +44,14 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("fe80::/10"),
 	netip.MustParsePrefix("2001:db8::/32"),
 	netip.MustParsePrefix("ff00::/8"),
+	// IPv6 translation and transition ranges are not directly allocated public
+	// destinations. In particular, NAT64 can embed a prohibited IPv4 address in
+	// 64:ff9b::/96, so these must not pass the global-unicast check.
+	netip.MustParsePrefix("64:ff9b::/96"),
+	netip.MustParsePrefix("64:ff9b:1::/48"),
+	netip.MustParsePrefix("2001::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("fec0::/10"),
 }
 
 var blockedHostSuffixes = []string{

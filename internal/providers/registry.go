@@ -367,7 +367,7 @@ func NewRegistry() *Registry {
 // NewRegistry so private/LAN provider URLs continue to work.
 func NewHostedRegistry() *Registry {
 	transport := hostednet.NewTransport()
-	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: transport.CheckRedirect}, clients: map[time.Duration]*http.Client{}, modelsDevEnabled: true}
+	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, clients: map[time.Duration]*http.Client{}, modelsDevEnabled: true}
 }
 
 // ClientFor returns an immutable HTTP client whose per-attempt
