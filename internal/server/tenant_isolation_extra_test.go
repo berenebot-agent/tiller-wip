@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -56,12 +55,7 @@ func TestUsageCacheAccountIsolation(t *testing.T) {
 
 	insert := func(accountID, rowID, clientID string, tokens int64) {
 		t.Helper()
-		adb, err := database.OpenActivity(ctx, filepath.Join(db.ActivityDir, accountID+".db"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer adb.Close()
-		if _, err := adb.Exec(`INSERT INTO request_logs(id,account_id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := db.Activity.ExecContext(ctx, `INSERT INTO request_logs(id,account_id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			rowID, accountID, clientID, "provider-a/model-a", "provider-a", "model-a", "chat", 0, 200, 1, tokens/2, tokens-tokens/2, "req-"+rowID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 			t.Fatal(err)
 		}

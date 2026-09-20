@@ -258,7 +258,7 @@ With a Single key, `main` can be redirected from the control panel without chang
 
 ## Data and security
 
-Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material.
+Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material. Core configuration lives in `tiller-router.db` (self-hosted SQLite); high-churn Activity telemetry lives separately in `activity.db` and is disposable — losing it does not affect routing or configuration. Back up `tiller-router.db` (and the master key); `activity.db` can be backed up separately only if Activity history matters. Hosted Tiller is intended to run on PostgreSQL instead of SQLite; ordinary self-hosting never requires an external database.
 
 **Recoverable provider credentials are encrypted at rest, always on.** Provider API credentials, OAuth tokens, and the notification auth header are sealed with AES-256-GCM; the master key lives outside the database (`TILLER_MASTER_KEY` / `TILLER_MASTER_KEY_FILE`, or a generated `./data/master.key`). **Back the master key up separately** — without it, existing encrypted credentials cannot be recovered. A database backup does not contain the key; a full `./data` archive does, and must be treated as secret. If encrypted values exist but the key is missing or wrong, Tiller starts in a locked state and credential-bearing providers stay unavailable until the key is restored. Rotate with `tiller-router rotate-master-key` (service stopped). Take care with **where you store `./data`** and any backups of it — keep them on storage you trust.
 

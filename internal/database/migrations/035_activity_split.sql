@@ -1,6 +1,7 @@
--- Activity tables move out of the central database into per-account files
--- under data/activity/<account_id>.db. The move itself is performed in Go by
--- database.migrateActivity (rows are copied with INSERT OR REPLACE, then the
--- central request_logs/request_attempts tables are dropped), because SQLite has
--- no cross-file DDL. This migration file exists only to record that the split
--- step has been reached in schema_migrations; it intentionally changes nothing.
+-- Activity tables move out of the central database into the separate
+-- activity.db file. The move itself is performed in Go by
+-- database.migrateActivity (rows are copied with INSERT OR REPLACE into the
+-- attached activity.db, verified, then the central request_logs/request_attempts
+-- tables are dropped), because SQLite has no cross-file DDL. This migration
+-- file exists only to record that the split step has been reached in
+-- schema_migrations; it intentionally changes nothing.

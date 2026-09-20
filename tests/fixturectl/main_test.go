@@ -33,11 +33,10 @@ func TestRunActivitySeedsDeterministicRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopen.Close()
-	activity, err := database.OpenActivity(context.Background(), filepath.Join(reopen.ActivityDir, database.LocalAccountID+".db"))
-	if err != nil {
-		t.Fatal(err)
+	activity := reopen.Activity
+	if activity == nil {
+		t.Fatal("fixture database has no Activity handle")
 	}
-	defer activity.Close()
 
 	var logs int
 	if err := activity.QueryRow(`SELECT count(*) FROM request_logs WHERE client_key_id='ck-fixture'`).Scan(&logs); err != nil {

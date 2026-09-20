@@ -26,9 +26,12 @@ type DB struct {
 	Path      string
 	Audit     *sql.DB
 	AuditPath string
-	// ActivityDir holds the per-account Activity database files. It is always
-	// a sibling of the central database file under the data directory.
-	ActivityDir string
+	// Activity is the separate Activity database (request_logs and
+	// request_attempts). It is best-effort: a missing or unopenable Activity
+	// database leaves it nil so Tiller still starts and routes. ActivityPath is
+	// its file, a sibling of the central database under the data directory.
+	Activity     *sql.DB
+	ActivityPath string
 }
 
 // LocalAccountID is the fixed, well-known identifier of the single implicit
@@ -85,10 +88,17 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
-	d := &DB{SQL: db, Path: path, ActivityDir: filepath.Join(filepath.Dir(path), ActivityDirName)}
+	d := &DB{SQL: db, Path: path, ActivityPath: filepath.Join(filepath.Dir(path), ActivityFileName)}
 	if err := d.Migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// Activity is best-effort telemetry: if it cannot be opened, leave the
+	// handle nil (reads return empty, writes no-op) rather than refusing to
+	// start. The one-time move from the central tables also runs here so a
+	// released install upgrades transparently.
+	if activity, aerr := OpenActivity(ctx, d.ActivityPath); aerr == nil {
+		d.Activity = activity
 	}
 	if err := d.migrateActivity(ctx); err != nil {
 		db.Close()
@@ -130,6 +140,15 @@ func restrictFileMode(path string) error {
 }
 
 func (d *DB) Close() error {
+	if d.Activity != nil {
+		if err := d.Activity.Close(); err != nil {
+			if d.Audit != nil {
+				_ = d.Audit.Close()
+			}
+			_ = d.SQL.Close()
+			return err
+		}
+	}
 	if d.Audit != nil {
 		if err := d.Audit.Close(); err != nil {
 			_ = d.SQL.Close()

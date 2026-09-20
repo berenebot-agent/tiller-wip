@@ -80,16 +80,14 @@ func openRawMigrationDB(t *testing.T, path string) *sql.DB {
 	return raw
 }
 
-// openFixtureActivity opens the local account's Activity database for a
-// migrated fixture. It mirrors the store's lazy open path.
+// openFixtureActivity returns the migrated fixture's Activity database. The
+// one-time move from the central tables runs during Open.
 func openFixtureActivity(t *testing.T, db *DB) *sql.DB {
 	t.Helper()
-	adb, err := OpenActivity(context.Background(), filepath.Join(db.ActivityDir, LocalAccountID+".db"))
-	if err != nil {
-		t.Fatal(err)
+	if db.Activity == nil {
+		t.Fatal("fixture database has no Activity handle")
 	}
-	t.Cleanup(func() { adb.Close() })
-	return adb
+	return db.Activity
 }
 
 type migrationEntry struct {

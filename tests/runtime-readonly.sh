@@ -107,6 +107,12 @@ if [ ! -f "$data_dir/tiller-router.db" ] && ! docker run --rm --user 0:0 \
     exit 1
 fi
 echo "    $data_dir/tiller-router.db present"
+if [ ! -f "$data_dir/activity.db" ] && ! docker run --rm --user 0:0 \
+    -v "$data_dir:/data" alpine:3.20 test -f /data/activity.db; then
+    echo "FAIL: no activity.db under /data" >&2
+    exit 1
+fi
+echo "    $data_dir/activity.db present"
 
 echo "==> docker inspect runtime settings"
 ro=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$name")

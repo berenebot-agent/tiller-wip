@@ -91,8 +91,8 @@ func TestBackupIsConsistentAndReadable(t *testing.T) {
 
 // TestBackupExcludesActivityAndRestoresCore proves a snapshot is a usable
 // restore point for the control plane and deliberately carries no Activity:
-// the central request_logs table is gone from the snapshot and the per-account
-// Activity files are not part of it.
+// the central request_logs table is gone from the snapshot and the separate
+// activity.db is not part of it.
 func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(context.Background(), filepath.Join(dir, "router.db"))
@@ -106,14 +106,9 @@ func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
 	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('bp1','backup-prov','generic-openai','http://example.test/v1',1,'["chat"]',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	adb, err := OpenActivity(context.Background(), filepath.Join(db.ActivityDir, LocalAccountID+".db"))
-	if err != nil {
+	if _, err := db.Activity.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('act-1','ck','m','chat',0,200,1,'r1',?)`, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := adb.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('act-1','ck','m','chat',0,200,1,'r1',?)`, now); err != nil {
-		t.Fatal(err)
-	}
-	adb.Close()
 
 	backup, err := db.Backup(context.Background(), filepath.Join(dir, "backups"))
 	if err != nil {

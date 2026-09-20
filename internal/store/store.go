@@ -18,6 +18,11 @@ import (
 	"time"
 )
 
+// errNoActivityStore is returned when an Activity operation is attempted on a
+// Store that was not configured with an Activity database handle. Core-only
+// callers (auth, discovery, settings) construct Store without one.
+var errNoActivityStore = errors.New("store: activity store is not configured")
+
 // activeTenantTxs counts currently open tenant transactions across all scopes.
 // It exists so a runtime guard test can prove no tenant transaction is held
 // across provider network I/O or client streaming (AGENTS.md tenancy invariants
@@ -33,18 +38,18 @@ func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 type Store struct {
 	db       *sql.DB
 	audit    *sql.DB
-	activity *activityFiles
+	activity *sql.DB
 	cipher   SecretCipher
 }
 
 // Option configures a Store.
 type Option func(*Store)
 
-// WithActivityDir enables per-account Activity database access under dir. A
-// Store without it can still serve control-plane queries but any Activity
-// method returns errNoActivityStore.
-func WithActivityDir(dir string) Option {
-	return func(s *Store) { s.activity = newActivityFiles(dir) }
+// WithActivityDB injects the separate Activity database handle. A Store
+// without it can still serve control-plane queries but any Activity method
+// returns errNoActivityStore.
+func WithActivityDB(db *sql.DB) Option {
+	return func(s *Store) { s.activity = db }
 }
 
 // WithCipher injects the recoverable-secret cipher used to encrypt and decrypt
@@ -83,12 +88,14 @@ func (s *Store) DB() *sql.DB { return s.db }
 // such as retention pruning. Tenant audit reads/writes use Scope methods.
 func (s *Store) AuditDB() *sql.DB { return s.audit }
 
-// DeleteAccountActivity removes the account's separate Activity file.
+// DeleteAccountActivity removes the account's Activity rows. The
+// request_attempts foreign key cascades, so both tables are cleared.
 func (s *Store) DeleteAccountActivity(accountID string) error {
 	if s.activity == nil {
-		return errNoActivityStore
+		return nil
 	}
-	return s.activity.Delete(accountID)
+	_, err := s.activity.ExecContext(context.Background(), `DELETE FROM request_logs WHERE account_id=?`, accountID)
+	return err
 }
 
 // For returns a handle scoped to one account. accountID must come from a
@@ -116,7 +123,7 @@ type Scope struct {
 	q         querier
 	audit     *sql.DB
 	accountID string
-	activity  *activityFiles
+	activity  *sql.DB
 	cipher    SecretCipher
 }
 
@@ -146,27 +153,23 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	return tx.Commit()
 }
 
-// withActivity runs fn against the account's Activity database. The handle is
-// released (and may be evicted) when fn returns.
+// withActivity runs fn against the shared Activity database. Every caller's
+// SQL is account-scoped through the Scope's accountID.
 func (s *Scope) withActivity(ctx context.Context, fn func(q querier) error) error {
-	db, release, err := s.activity.acquire(ctx, s.accountID)
-	if err != nil {
-		return err
+	if s.activity == nil {
+		return errNoActivityStore
 	}
-	defer release()
-	return fn(db)
+	return fn(s.activity)
 }
 
-// runActivityTx runs fn inside a transaction on the account's Activity
-// database. request_logs and request_attempts are written in one transaction,
-// so a single request's log and its attempts commit together.
+// runActivityTx runs fn inside a transaction on the Activity database.
+// request_logs and request_attempts are written in one transaction, so a single
+// request's log and its attempts commit together.
 func (s *Scope) runActivityTx(ctx context.Context, fn func(q querier) error) error {
-	db, release, err := s.activity.acquire(ctx, s.accountID)
-	if err != nil {
-		return err
+	if s.activity == nil {
+		return errNoActivityStore
 	}
-	defer release()
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := s.activity.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

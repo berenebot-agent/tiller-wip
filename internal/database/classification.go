@@ -45,9 +45,9 @@ var TableClassification = map[string]TableClass{
 	"settings":                 ClassTenant,
 }
 
-// ActivityTableClassification is the table inventory for each per-account
-// Activity database file. Activity tables live outside the central database so
-// the central backup never contains logs; they are still account-scoped.
+// ActivityTableClassification is the table inventory for the separate Activity
+// database. Activity tables live outside the central database so the central
+// backup never contains logs; they are still account-scoped.
 var ActivityTableClassification = map[string]TableClass{
 	"activity_schema_migrations": ClassPlatform,
 	"request_logs":               ClassTenant,
@@ -66,8 +66,8 @@ func MainTenantTables() []string {
 	return out
 }
 
-// ActivityTenantTables returns the tenant-owned table names in the per-account
-// Activity database.
+// ActivityTenantTables returns the tenant-owned table names in the Activity
+// database.
 func ActivityTenantTables() []string {
 	out := make([]string, 0, len(ActivityTableClassification))
 	for name, class := range ActivityTableClassification {

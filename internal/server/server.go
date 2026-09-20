@@ -246,7 +246,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if cfg.ModelsDevEnabled {
 		registry.LoadModelsDevCache(filepath.Join(cfg.DataDir, providers.ModelsDevCacheFile()))
 	}
-	storeOpts := []store.Option{store.WithActivityDir(db.ActivityDir), store.WithAuditDB(db.Audit)}
+	storeOpts := []store.Option{store.WithActivityDB(db.Activity), store.WithAuditDB(db.Audit)}
 	if options.cipher != nil {
 		storeOpts = append(storeOpts, store.WithCipher(options.cipher))
 	}
@@ -548,7 +548,7 @@ func (s *Server) scopeFor(accountID string) *store.Scope {
 // goes through New, which sets store.
 func (s *Server) storeHandle() *store.Store {
 	if s.store == nil {
-		opts := []store.Option{store.WithActivityDir(s.db.ActivityDir), store.WithAuditDB(s.db.Audit)}
+		opts := []store.Option{store.WithActivityDB(s.db.Activity), store.WithAuditDB(s.db.Audit)}
 		if s.secretCipher != nil {
 			opts = append(opts, store.WithCipher(s.secretCipher))
 		}

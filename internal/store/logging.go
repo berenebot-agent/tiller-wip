@@ -130,7 +130,7 @@ func insertRequestLogRow(ctx context.Context, q querier, accountID string, in *R
 // PruneRequestLogs deletes request logs older than each client key's retention
 // window. It is platform-level maintenance and deliberately spans all
 // accounts, so it lives on Store rather than an account Scope. Each account's
-// prune runs against that account's Activity file.
+// prune is account-scoped SQL against the shared Activity database.
 func (s *Store) PruneRequestLogs(ctx context.Context, now time.Time) error {
 	if s.activity == nil {
 		return nil
@@ -168,12 +168,7 @@ type retentionKey struct {
 }
 
 func (s *Store) pruneAccountRequestLogs(ctx context.Context, account string, keys []retentionKey, now time.Time) error {
-	db, release, err := s.activity.acquire(ctx, account)
-	if err != nil {
-		return err
-	}
-	defer release()
-	tx, err := db.BeginTx(ctx, nil)
+	tx, err := s.activity.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

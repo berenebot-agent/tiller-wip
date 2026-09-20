@@ -22,7 +22,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
@@ -93,12 +92,11 @@ func runActivity(args []string) error {
 		return fmt.Errorf("client %q has logging disabled; activity rows would be meaningless", *clientID)
 	}
 
-	// Activity lives in the per-account Activity database, not the central one.
-	activity, err := database.OpenActivity(ctx, filepath.Join(db.ActivityDir, accountID+".db"))
-	if err != nil {
-		return fmt.Errorf("open activity database: %w", err)
+	// Activity lives in its own database, not the central one.
+	activity := db.Activity
+	if activity == nil {
+		return fmt.Errorf("activity database is not open")
 	}
-	defer activity.Close()
 
 	short := *clientID
 	if len(short) > 8 {

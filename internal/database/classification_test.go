@@ -71,7 +71,7 @@ func TestTenantTableClassification(t *testing.T) {
 		}
 	}
 
-	// Activity tables must live in the per-account Activity database, not the
+	// Activity tables must live in the separate Activity database, not the
 	// central one: the central backup deliberately excludes Activity.
 	for _, name := range ActivityTenantTables() {
 		if actualSet[name] {
@@ -127,17 +127,15 @@ func verifyAuditSchema(t *testing.T, adb *sql.DB) {
 	}
 }
 
-// verifyActivitySchema opens a sample per-account Activity database and checks
-// its table classification and account_id coverage, mirroring the central
-// database guard for the split Activity schema.
+// verifyActivitySchema checks the Activity database's table classification and
+// account_id coverage, mirroring the central database guard for the separate
+// Activity schema.
 func verifyActivitySchema(t *testing.T, db *DB) {
 	t.Helper()
-	path := filepath.Join(db.ActivityDir, LocalAccountID+".db")
-	adb, err := OpenActivity(context.Background(), path)
-	if err != nil {
-		t.Fatal(err)
+	adb := db.Activity
+	if adb == nil {
+		t.Fatal("activity database is not open")
 	}
-	defer adb.Close()
 
 	rows, err := adb.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {

@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"io"
 	"log/slog"
-	"path/filepath"
-	"sync"
 	"testing"
 	"time"
 
@@ -17,27 +15,15 @@ import (
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
-// activityDB returns the local account's Activity database for a test DB,
-// opening (and caching for the test) the per-account file. Activity now lives
-// in its own file, so tests that seed or assert Activity rows use this instead
-// of db.SQL.
-var activityHandles sync.Map // map[*database.DB]*sql.DB
-
+// activityDB returns the Activity database for a test DB. Activity lives in
+// its own file, so tests that seed or assert Activity rows use this instead of
+// db.SQL.
 func activityDB(t *testing.T, db *database.DB) *sql.DB {
 	t.Helper()
-	if v, ok := activityHandles.Load(db); ok {
-		return v.(*sql.DB)
+	if db.Activity == nil {
+		t.Fatal("test database has no Activity handle")
 	}
-	adb, err := database.OpenActivity(context.Background(), filepath.Join(db.ActivityDir, database.LocalAccountID+".db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	activityHandles.Store(db, adb)
-	t.Cleanup(func() {
-		activityHandles.Delete(db)
-		adb.Close()
-	})
-	return adb
+	return db.Activity
 }
 
 // putOAuthToken seeds an OAuth token in the local account for tests.
