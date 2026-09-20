@@ -564,7 +564,15 @@ func (s *Server) adminHealth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load health.")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"status": "ready", "providers": counts.Providers, "available_models": counts.AvailableModels, "retired_models": counts.RetiredModels, "broken_virtual_models": counts.BrokenVirtualModels})
+	// Activity is best-effort telemetry: when its store is unavailable the
+	// service is degraded, not down. Surface it explicitly so the UI can show a
+	// warning rather than implying Activity history is empty.
+	activityAvailable := s.db.Activity != nil
+	status := "ready"
+	if !activityAvailable {
+		status = "degraded"
+	}
+	writeJSON(w, 200, map[string]any{"status": status, "activity_available": activityAvailable, "providers": counts.Providers, "available_models": counts.AvailableModels, "retired_models": counts.RetiredModels, "broken_virtual_models": counts.BrokenVirtualModels})
 }
 
 // decodeReasoningCapabilities decodes a stored JSON reasoning_capabilities

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -10,6 +11,24 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/store"
 )
+
+// activityUnavailable reports whether an Activity operation failed because the
+// Activity database could not be opened. Activity is best-effort telemetry, so
+// this is a distinct, intentional 503 rather than a generic database 500.
+func activityUnavailable(err error) bool {
+	return errors.Is(err, store.ErrActivityUnavailable)
+}
+
+// activityReadError maps an Activity read/clear failure to a response: an
+// explicit 503 when the Activity store is unavailable, otherwise the existing
+// generic database 500.
+func activityReadError(w http.ResponseWriter, err error, message string) {
+	if activityUnavailable(err) {
+		adminError(w, http.StatusServiceUnavailable, "activity_unavailable", "Activity history is unavailable because the Activity store could not be opened.")
+		return
+	}
+	adminError(w, 500, "database_error", message)
+}
 
 type requestAttemptView struct {
 	AttemptNumber      int     `json:"attempt_number"`
@@ -28,7 +47,7 @@ type requestAttemptView struct {
 func (s *Server) listRequestAttempts(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.scope(r).ListRequestAttempts(r.Context(), r.PathValue("id"))
 	if err != nil {
-		adminError(w, 500, "database_error", "Could not load request attempts.")
+		activityReadError(w, err, "Could not load request attempts.")
 		return
 	}
 	data := make([]requestAttemptView, 0, len(rows))
@@ -121,7 +140,7 @@ func (s *Server) listActivity(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := sc.ListClientActivity(r.Context(), clientID, search, limit, offset)
 	if err != nil {
-		adminError(w, 500, "database_error", "Could not load activity.")
+		activityReadError(w, err, "Could not load activity.")
 		return
 	}
 	data := make([]activityView, 0, len(rows))
@@ -147,7 +166,7 @@ func (s *Server) listGlobalActivity(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	rows, err := s.scope(r).ListGlobalActivity(r.Context(), search, limit, offset)
 	if err != nil {
-		adminError(w, 500, "database_error", "Could not load activity.")
+		activityReadError(w, err, "Could not load activity.")
 		return
 	}
 	data := make([]globalActivityView, 0, len(rows))
@@ -170,7 +189,7 @@ func (s *Server) clearActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := sc.ClearClientActivity(r.Context(), clientID); err != nil {
-		adminError(w, 500, "database_error", "Could not clear activity.")
+		activityReadError(w, err, "Could not clear activity.")
 		return
 	}
 	s.invalidateUsageAggregates(sc.AccountID())
@@ -185,6 +204,10 @@ func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request)
 	name, err := sc.ClientKeyName(r.Context(), clientID)
 	if err != nil {
 		adminError(w, 404, "not_found", "Client key not found.")
+		return
+	}
+	if !sc.ActivityAvailable() {
+		activityReadError(w, store.ErrActivityUnavailable, "Could not export activity.")
 		return
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
@@ -206,6 +229,10 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 		adminError(w, 404, "not_found", "Virtual model not found.")
 		return
 	}
+	if !sc.ActivityAvailable() {
+		activityReadError(w, store.ErrActivityUnavailable, "Could not export activity.")
+		return
+	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
 	cutoff := periodCutoffString(r.URL.Query().Get("period"))
 	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
@@ -223,6 +250,10 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 	provider, upstream, err := sc.RealModelCanonical(r.Context(), modelID)
 	if err != nil {
 		adminError(w, 404, "not_found", "Model not found.")
+		return
+	}
+	if !sc.ActivityAvailable() {
+		activityReadError(w, store.ErrActivityUnavailable, "Could not export activity.")
 		return
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
@@ -306,7 +337,7 @@ func (s *Server) listVirtualActivity(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	rows, err := sc.ListVirtualActivity(r.Context(), modelID, canonical, search, limit, offset)
 	if err != nil {
-		adminError(w, 500, "database_error", "Could not load activity.")
+		activityReadError(w, err, "Could not load activity.")
 		return
 	}
 	data := make([]globalActivityView, 0, len(rows))
@@ -328,7 +359,7 @@ func (s *Server) listRealModelActivity(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	rows, err := sc.ListRealModelActivity(r.Context(), modelID, provider, upstream, search, limit, offset)
 	if err != nil {
-		adminError(w, 500, "database_error", "Could not load activity.")
+		activityReadError(w, err, "Could not load activity.")
 		return
 	}
 	data := make([]globalActivityView, 0, len(rows))

@@ -9,7 +9,10 @@ import (
 	"github.com/tiller-router/tiller-router/internal/id"
 )
 
-// AuditEvent is the bounded, non-content representation persisted in audit.db.
+// AuditEvent is the bounded, non-content representation persisted in the
+// core database's audit tables. Audit is logically separate even though it now
+// lives in router.db: account reads are account-scoped and platform events are
+// never exposed through a customer API.
 type AuditEvent struct {
 	Event      string
 	ActorType  string
@@ -35,9 +38,6 @@ func auditMetadata(metadata map[string]string) (string, error) {
 }
 
 func (s *Scope) RecordAccountAudit(ctx context.Context, event AuditEvent) error {
-	if s.audit == nil {
-		return nil
-	}
 	if event.Outcome == "" {
 		event.Outcome = "success"
 	}
@@ -49,14 +49,11 @@ func (s *Scope) RecordAccountAudit(ctx context.Context, event AuditEvent) error 
 	if err != nil {
 		return err
 	}
-	_, err = s.audit.ExecContext(ctx, `INSERT INTO account_audit_events(id,account_id,event,actor_type,actor_id,target_type,target_id,outcome,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, eventID, s.accountID, event.Event, event.ActorType, nullableAuditID(event.ActorID), nullableAuditID(event.TargetType), nullableAuditID(event.TargetID), event.Outcome, metadata, now())
+	_, err = s.q.ExecContext(ctx, `INSERT INTO account_audit_events(id,account_id,event,actor_type,actor_id,target_type,target_id,outcome,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, eventID, s.accountID, event.Event, event.ActorType, nullableAuditID(event.ActorID), nullableAuditID(event.TargetType), nullableAuditID(event.TargetID), event.Outcome, metadata, now())
 	return err
 }
 
 func (s *Store) RecordPlatformAudit(ctx context.Context, event AuditEvent) error {
-	if s.audit == nil {
-		return nil
-	}
 	if event.Outcome == "" {
 		event.Outcome = "success"
 	}
@@ -68,7 +65,7 @@ func (s *Store) RecordPlatformAudit(ctx context.Context, event AuditEvent) error
 	if err != nil {
 		return err
 	}
-	_, err = s.audit.ExecContext(ctx, `INSERT INTO platform_audit_events(id,event,actor_type,actor_id,target_type,target_id,outcome,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, eventID, event.Event, event.ActorType, nullableAuditID(event.ActorID), nullableAuditID(event.TargetType), nullableAuditID(event.TargetID), event.Outcome, metadata, now())
+	_, err = s.db.ExecContext(ctx, `INSERT INTO platform_audit_events(id,event,actor_type,actor_id,target_type,target_id,outcome,metadata,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, eventID, event.Event, event.ActorType, nullableAuditID(event.ActorID), nullableAuditID(event.TargetType), nullableAuditID(event.TargetID), event.Outcome, metadata, now())
 	return err
 }
 
@@ -86,10 +83,7 @@ type AuditRow struct {
 }
 
 func (s *Scope) ListAccountAudit(ctx context.Context, limit, offset int) ([]AuditRow, error) {
-	if s.audit == nil {
-		return []AuditRow{}, nil
-	}
-	rows, err := s.audit.QueryContext(ctx, `SELECT id,account_id,event,actor_type,coalesce(actor_id,''),coalesce(target_type,''),coalesce(target_id,''),outcome,metadata,created_at FROM account_audit_events WHERE account_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, s.accountID, limit, offset)
+	rows, err := s.q.QueryContext(ctx, `SELECT id,account_id,event,actor_type,coalesce(actor_id,''),coalesce(target_type,''),coalesce(target_id,''),outcome,metadata,created_at FROM account_audit_events WHERE account_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, s.accountID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -106,10 +100,7 @@ func (s *Scope) ListAccountAudit(ctx context.Context, limit, offset int) ([]Audi
 }
 
 func (s *Store) ListPlatformAudit(ctx context.Context, limit, offset int) ([]AuditRow, error) {
-	if s.audit == nil {
-		return []AuditRow{}, nil
-	}
-	rows, err := s.audit.QueryContext(ctx, `SELECT id,event,actor_type,coalesce(actor_id,''),coalesce(target_type,''),coalesce(target_id,''),outcome,metadata,created_at FROM platform_audit_events ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,event,actor_type,coalesce(actor_id,''),coalesce(target_type,''),coalesce(target_id,''),outcome,metadata,created_at FROM platform_audit_events ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -125,22 +116,19 @@ func (s *Store) ListPlatformAudit(ctx context.Context, limit, offset int) ([]Aud
 	return out, rows.Err()
 }
 
-// SetAuditRetentionDays stores retention in the separate audit database rather
-// than in the core settings namespace.
+// SetAuditRetentionDays stores retention in the audit_meta table rather than in
+// the account settings namespace, so it is independent of tenant settings.
 func (s *Store) SetAuditRetentionDays(ctx context.Context, days int) error {
-	if s.audit == nil || days < 1 {
+	if days < 1 {
 		return errors.New("store: invalid audit retention")
 	}
-	_, err := s.audit.ExecContext(ctx, `INSERT INTO audit_meta(key,value,updated_at) VALUES('audit_retention_days',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, strconv.Itoa(days), now())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO audit_meta(key,value,updated_at) VALUES('audit_retention_days',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, strconv.Itoa(days), now())
 	return err
 }
 
 func (s *Store) AuditRetentionDays(ctx context.Context) (int, error) {
-	if s.audit == nil {
-		return 0, errors.New("store: audit database is not configured")
-	}
 	var raw string
-	if err := s.audit.QueryRowContext(ctx, `SELECT value FROM audit_meta WHERE key='audit_retention_days'`).Scan(&raw); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT value FROM audit_meta WHERE key='audit_retention_days'`).Scan(&raw); err != nil {
 		return 0, err
 	}
 	days, err := strconv.Atoi(raw)

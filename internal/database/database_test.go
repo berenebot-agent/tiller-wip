@@ -90,9 +90,9 @@ func TestBackupIsConsistentAndReadable(t *testing.T) {
 // because Activity now lives in per-account files.
 
 // TestBackupExcludesActivityAndRestoresCore proves a snapshot is a usable
-// restore point for the control plane and deliberately carries no Activity:
-// the central request_logs table is gone from the snapshot and the separate
-// activity.db is not part of it.
+// restore point for the control plane (including audit history) and
+// deliberately carries no Activity: the central request_logs table is gone
+// from the snapshot and the separate activity.db is not part of it.
 func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
 	dir := t.TempDir()
 	db, err := Open(context.Background(), filepath.Join(dir, "router.db"))
@@ -107,6 +107,11 @@ func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := db.Activity.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('act-1','ck','m','chat',0,200,1,'r1',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	// Audit history is durable control-plane state and must be captured by the
+	// core snapshot.
+	if _, err := db.SQL.Exec(`INSERT INTO account_audit_events(id,account_id,event,actor_type,outcome,metadata,created_at) VALUES('ae1',?,'user.login','user','success','{}',?)`, LocalAccountID, now); err != nil {
 		t.Fatal(err)
 	}
 
@@ -137,6 +142,13 @@ func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
 	}
 	if tables != 0 {
 		t.Fatalf("central backup must not contain Activity tables, found %d", tables)
+	}
+	var auditRows int
+	if err := restored.SQL.QueryRow(`SELECT count(*) FROM account_audit_events`).Scan(&auditRows); err != nil {
+		t.Fatalf("backup lost audit table: %v", err)
+	}
+	if auditRows != 1 {
+		t.Fatalf("backup audit rows = %d, want 1", auditRows)
 	}
 }
 

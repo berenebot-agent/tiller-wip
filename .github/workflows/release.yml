@@ -32,6 +32,11 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./cmd/tiller-router
+      - name: Validate docker-compose.yml
+        env:
+          TILLER_ADMIN_USERNAME: ci
+          TILLER_ADMIN_PASSWORD: ci
+        run: docker compose -f docker-compose.yml config >/dev/null
 
   regressions:
     name: Full container regressions

@@ -38,6 +38,20 @@ jobs:
       - name: Build
         run: go build ./cmd/tiller-router
 
+  compose:
+    name: Compose config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      # Fail if docker-compose.yml has invalid YAML, bad interpolation, or a
+      # required variable without a safe dummy value. No container is started.
+      - name: Validate docker-compose.yml
+        env:
+          TILLER_ADMIN_USERNAME: ci
+          TILLER_ADMIN_PASSWORD: ci
+        run: docker compose -f docker-compose.yml config >/dev/null
+
   container-regressions:
     name: Browser and runtime checks
     runs-on: ubuntu-latest

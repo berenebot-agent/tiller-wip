@@ -18,10 +18,12 @@ import (
 	"time"
 )
 
-// errNoActivityStore is returned when an Activity operation is attempted on a
-// Store that was not configured with an Activity database handle. Core-only
-// callers (auth, discovery, settings) construct Store without one.
-var errNoActivityStore = errors.New("store: activity store is not configured")
+// ErrActivityUnavailable is returned when an Activity read/write is attempted
+// but the Activity database could not be opened. It is distinct from a generic
+// database error: routing and the control plane stay available, Activity
+// writes are best-effort, and Activity reads surface an explicit unavailable
+// state rather than pretending history is empty.
+var ErrActivityUnavailable = errors.New("store: activity store unavailable")
 
 // activeTenantTxs counts currently open tenant transactions across all scopes.
 // It exists so a runtime guard test can prove no tenant transaction is held
@@ -37,7 +39,6 @@ func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 // Store owns the database handles and hands out account-scoped handles.
 type Store struct {
 	db       *sql.DB
-	audit    *sql.DB
 	activity *sql.DB
 	cipher   SecretCipher
 }
@@ -47,7 +48,7 @@ type Option func(*Store)
 
 // WithActivityDB injects the separate Activity database handle. A Store
 // without it can still serve control-plane queries but any Activity method
-// returns errNoActivityStore.
+// returns ErrActivityUnavailable.
 func WithActivityDB(db *sql.DB) Option {
 	return func(s *Store) { s.activity = db }
 }
@@ -64,13 +65,6 @@ func WithCipher(c SecretCipher) Option {
 	}
 }
 
-// WithAuditDB enables the separate central audit database. Audit methods are
-// no-ops only when no audit handle is supplied (for tests that exercise tenant
-// resources without audit persistence).
-func WithAuditDB(db *sql.DB) Option {
-	return func(s *Store) { s.audit = db }
-}
-
 func New(db *sql.DB, opts ...Option) *Store {
 	s := &Store{db: db, cipher: disabledCipher{}}
 	for _, opt := range opts {
@@ -84,12 +78,9 @@ func New(db *sql.DB, opts ...Option) *Store {
 // tables must not be queried through it.
 func (s *Store) DB() *sql.DB { return s.db }
 
-// AuditDB exposes the separate central audit handle for platform-only jobs
-// such as retention pruning. Tenant audit reads/writes use Scope methods.
-func (s *Store) AuditDB() *sql.DB { return s.audit }
-
 // DeleteAccountActivity removes the account's Activity rows. The
-// request_attempts foreign key cascades, so both tables are cleared.
+// request_attempts foreign key cascades, so both tables are cleared. It is
+// best-effort: when Activity is unavailable there is nothing to delete.
 func (s *Store) DeleteAccountActivity(accountID string) error {
 	if s.activity == nil {
 		return nil
@@ -101,7 +92,7 @@ func (s *Store) DeleteAccountActivity(accountID string) error {
 // For returns a handle scoped to one account. accountID must come from a
 // verified principal.
 func (s *Store) For(accountID string) *Scope {
-	return &Scope{db: s.db, q: s.db, audit: s.audit, accountID: accountID, activity: s.activity, cipher: s.cipher}
+	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity, cipher: s.cipher}
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx so a Scope works inside and
@@ -121,7 +112,6 @@ var errNestedTx = errors.New("store: cannot begin transaction within a transacti
 type Scope struct {
 	db        *sql.DB
 	q         querier
-	audit     *sql.DB
 	accountID string
 	activity  *sql.DB
 	cipher    SecretCipher
@@ -129,6 +119,12 @@ type Scope struct {
 
 // AccountID returns the account this scope is bound to.
 func (s *Scope) AccountID() string { return s.accountID }
+
+// ActivityAvailable reports whether the Activity database is open. Callers that
+// stream output (for example CSV exports) check this before emitting any bytes
+// so an unavailable Activity store yields a clean 503 instead of a truncated
+// response.
+func (s *Scope) ActivityAvailable() bool { return s.activity != nil }
 
 // RunTx runs fn inside a database transaction bound to the same account. The
 // scope passed to fn reads and writes within the transaction; the outer scope
@@ -145,7 +141,7 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	}
 	activeTenantTxs.Add(1)
 	defer activeTenantTxs.Add(-1)
-	child := &Scope{db: nil, q: tx, audit: s.audit, accountID: s.accountID, activity: s.activity, cipher: s.cipher}
+	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher}
 	if err := fn(child); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -157,7 +153,7 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 // SQL is account-scoped through the Scope's accountID.
 func (s *Scope) withActivity(ctx context.Context, fn func(q querier) error) error {
 	if s.activity == nil {
-		return errNoActivityStore
+		return ErrActivityUnavailable
 	}
 	return fn(s.activity)
 }
@@ -167,7 +163,7 @@ func (s *Scope) withActivity(ctx context.Context, fn func(q querier) error) erro
 // request's log and its attempts commit together.
 func (s *Scope) runActivityTx(ctx context.Context, fn func(q querier) error) error {
 	if s.activity == nil {
-		return errNoActivityStore
+		return ErrActivityUnavailable
 	}
 	tx, err := s.activity.BeginTx(ctx, nil)
 	if err != nil {

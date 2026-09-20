@@ -113,6 +113,12 @@ if [ ! -f "$data_dir/activity.db" ] && ! docker run --rm --user 0:0 \
     exit 1
 fi
 echo "    $data_dir/activity.db present"
+# Audit is folded into the core database; there must be no separate audit.db.
+if [ -f "$data_dir/audit.db" ]; then
+    echo "FAIL: unexpected separate audit.db under /data" >&2
+    exit 1
+fi
+echo "    no separate audit.db"
 
 echo "==> docker inspect runtime settings"
 ro=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$name")

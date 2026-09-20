@@ -9,12 +9,12 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 )
 
-// startBackupScheduler writes core and audit-database snapshots on a fixed
-// interval, verifies each snapshot, and prunes snapshots past the retention
-// window.
+// startBackupScheduler writes core-database snapshots on a fixed interval,
+// verifies each snapshot, and prunes snapshots past the retention window.
 //
-// Activity lives in separate per-account files and is deliberately excluded;
-// audit.db is included because it contains security history (see
+// The core database now includes durable control-plane state and the security
+// audit tables, so a single snapshot restores both. Activity lives in the
+// separate activity.db and is deliberately excluded (see
 // docs/backup_restore_runbook.md for RPO/RTO and off-host copy guidance).
 func (s *Server) startBackupScheduler(ctx context.Context) {
 	interval := s.config.BackupInterval
@@ -35,22 +35,8 @@ func (s *Server) startBackupScheduler(ctx context.Context) {
 			s.warnBackup("scheduled backup verification failed", err)
 			return
 		}
-		if s.db.Audit != nil {
-			auditPath, auditErr := database.BackupNamed(ctx, s.db.Audit, dir, "tiller-audit-")
-			if auditErr != nil {
-				s.warnBackup("scheduled audit backup failed", auditErr)
-				return
-			}
-			if auditErr := database.Verify(ctx, auditPath); auditErr != nil {
-				s.warnBackup("scheduled audit backup verification failed", auditErr)
-				return
-			}
-		}
 		if _, err := database.PruneBackups(dir, s.config.BackupRetention, time.Now()); err != nil {
 			s.warnBackup("scheduled backup prune failed", err)
-		}
-		if _, err := database.PrunePrefixedBackups(dir, s.config.BackupRetention, time.Now(), "tiller-audit-"); err != nil {
-			s.warnBackup("scheduled audit backup prune failed", err)
 		}
 	}
 	run()

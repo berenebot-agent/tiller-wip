@@ -79,51 +79,34 @@ func TestTenantTableClassification(t *testing.T) {
 		}
 	}
 	verifyActivitySchema(t, db)
-	verifyAuditSchema(t, db.Audit)
 }
 
-// verifyAuditSchema opens the central audit database and checks its table
-// classification and account_id coverage, mirroring the Activity guard. Audit
-// tables live outside the core database so security events are not lost when
-// the core backup policy or an account deletion is applied.
-func verifyAuditSchema(t *testing.T, adb *sql.DB) {
-	t.Helper()
-	if adb == nil {
-		t.Fatal("audit database is not open")
-	}
-
-	rows, err := adb.Query(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+// TestAuditSurvivesAccountDeletion proves the audit fold keeps account_id as
+// historical attribution: deleting the owning accounts row must not remove the
+// account's audit events (there is deliberately no FK from
+// account_audit_events to accounts).
+func TestAuditSurvivesAccountDeletion(t *testing.T) {
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	actual := map[string]bool{}
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			t.Fatal(err)
-		}
-		actual[name] = true
-	}
-	if err := rows.Err(); err != nil {
+	defer db.Close()
+
+	if _, err := db.SQL.Exec(`INSERT INTO accounts(id,plan,status,created_at,updated_at) VALUES('acct-x','free','active',?,?)`, Now(), Now()); err != nil {
 		t.Fatal(err)
 	}
-	for name := range actual {
-		if _, ok := AuditTableClassification[name]; !ok {
-			t.Errorf("audit table %q is not classified in AuditTableClassification", name)
-		}
+	if _, err := db.SQL.Exec(`INSERT INTO account_audit_events(id,account_id,event,actor_type,outcome,metadata,created_at) VALUES('ev1','acct-x','user.login','user','success','{}',?)`, Now()); err != nil {
+		t.Fatal(err)
 	}
-	for name := range AuditTableClassification {
-		if !actual[name] {
-			t.Errorf("AuditTableClassification declares %q but it is not in the audit schema", name)
-		}
+	if _, err := db.SQL.Exec(`DELETE FROM accounts WHERE id='acct-x'`); err != nil {
+		t.Fatal(err)
 	}
-	for _, name := range AuditTenantTables() {
-		if !actual[name] {
-			continue
-		}
-		if !activityTableHasColumn(t, adb, name, "account_id") {
-			t.Errorf("audit tenant table %q is missing an account_id column", name)
-		}
+	var remaining int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM account_audit_events WHERE account_id='acct-x'`).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 1 {
+		t.Fatalf("account audit events after account deletion = %d, want 1", remaining)
 	}
 }
 

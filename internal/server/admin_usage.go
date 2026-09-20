@@ -22,7 +22,9 @@ type targetResolutionHealth = store.TargetHealth
 func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	snap, err := s.buildUsageSnapshot(r.Context(), s.scope(r).AccountID())
 	if err != nil {
-		adminError(w, 500, "database_error", "Could not load usage.")
+		// Usage is derived from Activity; an unavailable Activity store is the
+		// same explicit degraded state, not a generic database failure.
+		activityReadError(w, err, "Could not load usage.")
 		return
 	}
 	writeJSON(w, 200, map[string]any{

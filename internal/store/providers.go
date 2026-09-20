@@ -344,8 +344,8 @@ func (s *Scope) DeleteProvider(ctx context.Context, providerID string) error {
 }
 
 // DeleteAccountResources removes all tenant control-plane rows for an account
-// in dependency order. Activity is deleted separately because it lives in a
-// per-account database file.
+// in dependency order. Activity is deleted separately because it lives in the
+// separate activity.db. Audit events are intentionally retained.
 func (s *Scope) DeleteAccountResources(ctx context.Context) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
 		statements := []string{

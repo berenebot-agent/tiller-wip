@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -104,6 +105,33 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	}
 	if len(globalOther) != 1 {
 		t.Fatalf("other account rows changed after the local account clear: %d", len(globalOther))
+	}
+}
+
+// TestActivityReadsReturnUnavailableWhenHandleMissing proves Activity reads
+// return the explicit sentinel (not an empty slice and not a nil error) when
+// the Activity handle is absent, so callers can surface an unavailable state.
+func TestActivityReadsReturnUnavailableWhenHandleMissing(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	st := store.New(db.SQL) // no WithActivityDB: core-only store
+	sc := st.For(database.LocalAccountID)
+	ctx := context.Background()
+
+	if _, err := sc.ListGlobalActivity(ctx, "", 10, 0); !errors.Is(err, store.ErrActivityUnavailable) {
+		t.Fatalf("ListGlobalActivity err = %v, want ErrActivityUnavailable", err)
+	}
+	if _, err := sc.ListRequestAttempts(ctx, "x"); !errors.Is(err, store.ErrActivityUnavailable) {
+		t.Fatalf("ListRequestAttempts err = %v, want ErrActivityUnavailable", err)
+	}
+	if err := sc.ClearClientActivity(ctx, "x"); !errors.Is(err, store.ErrActivityUnavailable) {
+		t.Fatalf("ClearClientActivity err = %v, want ErrActivityUnavailable", err)
+	}
+	if sc.ActivityAvailable() {
+		t.Fatal("ActivityAvailable() = true without an Activity handle")
 	}
 }
 

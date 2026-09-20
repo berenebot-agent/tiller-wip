@@ -211,7 +211,7 @@ func (s *Store) AccountStatus(ctx context.Context, accountID string) (string, er
 
 // DeleteAccountIdentity removes platform identity rows after tenant resources
 // have been deleted through internal/store. Audit rows deliberately remain in
-// the separate audit database.
+// the core database (account_audit_events has no FK to accounts).
 func (s *Store) DeleteAccountIdentity(ctx context.Context, accountID string) error {
 	var userID string
 	if err := s.db.QueryRowContext(ctx, `SELECT owner_user_id FROM accounts WHERE id=?`, accountID).Scan(&userID); err != nil {

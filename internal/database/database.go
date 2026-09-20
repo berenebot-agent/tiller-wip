@@ -22,16 +22,29 @@ import (
 var migrations embed.FS
 
 type DB struct {
-	SQL       *sql.DB
-	Path      string
-	Audit     *sql.DB
-	AuditPath string
+	SQL  *sql.DB
+	Path string
 	// Activity is the separate Activity database (request_logs and
 	// request_attempts). It is best-effort: a missing or unopenable Activity
 	// database leaves it nil so Tiller still starts and routes. ActivityPath is
 	// its file, a sibling of the central database under the data directory.
 	Activity     *sql.DB
 	ActivityPath string
+}
+
+// OpenOption configures Open.
+type OpenOption func(*openConfig)
+
+type openConfig struct {
+	backupDir string
+}
+
+// WithBackupDir sets where a one-time pre-major-migration rollback snapshot is
+// written. It defaults to <data dir>/backups. It is independent of the
+// scheduled-backup setting, so it follows the operator's configured backup
+// location when one is supplied.
+func WithBackupDir(dir string) OpenOption {
+	return func(c *openConfig) { c.backupDir = dir }
 }
 
 // LocalAccountID is the fixed, well-known identifier of the single implicit
@@ -48,7 +61,12 @@ const LocalAccountID = "00000000-0000-0000-0000-000000000001"
 // instead of a cryptic chmod EPERM.
 var ErrDataDirUnwritable = errors.New("data directory is not writable by the runtime user")
 
-func Open(ctx context.Context, path string) (*DB, error) {
+func Open(ctx context.Context, path string, opts ...OpenOption) (*DB, error) {
+	var cfg openConfig
+	cfg.backupDir = filepath.Join(filepath.Dir(path), "backups")
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -89,14 +107,21 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, err
 	}
 	d := &DB{SQL: db, Path: path, ActivityPath: filepath.Join(filepath.Dir(path), ActivityFileName)}
+	// Take a one-time, verified rollback snapshot before the account-tenancy
+	// migration (028) mutates an existing pre-SaaS database. It is a no-op for
+	// fresh installs and for databases that have already crossed 028.
+	if err := d.snapshotBeforeTenancy(ctx, cfg.backupDir); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := d.Migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// Activity is best-effort telemetry: if it cannot be opened, leave the
-	// handle nil (reads return empty, writes no-op) rather than refusing to
-	// start. The one-time move from the central tables also runs here so a
-	// released install upgrades transparently.
+	// handle nil (reads return an explicit unavailable error, writes no-op)
+	// rather than refusing to start. The one-time move from the central tables
+	// also runs here so a released install upgrades transparently.
 	if activity, aerr := OpenActivity(ctx, d.ActivityPath); aerr == nil {
 		d.Activity = activity
 	}
@@ -104,13 +129,89 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
-	d.AuditPath = filepath.Join(filepath.Dir(path), AuditFileName)
-	d.Audit, err = OpenAudit(ctx, d.AuditPath)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("open audit database: %w", err)
-	}
 	return d, nil
+}
+
+// TenancyMigration is the migration that starts the account-tenancy work. An
+// existing database without it is a pre-SaaS install.
+const TenancyMigration = "028_accounts.sql"
+
+// PreTenancySnapshotPrefix names the one-time rollback snapshot taken before the
+// account-tenancy migration. It deliberately differs from BackupPrefix so the
+// ordinary short-retention prune (PruneBackups) never removes it.
+const PreTenancySnapshotPrefix = "pre-saas-migration-"
+
+// snapshotBeforeTenancy creates a verified rollback snapshot before migration
+// 028 mutates an existing pre-SaaS database. It uses migration state, not an
+// application version string, to decide whether the snapshot is required:
+//
+//   - a fresh install has no schema_migrations table, so no snapshot is taken;
+//   - a database that already applied 028 has nothing to roll back;
+//   - an existing install with 028 still pending gets exactly one snapshot.
+//
+// If a snapshot already exists it is reused (and re-verified) rather than
+// overwritten. Migration aborts if the snapshot cannot be created or verified.
+func (d *DB) snapshotBeforeTenancy(ctx context.Context, backupDir string) error {
+	var hasMigrations int
+	if err := d.SQL.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'`).Scan(&hasMigrations); err != nil {
+		return fmt.Errorf("check migration state: %w", err)
+	}
+	if hasMigrations == 0 {
+		return nil
+	}
+	var applied int
+	if err := d.SQL.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version=?`, TenancyMigration).Scan(&applied); err != nil {
+		return fmt.Errorf("check tenancy migration state: %w", err)
+	}
+	if applied != 0 {
+		return nil
+	}
+	// Idempotent: reuse an existing, verified snapshot if one was already taken.
+	if existing, err := findPreTenancySnapshot(backupDir); err != nil {
+		return err
+	} else if existing != "" {
+		if err := Verify(ctx, existing); err != nil {
+			return fmt.Errorf("pre-migration snapshot failed verification (%s): %w", existing, err)
+		}
+		return nil
+	}
+	path, err := BackupNamed(ctx, d.SQL, backupDir, PreTenancySnapshotPrefix)
+	if err != nil {
+		return fmt.Errorf("pre-migration snapshot failed: %w", err)
+	}
+	if err := Verify(ctx, path); err != nil {
+		return fmt.Errorf("pre-migration snapshot failed verification (%s): %w", path, err)
+	}
+	return nil
+}
+
+// findPreTenancySnapshot returns the newest existing pre-tenancy snapshot in
+// dir, or "" when none exists.
+func findPreTenancySnapshot(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	newest := ""
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasPrefix(name, PreTenancySnapshotPrefix) || !strings.HasSuffix(name, BackupSuffix) {
+			continue
+		}
+		if newest == "" || name > newest {
+			newest = name
+		}
+	}
+	if newest == "" {
+		return "", nil
+	}
+	return filepath.Join(dir, newest), nil
 }
 
 // mapDataDirChmodErr rewrites a chmod failure on the data directory so the
@@ -142,15 +243,6 @@ func restrictFileMode(path string) error {
 func (d *DB) Close() error {
 	if d.Activity != nil {
 		if err := d.Activity.Close(); err != nil {
-			if d.Audit != nil {
-				_ = d.Audit.Close()
-			}
-			_ = d.SQL.Close()
-			return err
-		}
-	}
-	if d.Audit != nil {
-		if err := d.Audit.Close(); err != nil {
 			_ = d.SQL.Close()
 			return err
 		}

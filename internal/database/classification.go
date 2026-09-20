@@ -29,6 +29,10 @@ var TableClassification = map[string]TableClass{
 	"email_verification_tokens": ClassPlatform,
 	"password_reset_tokens":     ClassPlatform,
 	"platform_admin_sessions":   ClassPlatform,
+	// Audit lives in the core database now (migration 038). Platform audit is
+	// global; audit_meta holds the independent retention setting.
+	"platform_audit_events": ClassPlatform,
+	"audit_meta":            ClassPlatform,
 
 	// Tenant-owned. Every one of these must carry account_id.
 	"namespaces":               ClassTenant,
@@ -43,6 +47,10 @@ var TableClassification = map[string]TableClass{
 	"client_model_permissions": ClassTenant,
 	"client_single_bindings":   ClassTenant,
 	"settings":                 ClassTenant,
+	// Audit events are tenant-owned in the core database. account_id is
+	// historical attribution and deliberately has no FK to accounts, so
+	// retained audit history survives account deletion.
+	"account_audit_events": ClassTenant,
 }
 
 // ActivityTableClassification is the table inventory for the separate Activity
@@ -78,33 +86,10 @@ func ActivityTenantTables() []string {
 	return out
 }
 
-// AuditTableClassification is the table inventory for the central audit
-// database (one file shared by every account). Account audit events are
-// tenant-owned and carry account_id; platform audit events are global.
-var AuditTableClassification = map[string]TableClass{
-	"audit_schema_migrations": ClassPlatform,
-	"audit_meta":              ClassPlatform,
-	"account_audit_events":    ClassTenant,
-	"platform_audit_events":   ClassPlatform,
-}
-
-// AuditTenantTables returns the tenant-owned table names in the audit database.
-func AuditTenantTables() []string {
-	out := make([]string, 0, len(AuditTableClassification))
-	for name, class := range AuditTableClassification {
-		if class == ClassTenant {
-			out = append(out, name)
-		}
-	}
-	return out
-}
-
-// TenantTables returns every tenant-owned table name across the central,
-// Activity, and audit databases. The SQL-boundary guard uses this union so
-// tenant SQL cannot escape internal/store regardless of which database it
-// targets.
+// TenantTables returns every tenant-owned table name across the central and
+// Activity databases. The SQL-boundary guard uses this union so tenant SQL
+// cannot escape internal/store regardless of which database it targets.
 func TenantTables() []string {
 	out := append(MainTenantTables(), ActivityTenantTables()...)
-	out = append(out, AuditTenantTables()...)
 	return out
 }

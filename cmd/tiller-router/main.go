@@ -101,7 +101,7 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		}
 		return nil
 	}
-	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"))
+	db, err := database.Open(ctx, filepath.Join(cfg.DataDir, "tiller-router.db"), database.WithBackupDir(cfg.BackupDir))
 	if err != nil {
 		if errors.Is(err, database.ErrDataDirUnwritable) {
 			logger.Error(
