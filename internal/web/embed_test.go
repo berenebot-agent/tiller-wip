@@ -41,13 +41,17 @@ func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) 
 	handler := Handler()
 
 	tests := []struct {
-		name       string
-		path       string
-		statusCode int
+		name         string
+		path         string
+		statusCode   int
+		contentType  string
+		cacheControl string
 	}{
-		{name: "asset", path: "/style.css", statusCode: http.StatusOK},
-		{name: "api", path: "/api/missing", statusCode: http.StatusNotFound},
-		{name: "health", path: "/health/missing", statusCode: http.StatusNotFound},
+		{name: "asset", path: "/style.css", statusCode: http.StatusOK, contentType: "text/css; charset=utf-8", cacheControl: "no-store"},
+		{name: "api", path: "/api", statusCode: http.StatusNotFound},
+		{name: "api child", path: "/api/missing", statusCode: http.StatusNotFound},
+		{name: "health", path: "/health", statusCode: http.StatusNotFound},
+		{name: "health child", path: "/health/missing", statusCode: http.StatusNotFound},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -59,7 +63,13 @@ func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) 
 			if res.Code != test.statusCode {
 				t.Fatalf("status = %d, want %d", res.Code, test.statusCode)
 			}
-			if test.name != "asset" && strings.Contains(res.Body.String(), "<!doctype html>") {
+			if test.contentType != "" && res.Header().Get("Content-Type") != test.contentType {
+				t.Fatalf("Content-Type = %q, want %q", res.Header().Get("Content-Type"), test.contentType)
+			}
+			if test.cacheControl != "" && res.Header().Get("Cache-Control") != test.cacheControl {
+				t.Fatalf("Cache-Control = %q, want %q", res.Header().Get("Cache-Control"), test.cacheControl)
+			}
+			if strings.Contains(res.Body.String(), "<!doctype html>") {
 				t.Fatal("API or health response unexpectedly contains SPA HTML")
 			}
 		})
