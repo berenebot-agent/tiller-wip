@@ -112,7 +112,8 @@ type Server struct {
 	// logWriter batch-writes Activity rows off the request path. It is nil
 	// until StartBackground runs; while nil, writeLog writes synchronously so
 	// tests and direct Server construction stay deterministic.
-	logWriter *logWriter
+	logWriter          *logWriter
+	platformSettingsMu sync.Mutex
 }
 
 // secretEncryptionState reports the credential-encryption state for the admin
@@ -308,6 +309,8 @@ func (s *Server) StartBackground(ctx context.Context) {
 	}
 	go s.startLogPruner(ctx)
 	s.startLogWriter(ctx)
+	go s.startActivityMaintenance(ctx)
+	go s.startAuditMaintenance(ctx)
 	go s.startMaintenanceScheduler(ctx)
 }
 
@@ -381,6 +384,8 @@ func (s *Server) Handler() http.Handler {
 	}
 	if s.config.Mode == config.ModeHosted {
 		mux.Handle("GET /api/admin/audit", s.requireUser(http.HandlerFunc(s.accountAudit)))
+	} else {
+		mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	}
 	mux.Handle("GET /api/admin/provider-types", s.requireAdmin(http.HandlerFunc(s.providerTypes)))
 	mux.Handle("GET /api/admin/providers", s.requireAdmin(http.HandlerFunc(s.listProviders)))
@@ -431,7 +436,6 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.cooldownStatus)))
 	mux.Handle("DELETE /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.clearCooldown)))
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
-	mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	mux.Handle("GET /api/admin/debug/memory", s.requireAdmin(http.HandlerFunc(s.debugMemory)))
 	if s.config.DebugPprof {
 		mux.Handle("GET "+debugPprofPrefix, s.requireAdmin(http.HandlerFunc(s.debugPprof)))

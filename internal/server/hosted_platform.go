@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -14,7 +15,7 @@ import (
 )
 
 func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
-	key := peerIP(r)
+	key := clientIP(r, s.config.TrustedProxy)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 		return
@@ -124,67 +125,74 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	s.platformSettingsMu.Lock()
+	defer s.platformSettingsMu.Unlock()
 	st := s.storeHandle()
-	if input.HostedSignupEnabled != nil {
-		if err := st.SetHostedSignupEnabled(r.Context(), *input.HostedSignupEnabled); err != nil {
-			adminError(w, http.StatusInternalServerError, "database_error", "Could not update signup settings.")
-			return
-		}
-		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.signup_setting_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(*input.HostedSignupEnabled)}})
+	currentMail, err := st.GetPlatformMailSettings(r.Context())
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
+		return
+	}
+	if input.MailProvider != nil {
+		currentMail.Provider = strings.ToLower(strings.TrimSpace(*input.MailProvider))
+	}
+	if input.MailFrom != nil {
+		currentMail.From = strings.TrimSpace(*input.MailFrom)
+	}
+	if input.MailResendAPIKey != nil {
+		currentMail.ResendAPIKey = *input.MailResendAPIKey
+	}
+	if input.MailBrevoAPIKey != nil {
+		currentMail.BrevoAPIKey = *input.MailBrevoAPIKey
+	}
+	if input.MailSMTPHost != nil {
+		currentMail.SMTPHost = strings.TrimSpace(*input.MailSMTPHost)
+	}
+	if input.MailSMTPPort != nil {
+		currentMail.SMTPPort = strconv.Itoa(*input.MailSMTPPort)
+	}
+	if input.MailSMTPUsername != nil {
+		currentMail.SMTPUsername = *input.MailSMTPUsername
+	}
+	if input.MailSMTPPassword != nil {
+		currentMail.SMTPPassword = *input.MailSMTPPassword
+	}
+	if input.MailSMTPMode != nil {
+		currentMail.SMTPMode = strings.ToLower(strings.TrimSpace(*input.MailSMTPMode))
+	}
+	retention, err := st.AuditRetentionDays(r.Context())
+	if err != nil && input.AuditRetentionDays == nil {
+		retention = 30
 	}
 	if input.AuditRetentionDays != nil {
-		if err := st.SetAuditRetentionDays(r.Context(), *input.AuditRetentionDays); err != nil {
-			adminError(w, http.StatusBadRequest, "invalid_audit_retention", "Audit retention must be at least one day.")
-			return
-		}
+		retention = *input.AuditRetentionDays
+	}
+	signup, err := st.HostedSignupEnabled(r.Context())
+	if err != nil {
+		signup = false
+	}
+	if input.HostedSignupEnabled != nil {
+		signup = *input.HostedSignupEnabled
+	}
+	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
+	if err := mailer.Validate(cfg); err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
+		return
+	}
+	if err := st.SavePlatformSettings(r.Context(), store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail}); err != nil {
+		adminError(w, http.StatusServiceUnavailable, "settings_locked", "Platform settings could not be saved.")
+		return
+	}
+	if cfg.Provider == "" {
+		s.mailer.Clear()
+	} else if err := s.mailer.Update(cfg); err != nil {
+		adminError(w, http.StatusInternalServerError, "internal_error", "Mail settings could not be activated.")
+		return
+	}
+	if input.HostedSignupEnabled != nil {
+		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.signup_setting_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(*input.HostedSignupEnabled)}})
 	}
 	if hasMailUpdate(input) {
-		current, err := st.GetPlatformMailSettings(r.Context())
-		if err != nil {
-			adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
-			return
-		}
-		if input.MailProvider != nil {
-			current.Provider = strings.ToLower(strings.TrimSpace(*input.MailProvider))
-		}
-		if input.MailFrom != nil {
-			current.From = strings.TrimSpace(*input.MailFrom)
-		}
-		if input.MailResendAPIKey != nil {
-			current.ResendAPIKey = *input.MailResendAPIKey
-		}
-		if input.MailBrevoAPIKey != nil {
-			current.BrevoAPIKey = *input.MailBrevoAPIKey
-		}
-		if input.MailSMTPHost != nil {
-			current.SMTPHost = strings.TrimSpace(*input.MailSMTPHost)
-		}
-		if input.MailSMTPPort != nil {
-			current.SMTPPort = strconv.Itoa(*input.MailSMTPPort)
-		}
-		if input.MailSMTPUsername != nil {
-			current.SMTPUsername = *input.MailSMTPUsername
-		}
-		if input.MailSMTPPassword != nil {
-			current.SMTPPassword = *input.MailSMTPPassword
-		}
-		if input.MailSMTPMode != nil {
-			current.SMTPMode = strings.ToLower(strings.TrimSpace(*input.MailSMTPMode))
-		}
-		cfg := mailer.Config{Provider: current.Provider, From: current.From, ResendAPIKey: current.ResendAPIKey, BrevoAPIKey: current.BrevoAPIKey, SMTPHost: current.SMTPHost, SMTPPort: parseMailPort(current.SMTPPort), SMTPUsername: current.SMTPUsername, SMTPPassword: current.SMTPPassword, SMTPMode: current.SMTPMode}
-		if cfg.Provider == "" {
-			s.mailer.Clear()
-		} else if err := s.mailer.Update(cfg); err != nil {
-			adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
-			return
-		}
-		values := map[string]string{store.PlatformSettingMailProvider: current.Provider, store.PlatformSettingMailFrom: current.From, store.PlatformSettingMailResendAPIKey: current.ResendAPIKey, store.PlatformSettingMailBrevoAPIKey: current.BrevoAPIKey, store.PlatformSettingMailSMTPHost: current.SMTPHost, store.PlatformSettingMailSMTPPort: current.SMTPPort, store.PlatformSettingMailSMTPUsername: current.SMTPUsername, store.PlatformSettingMailSMTPPassword: current.SMTPPassword, store.PlatformSettingMailSMTPMode: current.SMTPMode}
-		for key, value := range values {
-			if err := st.SetPlatformSetting(r.Context(), key, value); err != nil {
-				adminError(w, http.StatusServiceUnavailable, "mail_settings_locked", "Mail secrets could not be saved.")
-				return
-			}
-		}
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.mail_settings_changed", ActorType: "platform"})
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -241,6 +249,8 @@ func (s *Server) changeAccountStatus(w http.ResponseWriter, r *http.Request, sta
 	if err := s.identity.SetAccountStatus(r.Context(), accountID, status); err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
 			adminError(w, http.StatusNotFound, "not_found", "Account not found.")
+		} else if errors.Is(err, identity.ErrAccountDeleting) {
+			adminError(w, http.StatusConflict, "account_deleting", "Account deletion is already in progress.")
 		} else {
 			adminError(w, http.StatusInternalServerError, "database_error", "Could not change account status.")
 		}

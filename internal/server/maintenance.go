@@ -23,6 +23,52 @@ import (
 // activity.db and is deliberately excluded from snapshots (see
 // docs/backup_restore_runbook.md for RPO/RTO and off-host copy guidance), but
 // it is compacted in place here.
+func (s *Server) startActivityMaintenance(ctx context.Context) {
+	interval := s.config.BackupInterval
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	reconcile := func() {
+		if err := s.storeHandle().ReconcileActivityCleanup(ctx); err != nil {
+			s.warnBackup("activity cleanup reconciliation failed", err)
+		}
+	}
+	reconcile()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reconcile()
+		}
+	}
+}
+
+func (s *Server) startAuditMaintenance(ctx context.Context) {
+	interval := s.config.BackupInterval
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	prune := func() {
+		if err := s.storeHandle().PruneAuditEvents(ctx, time.Now()); err != nil {
+			s.warnBackup("scheduled audit prune failed", err)
+		}
+	}
+	prune()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			prune()
+		}
+	}
+}
+
 func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 	interval := s.config.BackupInterval
 	if interval <= 0 {
@@ -33,9 +79,6 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 		dir = filepath.Join(s.config.DataDir, "backups")
 	}
 	run := func() {
-		if err := s.storeHandle().PruneAuditEvents(ctx, time.Now()); err != nil {
-			s.warnBackup("scheduled audit prune failed", err)
-		}
 		path, err := s.db.Backup(ctx, dir)
 		if err != nil {
 			s.warnBackup("scheduled backup failed", err)

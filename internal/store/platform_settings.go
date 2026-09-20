@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
 )
 
@@ -77,6 +78,59 @@ type PlatformMailSettings struct {
 	SMTPUsername string
 	SMTPPassword string
 	SMTPMode     string
+}
+
+type PlatformSettingsProposal struct {
+	HostedSignupEnabled bool
+	AuditRetentionDays  int
+	Mail                PlatformMailSettings
+}
+
+func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSettingsProposal) error {
+	if proposal.AuditRetentionDays < 1 {
+		return errors.New("store: invalid audit retention")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	upsert := func(key, value string) error {
+		if platformSecretSettings[key] && value != "" {
+			value, err = encryptWith(s.cipher, secretAAD("platform", "setting", key, "value"), value)
+			if err != nil {
+				return err
+			}
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, now())
+		return err
+	}
+	if err := upsert(PlatformSettingHostedSignupEnabled, boolString(proposal.HostedSignupEnabled)); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_meta(key,value,updated_at) VALUES('audit_retention_days',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, strconv.Itoa(proposal.AuditRetentionDays), now()); err != nil {
+		return err
+	}
+	values := map[string]string{
+		PlatformSettingMailProvider: proposal.Mail.Provider, PlatformSettingMailFrom: proposal.Mail.From,
+		PlatformSettingMailResendAPIKey: proposal.Mail.ResendAPIKey, PlatformSettingMailBrevoAPIKey: proposal.Mail.BrevoAPIKey,
+		PlatformSettingMailSMTPHost: proposal.Mail.SMTPHost, PlatformSettingMailSMTPPort: proposal.Mail.SMTPPort,
+		PlatformSettingMailSMTPUsername: proposal.Mail.SMTPUsername, PlatformSettingMailSMTPPassword: proposal.Mail.SMTPPassword,
+		PlatformSettingMailSMTPMode: proposal.Mail.SMTPMode,
+	}
+	for key, value := range values {
+		if err := upsert(key, value); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func boolString(value bool) string {
+	if value {
+		return "1"
+	}
+	return "0"
 }
 
 func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettings, error) {

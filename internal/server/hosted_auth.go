@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
@@ -38,7 +37,7 @@ func (s *Server) runtime(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
-	key := peerIP(r)
+	key := clientIP(r, s.config.TrustedProxy)
 	if s.signupLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
@@ -77,7 +76,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
-	key := peerIP(r)
+	key := clientIP(r, s.config.TrustedProxy)
 	if s.userLoginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
 		return
@@ -166,7 +165,7 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
-	key := peerIP(r)
+	key := clientIP(r, s.config.TrustedProxy)
 	if s.recoveryLimiter.locked(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 		return
@@ -187,7 +186,7 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
-	key := peerIP(r)
+	key := clientIP(r, s.config.TrustedProxy)
 	if s.recoveryLimiter.locked(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
 		return
@@ -250,8 +249,7 @@ func userSessionPayload(session identity.UserSession) map[string]any {
 }
 
 func validEmail(value string) bool {
-	value = identity.NormalizeEmail(value)
-	return value != "" && strings.Contains(value, "@") && !strings.ContainsAny(value, "\r\n")
+	return identity.ValidateEmail(identity.NormalizeEmail(value))
 }
 
 func (s *Server) sendVerification(ctx context.Context, user identity.User, token string) {

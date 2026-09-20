@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"net/mail"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,7 @@ var (
 	ErrBootstrapInvalid   = errors.New("identity: hosted bootstrap requires a valid customer email and password")
 	ErrBootstrapCollision = errors.New("identity: hosted bootstrap email already exists")
 	ErrBootstrapRequired  = errors.New("identity: hosted customer bootstrap credentials are required for an existing local installation")
+	ErrAccountDeleting    = errors.New("identity: account is deleting")
 )
 
 // User is the authenticated hosted identity and its one owned account.
@@ -187,7 +189,12 @@ func (s *Store) SetAccountStatus(ctx context.Context, accountID, status string) 
 	if status != "active" && status != "suspended" && status != "deleting" {
 		return errors.New("identity: invalid account status")
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE accounts SET status=?,updated_at=? WHERE id=?`, status, formatTime(time.Now()), accountID)
+	query := `UPDATE accounts SET status=?,updated_at=? WHERE id=?`
+	args := []any{status, formatTime(time.Now()), accountID}
+	if status == "active" || status == "suspended" {
+		query += ` AND status <> 'deleting'`
+	}
+	result, err := s.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
@@ -196,6 +203,14 @@ func (s *Store) SetAccountStatus(ctx context.Context, accountID, status string) 
 		return err
 	}
 	if n != 1 {
+		var current string
+		if err := s.db.QueryRowContext(ctx, `SELECT status FROM accounts WHERE id=?`, accountID).Scan(&current); errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		} else if err != nil {
+			return err
+		} else if current == "deleting" && (status == "active" || status == "suspended") {
+			return ErrAccountDeleting
+		}
 		return ErrNotFound
 	}
 	if status != "active" {
@@ -331,9 +346,24 @@ func (s *Store) markHostedBootstrapComplete(ctx context.Context) error {
 	return err
 }
 
-func validBootstrapEmail(email string) bool {
-	return len(email) <= 320 && strings.Count(email, "@") == 1 && !strings.ContainsAny(email, "\r\n")
+func ValidateEmail(email string) bool {
+	if len([]byte(email)) == 0 || len([]byte(email)) > 320 || strings.ContainsAny(email, "\r\n") {
+		return false
+	}
+	for _, r := range email {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Name != "" || parsed.Address != email {
+		return false
+	}
+	at := strings.LastIndexByte(email, '@')
+	return at > 0 && at < len(email)-1
 }
+
+func validBootstrapEmail(email string) bool { return ValidateEmail(email) }
 
 // CreateSignup creates the user, pending account, and verification token in a
 // short transaction. The caller sends the returned token only after this
@@ -628,9 +658,21 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 	s.mu.Lock()
 	if entry, found := s.userCache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) && constantSecret(secret, entry.secretHash) {
-			entry.expires = now.Add(s.userCacheTTL)
-			s.userCache[selector] = entry
 			s.mu.Unlock()
+			if now.Add(s.userSessionTTL / 2).After(entry.session.ExpiresAt) {
+				expires := now.Add(s.userSessionTTL)
+				if _, err := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=?`, formatTime(expires), formatTime(now), selector); err == nil {
+					entry.session.ExpiresAt, entry.expires = expires, now.Add(s.userCacheTTL)
+					s.mu.Lock()
+					s.userCache[selector] = entry
+					s.mu.Unlock()
+				}
+			} else {
+				entry.expires = now.Add(s.userCacheTTL)
+				s.mu.Lock()
+				s.userCache[selector] = entry
+				s.mu.Unlock()
+			}
 			return entry.session, true
 		}
 		delete(s.userCache, selector)
@@ -802,9 +844,21 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 	s.mu.Lock()
 	if entry, found := s.platformCache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) && constantSecret(secret, entry.secretHash) {
-			entry.expires = now.Add(s.platformCacheTTL)
-			s.platformCache[selector] = entry
 			s.mu.Unlock()
+			if now.Add(s.platformSessionTTL / 2).After(entry.session.ExpiresAt) {
+				expires := now.Add(s.platformSessionTTL)
+				if _, err := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=?`, formatTime(expires), formatTime(now), selector); err == nil {
+					entry.session.ExpiresAt, entry.expires = expires, now.Add(s.platformCacheTTL)
+					s.mu.Lock()
+					s.platformCache[selector] = entry
+					s.mu.Unlock()
+				}
+			} else {
+				entry.expires = now.Add(s.platformCacheTTL)
+				s.mu.Lock()
+				s.platformCache[selector] = entry
+				s.mu.Unlock()
+			}
 			return entry.session, true
 		}
 		delete(s.platformCache, selector)

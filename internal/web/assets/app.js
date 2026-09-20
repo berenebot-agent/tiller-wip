@@ -2105,8 +2105,9 @@ async function loadPlatformDashboard() {
   form.elements.mail_provider.value = settings.mail?.provider || '';
   applyMailProviderVisibility(settings.mail?.provider || '');
   form.elements.mail_from.value = settings.mail?.from || '';
-  form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
-  form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
+   form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
+   form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
+   form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
   form.elements.mail_smtp_mode.value = settings.mail?.smtp_mode || 'starttls';
   $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
   const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });

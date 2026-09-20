@@ -46,6 +46,7 @@ type PublicConfig struct {
 	From             string `json:"from"`
 	SMTPHost         string `json:"smtp_host,omitempty"`
 	SMTPPort         int    `json:"smtp_port,omitempty"`
+	SMTPUsername     string `json:"smtp_username,omitempty"`
 	SMTPMode         string `json:"smtp_mode,omitempty"`
 	Configured       bool   `json:"configured"`
 	SecretConfigured bool   `json:"secret_configured"`
@@ -124,7 +125,7 @@ func (m *Manager) Status() PublicConfig {
 func publicConfig(cfg Config) PublicConfig {
 	return PublicConfig{
 		Provider: cfg.Provider, From: cfg.From, SMTPHost: cfg.SMTPHost,
-		SMTPPort: cfg.SMTPPort, SMTPMode: cfg.SMTPMode,
+		SMTPPort: cfg.SMTPPort, SMTPUsername: cfg.SMTPUsername, SMTPMode: cfg.SMTPMode,
 		Configured:       cfg.Provider != "" && cfg.From != "",
 		SecretConfigured: cfg.ResendAPIKey != "" || cfg.BrevoAPIKey != "" || cfg.SMTPPassword != "" || cfg.SMTPUsername != "",
 	}

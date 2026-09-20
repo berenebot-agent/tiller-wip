@@ -526,10 +526,21 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) {
 			want := sha256.Sum256([]byte(secret))
 			if subtle.ConstantTimeCompare(want[:], entry.secretHash[:]) == 1 {
-				// Sliding expiry: an actively-used session stays warm.
-				entry.expires = now.Add(s.cacheTTL)
-				s.cache[selector] = entry
 				s.mu.Unlock()
+				if now.Add(s.ttl / 2).After(entry.session.ExpiresAt) {
+					expires := now.Add(s.ttl)
+					if _, err := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=?`, formatUTC(expires), formatUTC(now), selector); err == nil {
+						entry.session.ExpiresAt, entry.expires = expires, now.Add(s.cacheTTL)
+						s.mu.Lock()
+						s.cache[selector] = entry
+						s.mu.Unlock()
+					}
+				} else {
+					entry.expires = now.Add(s.cacheTTL)
+					s.mu.Lock()
+					s.cache[selector] = entry
+					s.mu.Unlock()
+				}
 				return entry.session, true
 			}
 		}
