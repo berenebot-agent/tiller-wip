@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -39,9 +40,10 @@ func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 
 // Store owns the database handles and hands out account-scoped handles.
 type Store struct {
-	db       *sql.DB
-	activity *sql.DB
-	cipher   SecretCipher
+	db        *sql.DB
+	activity  *sql.DB
+	cipher    SecretCipher
+	cleanupMu *sync.Mutex
 }
 
 // Option configures a Store.
@@ -67,7 +69,7 @@ func WithCipher(c SecretCipher) Option {
 }
 
 func New(db *sql.DB, opts ...Option) *Store {
-	s := &Store{db: db, cipher: disabledCipher{}}
+	s := &Store{db: db, cipher: disabledCipher{}, cleanupMu: &sync.Mutex{}}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -83,10 +85,15 @@ func (s *Store) DB() *sql.DB { return s.db }
 // best-effort Activity delete. The record survives an unavailable Activity
 // handle and is retried by ReconcileActivityCleanup.
 func (s *Store) DeleteAccountActivity(accountID string) error {
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
 	if _, err := s.db.ExecContext(context.Background(), `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, accountID, "", now()); err != nil {
 		return err
 	}
-	if err := s.reconcileActivityCleanup(context.Background(), accountID, ""); errors.Is(err, ErrActivityUnavailable) {
+	if err := s.reconcileActivityCleanupLocked(context.Background(), accountID, ""); errors.Is(err, ErrActivityUnavailable) {
 		return nil
 	} else {
 		return err
@@ -124,6 +131,15 @@ func (s *Store) ReconcileActivityCleanup(ctx context.Context) error {
 }
 
 func (s *Store) reconcileActivityCleanup(ctx context.Context, accountID, keyID string) error {
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	return s.reconcileActivityCleanupLocked(ctx, accountID, keyID)
+}
+
+func (s *Store) reconcileActivityCleanupLocked(ctx context.Context, accountID, keyID string) error {
 	if s.activity == nil {
 		return ErrActivityUnavailable
 	}
@@ -149,7 +165,7 @@ func (s *Scope) activityCleanupPending(ctx context.Context, keyID string) (bool,
 // For returns a handle scoped to one account. accountID must come from a
 // verified principal.
 func (s *Store) For(accountID string) *Scope {
-	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity, cipher: s.cipher}
+	return &Scope{db: s.db, q: s.db, accountID: accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu}
 }
 
 // querier is satisfied by both *sql.DB and *sql.Tx so a Scope works inside and
@@ -172,6 +188,7 @@ type Scope struct {
 	accountID string
 	activity  *sql.DB
 	cipher    SecretCipher
+	cleanupMu *sync.Mutex
 }
 
 // AccountID returns the account this scope is bound to.
@@ -198,7 +215,7 @@ func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) 
 	}
 	activeTenantTxs.Add(1)
 	defer activeTenantTxs.Add(-1)
-	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher}
+	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu}
 	if err := fn(child); err != nil {
 		_ = tx.Rollback()
 		return err

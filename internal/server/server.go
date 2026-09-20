@@ -292,6 +292,9 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 }
 func (s *Server) StartBackground(ctx context.Context) {
 	s.backgroundCtx = ctx
+	if err := s.storeHandle().ReconcileActivityCleanup(ctx); err != nil && s.logger != nil {
+		s.logger.Warn("activity cleanup reconciliation failed", "error_class", fmt.Sprintf("%T", err))
+	}
 	s.providers.StartScheduler(ctx)
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
@@ -322,6 +325,13 @@ func (s *Server) flushActivity(ctx context.Context) error {
 		return nil
 	}
 	return s.logWriter.flush(ctx)
+}
+
+func (s *Server) StopBackground(ctx context.Context) error {
+	if s.logWriter == nil {
+		return nil
+	}
+	return s.logWriter.stop(ctx)
 }
 
 func (s *Server) startLogPruner(ctx context.Context) {

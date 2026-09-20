@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 )
 
 // Sentinel errors returned by client/permission operations so the transport
@@ -358,17 +359,19 @@ func (s *Scope) DeleteClientKey(ctx context.Context, id string) (bool, error) {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, s.accountID, id, now()); err != nil {
 		return false, err
 	}
-	if err := s.store().reconcileActivityCleanup(ctx, s.accountID, id); err != nil && !errors.Is(err, ErrActivityUnavailable) {
+	cleanupStore := &Store{db: s.db, activity: s.activity}
+	if err := cleanupStore.reconcileActivityCleanupLocked(ctx, s.accountID, id); err != nil && !errors.Is(err, ErrActivityUnavailable) {
 		return false, err
 	}
 	return n > 0, nil
-}
-
-func (s *Scope) store() *Store {
-	return &Store{db: s.db, activity: s.activity, cipher: s.cipher}
 }
 
 // PermissionModelRow is one model within a permission group.

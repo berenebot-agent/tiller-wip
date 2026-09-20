@@ -157,6 +157,9 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			return err
 		}
+		if err := app.StopBackground(shutdownCtx); err != nil {
+			return err
+		}
 	}
 	return nil
 }

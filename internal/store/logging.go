@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/id"
@@ -76,6 +77,25 @@ func nullStringValue(v string) any {
 // transaction in the account's Activity database, so a single request's logs
 // commit together.
 func (s *Scope) InsertRequestLog(ctx context.Context, in RequestLogInsert) error {
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	pending, err := s.activityCleanupPending(ctx, "")
+	if err != nil {
+		return err
+	}
+	if pending {
+		return nil
+	}
+	pending, err = s.activityCleanupPending(ctx, in.ClientKeyID)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return nil
+	}
 	return s.runActivityTx(ctx, func(q querier) error {
 		return insertRequestLogRow(ctx, q, s.accountID, &in)
 	})
@@ -88,6 +108,11 @@ func (s *Scope) InsertRequestLogs(ctx context.Context, rows []RequestLogInsert) 
 	if len(rows) == 0 {
 		return nil
 	}
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
 	pending, err := s.activityCleanupPending(ctx, "")
 	if err != nil {
 		return err
