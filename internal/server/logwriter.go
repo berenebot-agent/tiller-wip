@@ -34,9 +34,12 @@ type logWriter struct {
 	logger   *slog.Logger
 
 	dropped     atomic.Int64
+	stopped     atomic.Int64
 	lastDropLog atomic.Int64
 	done        chan struct{}
 	flushCh     chan chan struct{}
+	stopCh      chan struct{}
+	stopOnce    sync.Once
 	wg          sync.WaitGroup
 }
 
@@ -47,6 +50,7 @@ func newLogWriter(scopeFor func(string) *store.Scope, logger *slog.Logger) *logW
 		logger:   logger,
 		done:     make(chan struct{}),
 		flushCh:  make(chan chan struct{}),
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -54,6 +58,15 @@ func newLogWriter(scopeFor func(string) *store.Scope, logger *slog.Logger) *logW
 // row and logs a throttled warning.
 func (w *logWriter) enqueue(item logWrite) {
 	select {
+	case <-w.stopCh:
+		w.stopped.Add(1)
+		return
+	default:
+	}
+	select {
+	case <-w.stopCh:
+		w.stopped.Add(1)
+		return
 	case w.ch <- item:
 	default:
 		n := w.dropped.Add(1)
@@ -62,6 +75,24 @@ func (w *logWriter) enqueue(item logWrite) {
 		if now-last > int64(time.Minute) && w.lastDropLog.CompareAndSwap(last, now) && w.logger != nil {
 			w.logger.Warn("activity log queue full; dropping rows", "dropped_total", n)
 		}
+	}
+}
+
+// stop stops accepting rows, drains the queue, flushes it, and waits for the
+// writer. It is idempotent and safe for shutdown callers.
+func (w *logWriter) stop(ctx context.Context) error {
+	if w == nil {
+		return nil
+	}
+	w.stopOnce.Do(func() { close(w.stopCh) })
+	if err := w.flush(ctx); err != nil {
+		return err
+	}
+	select {
+	case <-w.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -93,8 +124,16 @@ func (w *logWriter) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// Drain whatever was already queued, then flush once, using a
-			// fresh context so shutdown does not cancel the final write.
+			for {
+				select {
+				case item := <-w.ch:
+					pending[item.accountID] = append(pending[item.accountID], item.row)
+				default:
+					flush()
+					return
+				}
+			}
+		case <-w.stopCh:
 			for {
 				select {
 				case item := <-w.ch:

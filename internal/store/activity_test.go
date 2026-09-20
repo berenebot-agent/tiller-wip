@@ -111,6 +111,45 @@ func TestActivityIsAccountScoped(t *testing.T) {
 // TestActivityReadsReturnUnavailableWhenHandleMissing proves Activity reads
 // return the explicit sentinel (not an empty slice and not a nil error) when
 // the Activity handle is absent, so callers can surface an unavailable state.
+func TestActivityCleanupRecoversAfterUnavailable(t *testing.T) {
+	db, _ := openActivityStore(t)
+	ctx := context.Background()
+	_, err := db.Activity.Exec(`INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('cleanup-local',?,'key','model','chat',0,200,1,'cleanup-local',?)`, database.LocalAccountID, database.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Activity.Exec(`INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('cleanup-other',?,'key','model','chat',0,200,1,'cleanup-other',?)`, otherAccount, database.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Activity.Close(); err != nil {
+		t.Fatal(err)
+	}
+	unavailable := store.New(db.SQL)
+	if err := unavailable.DeleteAccountActivity(database.LocalAccountID); err != nil {
+		t.Fatal(err)
+	}
+	activity, err := database.OpenActivity(ctx, db.ActivityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer activity.Close()
+	available := store.New(db.SQL, store.WithActivityDB(activity))
+	if err := available.ReconcileActivityCleanup(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var local, other int
+	if err := activity.QueryRow(`SELECT count(*) FROM request_logs WHERE account_id=?`, database.LocalAccountID).Scan(&local); err != nil {
+		t.Fatal(err)
+	}
+	if err := activity.QueryRow(`SELECT count(*) FROM request_logs WHERE account_id=?`, otherAccount).Scan(&other); err != nil {
+		t.Fatal(err)
+	}
+	if local != 0 || other != 1 {
+		t.Fatalf("cleanup counts local=%d other=%d", local, other)
+	}
+}
+
 func TestActivityReadsReturnUnavailableWhenHandleMissing(t *testing.T) {
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {

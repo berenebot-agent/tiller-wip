@@ -88,6 +88,22 @@ func (s *Scope) InsertRequestLogs(ctx context.Context, rows []RequestLogInsert) 
 	if len(rows) == 0 {
 		return nil
 	}
+	pending, err := s.activityCleanupPending(ctx, "")
+	if err != nil {
+		return err
+	}
+	if pending {
+		return nil
+	}
+	for _, row := range rows {
+		pending, err := s.activityCleanupPending(ctx, row.ClientKeyID)
+		if err != nil {
+			return err
+		}
+		if pending {
+			return nil
+		}
+	}
 	return s.runActivityTx(ctx, func(q querier) error {
 		for i := range rows {
 			if err := insertRequestLogRow(ctx, q, s.accountID, &rows[i]); err != nil {

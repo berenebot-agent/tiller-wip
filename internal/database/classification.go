@@ -52,6 +52,7 @@ var TableClassification = map[string]TableClass{
 	// historical attribution and deliberately has no FK to accounts, so
 	// retained audit history survives account deletion.
 	"account_audit_events": ClassTenant,
+	"activity_cleanup":     ClassTenant,
 }
 
 // ActivityTableClassification is the table inventory for the separate Activity

@@ -349,28 +349,26 @@ func (s *Scope) RotateClientKey(ctx context.Context, id, selector, hash, fingerp
 	return n > 0, nil
 }
 
-// DeleteClientKey removes a client key. It returns false when no row in the
-// scope's account matched. Activity rows for the key are removed best-effort
-// after the core delete: the Activity database is a separate file, so the old
-// ON DELETE CASCADE cannot span it. A failed cleanup leaves harmless orphan
-// rows that the retention sweep cannot attribute any more, so it is logged by
-// the caller and retried on the next delete of the same key.
+// DeleteClientKey removes a client key and records Activity cleanup before
+// attempting the separate-file delete. The record also makes retries safe when
+// the core key has already gone.
 func (s *Scope) DeleteClientKey(ctx context.Context, id string) (bool, error) {
 	res, err := s.q.ExecContext(ctx, `DELETE FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID)
 	if err != nil {
 		return false, err
 	}
 	n, _ := res.RowsAffected()
-	if n == 0 {
-		return false, nil
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, s.accountID, id, now()); err != nil {
+		return false, err
 	}
-	// Best-effort: never fail the key deletion because Activity cleanup
-	// failed. The rows are metadata only and are account-scoped.
-	_ = s.withActivity(ctx, func(q querier) error {
-		_, err := q.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id=? AND account_id=?`, id, s.accountID)
-		return err
-	})
-	return true, nil
+	if err := s.store().reconcileActivityCleanup(ctx, s.accountID, id); err != nil && !errors.Is(err, ErrActivityUnavailable) {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+func (s *Scope) store() *Store {
+	return &Store{db: s.db, activity: s.activity, cipher: s.cipher}
 }
 
 // PermissionModelRow is one model within a permission group.

@@ -14,6 +14,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 )
@@ -78,15 +79,71 @@ func New(db *sql.DB, opts ...Option) *Store {
 // tables must not be queried through it.
 func (s *Store) DB() *sql.DB { return s.db }
 
-// DeleteAccountActivity removes the account's Activity rows. The
-// request_attempts foreign key cascades, so both tables are cleared. It is
-// best-effort: when Activity is unavailable there is nothing to delete.
+// DeleteAccountActivity records an account cleanup before attempting the
+// best-effort Activity delete. The record survives an unavailable Activity
+// handle and is retried by ReconcileActivityCleanup.
 func (s *Store) DeleteAccountActivity(accountID string) error {
-	if s.activity == nil {
-		return nil
+	if _, err := s.db.ExecContext(context.Background(), `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, accountID, "", now()); err != nil {
+		return err
 	}
-	_, err := s.activity.ExecContext(context.Background(), `DELETE FROM request_logs WHERE account_id=?`, accountID)
+	if err := s.reconcileActivityCleanup(context.Background(), accountID, ""); errors.Is(err, ErrActivityUnavailable) {
+		return nil
+	} else {
+		return err
+	}
+}
+
+// ReconcileActivityCleanup retries durable account and client-key Activity
+// cleanup records. It is safe to call when Activity is unavailable.
+func (s *Store) ReconcileActivityCleanup(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `SELECT account_id,coalesce(client_key_id,'') FROM activity_cleanup ORDER BY created_at`)
+	if err != nil {
+		return err
+	}
+	var pending [][2]string
+	for rows.Next() {
+		var accountID, keyID string
+		if err := rows.Scan(&accountID, &keyID); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, [2]string{accountID, keyID})
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, cleanup := range pending {
+		if err := s.reconcileActivityCleanup(ctx, cleanup[0], cleanup[1]); err != nil && !errors.Is(err, ErrActivityUnavailable) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) reconcileActivityCleanup(ctx context.Context, accountID, keyID string) error {
+	if s.activity == nil {
+		return ErrActivityUnavailable
+	}
+	query := `DELETE FROM request_logs WHERE account_id=?`
+	args := []any{accountID}
+	if keyID != "" {
+		query += ` AND client_key_id=?`
+		args = append(args, keyID)
+	}
+	if _, err := s.activity.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("delete Activity cleanup: %w", err)
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM activity_cleanup WHERE account_id=? AND client_key_id=?`, accountID, keyID)
 	return err
+}
+
+func (s *Scope) activityCleanupPending(ctx context.Context, keyID string) (bool, error) {
+	var n int
+	err := s.q.QueryRowContext(ctx, `SELECT count(*) FROM activity_cleanup WHERE account_id=? AND client_key_id=?`, s.accountID, keyID).Scan(&n)
+	return n != 0, err
 }
 
 // For returns a handle scoped to one account. accountID must come from a

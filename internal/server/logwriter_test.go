@@ -96,3 +96,28 @@ func TestLogWriterDropsWhenQueueFull(t *testing.T) {
 		t.Fatalf("dropped = %d, want 1", got)
 	}
 }
+
+func TestLogWriterStopRejectsEnqueueAndDrains(t *testing.T) {
+	app, db := newLogWriterServer(t)
+	w := newLogWriter(app.scopeFor, app.logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.start(ctx)
+	w.enqueue(writerRow("stop-row"))
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), time.Second)
+	defer stopCancel()
+	if err := w.stop(stopCtx); err != nil {
+		t.Fatal(err)
+	}
+	w.enqueue(writerRow("after-stop"))
+	if got := w.stopped.Load(); got != 1 {
+		t.Fatalf("stopped = %d, want 1", got)
+	}
+	var count int
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE id IN ('stop-row','after-stop')`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("drained rows = %d, want 1", count)
+	}
+}
