@@ -11,7 +11,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/hostednet"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -132,6 +134,10 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_base_url", "A valid provider base URL is required.")
 		return
 	}
+	if s.config.Mode == config.ModeHosted && hostednet.Validate(input.BaseURL) != nil {
+		adminError(w, 400, "hosted_outbound_url_required", "Hosted provider URLs must use validated public HTTPS on port 443.")
+		return
+	}
 	if descriptor.CredentialNeeded && input.Credential == "" {
 		adminError(w, 400, "credential_required", "This provider requires an API credential.")
 		return
@@ -239,6 +245,10 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		base := strings.TrimRight(*input.BaseURL, "/")
 		if providers.ValidateBaseURL(base) != nil {
 			adminError(w, 400, "invalid_base_url", "A valid provider base URL is required.")
+			return
+		}
+		if s.config.Mode == config.ModeHosted && hostednet.Validate(base) != nil {
+			adminError(w, 400, "hosted_outbound_url_required", "Hosted provider URLs must use validated public HTTPS on port 443.")
 			return
 		}
 		current.BaseURL = base

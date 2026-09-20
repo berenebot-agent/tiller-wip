@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/hostednet"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -31,6 +34,8 @@ const (
 // notificationTimeout bounds a single best-effort webhook delivery. Delivery
 // is fire-and-forget and never blocks or delays the inference request.
 const notificationTimeout = 5 * time.Second
+
+const maxNotificationResponseBytes int64 = 64 << 10
 
 // notificationPayload is the metadata captured for a single routing event. It
 // is rendered as a human-readable plain-text message for the webhook. It shares
@@ -204,6 +209,11 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 	}
 	resp, err := s.notifyClient.Do(req)
 	if err != nil {
+		s.logger.Warn("notification delivery failed", "event", event, "error_class", notificationErrorClass(err))
+		return
+	}
+	if err := drainNotificationResponse(resp.Body); err != nil {
+		_ = resp.Body.Close()
 		s.logger.Warn("notification delivery failed", "event", event, "error_class", notificationErrorClass(err))
 		return
 	}
@@ -403,6 +413,10 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "no_webhook_url", "Configure a webhook URL before sending a test notification.")
 		return
 	}
+	if s.config.Mode == config.ModeHosted && hostednet.Validate(cfg.WebhookURL) != nil {
+		adminError(w, 400, "invalid_webhook_url", "Hosted webhook URLs must use validated public HTTPS on port 443.")
+		return
+	}
 	payload := notificationPayload{
 		Event:     eventTest,
 		Severity:  severityWarning,
@@ -427,6 +441,11 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 502, "delivery_failed", "The test notification could not be delivered ("+notificationErrorClass(err)+").")
 		return
 	}
+	if err := drainNotificationResponse(resp.Body); err != nil {
+		_ = resp.Body.Close()
+		adminError(w, 502, "delivery_failed", "The test notification response was too large or could not be read.")
+		return
+	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := fmt.Sprintf("The webhook returned HTTP %d.", resp.StatusCode)
@@ -437,4 +456,15 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"delivered": true})
+}
+
+func drainNotificationResponse(body io.Reader) error {
+	read, err := io.CopyN(io.Discard, body, maxNotificationResponseBytes+1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if read > maxNotificationResponseBytes {
+		return errors.New("notification response body too large")
+	}
+	return nil
 }

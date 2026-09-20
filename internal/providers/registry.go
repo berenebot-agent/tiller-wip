@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/hostednet"
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
 )
 
@@ -361,6 +362,14 @@ func NewRegistry() *Registry {
 	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, clients: map[time.Duration]*http.Client{}, modelsDevEnabled: true}
 }
 
+// NewHostedRegistry uses the shared public-HTTPS outbound policy for provider,
+// discovery, models.dev, and OAuth requests. Local mode deliberately uses
+// NewRegistry so private/LAN provider URLs continue to work.
+func NewHostedRegistry() *Registry {
+	transport := hostednet.NewTransport()
+	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: transport.CheckRedirect}, clients: map[time.Duration]*http.Client{}, modelsDevEnabled: true}
+}
+
 // ClientFor returns an immutable HTTP client whose per-attempt
 // time-to-first-header bound is timeout. Clients are cached by duration so
 // concurrent requests for the same account setting share one transport. A
@@ -375,10 +384,13 @@ func (r *Registry) ClientFor(timeout time.Duration) *http.Client {
 		return c
 	}
 	replacement := *r.client
-	if t, ok := r.client.Transport.(*http.Transport); ok {
+	switch t := r.client.Transport.(type) {
+	case *http.Transport:
 		clone := t.Clone()
 		clone.ResponseHeaderTimeout = timeout
 		replacement.Transport = clone
+	case *hostednet.Transport:
+		replacement.Transport = t.CloneWithResponseHeaderTimeout(timeout)
 	}
 	r.clients[timeout] = &replacement
 	return &replacement
@@ -390,11 +402,17 @@ func (r *Registry) ClientFor(timeout time.Duration) *http.Client {
 func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if t, ok := r.client.Transport.(*http.Transport); ok {
+	switch t := r.client.Transport.(type) {
+	case *http.Transport:
 		clone := t.Clone()
 		clone.ResponseHeaderTimeout = d
 		replacement := *r.client
 		replacement.Transport = clone
+		r.client = &replacement
+		t.CloseIdleConnections()
+	case *hostednet.Transport:
+		replacement := *r.client
+		replacement.Transport = t.CloneWithResponseHeaderTimeout(d)
 		r.client = &replacement
 		t.CloseIdleConnections()
 	}
@@ -407,8 +425,11 @@ func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 func (r *Registry) ResponseHeaderTimeout() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if t, ok := r.client.Transport.(*http.Transport); ok {
+	switch t := r.client.Transport.(type) {
+	case *http.Transport:
 		return t.ResponseHeaderTimeout
+	case *hostednet.Transport:
+		return t.ResponseHeaderTimeout()
 	}
 	return 0
 }

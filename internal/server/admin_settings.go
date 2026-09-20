@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/tiller-router/tiller-router/internal/config"
+	"github.com/tiller-router/tiller-router/internal/hostednet"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -100,8 +101,16 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.NotificationsWebhookURL != nil && *input.NotificationsWebhookURL != "" {
-		if !validWebhookURL(*input.NotificationsWebhookURL) {
-			adminError(w, 400, "invalid_webhook_url", "The webhook URL must be a valid http(s) URL.")
+		valid := validWebhookURL(*input.NotificationsWebhookURL)
+		if s.config.Mode == config.ModeHosted {
+			valid = hostednet.Validate(*input.NotificationsWebhookURL) == nil
+		}
+		if !valid {
+			message := "The webhook URL must be a valid http(s) URL."
+			if s.config.Mode == config.ModeHosted {
+				message = "Hosted webhook URLs must use validated public HTTPS on port 443."
+			}
+			adminError(w, 400, "invalid_webhook_url", message)
 			return
 		}
 	}

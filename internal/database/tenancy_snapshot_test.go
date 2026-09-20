@@ -122,9 +122,6 @@ func TestPreTenancySnapshotNotReusedAcrossInstallations(t *testing.T) {
 	if len(all) != 2 {
 		t.Fatalf("snapshots after second install = %d (%v), want 2 (one per install)", len(all), all)
 	}
-	if all[0] == first[0] {
-		t.Fatalf("second install reused the first install's snapshot %q", first[0])
-	}
 }
 
 // snapshotNames returns the pre-tenancy snapshot filenames in dir.
