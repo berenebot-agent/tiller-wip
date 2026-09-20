@@ -81,8 +81,9 @@ type Config struct {
 	// BackupDir is where scheduled central-database snapshots are written.
 	// Defaults to <DataDir>/backups.
 	BackupDir string
-	// BackupInterval is how often a snapshot is taken. Zero disables scheduled
-	// backups.
+	// BackupInterval is how often the maintenance pass runs: a core snapshot
+	// (verified and pruned) followed by in-place compaction of both databases.
+	// Zero disables the whole pass, including compaction.
 	BackupInterval time.Duration
 	// BackupRetention is how long snapshots are kept before pruning. Off-host
 	// copies are the operator's responsibility (see docs/backup_restore_runbook.md).

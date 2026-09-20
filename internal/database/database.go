@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -32,6 +33,11 @@ type DB struct {
 	// its file, a sibling of the central database under the data directory.
 	Activity     *sql.DB
 	ActivityPath string
+	// maintenanceMu serializes whole-file operations on the databases: a
+	// backup snapshot (VACUUM INTO) and an in-place compaction (VACUUM) both
+	// rewrite the core file and must not overlap. Row reads and writes are
+	// never serialized here; SQLite's own locking governs those.
+	maintenanceMu sync.Mutex
 }
 
 // OpenOption configures Open.
@@ -385,6 +391,9 @@ func (d *DB) Ready(ctx context.Context) error {
 }
 
 func (d *DB) Backup(ctx context.Context, dir string) (string, error) {
+	// Serialize against an in-place VACUUM: both rewrite the core file.
+	d.maintenanceMu.Lock()
+	defer d.maintenanceMu.Unlock()
 	return BackupNamed(ctx, d.SQL, dir, "tiller-router-")
 }
 
