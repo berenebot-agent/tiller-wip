@@ -658,21 +658,27 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 	s.mu.Lock()
 	if entry, found := s.userCache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) && constantSecret(secret, entry.secretHash) {
+			generation := atomic.LoadUint64(&s.rev)
 			s.mu.Unlock()
 			if now.Add(s.userSessionTTL / 2).After(entry.session.ExpiresAt) {
 				expires := now.Add(s.userSessionTTL)
-				if _, err := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=?`, formatTime(expires), formatTime(now), selector); err == nil {
-					entry.session.ExpiresAt, entry.expires = expires, now.Add(s.userCacheTTL)
-					s.mu.Lock()
-					s.userCache[selector] = entry
-					s.mu.Unlock()
+				result, err := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(expires), formatTime(now), selector, formatTime(entry.session.ExpiresAt))
+				if err != nil {
+					return UserSession{}, false
 				}
-			} else {
-				entry.expires = now.Add(s.userCacheTTL)
-				s.mu.Lock()
-				s.userCache[selector] = entry
-				s.mu.Unlock()
+				affected, err := result.RowsAffected()
+				if err != nil || affected != 1 {
+					return UserSession{}, false
+				}
+				entry.session.ExpiresAt = expires
 			}
+			if atomic.LoadUint64(&s.rev) != generation {
+				return UserSession{}, false
+			}
+			entry.expires = now.Add(s.userCacheTTL)
+			s.mu.Lock()
+			s.userCache[selector] = entry
+			s.mu.Unlock()
 			return entry.session, true
 		}
 		delete(s.userCache, selector)
@@ -693,8 +699,15 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 		return UserSession{}, false
 	}
 	if now.Add(s.userSessionTTL / 2).After(exp) {
-		exp = now.Add(s.userSessionTTL)
-		_, _ = s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=?`, formatTime(exp), formatTime(now), selector)
+		next := now.Add(s.userSessionTTL)
+		result, updateErr := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
+		if updateErr != nil {
+			return UserSession{}, false
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			return UserSession{}, false
+		}
+		exp = next
 	}
 	session.ExpiresAt = exp
 	s.mu.Lock()
@@ -712,8 +725,8 @@ func (s *Store) DeleteUserSession(raw string) {
 	if !ok {
 		return
 	}
-	s.mu.Lock()
 	_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE id=?`, selector)
+	s.mu.Lock()
 	atomic.AddUint64(&s.rev, 1)
 	delete(s.userCache, selector)
 	s.mu.Unlock()
@@ -726,27 +739,27 @@ func (s *Store) CheckUserCSRF(session UserSession, token string) bool {
 // InvalidateUser and InvalidateAccount are immediate revocation paths used by
 // password reset, user disablement, and account suspension/deletion.
 func (s *Store) InvalidateUser(userID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE user_id=?`, userID)
+	s.mu.Lock()
 	atomic.AddUint64(&s.rev, 1)
 	for selector, entry := range s.userCache {
 		if entry.session.User.ID == userID {
 			delete(s.userCache, selector)
 		}
 	}
+	s.mu.Unlock()
 }
 
 func (s *Store) InvalidateAccount(accountID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE account_id=?`, accountID)
+	s.mu.Lock()
 	atomic.AddUint64(&s.rev, 1)
 	for selector, entry := range s.userCache {
 		if entry.session.User.AccountID == accountID {
 			delete(s.userCache, selector)
 		}
 	}
+	s.mu.Unlock()
 }
 
 // StartSweeper removes expired cached customer and platform sessions.
@@ -844,21 +857,27 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 	s.mu.Lock()
 	if entry, found := s.platformCache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) && constantSecret(secret, entry.secretHash) {
+			generation := atomic.LoadUint64(&s.platformRev)
 			s.mu.Unlock()
 			if now.Add(s.platformSessionTTL / 2).After(entry.session.ExpiresAt) {
 				expires := now.Add(s.platformSessionTTL)
-				if _, err := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=?`, formatTime(expires), formatTime(now), selector); err == nil {
-					entry.session.ExpiresAt, entry.expires = expires, now.Add(s.platformCacheTTL)
-					s.mu.Lock()
-					s.platformCache[selector] = entry
-					s.mu.Unlock()
+				result, err := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(expires), formatTime(now), selector, formatTime(entry.session.ExpiresAt))
+				if err != nil {
+					return PlatformSession{}, false
 				}
-			} else {
-				entry.expires = now.Add(s.platformCacheTTL)
-				s.mu.Lock()
-				s.platformCache[selector] = entry
-				s.mu.Unlock()
+				affected, err := result.RowsAffected()
+				if err != nil || affected != 1 {
+					return PlatformSession{}, false
+				}
+				entry.session.ExpiresAt = expires
 			}
+			if atomic.LoadUint64(&s.platformRev) != generation {
+				return PlatformSession{}, false
+			}
+			entry.expires = now.Add(s.platformCacheTTL)
+			s.mu.Lock()
+			s.platformCache[selector] = entry
+			s.mu.Unlock()
 			return entry.session, true
 		}
 		delete(s.platformCache, selector)
@@ -876,8 +895,15 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 		return PlatformSession{}, false
 	}
 	if now.Add(s.platformSessionTTL / 2).After(exp) {
-		exp = now.Add(s.platformSessionTTL)
-		_, _ = s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=?`, formatTime(exp), formatTime(now), selector)
+		next := now.Add(s.platformSessionTTL)
+		result, updateErr := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
+		if updateErr != nil {
+			return PlatformSession{}, false
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			return PlatformSession{}, false
+		}
+		exp = next
 	}
 	session.ExpiresAt = exp
 	s.mu.Lock()
@@ -895,8 +921,8 @@ func (s *Store) DeletePlatformSession(raw string) {
 	if !ok {
 		return
 	}
-	s.mu.Lock()
 	_, _ = s.db.Exec(`DELETE FROM platform_admin_sessions WHERE id=?`, selector)
+	s.mu.Lock()
 	atomic.AddUint64(&s.platformRev, 1)
 	delete(s.platformCache, selector)
 	s.mu.Unlock()

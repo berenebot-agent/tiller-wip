@@ -317,10 +317,10 @@ func (s *Server) StartBackground(ctx context.Context) {
 // startLogWriter launches the asynchronous Activity writer. It runs only in
 // the real deployment (StartBackground); tests that need deterministic reads
 // keep the synchronous write path.
-func (s *Server) startLogWriter(ctx context.Context) {
+func (s *Server) startLogWriter(_ context.Context) {
 	w := newLogWriter(s.scopeFor, s.logger)
 	s.logWriter = w
-	w.start(ctx)
+	w.start(context.Background())
 }
 
 func (s *Server) flushActivity(ctx context.Context) error {

@@ -161,15 +161,19 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		currentMail.SMTPMode = strings.ToLower(strings.TrimSpace(*input.MailSMTPMode))
 	}
 	retention, err := st.AuditRetentionDays(r.Context())
-	if err != nil && input.AuditRetentionDays == nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		retention = 30
+	} else if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
+		return
 	}
 	if input.AuditRetentionDays != nil {
 		retention = *input.AuditRetentionDays
 	}
 	signup, err := st.HostedSignupEnabled(r.Context())
 	if err != nil {
-		signup = false
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
+		return
 	}
 	if input.HostedSignupEnabled != nil {
 		signup = *input.HostedSignupEnabled

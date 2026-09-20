@@ -526,21 +526,24 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) {
 			want := sha256.Sum256([]byte(secret))
 			if subtle.ConstantTimeCompare(want[:], entry.secretHash[:]) == 1 {
+				generation := atomic.LoadUint64(&s.rev)
 				s.mu.Unlock()
 				if now.Add(s.ttl / 2).After(entry.session.ExpiresAt) {
 					expires := now.Add(s.ttl)
-					if _, err := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=?`, formatUTC(expires), formatUTC(now), selector); err == nil {
+					if _, err := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(expires), formatUTC(now), selector, formatUTC(entry.session.ExpiresAt)); err == nil {
 						entry.session.ExpiresAt, entry.expires = expires, now.Add(s.cacheTTL)
-						s.mu.Lock()
-						s.cache[selector] = entry
-						s.mu.Unlock()
 					}
-				} else {
-					entry.expires = now.Add(s.cacheTTL)
-					s.mu.Lock()
-					s.cache[selector] = entry
-					s.mu.Unlock()
 				}
+				if atomic.LoadUint64(&s.rev) != generation {
+					return Session{}, false
+				}
+				if !now.Before(entry.session.ExpiresAt) {
+					return Session{}, false
+				}
+				entry.expires = now.Add(s.cacheTTL)
+				s.mu.Lock()
+				s.cache[selector] = entry
+				s.mu.Unlock()
 				return entry.session, true
 			}
 		}
@@ -567,8 +570,15 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	s.rehashSessionToken(selector, secret, tokenHash)
 	// Sliding expiry: extend when more than half the lifetime has elapsed.
 	if now.Add(s.ttl / 2).After(exp) {
-		exp = now.Add(s.ttl)
-		_, _ = s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=?`, formatUTC(exp), formatUTC(now), selector)
+		next := now.Add(s.ttl)
+		result, updateErr := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(next), formatUTC(now), selector, formatUTC(exp))
+		if updateErr != nil {
+			return Session{}, false
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			return Session{}, false
+		}
+		exp = next
 	}
 	session := Session{CSRFToken: csrfToken, ExpiresAt: exp}
 	s.mu.Lock()

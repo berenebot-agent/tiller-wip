@@ -9,6 +9,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 )
 
+const activityMaintenanceInterval = time.Hour
+
 // startMaintenanceScheduler runs the periodic maintenance pass: a core-database
 // snapshot (verified, then pruned by retention), followed by in-place
 // compaction of both databases. It runs once at startup and then on a fixed
@@ -24,10 +26,7 @@ import (
 // docs/backup_restore_runbook.md for RPO/RTO and off-host copy guidance), but
 // it is compacted in place here.
 func (s *Server) startActivityMaintenance(ctx context.Context) {
-	interval := s.config.BackupInterval
-	if interval <= 0 {
-		interval = time.Hour
-	}
+	interval := activityMaintenanceInterval
 	reconcile := func() {
 		if err := s.storeHandle().ReconcileActivityCleanup(ctx); err != nil {
 			s.warnBackup("activity cleanup reconciliation failed", err)
@@ -47,10 +46,7 @@ func (s *Server) startActivityMaintenance(ctx context.Context) {
 }
 
 func (s *Server) startAuditMaintenance(ctx context.Context) {
-	interval := s.config.BackupInterval
-	if interval <= 0 {
-		interval = time.Hour
-	}
+	interval := activityMaintenanceInterval
 	prune := func() {
 		if err := s.storeHandle().PruneAuditEvents(ctx, time.Now()); err != nil {
 			s.warnBackup("scheduled audit prune failed", err)
