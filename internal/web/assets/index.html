@@ -14,7 +14,7 @@
 <body>
   <div class="login-shell" id="login-shell">
     <section class="login-card" aria-labelledby="login-title">
-      <h1 id="login-title" class="login-brand"><img class="login-mark" src="/media/tiller-mark.svg" alt=""><span>Tiller <b>Router</b></span></h1>
+      <h1 id="login-title" class="login-brand"><a href="/login"><img class="login-mark" src="/media/tiller-mark.svg" alt=""><span>Tiller <b>Router</b></span></a></h1>
       <form id="login-form" class="stack-form">
         <label id="login-identity-label">Administrator <input name="username" autocomplete="username" required autofocus></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
@@ -48,7 +48,7 @@
       </section>
       <form id="reset-form" class="stack-form" hidden>
         <p class="eyebrow">RESET PASSWORD</p>
-        <label>New passphrase <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+        <label>New password <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
         <p class="form-error" id="reset-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Set new password</button>
       </form>
@@ -59,7 +59,7 @@
         <p class="form-error" id="platform-login-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Open platform dashboard</button>
       </form>
-      <p class="login-foot" id="login-foot">Session state is local to this router process.</p>
+      
     </section>
   </div>
 

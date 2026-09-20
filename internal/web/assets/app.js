@@ -2056,7 +2056,6 @@ function liveStop() { live.stop(); }
     if (runtimeMode === 'hosted') {
       $('#login-identity-label').firstChild.textContent = 'Email ';
       $('#login-submit').textContent = 'Sign in';
-      $('#login-foot').textContent = 'Hosted Tiller — request content is not persisted.';
     }
     const path = location.pathname;
     const token = new URLSearchParams(location.search).get('token');
