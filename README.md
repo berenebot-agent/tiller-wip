@@ -185,9 +185,40 @@ The repository's `docker-compose.yml` builds locally instead of pulling an image
 
 The service starts as root to self-fix `./data` ownership, then drops to a non-root user before serving.
 
+### Hosted Compose networking
+
+The main `docker-compose.yml` remains the simple self-hosted appliance: it
+keeps direct `TILLER_PORT` publishing and does not require a reverse proxy.
+Hosted deployments use the separate `docker-compose.hosted.yml` override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.hosted.yml up -d --build
+```
+
+The hosted override removes direct host-port publishing and attaches Tiller to
+a managed `tiller-router-egress` network containing only Tiller, plus an
+ingress network for the reverse proxy. It does not use the implicit Compose
+default network.
+
+If the reverse proxy runs in a different Compose project, point the hosted
+override at its existing Docker network:
+
+```dotenv
+TILLER_INGRESS_NETWORK=proxy_network
+TILLER_INGRESS_NETWORK_EXTERNAL=true
+```
+
+The hosted deployment requires `TILLER_PUBLIC_URL` and still uses the
+application-level `SafeTransport` for public HTTPS
+destination validation and SSRF protection. Docker network isolation is only
+defense in depth; it is not a substitute for the application policy or an
+optional VPS firewall hardening rule.
+
 ### Other compose / env options
 
-The repo's `docker-compose.yml` plus `.env` cover the most common customisations without editing any Go code. The full list of recognised variables is in `.env.example`.
+The repo's `docker-compose.yml` plus `.env` cover the most common local
+customisations without editing any Go code. The full list of local variables is
+in `.env.example`. The hosted override additionally requires:
 
 ```bash
 TILLER_ADMIN_USERNAME=admin                          # admin login for the web UI
@@ -201,9 +232,9 @@ TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy 
 TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
 TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
 TILLER_ADMIN_COOKIE_SECURE=true                     # force Secure on the admin cookie (auto set to true if https used)
-TILLER_MODE=local                                    # local (default) or hosted
-TILLER_PUBLIC_URL=https://app.example.com             # required for hosted mode
-TILLER_USER_SESSION_TTL=720h                         # hosted customer session lifetime
+TILLER_PUBLIC_URL=https://app.example.com             # required by hosted override
+TILLER_INGRESS_NETWORK=proxy_network                 # optional external proxy network
+TILLER_INGRESS_NETWORK_EXTERNAL=true                 # set only for a pre-existing network
 ```
 
 ### First steps

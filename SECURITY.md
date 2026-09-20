@@ -28,6 +28,18 @@ interface private, use HTTPS at the edge, protect `./data`, and never commit
 `.env` or provider credentials. Proxy-header trust must remain disabled unless
 the direct proxy peer is restricted with `TILLER_TRUSTED_PROXY`.
 
+The main Compose deployment remains the simple self-hosted appliance. The
+separate `docker-compose.hosted.yml` override removes direct host-port
+publishing and uses explicit networks rather than the implicit Compose default
+network. Tiller is attached to a managed `tiller-router-egress` network
+containing only Tiller and to an ingress network used by the reverse proxy. A
+proxy in another Compose project can use an existing network with
+`TILLER_INGRESS_NETWORK` and `TILLER_INGRESS_NETWORK_EXTERNAL=true`. This
+network layout requires no host firewall configuration and does not alter
+local/LAN provider support. It is defense in depth only: hosted outbound
+requests remain subject to the application `SafeTransport`, and operators may
+add provider-specific VPS firewall rules separately.
+
 **Recoverable provider credentials are encrypted at rest (always on).**
 Provider API credentials, OAuth access/refresh/id tokens and `provider_data`, the
 notification auth header, and hosted mail credentials are sealed with AES-256-GCM (versioned `enc:v1:`

@@ -44,13 +44,21 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v4
-      # Fail if docker-compose.yml has invalid YAML, bad interpolation, or a
+      # Fail if the Compose files have invalid YAML, bad interpolation, or a
       # required variable without a safe dummy value. No container is started.
       - name: Validate docker-compose.yml
         env:
           TILLER_ADMIN_USERNAME: ci
           TILLER_ADMIN_PASSWORD: ci
         run: docker compose -f docker-compose.yml config >/dev/null
+      - name: Validate external proxy network override
+        env:
+          TILLER_ADMIN_USERNAME: ci
+          TILLER_ADMIN_PASSWORD: ci
+          TILLER_INGRESS_NETWORK: ci-proxy-network
+          TILLER_INGRESS_NETWORK_EXTERNAL: "true"
+          TILLER_PUBLIC_URL: https://app.example.com
+        run: docker compose -f docker-compose.yml -f docker-compose.hosted.yml config >/dev/null
 
   container-regressions:
     name: Browser and runtime checks

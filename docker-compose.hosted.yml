@@ -1,0 +1,28 @@
+# Hosted deployment override. Use with:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.hosted.yml up -d --build
+#
+# The base Compose file remains the simple self-hosted appliance. This override
+# removes its direct host port and supplies the reverse-proxy network boundary.
+services:
+  tiller-router:
+    environment:
+      TILLER_MODE: hosted
+      TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:?set TILLER_PUBLIC_URL}
+    ports: !reset []
+    expose:
+      - "8080"
+    networks:
+      - ingress
+      - egress
+
+networks:
+  # A same-project reverse proxy can join this network as `ingress`. A proxy
+  # in another Compose project can use an existing network by setting both
+  # TILLER_INGRESS_NETWORK and TILLER_INGRESS_NETWORK_EXTERNAL=true.
+  ingress:
+    name: ${TILLER_INGRESS_NETWORK:-tiller-router-ingress}
+    external: ${TILLER_INGRESS_NETWORK_EXTERNAL:-false}
+  # Deliberately managed by this project and contains only Tiller.
+  egress:
+    name: tiller-router-egress
