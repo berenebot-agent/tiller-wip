@@ -87,6 +87,96 @@ func TestPreTenancySnapshotIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestPreTenancySnapshotNotReusedAcrossInstallations proves the reuse check is
+// bound to the installation: a snapshot taken for one pre-SaaS database is not
+// treated as another database's rollback point even when they share a backup
+// directory.
+func TestPreTenancySnapshotNotReusedAcrossInstallations(t *testing.T) {
+	backupDir := t.TempDir()
+
+	// First installation: migrate and record its snapshot name.
+	dirA := t.TempDir()
+	pathA := filepath.Join(dirA, "router.db")
+	openMigrationFixture(t, pathA, 27)
+	dbA, err := Open(context.Background(), pathA, WithBackupDir(backupDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbA.Close()
+	first := snapshotNames(t, backupDir)
+	if len(first) != 1 {
+		t.Fatalf("installation A snapshots = %d (%v), want 1", len(first), first)
+	}
+
+	// Second installation in the same backup dir.
+	dirB := t.TempDir()
+	pathB := filepath.Join(dirB, "router.db")
+	openMigrationFixture(t, pathB, 27)
+	dbB, err := Open(context.Background(), pathB, WithBackupDir(backupDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbB.Close()
+
+	all := snapshotNames(t, backupDir)
+	if len(all) != 2 {
+		t.Fatalf("snapshots after second install = %d (%v), want 2 (one per install)", len(all), all)
+	}
+	if all[0] == first[0] {
+		t.Fatalf("second install reused the first install's snapshot %q", first[0])
+	}
+}
+
+// snapshotNames returns the pre-tenancy snapshot filenames in dir.
+func snapshotNames(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), PreTenancySnapshotPrefix) && strings.HasSuffix(entry.Name(), BackupSuffix) {
+			out = append(out, entry.Name())
+		}
+	}
+	return out
+}
+
+// TestInstallationIDStableAcrossReopen proves the install id used to bind
+// snapshot reuse is durable: reopening the same database yields the same id.
+func TestInstallationIDStableAcrossReopen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router.db")
+	openMigrationFixture(t, path, 27)
+
+	db, err := Open(context.Background(), path, WithBackupDir(filepath.Join(dir, "backups")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := db.installationID(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if first == 0 {
+		t.Fatal("installation id should be non-zero after first open")
+	}
+
+	reopened, err := Open(context.Background(), path, WithBackupDir(filepath.Join(dir, "backups")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	second, err := reopened.installationID(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second != first {
+		t.Fatalf("installation id changed across reopen: %d -> %d", first, second)
+	}
+}
+
 // TestPreTenancySnapshotSkippedForFreshInstall proves a fresh install (no
 // schema_migrations table) takes no snapshot.
 func TestPreTenancySnapshotSkippedForFreshInstall(t *testing.T) {

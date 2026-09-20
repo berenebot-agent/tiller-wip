@@ -526,12 +526,22 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 }
 
 // scope returns the account-scoped store handle for the request. The account
-// is taken from the verified principal attached by the auth middleware; a
-// request that reaches a handler without one is a routing bug and is treated
-// as the local account only because Phase 1 has exactly one account.
+// is taken from the verified principal attached by the auth middleware.
+//
+// In local mode a request that reaches a handler without a principal is a
+// routing bug, but there is exactly one implicit account, so it falls back to
+// the local account id. Hosted mode must never do that: a missing principal
+// there would silently resolve to the local account and cross the tenant
+// boundary, so it fails closed to an empty (never-matching) account instead.
 func (s *Server) scope(r *http.Request) *store.Scope {
 	accountID, _ := r.Context().Value(accountKey).(string)
 	if accountID == "" {
+		if s.config.Mode == config.ModeHosted {
+			if s.logger != nil {
+				s.logger.Warn("hosted request reached handler without a verified account principal")
+			}
+			return s.storeHandle().For("")
+		}
 		accountID = database.LocalAccountID
 	}
 	return s.storeHandle().For(accountID)

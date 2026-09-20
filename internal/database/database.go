@@ -2,8 +2,10 @@ package database
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"embed"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -149,8 +151,11 @@ const PreTenancySnapshotPrefix = "pre-saas-migration-"
 //   - a database that already applied 028 has nothing to roll back;
 //   - an existing install with 028 still pending gets exactly one snapshot.
 //
-// If a snapshot already exists it is reused (and re-verified) rather than
-// overwritten. Migration aborts if the snapshot cannot be created or verified.
+// Reuse is bound to this installation: the snapshot filename embeds the
+// database's durable installation id, so a leftover snapshot taken for a
+// different database that happens to share the backup directory is never
+// treated as this installation's rollback point. Migration aborts if the
+// snapshot cannot be created or verified.
 func (d *DB) snapshotBeforeTenancy(ctx context.Context, backupDir string) error {
 	var hasMigrations int
 	if err := d.SQL.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'`).Scan(&hasMigrations); err != nil {
@@ -166,8 +171,13 @@ func (d *DB) snapshotBeforeTenancy(ctx context.Context, backupDir string) error 
 	if applied != 0 {
 		return nil
 	}
-	// Idempotent: reuse an existing, verified snapshot if one was already taken.
-	if existing, err := findPreTenancySnapshot(backupDir); err != nil {
+	installID, err := d.installationID(ctx)
+	if err != nil {
+		return fmt.Errorf("installation id: %w", err)
+	}
+	prefix := fmt.Sprintf("%s%08x-", PreTenancySnapshotPrefix, uint32(installID))
+	// Idempotent: reuse this installation's snapshot if one was already taken.
+	if existing, err := findSnapshot(backupDir, prefix); err != nil {
 		return err
 	} else if existing != "" {
 		if err := Verify(ctx, existing); err != nil {
@@ -175,7 +185,7 @@ func (d *DB) snapshotBeforeTenancy(ctx context.Context, backupDir string) error 
 		}
 		return nil
 	}
-	path, err := BackupNamed(ctx, d.SQL, backupDir, PreTenancySnapshotPrefix)
+	path, err := BackupNamed(ctx, d.SQL, backupDir, prefix)
 	if err != nil {
 		return fmt.Errorf("pre-migration snapshot failed: %w", err)
 	}
@@ -185,9 +195,40 @@ func (d *DB) snapshotBeforeTenancy(ctx context.Context, backupDir string) error 
 	return nil
 }
 
-// findPreTenancySnapshot returns the newest existing pre-tenancy snapshot in
-// dir, or "" when none exists.
-func findPreTenancySnapshot(dir string) (string, error) {
+// installationID returns this database's durable install identifier, creating
+// one on first use. It is stored in the SQLite header's reserved application_id
+// field, so it needs no extra table or companion file and travels with the
+// database (including inside a VACUUM INTO snapshot) across directory moves.
+//
+// application_id is unused by Tiller otherwise; a non-zero value is set once,
+// before migration 028, and never changed.
+func (d *DB) installationID(ctx context.Context) (int64, error) {
+	var id int64
+	if err := d.SQL.QueryRowContext(ctx, `PRAGMA application_id`).Scan(&id); err != nil {
+		return 0, err
+	}
+	if id != 0 {
+		return id, nil
+	}
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 0, err
+	}
+	id = int64(binary.BigEndian.Uint32(b[:]) & 0x7fffffff)
+	if id == 0 {
+		id = 1
+	}
+	// PRAGMA does not accept bound parameters; the value is a locally generated
+	// integer, never request input.
+	if _, err := d.SQL.ExecContext(ctx, fmt.Sprintf("PRAGMA application_id=%d", id)); err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
+// findSnapshot returns the newest file in dir named with prefix and the backup
+// suffix, or "" when none exists.
+func findSnapshot(dir, prefix string) (string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -201,7 +242,7 @@ func findPreTenancySnapshot(dir string) (string, error) {
 			continue
 		}
 		name := entry.Name()
-		if !strings.HasPrefix(name, PreTenancySnapshotPrefix) || !strings.HasSuffix(name, BackupSuffix) {
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, BackupSuffix) {
 			continue
 		}
 		if newest == "" || name > newest {

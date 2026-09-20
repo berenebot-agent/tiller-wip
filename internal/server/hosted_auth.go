@@ -274,10 +274,19 @@ func (s *Server) sendPasswordReset(ctx context.Context, user identity.User, toke
 	}
 }
 
+// recordAccountAudit writes an account-scoped audit event best-effort. Audit is
+// security history, so a write failure is logged loudly, but it must never fail
+// the user operation that triggered it (login, verification, reset, deletion).
 func (s *Server) recordAccountAudit(ctx context.Context, accountID string, event store.AuditEvent) {
-	_ = s.storeHandle().For(accountID).RecordAccountAudit(ctx, event)
+	if err := s.storeHandle().For(accountID).RecordAccountAudit(ctx, event); err != nil && s.logger != nil {
+		s.logger.Error("account audit write failed", "event", event.Event, "error_class", fmt.Sprintf("%T", err))
+	}
 }
 
+// recordPlatformAudit writes a platform audit event best-effort with the same
+// contract as recordAccountAudit.
 func (s *Server) recordPlatformAudit(ctx context.Context, event store.AuditEvent) {
-	_ = s.storeHandle().RecordPlatformAudit(ctx, event)
+	if err := s.storeHandle().RecordPlatformAudit(ctx, event); err != nil && s.logger != nil {
+		s.logger.Error("platform audit write failed", "event", event.Event, "error_class", fmt.Sprintf("%T", err))
+	}
 }

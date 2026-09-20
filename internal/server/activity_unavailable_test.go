@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -125,6 +127,41 @@ func TestAdminHealthReportsActivityDegraded(t *testing.T) {
 	}
 	if payload["activity_available"] != false {
 		t.Fatalf("activity_available = %v, want false", payload["activity_available"])
+	}
+}
+
+// TestHostedScopeNeverFallsBackToLocalAccount proves a hosted request that
+// reaches a handler without a verified account principal does not silently
+// resolve to the local account (which would cross the tenant boundary); it
+// fails closed to an empty account. Local mode keeps its single implicit
+// account fallback.
+func TestHostedScopeNeverFallsBackToLocalAccount(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
+	hosted, err := New(config.Config{Mode: config.ModeHosted, AdminUsername: "admin", AdminPassword: "correct horse", PublicURL: "https://tiller.example.com", DataDir: t.TempDir()}, db, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/providers", nil)
+	if got := hosted.scope(req).AccountID(); got == database.LocalAccountID {
+		t.Fatal("hosted scope fell back to the local account id without a principal")
+	}
+	if got := hosted.scope(req).AccountID(); got == "" {
+		// Expected: fail-closed to an empty, never-matching account.
+	} else {
+		t.Fatalf("hosted scope account = %q, want empty (fail closed)", got)
+	}
+
+	// Local mode without a principal still resolves to the single local account.
+	local := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	localReq := httptest.NewRequest(http.MethodGet, "/api/admin/providers", nil)
+	if got := local.scope(localReq).AccountID(); got != database.LocalAccountID {
+		t.Fatalf("local scope account = %q, want local account id", got)
 	}
 }
 
