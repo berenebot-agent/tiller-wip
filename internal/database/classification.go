@@ -31,6 +31,12 @@ var TableClassification = map[string]TableClass{
 	"email_change_tokens":       ClassPlatform,
 	"mail_outbox":               ClassPlatform,
 	"platform_admin_sessions":   ClassPlatform,
+	// Plan definitions and legal documents are platform-global: plans are the
+	// entitlement catalogue every account references, and legal documents are
+	// the published policy text. Acceptance records are per-user history.
+	"plans":             ClassPlatform,
+	"legal_documents":   ClassPlatform,
+	"legal_acceptances": ClassPlatform,
 	// Audit lives in the core database now (migration 038). Platform audit is
 	// global; audit_meta holds the independent retention setting.
 	"platform_audit_events": ClassPlatform,
@@ -55,6 +61,7 @@ var TableClassification = map[string]TableClass{
 	// retained audit history survives account deletion.
 	"account_audit_events": ClassTenant,
 	"activity_cleanup":     ClassTenant,
+	"usage_counters":       ClassTenant,
 }
 
 // ActivityTableClassification is the table inventory for the separate Activity
