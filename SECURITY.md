@@ -93,6 +93,29 @@ CSRF tokens. Account suspension immediately revokes customer sessions and
 blocks client-key traffic. Hosted detailed body logging is unavailable even if
 the account settings request attempts to enable it.
 
+**Account self-service.** Hosted customers manage their identity from the
+Account tab. Changing the password or email, signing out everywhere, and
+deleting the account all require the current password. Email changes are
+verify-new-first: the current address remains the login identity until a link
+sent to the **new** address is confirmed, a warning is mailed to the **current**
+address at request time, and confirmation revokes every other session. A pending
+email change is cancelled by a password reset or an authenticated password
+change. Requesting a change to an address already owned by another account
+returns the same generic response but sends no mail, so the endpoint cannot be
+used to mail another customer. Self-service deletion is synchronous and
+terminal, sharing one purge path with operator deletion; account audit history
+is retained.
+
+**Durable transactional mail.** Signup, verification, password-reset, and
+email-change messages are queued in a `mail_outbox` row inside the same
+transaction that creates the one-time token, then delivered by a background
+worker with bounded retries. The raw one-time token stored in the payload is
+encrypted at rest with the same always-on master key (`enc:v1:`, AAD-bound to
+the row) and is scrubbed on successful send, so a leaked database or backup does
+not yield an account takeover. Rows that exhaust their retries are dead-lettered
+and surface on the platform dashboard; queued and recently dead counts are shown
+to the operator.
+
 Platform administration uses the environment-only
 `TILLER_PLATFORM_ADMIN_USERNAME` and `TILLER_PLATFORM_ADMIN_PASSWORD`
 credentials at `/platform`. Customers use separate email/password identities at

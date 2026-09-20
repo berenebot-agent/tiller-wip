@@ -11,6 +11,11 @@ import (
 
 const activityMaintenanceInterval = time.Hour
 
+// mailOutboxRetention bounds how long delivered/dead mail rows are retained.
+// Their one-time tokens are already scrubbed or encrypted, so this is size
+// control for the core database and its snapshots.
+const mailOutboxRetention = 30 * 24 * time.Hour
+
 // startMaintenanceScheduler runs the periodic maintenance pass: a core-database
 // snapshot (verified, then pruned by retention), followed by in-place
 // compaction of both databases. It runs once at startup and then on a fixed
@@ -54,6 +59,18 @@ func (s *Server) startAuditMaintenance(ctx context.Context) {
 	prune := func() {
 		if err := s.storeHandle().PruneAuditEvents(ctx, time.Now()); err != nil {
 			s.warnBackup("scheduled audit prune failed", err)
+		}
+		// Identity tokens and delivered mail are hash-only / payload-scrubbed,
+		// so this is size control for the core database and every snapshot.
+		if s.identity != nil {
+			if err := s.identity.PruneExpiredTokens(ctx, time.Now()); err != nil {
+				s.warnBackup("scheduled token prune failed", err)
+			}
+		}
+		if s.outbox != nil {
+			if _, err := s.outbox.Cleanup(ctx, mailOutboxRetention); err != nil {
+				s.warnBackup("scheduled mail outbox prune failed", err)
+			}
 		}
 	}
 	prune()

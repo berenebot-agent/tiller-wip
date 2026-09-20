@@ -120,6 +120,17 @@ type secretRecord struct {
 	value     string
 }
 
+// aad returns the associated data binding this secret to its context. Most
+// secrets use the tenant secretAAD scheme; the durable mail outbox stores
+// platform-global one-time tokens under a different AAD (it is written by
+// internal/mailoutbox, not the tenant store), so it is handled explicitly.
+func (r secretRecord) aad() []byte {
+	if r.kind == "mailoutbox" {
+		return crypto.AAD("tiller", "mailoutbox", r.id, "token")
+	}
+	return secretAAD(r.accountID, r.kind, r.id, r.field)
+}
+
 // listSecrets loads every non-empty recoverable secret column in the tenant
 // tables. All reads complete before any write, so no UPDATE runs while a query
 // cursor is open on the same SQLite connection.
@@ -221,6 +232,28 @@ func listSecrets(ctx context.Context, db querier) ([]secretRecord, error) {
 		return nil, err
 	}
 	rows.Close()
+
+	// Durable mail-outbox one-time tokens are recoverable secrets stored by
+	// internal/mailoutbox (platform-global, dedicated AAD). Include them so the
+	// startup migration and key rotation cover them too.
+	rows, err = db.QueryContext(ctx, `SELECT id,coalesce(token_ciphertext,'') FROM mail_outbox WHERE token_ciphertext LIKE 'enc:v1:%'`)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var rec secretRecord
+		if err := rows.Scan(&rec.id, &rec.value); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rec.accountID, rec.kind, rec.field = "platform", "mailoutbox", "token"
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
 	return out, nil
 }
 
@@ -253,9 +286,22 @@ func applySecret(ctx context.Context, db querier, rec secretRecord, newValue str
 		}
 		_, err := db.ExecContext(ctx, `UPDATE settings SET value=? WHERE account_id=? AND key=?`, newValue, rec.accountID, rec.id)
 		return err
+	case "mailoutbox":
+		_, err := db.ExecContext(ctx, `UPDATE mail_outbox SET token_ciphertext=? WHERE id=?`, nullableSecret(newValue), rec.id)
+		return err
 	default:
 		return errors.New("store: unknown secret record kind")
 	}
+}
+
+// nullableSecret maps an empty re-encryption result back to NULL. Rotation
+// never produces empty for a non-empty input, but this keeps the column
+// invariant explicit.
+func nullableSecret(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 // walkSecrets applies mutate to every recoverable secret and writes back the
@@ -295,7 +341,8 @@ SELECT
  (SELECT count(*) FROM providers WHERE credential_secret LIKE 'enc:v1:%')
  + (SELECT count(*) FROM provider_oauth_tokens WHERE access_token LIKE 'enc:v1:%' OR refresh_token LIKE 'enc:v1:%' OR id_token LIKE 'enc:v1:%' OR provider_data LIKE 'enc:v1:%')
  + (SELECT count(*) FROM settings WHERE value LIKE 'enc:v1:%' AND key IN (` + placeholders + `))
- + (SELECT count(*) FROM platform_settings WHERE value LIKE 'enc:v1:%' AND key IN (` + strings.TrimRight(strings.Repeat("?,", len(platformSecretSettingKeys())), ",") + `))`
+ + (SELECT count(*) FROM platform_settings WHERE value LIKE 'enc:v1:%' AND key IN (` + strings.TrimRight(strings.Repeat("?,", len(platformSecretSettingKeys())), ",") + `))
+ + (SELECT count(*) FROM mail_outbox WHERE token_ciphertext LIKE 'enc:v1:%')`
 	for _, key := range platformSecretSettingKeys() {
 		args = append(args, key)
 	}
@@ -321,7 +368,7 @@ func MigrateSecrets(ctx context.Context, db *sql.DB, cipher SecretCipher) (migra
 	}
 	defer func() { _ = tx.Rollback() }()
 	err = walkSecrets(ctx, tx, func(rec secretRecord) (string, bool, error) {
-		aad := secretAAD(rec.accountID, rec.kind, rec.id, rec.field)
+		aad := rec.aad()
 		if crypto.Encrypted(rec.value) {
 			if _, derr := decryptWith(cipher, aad, rec.value); derr != nil {
 				return "", false, derr
@@ -365,7 +412,7 @@ func RotateSecrets(ctx context.Context, db *sql.DB, oldCipher, newCipher SecretC
 	}
 	defer func() { _ = tx.Rollback() }()
 	err = walkSecrets(ctx, tx, func(rec secretRecord) (string, bool, error) {
-		aad := secretAAD(rec.accountID, rec.kind, rec.id, rec.field)
+		aad := rec.aad()
 		plaintext, derr := decryptWith(oldCipher, aad, rec.value)
 		if derr != nil {
 			return "", false, derr

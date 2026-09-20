@@ -85,7 +85,8 @@ const rowCache = (row) => {
   return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
 };
 const VIEWS = ['providers', 'models', 'virtual', 'clients', 'activity', 'settings'];
-const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'clients'); return VIEWS.includes(v) ? v : 'clients'; };
+const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return VIEWS.includes(v) ? v : 'clients'; };
+const settingsTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'settings' && parts[1] ? parts[1] : ''; };
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -183,8 +184,12 @@ $('#platform-login-form').addEventListener('submit', async event => { event.prev
 $('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
 
 async function navigate(view) {
-  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') await loadSettings(); }
+  state.view = view;
+  // Preserve the settings sub-tab in the hash; only the base view is rewritten.
+  const desiredHash = view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : '#' + view;
+  if (location.hash !== desiredHash) history.pushState(null, '', desiredHash);
+  $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
+  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); } }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
@@ -1574,6 +1579,64 @@ $('[name="notifications_auth_header"]', $('#notifications-form')).addEventListen
 $('#clear-notifications-auth').addEventListener('click', async () => { const button = $('#clear-notifications-auth'); button.disabled = true; $('#notifications-error').textContent = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ notifications_auth_header: '' }) }); authHeaderClear = false; authHeaderDirty = false; $('[name="notifications_auth_header"]', $('#notifications-form')).value = ''; $('#notifications-auth-note').textContent = 'Authorization header cleared.'; $('#clear-notifications-auth').hidden = true; } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
 $('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
 
+// Settings tabs. Account is hosted-only; the others carry the existing config
+// cards. The hash reflects the sub-tab (#settings/<tab>) so deep links work.
+const SETTINGS_TABS = ['account', 'routing', 'logging', 'security', 'notifications', 'data'];
+let settingsTab = 'routing';
+function showSettingsTab(tab) {
+  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && runtimeMode !== 'hosted')) tab = 'routing';
+  settingsTab = tab;
+  $$('.settings-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.settingsTab === tab));
+  $$('.settings-panel').forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.classList.toggle('active', active); panel.hidden = !active; });
+  $('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+  // Account actions save themselves; the shared save bar only applies to config.
+  $('#save-settings-top').hidden = tab === 'account';
+  $('#save-settings-bottom').hidden = tab === 'account';
+}
+$$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSettingsTab(btn.dataset.settingsTab); const hash = btn.dataset.settingsTab === 'routing' ? '#settings' : `#settings/${btn.dataset.settingsTab}`; if (location.hash !== hash) history.pushState(null, '', hash); if (btn.dataset.settingsTab === 'account') loadAccount(); }));
+$('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+
+async function loadAccount() {
+  if (runtimeMode !== 'hosted') return;
+  try {
+    const [profile, usage] = await Promise.all([api('/api/auth/account'), api('/api/admin/usage')]);
+    $('#account-email').textContent = profile.email;
+    $('#account-id').textContent = profile.account_id;
+    $('#account-plan').textContent = profile.plan;
+    $('#account-status').textContent = profile.account_status;
+    $('#account-created').textContent = profile.created_at ? new Date(profile.created_at).toLocaleString() : '—';
+    $('#account-delete-hint').textContent = profile.email;
+    const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
+    const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
+    $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
+  } catch (error) {
+    flash(errorMessage(error, 'Could not load account details.'), 'error');
+  }
+}
+
+$('#account-password-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-password-error').textContent = '';
+  try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); event.currentTarget.reset(); flash('Password updated. Other sessions were signed out.'); }
+  catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
+});
+$('#account-email-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
+  try { const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); event.currentTarget.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.'; }
+  catch (error) { note.textContent = errorMessage(error, 'Could not start the email change.'); }
+});
+$('#account-revoke-sessions').addEventListener('click', async () => {
+  const button = $('#account-revoke-sessions'); button.disabled = true; $('#account-sessions-error').textContent = '';
+  try { await api('/api/auth/account/sessions/revoke-all', { method: 'POST', body: '{}' }); showLogin(); }
+  catch (error) { $('#account-sessions-error').textContent = errorMessage(error, 'Could not sign out sessions.'); button.disabled = false; }
+});
+$('#account-delete-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-delete-error').textContent = '';
+  if (!window.confirm('Delete your account now? This is immediate and irreversible.')) return;
+  const button = $('#account-delete-form button[type="submit"]'); button.disabled = true;
+  try { const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: form.get('confirm'), password: form.get('password') }) }); flash(result.message || 'Account deleted.'); showLogin(); }
+  catch (error) { $('#account-delete-error').textContent = errorMessage(error, 'Could not delete the account.'); button.disabled = false; }
+});
+
 let entitySubmit = null;
 // Monotonic id for the currently-open entity dialog. A submit captures it and
 // only closes/updates the dialog if no newer openEntity() replaced it while the
@@ -2086,6 +2149,19 @@ function liveStop() { live.stop(); }
       return;
     }
     if (runtimeMode === 'hosted' && path === '/reset-password' && token) authView('reset-form');
+    else if (runtimeMode === 'hosted' && path === '/confirm-email-change' && token) {
+      authView('verify-panel');
+      try {
+        const result = await api('/api/auth/email-change/confirm', { method: 'POST', body: JSON.stringify({ token }) });
+        $('#verify-message').textContent = `Your email address is now ${result.email}.`;
+        $('#verify-login').hidden = false;
+        history.replaceState(null, '', '/login');
+      } catch (error) {
+        $('#verify-message').textContent = '';
+        showAuthError('verify-error', error, 'This email-change link is invalid or expired.');
+      }
+      return;
+    }
     else {
       state.view = viewFromHash();
       const sessionPath = runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session';
@@ -2121,6 +2197,14 @@ async function loadPlatformDashboard() {
   $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || userRows.length < 100;
   const audit = await api('/api/platform/audit?limit=100');
   $('#platform-audit-list').innerHTML = (audit.data || []).map(row => `<div class="platform-list-item"><strong>${h(row.event)}</strong><small>${h(row.created_at)} · ${h(row.target_id || '')}</small></div>`).join('') || '<p class="meta-line">No platform events.</p>';
+  try {
+    const queue = await api('/api/platform/mail/queue');
+    $('#platform-mail-queued').textContent = queue.queued;
+    $('#platform-mail-dead').textContent = queue.dead_recent;
+    $('#platform-mail-error').textContent = '';
+  } catch (error) {
+    $('#platform-mail-error').textContent = errorMessage(error, 'Could not load the mail queue.');
+  }
 }
 function applyMailProviderVisibility(provider) {
   document.querySelectorAll('#platform-settings-form [data-mail-when]').forEach(el => {

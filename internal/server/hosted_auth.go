@@ -10,7 +10,6 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/identity"
-	"github.com/tiller-router/tiller-router/internal/mailer"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -71,7 +70,6 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	s.signupLimiter.success(key)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "user.signup", ActorType: "anonymous", TargetType: "user", TargetID: result.User.ID})
-	s.sendVerification(r.Context(), result.User, result.VerificationToken)
 	writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 }
 
@@ -177,9 +175,8 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	u, token, err := s.identity.IssueVerification(r.Context(), input.Email)
-	if err == nil && token != "" {
-		s.sendVerification(r.Context(), u, token)
+	if _, _, err := s.identity.IssueVerification(r.Context(), input.Email); err != nil && s.logger != nil {
+		s.logger.Warn("verification issue failed", "error_class", fmt.Sprintf("%T", err))
 	}
 	s.recoveryLimiter.success(key)
 	writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
@@ -198,9 +195,8 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	u, token, err := s.identity.IssuePasswordReset(r.Context(), input.Email)
-	if err == nil && token != "" {
-		s.sendPasswordReset(r.Context(), u, token)
+	if _, _, err := s.identity.IssuePasswordReset(r.Context(), input.Email); err != nil && s.logger != nil {
+		s.logger.Warn("password reset issue failed", "error_class", fmt.Sprintf("%T", err))
 	}
 	s.recoveryLimiter.success(key)
 	writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
@@ -250,26 +246,6 @@ func userSessionPayload(session identity.UserSession) map[string]any {
 
 func validEmail(value string) bool {
 	return identity.ValidateEmail(identity.NormalizeEmail(value))
-}
-
-func (s *Server) sendVerification(ctx context.Context, user identity.User, token string) {
-	if s.mailer == nil || s.config.PublicURL == "" {
-		return
-	}
-	message := mailer.Message{To: user.Email, Subject: "Verify your Tiller account", Text: fmt.Sprintf("Verify your Tiller account:\n\n%s/verify-email?token=%s\n\nThis link expires in 24 hours.", s.config.PublicURL, token)}
-	if err := s.mailer.Send(ctx, message); err != nil && s.logger != nil {
-		s.logger.Warn("verification mail unavailable", "error_class", fmt.Sprintf("%T", err))
-	}
-}
-
-func (s *Server) sendPasswordReset(ctx context.Context, user identity.User, token string) {
-	if s.mailer == nil || s.config.PublicURL == "" {
-		return
-	}
-	message := mailer.Message{To: user.Email, Subject: "Reset your Tiller password", Text: fmt.Sprintf("Reset your Tiller password:\n\n%s/reset-password?token=%s\n\nThis link expires in 1 hour.", s.config.PublicURL, token)}
-	if err := s.mailer.Send(ctx, message); err != nil && s.logger != nil {
-		s.logger.Warn("password reset mail unavailable", "error_class", fmt.Sprintf("%T", err))
-	}
 }
 
 // recordAccountAudit writes an account-scoped audit event best-effort. Audit is

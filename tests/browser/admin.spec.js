@@ -40,9 +40,10 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
 
 await page.locator('#nav-quick').getByRole('link', { name: 'Settings' }).click();
   await expect(page.locator('#top-status')).toHaveText('READY');
-  await expect(page.locator('.backup-warning')).toContainText('encrypted provider credentials');
   await expect(page.locator('#fallback-form input[name="fallback_timeout_seconds"]')).toHaveValue('60');
   await expect(page.locator('#fallback-form')).toContainText('at least 60 seconds');
+  await page.locator('[data-settings-tab="data"]').click();
+  await expect(page.locator('.backup-warning')).toContainText('encrypted provider credentials');
 
 await page.setViewportSize({ width: 1440, height: 900 });
 await expect(page.locator('#nav-quick')).toBeHidden();
@@ -804,6 +805,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
 
   // 2. Global activity section: same sentinel-then-success pattern must clear the error.
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="data"]').click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
 
@@ -944,6 +946,7 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="data"]').click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
   const globalCell = page.locator('#global-activity-body tr .activity-request-id').first();

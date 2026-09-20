@@ -28,6 +28,8 @@ var TableClassification = map[string]TableClass{
 	"user_sessions":             ClassPlatform,
 	"email_verification_tokens": ClassPlatform,
 	"password_reset_tokens":     ClassPlatform,
+	"email_change_tokens":       ClassPlatform,
+	"mail_outbox":               ClassPlatform,
 	"platform_admin_sessions":   ClassPlatform,
 	// Audit lives in the core database now (migration 038). Platform audit is
 	// global; audit_meta holds the independent retention setting.

@@ -186,6 +186,40 @@ func TestMigrateSecretsLockedOnWrongKey(t *testing.T) {
 	}
 }
 
+// TestRotateSecretsCoversMailOutbox proves key rotation re-encrypts a queued
+// outbox one-time token, which uses a distinct AAD from tenant secrets.
+func TestRotateSecretsCoversMailOutbox(t *testing.T) {
+	db, _ := openStore(t)
+	ctx := context.Background()
+	cipherA := testCipher(t, 1)
+	cipherB := testCipher(t, 2)
+	sealed, err := cipherA.Encrypt(crypto.AAD("tiller", "mailoutbox", "row-1", "token"), "raw-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO mail_outbox(id,type,recipient,params,token_ciphertext,attempts,next_attempt_at,created_at) VALUES('row-1','verify_email','a@example.com','{}',?,0,'2030-01-01T00:00:00Z','2030-01-01T00:00:00Z')`, sealed); err != nil {
+		t.Fatal(err)
+	}
+	rotated, err := store.RotateSecrets(ctx, db.SQL, cipherA, cipherB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated != 1 {
+		t.Fatalf("rotated = %d, want 1", rotated)
+	}
+	var stored string
+	if err := db.SQL.QueryRow(`SELECT token_ciphertext FROM mail_outbox WHERE id='row-1'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := cipherB.Decrypt(crypto.AAD("tiller", "mailoutbox", "row-1", "token"), stored)
+	if err != nil || plain != "raw-token" {
+		t.Fatalf("rotated outbox token = %q, err = %v", plain, err)
+	}
+	if _, err := cipherA.Decrypt(crypto.AAD("tiller", "mailoutbox", "row-1", "token"), stored); err == nil {
+		t.Fatal("old key still decrypts the rotated outbox token")
+	}
+}
+
 func TestRotateSecrets(t *testing.T) {
 	db, _ := openStore(t)
 	ctx := context.Background()

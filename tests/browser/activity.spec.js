@@ -96,6 +96,7 @@ test('activity records real inference: success, upstream failure, and ordered fa
   // The Activity UI renders the three real-inference rows (global view; the
   // lane was cleared at the start so these are the only rows).
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="data"]').click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(3);
@@ -116,6 +117,7 @@ test('global activity renders across clients, searches, and pages', async ({ pag
   seedActivity(client1.id, 28);
   seedActivity(client2.id, 27);
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="data"]').click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
@@ -162,6 +164,7 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="data"]').click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await page.locator('#global-activity-search').fill('zzz-no-match-boundary');
   await expect(page.locator('#global-activity-empty')).toBeVisible();

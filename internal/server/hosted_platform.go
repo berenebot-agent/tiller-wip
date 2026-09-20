@@ -238,6 +238,22 @@ func (s *Server) platformAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "limit": limit, "offset": offset})
 }
 
+// platformMailQueue reports queued and recently dead-lettered mail for the
+// operator dashboard. Dead is a recent-window count so an all-time total cannot
+// masquerade as an active incident.
+func (s *Server) platformMailQueue(w http.ResponseWriter, r *http.Request) {
+	if s.outbox == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "dead_recent": 0})
+		return
+	}
+	queued, dead, err := s.outbox.DueCounts(r.Context(), 24*time.Hour)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load the mail queue.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queued": queued, "dead_recent": dead})
+}
+
 func (s *Server) accountAudit(w http.ResponseWriter, r *http.Request) {
 	limit, offset, _ := pagination(r)
 	rows, err := s.scope(r).ListAccountAudit(r.Context(), limit, offset)
@@ -294,22 +310,8 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusNotFound, "not_found", "Account not found.")
 		return
 	}
-	s.identity.InvalidateAccount(accountID)
-	s.clients.InvalidateAccount(accountID)
-	if err := s.storeHandle().BeginActivityCleanup(accountID, ""); err != nil {
-		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not prepare account activity cleanup.")
-		return
-	}
-	if err := s.storeHandle().For(accountID).DeleteAccountResources(r.Context()); err != nil {
-		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account resources.")
-		return
-	}
-	if err := s.finalizeActivityCleanup(r.Context(), accountID, ""); err != nil {
-		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account activity.")
-		return
-	}
-	if err := s.identity.DeleteAccountIdentity(r.Context(), accountID); err != nil {
-		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account identity.")
+	if err := s.purgeAccount(r.Context(), accountID); err != nil {
+		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account.")
 		return
 	}
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_deleted", ActorType: "platform", TargetType: "account", TargetID: accountID})

@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/hostednet"
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/mailer"
+	"github.com/tiller-router/tiller-router/internal/mailoutbox"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -49,6 +51,9 @@ type Server struct {
 	sessions     *auth.SessionStore
 	identity     *identity.Store
 	mailer       *mailer.Manager
+	// outbox is the durable transactional-mail queue. It is nil in local mode,
+	// where identity flows never enqueue.
+	outbox *mailoutbox.Outbox
 	// adminAccount resolves the account owned by an authenticated admin
 	// session. Nil means the single implicit local account (Phase 1); Phase 3
 	// wires hosted users in here. Tests inject a non-local account.
@@ -282,11 +287,25 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			return nil, err
 		}
 	}
+	var outbox *mailoutbox.Outbox
+	var mailCipher mailoutbox.Cipher
+	if options.cipher != nil {
+		mailCipher = options.cipher
+	}
+	if cfg.Mode == config.ModeHosted {
+		deadLetter := func(ctx context.Context, row mailoutbox.DeadLetter) {
+			if err := st.RecordPlatformAudit(ctx, store.AuditEvent{Event: "platform.mail_dead_letter", ActorType: "platform", TargetType: "mail", TargetID: row.ID, Metadata: map[string]string{"type": row.Type, "attempts": strconv.Itoa(row.Attempts)}}); err != nil && logger != nil {
+				logger.Error("mail dead-letter audit write failed", "error_class", fmt.Sprintf("%T", err))
+			}
+		}
+		outbox = mailoutbox.New(db.SQL, mailManager, cfg.PublicURL, mailCipher, logger, deadLetter)
+		identityStore.SetMailQueue(outbox)
+	}
 	notifyClient := &http.Client{Timeout: notificationTimeout}
 	if cfg.Mode == config.ModeHosted {
 		notifyClient = hostednet.NewClient(notificationTimeout)
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, mailer: mailManager, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryLimiter: newLoginLimiter(5, time.Hour, time.Hour), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryLimiter: newLoginLimiter(5, time.Hour, time.Hour), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	return s, nil
@@ -306,6 +325,9 @@ func (s *Server) StartBackground(ctx context.Context) {
 	}
 	if s.identity != nil {
 		s.identity.StartSweeper(ctx)
+	}
+	if s.outbox != nil {
+		s.outbox.Start(ctx)
 	}
 	go s.startLogPruner(ctx)
 	s.startLogWriter(ctx)
@@ -384,6 +406,12 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/auth/verification/resend", s.resendVerification)
 		mux.HandleFunc("POST /api/auth/password-reset/request", s.requestPasswordReset)
 		mux.HandleFunc("POST /api/auth/password-reset/confirm", s.confirmPasswordReset)
+		mux.HandleFunc("POST /api/auth/email-change/confirm", s.confirmEmailChange)
+		mux.Handle("GET /api/auth/account", s.requireUser(http.HandlerFunc(s.accountProfile)))
+		mux.Handle("POST /api/auth/account/password", s.requireUser(http.HandlerFunc(s.changeOwnPassword)))
+		mux.Handle("POST /api/auth/account/email", s.requireUser(http.HandlerFunc(s.requestOwnEmailChange)))
+		mux.Handle("POST /api/auth/account/sessions/revoke-all", s.requireUser(http.HandlerFunc(s.revokeOwnSessions)))
+		mux.Handle("DELETE /api/auth/account", s.requireUser(http.HandlerFunc(s.deleteOwnAccount)))
 		mux.HandleFunc("POST /api/platform/session", s.platformLogin)
 		mux.Handle("GET /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformSessionStatus)))
 		mux.Handle("DELETE /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformLogout)))
@@ -391,6 +419,7 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("PUT /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.updatePlatformSettings)))
 		mux.Handle("GET /api/platform/users", s.requirePlatform(http.HandlerFunc(s.platformUsers)))
 		mux.Handle("GET /api/platform/audit", s.requirePlatform(http.HandlerFunc(s.platformAudit)))
+		mux.Handle("GET /api/platform/mail/queue", s.requirePlatform(http.HandlerFunc(s.platformMailQueue)))
 		mux.Handle("POST /api/platform/accounts/{id}/suspend", s.requirePlatform(http.HandlerFunc(s.suspendAccount)))
 		mux.Handle("POST /api/platform/accounts/{id}/unsuspend", s.requirePlatform(http.HandlerFunc(s.unsuspendAccount)))
 		mux.Handle("POST /api/platform/accounts/{id}/sessions/revoke", s.requirePlatform(http.HandlerFunc(s.revokeAccountSessions)))

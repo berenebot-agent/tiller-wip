@@ -20,11 +20,13 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
+	"github.com/tiller-router/tiller-router/internal/mailoutbox"
 )
 
 const (
 	verificationTTL        = 24 * time.Hour
 	resetTTL               = time.Hour
+	emailChangeTTL         = 24 * time.Hour
 	selectorBytes          = 16
 	secretBytes            = 32
 	csrfBytes              = 32
@@ -113,6 +115,7 @@ type Store struct {
 	platformRev        uint64
 	maxEntries         int
 	renewHook          func()
+	mailQueue          MailQueue
 }
 
 type userSessionCacheEntry struct {
@@ -408,9 +411,13 @@ func (s *Store) CreateSignup(ctx context.Context, email, password string) (Signu
 	if _, err := tx.ExecContext(ctx, `INSERT INTO email_verification_tokens(id,user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?,?)`, selector, userID, tokenHash, formatTime(now), formatTime(now.Add(verificationTTL))); err != nil {
 		return SignupResult{}, err
 	}
+	if err := s.enqueueMail(ctx, tx, mailoutbox.QueuedMessage{UserID: userID, Type: mailoutbox.TypeVerifyEmail, Recipient: email, Token: rawToken}); err != nil {
+		return SignupResult{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SignupResult{}, err
 	}
+	s.nudgeMail()
 	return SignupResult{User: User{ID: userID, Email: email, Status: "active", AccountID: accountID, AccountStatus: "pending"}, VerificationToken: rawToken}, nil
 }
 
@@ -486,9 +493,13 @@ func (s *Store) IssueVerification(ctx context.Context, email string) (User, stri
 	if _, err := tx.ExecContext(ctx, `INSERT INTO email_verification_tokens(id,user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?,?)`, selector, u.ID, hash, formatTime(now), formatTime(now.Add(verificationTTL))); err != nil {
 		return User{}, "", err
 	}
+	if err := s.enqueueMail(ctx, tx, mailoutbox.QueuedMessage{UserID: u.ID, Type: mailoutbox.TypeVerifyEmail, Recipient: u.Email, Token: raw}); err != nil {
+		return User{}, "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return User{}, "", err
 	}
+	s.nudgeMail()
 	return u, raw, nil
 }
 
@@ -564,9 +575,13 @@ func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, str
 	if _, err := tx.ExecContext(ctx, `INSERT INTO password_reset_tokens(id,user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?,?)`, selector, u.ID, hash, formatTime(now), formatTime(now.Add(resetTTL))); err != nil {
 		return User{}, "", err
 	}
+	if err := s.enqueueMail(ctx, tx, mailoutbox.QueuedMessage{UserID: u.ID, Type: mailoutbox.TypePasswordReset, Recipient: u.Email, Token: raw}); err != nil {
+		return User{}, "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return User{}, "", err
 	}
+	s.nudgeMail()
 	return u, raw, nil
 }
 
@@ -615,6 +630,12 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+		return User{}, err
+	}
+	// A password reset cancels any outstanding email change: the warning mail
+	// tells the owner to reset their password to stop a change they did not
+	// request, and this is where that promise is kept.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM email_change_tokens WHERE user_id=?`, userID); err != nil {
 		return User{}, err
 	}
 	if err := tx.Commit(); err != nil {

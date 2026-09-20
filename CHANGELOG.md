@@ -8,6 +8,15 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Hosted Account page.** A hosted-only Account tab in Settings lets customers
+  view their identity, change password, change email (verify-new-first with a
+  warning to the current address), sign out everywhere, and delete their account
+  instantly. All sensitive actions re-authenticate with the current password.
+- **Durable transactional mail outbox.** Signup, verification, password-reset,
+  and email-change messages are queued in the same transaction that creates the
+  one-time token and delivered by a retrying background worker. The one-time
+  token is encrypted at rest and scrubbed on send, and dead letters surface on
+  the platform dashboard.
 - **Activity living-pane graph.** The Activity view now renders live request
   legs as a graph (self-hosted D3, no CDN) with an active-only pane, per-client
   legs, and click-through from graph nodes into the request dialog. Cooldown
