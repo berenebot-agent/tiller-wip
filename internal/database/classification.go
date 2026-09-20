@@ -35,18 +35,19 @@ var TableClassification = map[string]TableClass{
 	"audit_meta":            ClassPlatform,
 
 	// Tenant-owned. Every one of these must carry account_id.
-	"namespaces":               ClassTenant,
-	"providers":                ClassTenant,
-	"provider_models":          ClassTenant,
-	"provider_oauth_tokens":    ClassTenant,
-	"virtual_provider_groups":  ClassTenant,
-	"virtual_models":           ClassTenant,
-	"virtual_model_targets":    ClassTenant,
-	"client_keys":              ClassTenant,
-	"client_group_defaults":    ClassTenant,
-	"client_model_permissions": ClassTenant,
-	"client_single_bindings":   ClassTenant,
-	"settings":                 ClassTenant,
+	"namespaces":                   ClassTenant,
+	"providers":                    ClassTenant,
+	"provider_models":              ClassTenant,
+	"provider_oauth_tokens":        ClassTenant,
+	"oauth_connection_generations": ClassTenant,
+	"virtual_provider_groups":      ClassTenant,
+	"virtual_models":               ClassTenant,
+	"virtual_model_targets":        ClassTenant,
+	"client_keys":                  ClassTenant,
+	"client_group_defaults":        ClassTenant,
+	"client_model_permissions":     ClassTenant,
+	"client_single_bindings":       ClassTenant,
+	"settings":                     ClassTenant,
 	// Audit events are tenant-owned in the core database. account_id is
 	// historical attribution and deliberately has no FK to accounts, so
 	// retained audit history survives account deletion.

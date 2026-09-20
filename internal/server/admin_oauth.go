@@ -39,11 +39,12 @@ func (s *Server) recordOAuthFailure(r *http.Request, limiter *loginLimiter) bool
 }
 
 type oauthDeviceState struct {
-	Status string
-	Device github.DeviceCode
-	Token  oauth.TokenRecord
-	Err    string
-	Cancel context.CancelFunc
+	Status     string
+	Generation int64
+	Device     github.DeviceCode
+	Token      oauth.TokenRecord
+	Err        string
+	Cancel     context.CancelFunc
 }
 
 func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
@@ -87,6 +88,17 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		adminError(w, 500, "oauth_start_failed", "Could not start OAuth connection.")
+		return
+	}
+	currentGeneration, err := scope.OAuthGeneration(r.Context(), id)
+	if err != nil {
+		s.oauthFlows.Cancel(scope.AccountID(), id)
+		adminError(w, 500, "database_error", "Could not start OAuth connection.")
+		return
+	}
+	if currentGeneration != generation {
+		s.oauthFlows.Cancel(scope.AccountID(), id)
+		adminError(w, 409, "oauth_disconnected", "OAuth connection was disconnected while it was starting.")
 		return
 	}
 	authURL := ""
@@ -200,15 +212,30 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		return device, nil
 	}
 	flowCtx, cancel := context.WithCancel(s.backgroundCtx)
-	s.oauthDevices[tenantKey(accountID, id)] = &oauthDeviceState{Status: "pending", Cancel: cancel}
+	s.oauthDevices[tenantKey(accountID, id)] = &oauthDeviceState{Status: "pending", Generation: generation, Cancel: cancel}
 	s.oauthDeviceMu.Unlock()
+	currentGeneration, err := s.scopeFor(accountID).OAuthGeneration(ctx, id)
+	if err != nil {
+		cancel()
+		s.oauthDeviceMu.Lock()
+		delete(s.oauthDevices, tenantKey(accountID, id))
+		s.oauthDeviceMu.Unlock()
+		return github.DeviceCode{}, err
+	}
+	if currentGeneration != generation {
+		cancel()
+		s.oauthDeviceMu.Lock()
+		delete(s.oauthDevices, tenantKey(accountID, id))
+		s.oauthDeviceMu.Unlock()
+		return github.DeviceCode{}, store.ErrOAuthGenerationChanged
+	}
 	device, err := github.RequestDeviceCode(flowCtx, s.providers.Registry().HTTPClient())
 	if err != nil {
-		s.finishDevice(accountID, id, "failed", err)
+		s.finishDevice(accountID, id, generation, "failed", err)
 		return github.DeviceCode{}, err
 	}
 	s.oauthDeviceMu.Lock()
-	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil {
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
 		state.Device = device
 	}
 	s.oauthDeviceMu.Unlock()
@@ -217,14 +244,14 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		tokens, err := github.PollToken(pollCtx, s.providers.Registry().HTTPClient(), device)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.finishDevice(accountID, id, "failed", err)
+				s.finishDevice(accountID, id, generation, "failed", err)
 			}
 			return
 		}
 		user, _ := github.FetchUser(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		copilot, _, err := github.FetchCopilotToken(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		if err != nil {
-			s.finishDevice(accountID, id, "failed", err)
+			s.finishDevice(accountID, id, generation, "failed", err)
 			return
 		}
 		for key, value := range copilot.ProviderData {
@@ -237,16 +264,16 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		tokens.AccountEmail, tokens.AccountPlan = user.Email, user.Login
 		record, err := oauth.MergeToken(oauth.TokenRecord{ProviderID: id}, tokens, time.Now().UTC())
 		if err != nil {
-			s.finishDevice(accountID, id, "failed", err)
+			s.finishDevice(accountID, id, generation, "failed", err)
 			return
 		}
 		record.Generation = generation
 		if err := s.scopeFor(accountID).PutOAuthTokenIfGeneration(pollCtx, oauth.TokenToStore(record), generation); err != nil {
-			s.finishDevice(accountID, id, "failed", err)
+			s.finishDevice(accountID, id, generation, "failed", err)
 			return
 		}
 		s.oauthDeviceMu.Lock()
-		if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil {
+		if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
 			state.Status, state.Token = "connected", record
 		}
 		s.oauthDeviceMu.Unlock()
@@ -254,10 +281,10 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 	return device, nil
 }
 
-func (s *Server) finishDevice(accountID, id, status string, err error) {
+func (s *Server) finishDevice(accountID, id string, generation int64, status string, err error) {
 	s.oauthDeviceMu.Lock()
 	defer s.oauthDeviceMu.Unlock()
-	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil {
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
 		state.Status = status
 		if err != nil {
 			state.Err = "GitHub OAuth connection failed."
