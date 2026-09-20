@@ -22,11 +22,11 @@ async function loginFresh(browser) {
   const page = await context.newPage();
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
-  await page.getByLabel('Administrator').fill(ADMIN_USER);
+  await page.getByLabel('Tiller username').fill(ADMIN_USER);
   // Scope to the login form: the reset form's "New password" label also
   // substring-matches getByLabel('Password') in strict mode.
   await page.locator('#login-form').getByLabel('Password').fill(ADMIN_PASS);
-  await page.getByRole('button', { name: 'Enter control panel' }).click();
+  await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
   return { context, page };
 }

@@ -541,12 +541,12 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie(sessionCookie)
 		if err != nil {
-			adminError(w, 401, "unauthorized", "Administrator authentication required.")
+			adminError(w, 401, "unauthorized", "Authentication required.")
 			return
 		}
 		session, ok := s.sessions.Get(cookie.Value)
 		if !ok {
-			adminError(w, 401, "unauthorized", "Administrator authentication required.")
+			adminError(w, 401, "unauthorized", "Authentication required.")
 			return
 		}
 		// Refresh the cookie so the browser tracks the sliding session expiry.
