@@ -168,7 +168,7 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and the same `TILLER_ADMIN_*` values used for the platform operator.
+   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their old `TILLER_ADMIN_*` values once to migrate the local account into a verified hosted customer; fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
 
 > **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall.
 
@@ -218,11 +218,15 @@ optional VPS firewall hardening rule.
 
 The repo's `docker-compose.yml` plus `.env` cover the most common local
 customisations without editing any Go code. The full list of local variables is
-in `.env.example`. The hosted override additionally requires:
+in `.env.example`. The hosted override additionally requires the platform
+credentials below. `TILLER_ADMIN_*` is only needed there when converting an
+existing local installation:
 
 ```bash
-TILLER_ADMIN_USERNAME=admin                          # admin login for the web UI
-TILLER_ADMIN_PASSWORD=replace-with-a-long-random-password   # admin password
+TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
+TILLER_PLATFORM_ADMIN_PASSWORD=replace-with-a-long-random-password
+TILLER_ADMIN_USERNAME=owner@example.com               # optional one-time migration input
+TILLER_ADMIN_PASSWORD=existing-local-password         # optional one-time migration input
 TILLER_PORT=8080                                     # host port (default 8080)
 TILLER_RUN_UID=1000                                  # runtime uid (default 65532)
 TILLER_RUN_GID=1000                                  # runtime gid (default 65532)

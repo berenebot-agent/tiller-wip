@@ -10,8 +10,8 @@ services:
     restart: unless-stopped
 
     environment:
-      TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
-      TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
+      TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:-}
+      TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:-}
 
       # Hosted mode is opt-in. Leave unset for the existing local appliance.
       TILLER_MODE: ${TILLER_MODE:-local}

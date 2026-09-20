@@ -52,14 +52,12 @@
         <p class="form-error" id="reset-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Set new password</button>
       </form>
-      <div id="platform-entry" class="auth-links" hidden><button class="btn-link" id="show-platform-login" type="button">Platform operator sign in</button></div>
       <form id="platform-login-form" class="stack-form" hidden>
-        <p class="eyebrow">PLATFORM OPERATOR</p>
+        <p class="eyebrow">PLATFORM ADMIN</p>
         <label>Username <input name="username" autocomplete="username" required></label>
-        <label>Operator secret <input name="password" type="password" autocomplete="current-password" required></label>
+        <label>Password <input aria-label="Platform admin credential" name="password" type="password" autocomplete="current-password" required></label>
         <p class="form-error" id="platform-login-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Open platform dashboard</button>
-        <button class="btn-link" id="show-customer-login" type="button">Back to customer sign in</button>
       </form>
       <p class="login-foot" id="login-foot">Session state is local to this router process.</p>
     </section>

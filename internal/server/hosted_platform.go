@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/mailer"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -28,7 +27,7 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.AdminUsername, s.config.AdminPassword) {
+	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.PlatformUsername, s.config.PlatformPassword) {
 		s.loginLimiter.recordFailure(key)
 		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid platform credentials.")
 		return
@@ -234,10 +233,6 @@ func (s *Server) accountAudit(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) changeAccountStatus(w http.ResponseWriter, r *http.Request, status string) {
 	accountID := r.PathValue("id")
-	if accountID == database.LocalAccountID {
-		adminError(w, http.StatusBadRequest, "invalid_account", "The local account cannot be changed from hosted controls.")
-		return
-	}
 	if err := s.identity.SetAccountStatus(r.Context(), accountID, status); err != nil {
 		if errors.Is(err, identity.ErrNotFound) {
 			adminError(w, http.StatusNotFound, "not_found", "Account not found.")
@@ -269,10 +264,6 @@ func (s *Server) revokeAccountSessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
-	if accountID == database.LocalAccountID {
-		adminError(w, http.StatusBadRequest, "invalid_account", "The local account cannot be deleted from hosted controls.")
-		return
-	}
 	var input struct {
 		Confirm string `json:"confirm"`
 	}

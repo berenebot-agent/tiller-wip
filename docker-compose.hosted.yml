@@ -9,6 +9,12 @@ services:
     environment:
       TILLER_MODE: hosted
       TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:?set TILLER_PUBLIC_URL}
+      TILLER_PLATFORM_ADMIN_USERNAME: ${TILLER_PLATFORM_ADMIN_USERNAME:?set TILLER_PLATFORM_ADMIN_USERNAME}
+      TILLER_PLATFORM_ADMIN_PASSWORD: ${TILLER_PLATFORM_ADMIN_PASSWORD:?set TILLER_PLATFORM_ADMIN_PASSWORD}
+      # Set these only when converting an existing local deployment. They are
+      # consumed once to create the first hosted customer and then ignored.
+      TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:-}
+      TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:-}
     ports: !reset []
     expose:
       - "8080"

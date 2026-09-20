@@ -144,10 +144,9 @@ function authView(name) {
   ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
-  $('#platform-entry').hidden = hosted || name !== 'login-form';
   $('#login-foot').hidden = name !== 'login-form';
 }
-function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; authView('login-form'); history.replaceState(null, '', runtimeMode === 'hosted' ? '/login' : '/'); liveStop(); }
+function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#app').hidden = false; liveStart(); navigate(state.view); }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
@@ -161,7 +160,6 @@ $('#login-form').addEventListener('submit', async event => {
 });
 $('#logout').addEventListener('click', async () => { try { await api(runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
 
-$('#login-identity-label').firstChild.textContent = 'Administrator ';
 function showAuthError(id, error, fallback) { const el = $('#' + id); if (el) el.textContent = errorMessage(error, fallback); }
 $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
@@ -171,10 +169,8 @@ $('#signup-form').addEventListener('submit', async event => { event.preventDefau
 $('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email') }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } });
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
-$('#show-platform-login').onclick = () => authView('platform-login-form');
-$('#show-customer-login').onclick = () => authView('login-form');
 $('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
-$('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { showLogin(); } };
+$('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
 
 async function navigate(view) {
   state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
@@ -2064,6 +2060,16 @@ function liveStop() { live.stop(); }
     }
     const path = location.pathname;
     const token = new URLSearchParams(location.search).get('token');
+    if (runtimeMode === 'hosted' && path.startsWith('/platform')) {
+      try {
+        const session = await api('/api/platform/session');
+        state.csrf = session.csrf_token;
+        $('#login-shell').hidden = true;
+        $('#platform-shell').hidden = false;
+        await loadPlatformDashboard();
+      } catch { showLogin(); }
+      return;
+    }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
       try { await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; history.replaceState(null, '', '/login'); } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); }

@@ -143,7 +143,7 @@ func TestHostedScopeNeverFallsBackToLocalAccount(t *testing.T) {
 	defer db.Close()
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hosted, err := New(config.Config{Mode: config.ModeHosted, AdminUsername: "admin", AdminPassword: "correct horse", PublicURL: "https://tiller.example.com", DataDir: t.TempDir()}, db, discard)
+	hosted, err := New(config.Config{Mode: config.ModeHosted, PlatformUsername: "platform-admin", PlatformPassword: "correct horse", PublicURL: "https://tiller.example.com", DataDir: t.TempDir()}, db, discard)
 	if err != nil {
 		t.Fatal(err)
 	}

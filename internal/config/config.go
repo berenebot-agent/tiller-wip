@@ -53,9 +53,13 @@ type Config struct {
 	// UserSessionTTL is the sliding lifetime of a hosted customer session.
 	UserSessionTTL time.Duration
 	// Mail is the optional bootstrap seed for mail delivery.
-	Mail              MailBootstrap
+	Mail MailBootstrap
+	// AdminUsername and AdminPassword are local credentials. In hosted mode
+	// they are optional one-time bootstrap credentials for the local account.
 	AdminUsername     string
 	AdminPassword     string
+	PlatformUsername  string
+	PlatformPassword  string
 	AdminCookieSecure bool
 	AdminSessionTTL   time.Duration
 	DataDir           string
@@ -96,6 +100,8 @@ func Load() (Config, error) {
 	c := Config{
 		AdminUsername:     os.Getenv("TILLER_ADMIN_USERNAME"),
 		AdminPassword:     os.Getenv("TILLER_ADMIN_PASSWORD"),
+		PlatformUsername:  os.Getenv("TILLER_PLATFORM_ADMIN_USERNAME"),
+		PlatformPassword:  os.Getenv("TILLER_PLATFORM_ADMIN_PASSWORD"),
 		AdminCookieSecure: false,
 		AdminSessionTTL:   30 * 24 * time.Hour,
 		UserSessionTTL:    30 * 24 * time.Hour,
@@ -245,8 +251,20 @@ func Load() (Config, error) {
 	if raw := os.Getenv("TILLER_BACKUP_DIR"); raw != "" {
 		c.BackupDir = raw
 	}
-	if c.AdminUsername == "" || c.AdminPassword == "" {
-		return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD are required")
+	if c.Mode == ModeLocal {
+		if c.AdminUsername == "" || c.AdminPassword == "" {
+			return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD are required")
+		}
+	} else {
+		if c.PlatformUsername == "" || c.PlatformPassword == "" {
+			return Config{}, errors.New("TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD are required in hosted mode")
+		}
+		if err := validatePlatformUsername(c.PlatformUsername); err != nil {
+			return Config{}, fmt.Errorf("TILLER_PLATFORM_ADMIN_USERNAME: %w", err)
+		}
+		if (c.AdminUsername == "") != (c.AdminPassword == "") {
+			return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD must be provided together for hosted bootstrap")
+		}
 	}
 	if err := os.MkdirAll(c.DataDir, 0o700); err != nil {
 		return Config{}, fmt.Errorf("create data directory: %w", err)
@@ -266,6 +284,18 @@ func Load() (Config, error) {
 		c.BackupDir = absBackup
 	}
 	return c, nil
+}
+
+func validatePlatformUsername(value string) error {
+	if len(value) < 3 || len(value) > 64 {
+		return errors.New("must be 3 to 64 characters")
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '_' && r != '-' {
+			return errors.New("may contain only letters, numbers, dot, underscore, and hyphen")
+		}
+	}
+	return nil
 }
 
 // validatePublicURL normalizes and validates TILLER_PUBLIC_URL. Only an HTTPS

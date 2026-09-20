@@ -10,6 +10,8 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
 	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 
 	// Default on when the env var is unset/empty.
@@ -54,6 +56,8 @@ func TestDebugPprofFlag(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
 	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 
@@ -149,6 +153,8 @@ func TestModeAndPublicURL(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
 	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	t.Setenv("TILLER_PUBLIC_URL", "")
@@ -199,6 +205,8 @@ func TestPublicURLValidation(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
 	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	t.Setenv("TILLER_MODE", "hosted")

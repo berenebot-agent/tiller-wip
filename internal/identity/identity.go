@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 )
 
@@ -32,15 +33,17 @@ const (
 )
 
 var (
-	ErrNotFound        = errors.New("identity: not found")
-	ErrInvalidToken    = errors.New("identity: invalid token")
-	ErrExpiredToken    = errors.New("identity: expired token")
-	ErrAlreadyUsed     = errors.New("identity: token already used")
-	ErrNotVerified     = errors.New("identity: email not verified")
-	ErrUserDisabled    = errors.New("identity: user disabled")
-	ErrAccountInactive = errors.New("identity: account inactive")
-	ErrWeakPassword    = errors.New("identity: password does not meet minimum length")
-	ErrPasswordTooLong = errors.New("identity: password exceeds maximum length")
+	ErrNotFound           = errors.New("identity: not found")
+	ErrInvalidToken       = errors.New("identity: invalid token")
+	ErrExpiredToken       = errors.New("identity: expired token")
+	ErrAlreadyUsed        = errors.New("identity: token already used")
+	ErrNotVerified        = errors.New("identity: email not verified")
+	ErrUserDisabled       = errors.New("identity: user disabled")
+	ErrAccountInactive    = errors.New("identity: account inactive")
+	ErrWeakPassword       = errors.New("identity: password does not meet minimum length")
+	ErrPasswordTooLong    = errors.New("identity: password exceeds maximum length")
+	ErrBootstrapInvalid   = errors.New("identity: hosted bootstrap credentials are invalid")
+	ErrBootstrapCollision = errors.New("identity: hosted bootstrap email already exists")
 )
 
 // User is the authenticated hosted identity and its one owned account.
@@ -259,6 +262,73 @@ func ValidatePassword(password string) error {
 		return ErrPasswordTooLong
 	}
 	return nil
+}
+
+// BootstrapHostedCustomer converts the local account into a normal hosted
+// customer exactly once. Empty credentials mean this is a fresh hosted install;
+// in that case only the completion marker is written. The caller must run this
+// before syncing the hosted platform credential, because the same settings table
+// is used by local credential compatibility.
+func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password string) error {
+	var complete string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&complete)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	email = NormalizeEmail(email)
+	if email == "" && password == "" {
+		return s.markHostedBootstrapComplete(ctx)
+	}
+	if !validBootstrapEmail(email) || ValidatePassword(password) != nil {
+		return ErrBootstrapInvalid
+	}
+	if _, err := s.userByEmail(ctx, email); err == nil {
+		return ErrBootstrapCollision
+	} else if !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	passwordHash, err := s.passwordHasher.Hash(password)
+	if err != nil {
+		return err
+	}
+	userID, err := id.New()
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,'active',?,?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now), formatTime(now)); err != nil {
+		return err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE accounts SET owner_user_id=?,updated_at=? WHERE id=? AND owner_user_id IS NULL`, userID, formatTime(now), database.LocalAccountID)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count != 1 {
+		return ErrBootstrapCollision
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO platform_settings(key,value,updated_at) VALUES('hosted_bootstrap_complete','1',?)`, formatTime(now)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) markHostedBootstrapComplete(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO platform_settings(key,value,updated_at) VALUES('hosted_bootstrap_complete','1',?)`, formatTime(time.Now().UTC()))
+	return err
+}
+
+func validBootstrapEmail(email string) bool {
+	return len(email) <= 320 && strings.Count(email, "@") == 1 && !strings.ContainsAny(email, "\r\n")
 }
 
 // CreateSignup creates the user, pending account, and verification token in a

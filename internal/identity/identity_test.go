@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -95,5 +96,58 @@ func TestAccountSuspensionInvalidatesSessions(t *testing.T) {
 	}
 	if _, ok := st.GetUserSession(ctx, session.Token); ok {
 		t.Fatal("suspended account session remained valid")
+	}
+}
+
+func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
+	st, db := newTestStore(t)
+	ctx := context.Background()
+	if err := st.BootstrapHostedCustomer(ctx, "Owner@Example.COM", "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	var userID, email, ownerID string
+	if err := db.QueryRow(`SELECT u.id,u.email,a.owner_user_id FROM users u JOIN accounts a ON a.id=?`, database.LocalAccountID).Scan(&userID, &email, &ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if userID == "" || email != "owner@example.com" || ownerID != userID {
+		t.Fatalf("migrated local account = user=%q email=%q owner=%q", userID, email, ownerID)
+	}
+	if err := st.BootstrapHostedCustomer(ctx, "other@example.com", "another correct horse battery staple"); err != nil {
+		t.Fatalf("repeat bootstrap: %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM users`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("user count after repeat = %d, want 1", count)
+	}
+}
+
+func TestBootstrapHostedFreshInstallCreatesNoCustomer(t *testing.T) {
+	st, db := newTestStore(t)
+	if err := st.BootstrapHostedCustomer(context.Background(), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM users`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("fresh hosted user count = %d, want 0", count)
+	}
+}
+
+func TestBootstrapHostedInvalidCredentialsDoNotMutate(t *testing.T) {
+	st, db := newTestStore(t)
+	if err := st.BootstrapHostedCustomer(context.Background(), "not-an-email", "short"); !errors.Is(err, ErrBootstrapInvalid) {
+		t.Fatalf("invalid bootstrap error = %v", err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM users`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("invalid bootstrap user count = %d, want 0", count)
 	}
 }

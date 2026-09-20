@@ -260,7 +260,10 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		return nil, err
 	}
 	if cfg.Mode == config.ModeHosted {
-		if err := identityStore.SyncPlatformCredential(cfg.AdminUsername, cfg.AdminPassword); err != nil {
+		if err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.AdminUsername, cfg.AdminPassword); err != nil {
+			return nil, fmt.Errorf("hosted bootstrap: %w", err)
+		}
+		if err := identityStore.SyncPlatformCredential(cfg.PlatformUsername, cfg.PlatformPassword); err != nil {
 			return nil, err
 		}
 	}

@@ -93,6 +93,14 @@ CSRF tokens. Account suspension immediately revokes customer sessions and
 blocks client-key traffic. Hosted detailed body logging is unavailable even if
 the account settings request attempts to enable it.
 
+Platform administration uses the environment-only
+`TILLER_PLATFORM_ADMIN_USERNAME` and `TILLER_PLATFORM_ADMIN_PASSWORD`
+credentials at `/platform`. Customers use separate email/password identities at
+`/login`; neither session type elevates into the other. Existing local
+deployments can provide `TILLER_ADMIN_*` once during hosted startup to migrate
+`LocalAccountID` into a verified customer account. Fresh hosted deployments do
+not create a customer from the platform credential.
+
 **Detailed error logging (opt-in).** Activity is metadata-only by default. If the
 administrator enables the Detailed Error Logging setting, failed request bodies
 and provider error bodies are stored (bounded to 1 MiB). Activity exports
