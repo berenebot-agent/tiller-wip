@@ -41,6 +41,45 @@ func TestOpenRestrictsFileAndDirPermissions(t *testing.T) {
 	}
 }
 
+func TestFreshHostedOpenPersistsBootstrapState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.db")
+	db, err := Open(context.Background(), path, WithHostedMode(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !db.FreshInstall {
+		db.Close()
+		t.Fatal("fresh hosted database was not classified as fresh")
+	}
+	var marker string
+	if err := db.SQL.QueryRow(`SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&marker); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if marker != "1" {
+		db.Close()
+		t.Fatalf("fresh hosted bootstrap marker = %q, want 1", marker)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.FreshInstall {
+		t.Fatal("reopened hosted database was classified as fresh")
+	}
+	if err := reopened.SQL.QueryRow(`SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != "1" {
+		t.Fatalf("reopened hosted bootstrap marker = %q, want 1", marker)
+	}
+}
+
 func TestMigrationsAndSharedNamespace(t *testing.T) {
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {

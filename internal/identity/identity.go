@@ -42,8 +42,9 @@ var (
 	ErrAccountInactive    = errors.New("identity: account inactive")
 	ErrWeakPassword       = errors.New("identity: password does not meet minimum length")
 	ErrPasswordTooLong    = errors.New("identity: password exceeds maximum length")
-	ErrBootstrapInvalid   = errors.New("identity: hosted bootstrap credentials are invalid")
+	ErrBootstrapInvalid   = errors.New("identity: hosted bootstrap requires a valid customer email and password")
 	ErrBootstrapCollision = errors.New("identity: hosted bootstrap email already exists")
+	ErrBootstrapRequired  = errors.New("identity: hosted customer bootstrap credentials are required for an existing local installation")
 )
 
 // User is the authenticated hosted identity and its one owned account.
@@ -265,11 +266,11 @@ func ValidatePassword(password string) error {
 }
 
 // BootstrapHostedCustomer converts the local account into a normal hosted
-// customer exactly once. Empty credentials mean this is a fresh hosted install;
-// in that case only the completion marker is written. The caller must run this
-// before syncing the hosted platform credential, because the same settings table
-// is used by local credential compatibility.
-func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password string) error {
+// customer exactly once. freshInstall comes from the database migration state;
+// it prevents an existing local database from being mistaken for a new hosted
+// install when the legacy credentials are omitted. The caller must run this
+// before syncing the hosted platform credential.
+func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password string, freshInstall bool) error {
 	var complete string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&complete)
 	if err == nil {
@@ -279,8 +280,11 @@ func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password str
 		return err
 	}
 	email = NormalizeEmail(email)
-	if email == "" && password == "" {
+	if email == "" && password == "" && freshInstall {
 		return s.markHostedBootstrapComplete(ctx)
+	}
+	if email == "" && password == "" {
+		return ErrBootstrapRequired
 	}
 	if !validBootstrapEmail(email) || ValidatePassword(password) != nil {
 		return ErrBootstrapInvalid

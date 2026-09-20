@@ -102,7 +102,7 @@ func TestAccountSuspensionInvalidatesSessions(t *testing.T) {
 func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 	st, db := newTestStore(t)
 	ctx := context.Background()
-	if err := st.BootstrapHostedCustomer(ctx, "Owner@Example.COM", "correct horse battery staple"); err != nil {
+	if err := st.BootstrapHostedCustomer(ctx, "Owner@Example.COM", "correct horse battery staple", true); err != nil {
 		t.Fatal(err)
 	}
 	var userID, email, ownerID string
@@ -112,7 +112,7 @@ func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 	if userID == "" || email != "owner@example.com" || ownerID != userID {
 		t.Fatalf("migrated local account = user=%q email=%q owner=%q", userID, email, ownerID)
 	}
-	if err := st.BootstrapHostedCustomer(ctx, "other@example.com", "another correct horse battery staple"); err != nil {
+	if err := st.BootstrapHostedCustomer(ctx, "other@example.com", "another correct horse battery staple", false); err != nil {
 		t.Fatalf("repeat bootstrap: %v", err)
 	}
 	var count int
@@ -126,7 +126,7 @@ func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 
 func TestBootstrapHostedFreshInstallCreatesNoCustomer(t *testing.T) {
 	st, db := newTestStore(t)
-	if err := st.BootstrapHostedCustomer(context.Background(), "", ""); err != nil {
+	if err := st.BootstrapHostedCustomer(context.Background(), "", "", true); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -140,7 +140,7 @@ func TestBootstrapHostedFreshInstallCreatesNoCustomer(t *testing.T) {
 
 func TestBootstrapHostedInvalidCredentialsDoNotMutate(t *testing.T) {
 	st, db := newTestStore(t)
-	if err := st.BootstrapHostedCustomer(context.Background(), "not-an-email", "short"); !errors.Is(err, ErrBootstrapInvalid) {
+	if err := st.BootstrapHostedCustomer(context.Background(), "not-an-email", "short", false); !errors.Is(err, ErrBootstrapInvalid) {
 		t.Fatalf("invalid bootstrap error = %v", err)
 	}
 	var count int

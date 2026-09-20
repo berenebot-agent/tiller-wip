@@ -98,8 +98,11 @@ Platform administration uses the environment-only
 credentials at `/platform`. Customers use separate email/password identities at
 `/login`; neither session type elevates into the other. Existing local
 deployments can provide `TILLER_ADMIN_*` once during hosted startup to migrate
-`LocalAccountID` into a verified customer account. Fresh hosted deployments do
-not create a customer from the platform credential.
+`LocalAccountID` into a verified customer account. The database migration state
+distinguishes a fresh hosted install from an existing local database; hosted
+startup fails closed if an existing local account has no valid migration
+credentials. Fresh hosted deployments do not create a customer from the
+platform credential.
 
 **Detailed error logging (opt-in).** Activity is metadata-only by default. If the
 administrator enables the Detailed Error Logging setting, failed request bodies

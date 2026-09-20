@@ -27,6 +27,10 @@ var migrations embed.FS
 type DB struct {
 	SQL  *sql.DB
 	Path string
+	// FreshInstall is true only when this database had no migration state before
+	// Open ran. Hosted bootstrap uses it to distinguish a new hosted database
+	// from an existing local installation.
+	FreshInstall bool
 	// Activity is the separate Activity database (request_logs and
 	// request_attempts). It is best-effort: a missing or unopenable Activity
 	// database leaves it nil so Tiller still starts and routes. ActivityPath is
@@ -44,7 +48,8 @@ type DB struct {
 type OpenOption func(*openConfig)
 
 type openConfig struct {
-	backupDir string
+	backupDir  string
+	hostedMode bool
 }
 
 // WithBackupDir sets where a one-time pre-major-migration rollback snapshot is
@@ -53,6 +58,13 @@ type openConfig struct {
 // location when one is supplied.
 func WithBackupDir(dir string) OpenOption {
 	return func(c *openConfig) { c.backupDir = dir }
+}
+
+// WithHostedMode lets Open persist the fresh-install bootstrap state before
+// server startup. A fresh local install must not be treated as a fresh hosted
+// install if it is switched to hosted mode later.
+func WithHostedMode(hosted bool) OpenOption {
+	return func(c *openConfig) { c.hostedMode = hosted }
 }
 
 // LocalAccountID is the fixed, well-known identifier of the single implicit
@@ -107,6 +119,11 @@ func Open(ctx context.Context, path string, opts ...OpenOption) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
+	var migrationTable int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'`).Scan(&migrationTable); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("check migration state: %w", err)
+	}
 	// Restrict the on-disk DB and any existing WAL/SHM sidecars to the owning
 	// user. SQLite creates -wal/-shm with the same mode as the main DB file, so
 	// tightening the DB file also governs future sidecar files.
@@ -114,7 +131,7 @@ func Open(ctx context.Context, path string, opts ...OpenOption) (*DB, error) {
 		db.Close()
 		return nil, err
 	}
-	d := &DB{SQL: db, Path: path, ActivityPath: filepath.Join(filepath.Dir(path), ActivityFileName)}
+	d := &DB{SQL: db, Path: path, FreshInstall: migrationTable == 0, ActivityPath: filepath.Join(filepath.Dir(path), ActivityFileName)}
 	// Take a one-time, verified rollback snapshot before the account-tenancy
 	// migration (028) mutates an existing pre-SaaS database. It is a no-op for
 	// fresh installs and for databases that have already crossed 028.
@@ -125,6 +142,12 @@ func Open(ctx context.Context, path string, opts ...OpenOption) (*DB, error) {
 	if err := d.Migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
+	}
+	if d.FreshInstall && cfg.hostedMode {
+		if _, err := d.SQL.ExecContext(ctx, `INSERT OR IGNORE INTO platform_settings(key,value,updated_at) VALUES('hosted_bootstrap_complete','1',?)`, Now()); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("record fresh hosted bootstrap state: %w", err)
+		}
 	}
 	// Activity is best-effort telemetry: if it cannot be opened, leave the
 	// handle nil (reads return an explicit unavailable error, writes no-op)
