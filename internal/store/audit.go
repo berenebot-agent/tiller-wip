@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strconv"
+	"time"
 
 	"github.com/tiller-router/tiller-router/internal/id"
 )
@@ -136,6 +137,26 @@ func (s *Store) AuditRetentionDays(ctx context.Context) (int, error) {
 		return 0, errors.New("store: invalid audit retention")
 	}
 	return days, nil
+}
+
+func (s *Store) PruneAuditEvents(ctx context.Context, current time.Time) error {
+	days, err := s.AuditRetentionDays(ctx)
+	if err != nil {
+		return err
+	}
+	cutoff := current.UTC().Add(-time.Duration(days) * 24 * time.Hour).Format(time.RFC3339Nano)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM account_audit_events WHERE created_at < ?`, cutoff); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM platform_audit_events WHERE created_at < ?`, cutoff); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func nullableAuditID(value string) any {
