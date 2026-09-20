@@ -330,6 +330,24 @@ func (s *Server) flushActivity(ctx context.Context) error {
 	return s.logWriter.flush(ctx)
 }
 
+func (s *Server) finalizeActivityCleanup(ctx context.Context, accountID, clientKeyID string) error {
+	cleanupStore := s.storeHandle()
+	firstErr := cleanupStore.DeleteActivityRows(ctx, accountID, clientKeyID)
+	if s.logWriter != nil {
+		if err := s.logWriter.discardAndDrain(ctx, accountID, clientKeyID); err != nil {
+			return err
+		}
+	}
+	secondErr := cleanupStore.DeleteActivityRows(ctx, accountID, clientKeyID)
+	if secondErr == nil {
+		return cleanupStore.RetireActivityCleanup(accountID, clientKeyID)
+	}
+	if errors.Is(firstErr, store.ErrActivityUnavailable) || errors.Is(secondErr, store.ErrActivityUnavailable) {
+		return nil
+	}
+	return secondErr
+}
+
 func (s *Server) StopBackground(ctx context.Context) error {
 	if s.logWriter == nil {
 		return nil

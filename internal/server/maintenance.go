@@ -28,6 +28,10 @@ const activityMaintenanceInterval = time.Hour
 func (s *Server) startActivityMaintenance(ctx context.Context) {
 	interval := activityMaintenanceInterval
 	reconcile := func() {
+		if err := s.flushActivity(ctx); err != nil {
+			s.warnBackup("activity writer barrier failed", err)
+			return
+		}
 		if err := s.storeHandle().ReconcileActivityCleanup(ctx); err != nil {
 			s.warnBackup("activity cleanup reconciliation failed", err)
 		}

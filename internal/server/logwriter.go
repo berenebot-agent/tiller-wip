@@ -29,9 +29,12 @@ type logWrite struct {
 
 // logWriter batches Activity inserts per account on a background goroutine.
 type logWriter struct {
-	ch       chan logWrite
-	scopeFor func(string) *store.Scope
-	logger   *slog.Logger
+	ch                chan logWrite
+	scopeFor          func(string) *store.Scope
+	logger            *slog.Logger
+	queueMu           sync.RWMutex
+	discardedAccounts map[string]struct{}
+	discardedKeys     map[string]map[string]struct{}
 
 	dropped     atomic.Int64
 	stopped     atomic.Int64
@@ -45,18 +48,25 @@ type logWriter struct {
 
 func newLogWriter(scopeFor func(string) *store.Scope, logger *slog.Logger) *logWriter {
 	return &logWriter{
-		ch:       make(chan logWrite, logWriteQueueSize),
-		scopeFor: scopeFor,
-		logger:   logger,
-		done:     make(chan struct{}),
-		flushCh:  make(chan chan struct{}),
-		stopCh:   make(chan struct{}),
+		ch:                make(chan logWrite, logWriteQueueSize),
+		scopeFor:          scopeFor,
+		logger:            logger,
+		discardedAccounts: make(map[string]struct{}),
+		discardedKeys:     make(map[string]map[string]struct{}),
+		done:              make(chan struct{}),
+		flushCh:           make(chan chan struct{}),
+		stopCh:            make(chan struct{}),
 	}
 }
 
 // enqueue offers a row to the writer without blocking. A full queue drops the
 // row and logs a throttled warning.
 func (w *logWriter) enqueue(item logWrite) {
+	w.queueMu.RLock()
+	defer w.queueMu.RUnlock()
+	if w.discarded(item) {
+		return
+	}
 	select {
 	case <-w.stopCh:
 		w.stopped.Add(1)
@@ -84,7 +94,9 @@ func (w *logWriter) stop(ctx context.Context) error {
 	if w == nil {
 		return nil
 	}
+	w.queueMu.Lock()
 	w.stopOnce.Do(func() { close(w.stopCh) })
+	w.queueMu.Unlock()
 	if err := w.flush(ctx); err != nil {
 		return err
 	}
@@ -121,28 +133,26 @@ func (w *logWriter) run(ctx context.Context) {
 		}
 		total = 0
 	}
+	drain := func() {
+		for {
+			select {
+			case item := <-w.ch:
+				pending[item.accountID] = append(pending[item.accountID], item.row)
+				total++
+			default:
+				flush()
+				return
+			}
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
-			for {
-				select {
-				case item := <-w.ch:
-					pending[item.accountID] = append(pending[item.accountID], item.row)
-				default:
-					flush()
-					return
-				}
-			}
+			drain()
+			return
 		case <-w.stopCh:
-			for {
-				select {
-				case item := <-w.ch:
-					pending[item.accountID] = append(pending[item.accountID], item.row)
-				default:
-					flush()
-					return
-				}
-			}
+			drain()
+			return
 		case item := <-w.ch:
 			pending[item.accountID] = append(pending[item.accountID], item.row)
 			total++
@@ -150,7 +160,7 @@ func (w *logWriter) run(ctx context.Context) {
 				flush()
 			}
 		case ack := <-w.flushCh:
-			flush()
+			drain()
 			close(ack)
 		case <-ticker.C:
 			if total > 0 {
@@ -167,6 +177,12 @@ func (w *logWriter) flush(ctx context.Context) error {
 	if w == nil {
 		return nil
 	}
+	w.queueMu.Lock()
+	defer w.queueMu.Unlock()
+	return w.flushLocked(ctx)
+}
+
+func (w *logWriter) flushLocked(ctx context.Context) error {
 	ack := make(chan struct{})
 	select {
 	case w.flushCh <- ack:
@@ -183,6 +199,38 @@ func (w *logWriter) flush(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (w *logWriter) discarded(item logWrite) bool {
+	if _, ok := w.discardedAccounts[item.accountID]; ok {
+		return true
+	}
+	keys := w.discardedKeys[item.accountID]
+	_, ok := keys[item.row.ClientKeyID]
+	return ok
+}
+
+// discardAndDrain permanently suppresses a deleted account/key for this
+// process and establishes a queue barrier before the cleanup tombstone can be
+// retired. The durable tombstone covers process restarts.
+func (w *logWriter) discardAndDrain(ctx context.Context, accountID, clientKeyID string) error {
+	if w == nil {
+		return nil
+	}
+	w.queueMu.Lock()
+	if clientKeyID == "" {
+		w.discardedAccounts[accountID] = struct{}{}
+	} else {
+		keys := w.discardedKeys[accountID]
+		if keys == nil {
+			keys = make(map[string]struct{})
+			w.discardedKeys[accountID] = keys
+		}
+		keys[clientKeyID] = struct{}{}
+	}
+	err := w.flushLocked(ctx)
+	w.queueMu.Unlock()
+	return err
 }
 
 // wait blocks until the writer goroutine has stopped. Used by tests and

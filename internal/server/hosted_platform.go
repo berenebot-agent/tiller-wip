@@ -296,11 +296,15 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	s.identity.InvalidateAccount(accountID)
 	s.clients.InvalidateAccount(accountID)
+	if err := s.storeHandle().BeginActivityCleanup(accountID, ""); err != nil {
+		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not prepare account activity cleanup.")
+		return
+	}
 	if err := s.storeHandle().For(accountID).DeleteAccountResources(r.Context()); err != nil {
 		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account resources.")
 		return
 	}
-	if err := s.storeHandle().DeleteAccountActivity(accountID); err != nil {
+	if err := s.finalizeActivityCleanup(r.Context(), accountID, ""); err != nil {
 		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account activity.")
 		return
 	}

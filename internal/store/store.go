@@ -100,6 +100,53 @@ func (s *Store) DeleteAccountActivity(accountID string) error {
 	}
 }
 
+// BeginActivityCleanup records an account or client-key cleanup intent before
+// the corresponding core rows are removed. The intent remains durable until a
+// caller has drained the asynchronous Activity writer and retired it.
+func (s *Store) BeginActivityCleanup(accountID, clientKeyID string) error {
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	_, err := s.db.ExecContext(context.Background(), `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, accountID, clientKeyID, now())
+	return err
+}
+
+// DeleteActivityRows removes Activity rows without retiring the durable
+// cleanup intent. The caller must drain any asynchronous writer before
+// retiring that intent.
+func (s *Store) DeleteActivityRows(ctx context.Context, accountID, clientKeyID string) error {
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	if s.activity == nil {
+		return ErrActivityUnavailable
+	}
+	query := `DELETE FROM request_logs WHERE account_id=?`
+	args := []any{accountID}
+	if clientKeyID != "" {
+		query += ` AND client_key_id=?`
+		args = append(args, clientKeyID)
+	}
+	_, err := s.activity.ExecContext(ctx, query, args...)
+	return err
+}
+
+// RetireActivityCleanup removes a cleanup intent after Activity rows and all
+// queued writes for the scope have been handled.
+func (s *Store) RetireActivityCleanup(accountID, clientKeyID string) error {
+	if s.cleanupMu == nil {
+		s.cleanupMu = &sync.Mutex{}
+	}
+	s.cleanupMu.Lock()
+	defer s.cleanupMu.Unlock()
+	_, err := s.db.ExecContext(context.Background(), `DELETE FROM activity_cleanup WHERE account_id=? AND client_key_id=?`, accountID, clientKeyID)
+	return err
+}
+
 // ReconcileActivityCleanup retries durable account and client-key Activity
 // cleanup records. It is safe to call when Activity is unavailable.
 func (s *Store) ReconcileActivityCleanup(ctx context.Context) error {
@@ -160,6 +207,12 @@ func (s *Scope) activityCleanupPending(ctx context.Context, keyID string) (bool,
 	var n int
 	err := s.q.QueryRowContext(ctx, `SELECT count(*) FROM activity_cleanup WHERE account_id=? AND client_key_id=?`, s.accountID, keyID).Scan(&n)
 	return n != 0, err
+}
+
+// ActivityCleanupPending reports whether a durable cleanup intent exists for
+// this account and client key. It is used to make deletion retries idempotent.
+func (s *Scope) ActivityCleanupPending(ctx context.Context, keyID string) (bool, error) {
+	return s.activityCleanupPending(ctx, keyID)
 }
 
 // For returns a handle scoped to one account. accountID must come from a

@@ -406,6 +406,7 @@ type SessionStore struct {
 	mu         sync.Mutex
 	cache      map[string]sessionCacheEntry
 	rev        uint64
+	renewHook  func()
 }
 
 // NewSessionStoreWithHasher constructs a SessionStore that uses the same hasher
@@ -530,8 +531,24 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 				s.mu.Unlock()
 				if now.Add(s.ttl / 2).After(entry.session.ExpiresAt) {
 					expires := now.Add(s.ttl)
-					if _, err := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(expires), formatUTC(now), selector, formatUTC(entry.session.ExpiresAt)); err == nil {
-						entry.session.ExpiresAt, entry.expires = expires, now.Add(s.cacheTTL)
+					if s.renewHook != nil {
+						s.renewHook()
+					}
+					result, err := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(expires), formatUTC(now), selector, formatUTC(entry.session.ExpiresAt))
+					if err == nil {
+						affected, rowsErr := result.RowsAffected()
+						if rowsErr != nil {
+							return Session{}, false
+						}
+						if affected == 1 {
+							entry.session.ExpiresAt, entry.expires = expires, now.Add(s.cacheTTL)
+						} else {
+							current, ok := s.loadSession(selector, secret, now)
+							if !ok {
+								return Session{}, false
+							}
+							entry.session = current
+						}
 					}
 				}
 				if atomic.LoadUint64(&s.rev) != generation {
@@ -540,11 +557,7 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 				if !now.Before(entry.session.ExpiresAt) {
 					return Session{}, false
 				}
-				entry.expires = now.Add(s.cacheTTL)
-				s.mu.Lock()
-				s.cache[selector] = entry
-				s.mu.Unlock()
-				return entry.session, true
+				return s.publishSession(selector, entry.session, secret, now, generation)
 			}
 		}
 		delete(s.cache, selector)
@@ -552,13 +565,44 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	s.mu.Unlock()
 	generation := atomic.LoadUint64(&s.rev)
 
-	var csrfToken, tokenHash, expiresAt string
-	err := s.db.QueryRow(`SELECT csrf_token, token_hash, expires_at FROM admin_sessions WHERE id=?`, selector).Scan(&csrfToken, &tokenHash, &expiresAt)
-	if err != nil {
+	session, ok := s.loadSession(selector, secret, now)
+	if !ok {
 		return Session{}, false
 	}
-	exp, perr := time.Parse(time.RFC3339Nano, expiresAt)
-	if perr != nil || now.After(exp) {
+	exp := session.ExpiresAt
+	// Sliding expiry: extend when more than half the lifetime has elapsed.
+	if now.Add(s.ttl / 2).After(exp) {
+		next := now.Add(s.ttl)
+		if s.renewHook != nil {
+			s.renewHook()
+		}
+		result, updateErr := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(next), formatUTC(now), selector, formatUTC(exp))
+		if updateErr != nil {
+			return Session{}, false
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			if err != nil {
+				return Session{}, false
+			}
+			session, ok = s.loadSession(selector, secret, now)
+			if !ok {
+				return Session{}, false
+			}
+		} else {
+			session.ExpiresAt = next
+		}
+	}
+	return s.publishSession(selector, session, secret, now, generation)
+}
+
+func (s *SessionStore) loadSession(selector, secret string, now time.Time) (Session, bool) {
+	var session Session
+	var tokenHash, expiresAt string
+	if err := s.db.QueryRow(`SELECT csrf_token, token_hash, expires_at FROM admin_sessions WHERE id=?`, selector).Scan(&session.CSRFToken, &tokenHash, &expiresAt); err != nil {
+		return Session{}, false
+	}
+	exp, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil || !now.Before(exp) {
 		s.revoke(selector)
 		return Session{}, false
 	}
@@ -568,23 +612,18 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	// Lazy migration: upgrade a legacy argon2id session token hash after a
 	// successful verify. Best-effort; sessions also upgrade on next login.
 	s.rehashSessionToken(selector, secret, tokenHash)
-	// Sliding expiry: extend when more than half the lifetime has elapsed.
-	if now.Add(s.ttl / 2).After(exp) {
-		next := now.Add(s.ttl)
-		result, updateErr := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(next), formatUTC(now), selector, formatUTC(exp))
-		if updateErr != nil {
-			return Session{}, false
-		}
-		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-			return Session{}, false
-		}
-		exp = next
-	}
-	session := Session{CSRFToken: csrfToken, ExpiresAt: exp}
+	session.ExpiresAt = exp
+	return session, true
+}
+
+func (s *SessionStore) publishSession(selector string, session Session, secret string, now time.Time, generation uint64) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if atomic.LoadUint64(&s.rev) != generation {
 		return Session{}, false
+	}
+	if current, ok := s.cache[selector]; ok && current.session.ExpiresAt.After(session.ExpiresAt) {
+		session.ExpiresAt = current.session.ExpiresAt
 	}
 	s.ensureCacheRoomLocked(now)
 	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(s.cacheTTL), secretHash: sha256.Sum256([]byte(secret))}

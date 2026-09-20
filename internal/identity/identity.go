@@ -112,6 +112,7 @@ type Store struct {
 	rev                uint64
 	platformRev        uint64
 	maxEntries         int
+	renewHook          func()
 }
 
 type userSessionCacheEntry struct {
@@ -662,30 +663,67 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 			s.mu.Unlock()
 			if now.Add(s.userSessionTTL / 2).After(entry.session.ExpiresAt) {
 				expires := now.Add(s.userSessionTTL)
+				if s.renewHook != nil {
+					s.renewHook()
+				}
 				result, err := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(expires), formatTime(now), selector, formatTime(entry.session.ExpiresAt))
 				if err != nil {
 					return UserSession{}, false
 				}
 				affected, err := result.RowsAffected()
-				if err != nil || affected != 1 {
+				if err != nil {
 					return UserSession{}, false
 				}
-				entry.session.ExpiresAt = expires
+				if affected == 1 {
+					entry.session.ExpiresAt = expires
+				} else {
+					current, ok := s.loadUserSession(ctx, selector, secret, now)
+					if !ok {
+						return UserSession{}, false
+					}
+					entry.session = current
+				}
 			}
 			if atomic.LoadUint64(&s.rev) != generation {
 				return UserSession{}, false
 			}
-			entry.expires = now.Add(s.userCacheTTL)
-			s.mu.Lock()
-			s.userCache[selector] = entry
-			s.mu.Unlock()
-			return entry.session, true
+			return s.publishUserSession(selector, entry.session, secret, now, generation)
 		}
 		delete(s.userCache, selector)
 	}
 	s.mu.Unlock()
 
 	generation := atomic.LoadUint64(&s.rev)
+	session, ok := s.loadUserSession(ctx, selector, secret, now)
+	if !ok {
+		return UserSession{}, false
+	}
+	exp := session.ExpiresAt
+	if now.Add(s.userSessionTTL / 2).After(exp) {
+		next := now.Add(s.userSessionTTL)
+		if s.renewHook != nil {
+			s.renewHook()
+		}
+		result, updateErr := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
+		if updateErr != nil {
+			return UserSession{}, false
+		}
+		if affected, err := result.RowsAffected(); err != nil {
+			return UserSession{}, false
+		} else if affected != 1 {
+			session, ok = s.loadUserSession(ctx, selector, secret, now)
+			if !ok {
+				return UserSession{}, false
+			}
+		} else {
+			exp = next
+			session.ExpiresAt = next
+		}
+	}
+	return s.publishUserSession(selector, session, secret, now, generation)
+}
+
+func (s *Store) loadUserSession(ctx context.Context, selector, secret string, now time.Time) (UserSession, bool) {
 	var session UserSession
 	var hash, expires string
 	var status, accountStatus string
@@ -698,22 +736,18 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 	if err != nil || !now.Before(exp) || status != "active" || !session.User.Verified() || accountStatus != "active" || !s.tokenHasher.Verify(secret, hash) {
 		return UserSession{}, false
 	}
-	if now.Add(s.userSessionTTL / 2).After(exp) {
-		next := now.Add(s.userSessionTTL)
-		result, updateErr := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
-		if updateErr != nil {
-			return UserSession{}, false
-		}
-		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-			return UserSession{}, false
-		}
-		exp = next
-	}
 	session.ExpiresAt = exp
+	return session, true
+}
+
+func (s *Store) publishUserSession(selector string, session UserSession, secret string, now time.Time, generation uint64) (UserSession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if atomic.LoadUint64(&s.rev) != generation {
 		return UserSession{}, false
+	}
+	if current, ok := s.userCache[selector]; ok && current.session.ExpiresAt.After(session.ExpiresAt) {
+		session.ExpiresAt = current.session.ExpiresAt
 	}
 	s.ensureUserCacheRoomLocked(now)
 	s.userCache[selector] = userSessionCacheEntry{session: session, expires: now.Add(s.userCacheTTL), secretHash: sha256.Sum256([]byte(secret))}
@@ -861,30 +895,67 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 			s.mu.Unlock()
 			if now.Add(s.platformSessionTTL / 2).After(entry.session.ExpiresAt) {
 				expires := now.Add(s.platformSessionTTL)
+				if s.renewHook != nil {
+					s.renewHook()
+				}
 				result, err := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(expires), formatTime(now), selector, formatTime(entry.session.ExpiresAt))
 				if err != nil {
 					return PlatformSession{}, false
 				}
 				affected, err := result.RowsAffected()
-				if err != nil || affected != 1 {
+				if err != nil {
 					return PlatformSession{}, false
 				}
-				entry.session.ExpiresAt = expires
+				if affected == 1 {
+					entry.session.ExpiresAt = expires
+				} else {
+					current, ok := s.loadPlatformSession(ctx, selector, secret, now)
+					if !ok {
+						return PlatformSession{}, false
+					}
+					entry.session = current
+				}
 			}
 			if atomic.LoadUint64(&s.platformRev) != generation {
 				return PlatformSession{}, false
 			}
-			entry.expires = now.Add(s.platformCacheTTL)
-			s.mu.Lock()
-			s.platformCache[selector] = entry
-			s.mu.Unlock()
-			return entry.session, true
+			return s.publishPlatformSession(selector, entry.session, secret, now, generation)
 		}
 		delete(s.platformCache, selector)
 	}
 	s.mu.Unlock()
 
 	generation := atomic.LoadUint64(&s.platformRev)
+	session, ok := s.loadPlatformSession(ctx, selector, secret, now)
+	if !ok {
+		return PlatformSession{}, false
+	}
+	exp := session.ExpiresAt
+	if now.Add(s.platformSessionTTL / 2).After(exp) {
+		next := now.Add(s.platformSessionTTL)
+		if s.renewHook != nil {
+			s.renewHook()
+		}
+		result, updateErr := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
+		if updateErr != nil {
+			return PlatformSession{}, false
+		}
+		if affected, err := result.RowsAffected(); err != nil {
+			return PlatformSession{}, false
+		} else if affected != 1 {
+			session, ok = s.loadPlatformSession(ctx, selector, secret, now)
+			if !ok {
+				return PlatformSession{}, false
+			}
+		} else {
+			exp = next
+			session.ExpiresAt = next
+		}
+	}
+	return s.publishPlatformSession(selector, session, secret, now, generation)
+}
+
+func (s *Store) loadPlatformSession(ctx context.Context, selector, secret string, now time.Time) (PlatformSession, bool) {
 	var session PlatformSession
 	var hash, expires string
 	if err := s.db.QueryRowContext(ctx, `SELECT csrf_token,token_hash,expires_at FROM platform_admin_sessions WHERE id=?`, selector).Scan(&session.CSRFToken, &hash, &expires); err != nil {
@@ -894,22 +965,18 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 	if err != nil || !now.Before(exp) || !s.tokenHasher.Verify(secret, hash) {
 		return PlatformSession{}, false
 	}
-	if now.Add(s.platformSessionTTL / 2).After(exp) {
-		next := now.Add(s.platformSessionTTL)
-		result, updateErr := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
-		if updateErr != nil {
-			return PlatformSession{}, false
-		}
-		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-			return PlatformSession{}, false
-		}
-		exp = next
-	}
 	session.ExpiresAt = exp
+	return session, true
+}
+
+func (s *Store) publishPlatformSession(selector string, session PlatformSession, secret string, now time.Time, generation uint64) (PlatformSession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if atomic.LoadUint64(&s.platformRev) != generation {
 		return PlatformSession{}, false
+	}
+	if current, ok := s.platformCache[selector]; ok && current.session.ExpiresAt.After(session.ExpiresAt) {
+		session.ExpiresAt = current.session.ExpiresAt
 	}
 	s.ensurePlatformCacheRoomLocked(now)
 	s.platformCache[selector] = platformSessionCacheEntry{session: session, expires: now.Add(s.platformCacheTTL), secretHash: sha256.Sum256([]byte(secret))}

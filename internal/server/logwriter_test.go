@@ -121,3 +121,58 @@ func TestLogWriterStopRejectsEnqueueAndDrains(t *testing.T) {
 		t.Fatalf("drained rows = %d, want 1", count)
 	}
 }
+
+func TestLogWriterDiscardBarrierFiltersDeletedKey(t *testing.T) {
+	app, db := newLogWriterServer(t)
+	w := newLogWriter(app.scopeFor, app.logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.start(ctx)
+
+	deleted := writerRow("deleted-key-row")
+	deleted.row.ClientKeyID = "deleted-key"
+	kept := writerRow("kept-key-row")
+	kept.row.ClientKeyID = "kept-key"
+	w.enqueue(deleted)
+	w.enqueue(kept)
+
+	st := app.storeHandle()
+	if err := st.BeginActivityCleanup(database.LocalAccountID, "deleted-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteActivityRows(ctx, database.LocalAccountID, "deleted-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.discardAndDrain(ctx, database.LocalAccountID, "deleted-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteActivityRows(ctx, database.LocalAccountID, "deleted-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RetireActivityCleanup(database.LocalAccountID, "deleted-key"); err != nil {
+		t.Fatal(err)
+	}
+
+	var deletedCount, keptCount int
+	activity := activityDB(t, db)
+	if err := activity.QueryRow(`SELECT count(*) FROM request_logs WHERE id='deleted-key-row'`).Scan(&deletedCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := activity.QueryRow(`SELECT count(*) FROM request_logs WHERE id='kept-key-row'`).Scan(&keptCount); err != nil {
+		t.Fatal(err)
+	}
+	if deletedCount != 0 || keptCount != 1 {
+		t.Fatalf("deleted=%d kept=%d, want deleted=0 kept=1", deletedCount, keptCount)
+	}
+
+	w.enqueue(deleted)
+	if err := w.flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := activity.QueryRow(`SELECT count(*) FROM request_logs WHERE id='deleted-key-row'`).Scan(&deletedCount); err != nil {
+		t.Fatal(err)
+	}
+	if deletedCount != 0 {
+		t.Fatalf("late deleted row count=%d, want 0", deletedCount)
+	}
+}

@@ -339,8 +339,12 @@ func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
 	name, err := s.scope(r).ClientKeyName(r.Context(), clientID)
 	if errors.Is(err, store.ErrClientKeyNotFound) {
-		adminError(w, 404, "not_found", "Client key not found.")
-		return
+		pending, pendingErr := s.scope(r).ActivityCleanupPending(r.Context(), clientID)
+		if pendingErr != nil || !pending {
+			adminError(w, 404, "not_found", "Client key not found.")
+			return
+		}
+		name = ""
 	} else if err != nil {
 		adminError(w, 500, "database_error", "Could not delete client key.")
 		return
@@ -354,9 +358,15 @@ func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
+	if err := s.finalizeActivityCleanup(r.Context(), s.scope(r).AccountID(), clientID); err != nil {
+		adminError(w, 500, "database_error", "Could not delete client key activity.")
+		return
+	}
 	s.clients.Invalidate(clientID)
 	w.WriteHeader(204)
-	s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
+	if name != "" {
+		s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
+	}
 }
 
 type permissionGroup struct {

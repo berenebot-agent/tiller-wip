@@ -120,18 +120,22 @@ func (s *Scope) InsertRequestLogs(ctx context.Context, rows []RequestLogInsert) 
 	if pending {
 		return nil
 	}
+	filtered := make([]RequestLogInsert, 0, len(rows))
 	for _, row := range rows {
 		pending, err := s.activityCleanupPending(ctx, row.ClientKeyID)
 		if err != nil {
 			return err
 		}
-		if pending {
-			return nil
+		if !pending {
+			filtered = append(filtered, row)
 		}
 	}
+	if len(filtered) == 0 {
+		return nil
+	}
 	return s.runActivityTx(ctx, func(q querier) error {
-		for i := range rows {
-			if err := insertRequestLogRow(ctx, q, s.accountID, &rows[i]); err != nil {
+		for i := range filtered {
+			if err := insertRequestLogRow(ctx, q, s.accountID, &filtered[i]); err != nil {
 				return err
 			}
 		}

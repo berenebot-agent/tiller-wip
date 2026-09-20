@@ -174,6 +174,32 @@ func TestActivityReadsReturnUnavailableWhenHandleMissing(t *testing.T) {
 	}
 }
 
+func TestDeleteClientKeyRetryWithPendingCleanup(t *testing.T) {
+	db, st := openActivityStore(t)
+	ctx := context.Background()
+	if _, err := db.SQL.Exec(`INSERT INTO client_keys(id,account_id,name,description,selector,secret_hash,secret_fingerprint,enabled,created_at,updated_at,logging_enabled,retention_days,key_type,key_group) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"retry-key", database.LocalAccountID, "Retry", "", "retry-selector", "hash", "finger", 1, database.Now(), database.Now(), 1, 30, "catalogue", "default"); err != nil {
+		t.Fatal(err)
+	}
+
+	scope := st.For(database.LocalAccountID)
+	found, err := scope.DeleteClientKey(ctx, "retry-key")
+	if err != nil || !found {
+		t.Fatalf("first delete found=%v err=%v", found, err)
+	}
+	found, err = scope.DeleteClientKey(ctx, "retry-key")
+	if err != nil || !found {
+		t.Fatalf("retry delete found=%v err=%v", found, err)
+	}
+	var pending int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM activity_cleanup WHERE account_id=? AND client_key_id=?`, database.LocalAccountID, "retry-key").Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 1 {
+		t.Fatalf("pending cleanup count=%d, want 1", pending)
+	}
+}
+
 func ids(rows []store.ActivityRow) []string {
 	out := make([]string, 0, len(rows))
 	for _, r := range rows {

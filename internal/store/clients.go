@@ -354,23 +354,33 @@ func (s *Scope) RotateClientKey(ctx context.Context, id, selector, hash, fingerp
 // attempting the separate-file delete. The record also makes retries safe when
 // the core key has already gone.
 func (s *Scope) DeleteClientKey(ctx context.Context, id string) (bool, error) {
-	res, err := s.q.ExecContext(ctx, `DELETE FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
 	if s.cleanupMu == nil {
 		s.cleanupMu = &sync.Mutex{}
 	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
+	var exists int
+	if err := s.q.QueryRowContext(ctx, `SELECT count(*) FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).Scan(&exists); err != nil {
+		return false, err
+	}
+	var pending int
+	if err := s.q.QueryRowContext(ctx, `SELECT count(*) FROM activity_cleanup WHERE account_id=? AND client_key_id=?`, s.accountID, id).Scan(&pending); err != nil {
+		return false, err
+	}
+	if exists == 0 && pending == 0 {
+		return false, nil
+	}
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, s.accountID, id, now()); err != nil {
 		return false, err
 	}
-	cleanupStore := &Store{db: s.db, activity: s.activity}
-	if err := cleanupStore.reconcileActivityCleanupLocked(ctx, s.accountID, id); err != nil && !errors.Is(err, ErrActivityUnavailable) {
+	if exists == 0 {
+		return true, nil
+	}
+	res, err := s.q.ExecContext(ctx, `DELETE FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID)
+	if err != nil {
 		return false, err
 	}
+	n, _ := res.RowsAffected()
 	return n > 0, nil
 }
 
