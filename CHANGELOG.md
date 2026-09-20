@@ -17,6 +17,14 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Hosted release-readiness paths.** Hosted SPA entry URLs now retain their
+  requested flow without redirects or initialization errors; verification
+  resend/reset recovery, hosted account search/paging, deletion retry, and
+  local-only backup boundaries are complete. Platform settings now validate and
+  persist atomically, OAuth disconnects cannot be undone by stale work, Activity
+  cleanup and shutdown are durable, audit retention runs independently, trusted
+  proxy login limits are consistent, bootstrap/signup email validation is strict,
+  and active cached sessions renew their persisted expiry.
 - **Ordered fallback now survives empty or errored 2xx streams.** A target that
   returns HTTP 200 but delivers an explicit upstream stream error, or ends
   without any assistant output before client-visible bytes, is treated as a
