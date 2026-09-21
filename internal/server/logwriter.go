@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -20,7 +21,34 @@ const (
 	logWriteQueueSize     = 1024
 	logWriteBatchSize     = 64
 	logWriteFlushInterval = 25 * time.Millisecond
+	// maxActivityErrorLogLen bounds the sqlite error text in the batch-write
+	// warning. The message is driver text (code/constraint detail), never a
+	// request or response body.
+	maxActivityErrorLogLen = 500
 )
+
+// sqliteCoder matches modernc.org/sqlite's *Error without importing the
+// driver into the server package.
+type sqliteCoder interface {
+	Code() int
+}
+
+// sqliteCode extracts the sqlite result code (primary + extended bits) when
+// the error chain carries one.
+func sqliteCode(err error) (int, bool) {
+	var coder sqliteCoder
+	if errors.As(err, &coder) {
+		return coder.Code(), true
+	}
+	return 0, false
+}
+
+func truncateActivityError(s string) string {
+	if len(s) > maxActivityErrorLogLen {
+		return s[:maxActivityErrorLogLen] + "…"
+	}
+	return s
+}
 
 type logWrite struct {
 	accountID string
@@ -127,7 +155,16 @@ func (w *logWriter) run(ctx context.Context) {
 	flush := func() {
 		for account, rows := range pending {
 			if err := w.scopeFor(account).InsertRequestLogs(context.Background(), rows); err != nil && w.logger != nil {
-				w.logger.Warn("activity batch write failed", "error_class", fmt.Sprintf("%T", err))
+				args := []any{
+					"error_class", fmt.Sprintf("%T", err),
+					"error", truncateActivityError(err.Error()),
+					"account_id", account,
+					"batch_size", len(rows),
+				}
+				if code, ok := sqliteCode(err); ok {
+					args = append(args, "sqlite_code", code)
+				}
+				w.logger.Warn("activity batch write failed", args...)
 			}
 			delete(pending, account)
 		}
