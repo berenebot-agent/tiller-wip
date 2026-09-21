@@ -68,8 +68,8 @@ docker run --rm -d --name "$name" --network host \
     --security-opt no-new-privileges:true \
     --user 65532:65532 \
     -v "$data_dir:/data" \
-    -e TILLER_ADMIN_USERNAME=admin \
-    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_USERNAME=admin \
+    -e TILLER_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$port" \
     -e TILLER_DATA_DIR=/data \
     -e TILLER_TRUSTED_PROXY=127.0.0.0/8 \
@@ -184,8 +184,8 @@ docker run --rm -d --name "$dc" --network host \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
     --security-opt no-new-privileges:true \
     -v "$default_dir:/data" \
-    -e TILLER_ADMIN_USERNAME=admin \
-    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_USERNAME=admin \
+    -e TILLER_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:18082" \
     -e TILLER_DATA_DIR=/data \
     "$ROUTER_IMAGE" >/dev/null
@@ -224,8 +224,8 @@ docker run --rm -d --name "$pc" --network host \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
     --security-opt no-new-privileges:true \
     -v "$probe_dir:/data" \
-    -e TILLER_ADMIN_USERNAME=admin \
-    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_USERNAME=admin \
+    -e TILLER_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:18083" \
     -e TILLER_DATA_DIR=/data \
     "$ROUTER_IMAGE" >/dev/null

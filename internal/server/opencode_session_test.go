@@ -128,7 +128,7 @@ func TestCodexSessionAffinityHeaderStable(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
@@ -230,7 +230,7 @@ func opencodeSessionHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)

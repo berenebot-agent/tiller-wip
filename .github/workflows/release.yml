@@ -34,21 +34,21 @@ jobs:
         run: go build ./cmd/tiller-router
       - name: Validate docker-compose.yml
         env:
-          TILLER_ADMIN_USERNAME: ci
-          TILLER_ADMIN_PASSWORD: ci
+          TILLER_USERNAME: ci
+          TILLER_PASSWORD: ci
         run: docker compose -f docker-compose.yml config >/dev/null
       - name: Validate hosted override with managed ingress network
         env:
-          TILLER_ADMIN_USERNAME: ci
-          TILLER_ADMIN_PASSWORD: ci
+          TILLER_USERNAME: ci
+          TILLER_PASSWORD: ci
           TILLER_PLATFORM_ADMIN_USERNAME: ci-platform
           TILLER_PLATFORM_ADMIN_PASSWORD: ci-platform-password
           TILLER_PUBLIC_URL: https://app.example.com
         run: docker compose -f docker-compose.yml -f docker-compose.hosted.yml config >/dev/null
       - name: Validate external proxy network override
         env:
-          TILLER_ADMIN_USERNAME: ci
-          TILLER_ADMIN_PASSWORD: ci
+          TILLER_USERNAME: ci
+          TILLER_PASSWORD: ci
           TILLER_PLATFORM_ADMIN_USERNAME: ci-platform
           TILLER_PLATFORM_ADMIN_PASSWORD: ci-platform-password
           TILLER_PUBLIC_URL: https://app.example.com

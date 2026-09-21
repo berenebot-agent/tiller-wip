@@ -149,7 +149,7 @@ func TestAdminLoginRateLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	if err != nil {
 		t.Fatal(err)
 	}

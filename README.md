@@ -153,8 +153,8 @@ Provider support varies because upstream APIs vary. The beta should be treated a
        ports:
          - "8080:8080"
        environment:
-         TILLER_ADMIN_USERNAME: admin
-         TILLER_ADMIN_PASSWORD: replace-this-with-a-long-random-password
+         TILLER_USERNAME: admin
+         TILLER_PASSWORD: replace-this-with-a-long-random-password
        volumes:
          - ./data:/data
        restart: unless-stopped
@@ -168,7 +168,9 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their old `TILLER_ADMIN_*` values once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
+   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
+
+> **Renamed credential vars:** `TILLER_ADMIN_USERNAME` / `TILLER_ADMIN_PASSWORD` are now `TILLER_USERNAME` / `TILLER_PASSWORD`, to deconflict with the hosted platform console's `TILLER_PLATFORM_ADMIN_*`. The old names still work and log a startup deprecation warning; the new names win if both are set.
 
 > **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall.
 
@@ -177,7 +179,7 @@ Provider support varies because upstream APIs vary. The beta should be treated a
 ```bash
 git clone https://github.com/dellarb/tiller-router.git
 cd tiller-router
-cp .env.example .env   # set TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD
+cp .env.example .env   # set TILLER_USERNAME / TILLER_PASSWORD
 docker compose up -d --build
 ```
 
@@ -219,14 +221,15 @@ optional VPS firewall hardening rule.
 The repo's `docker-compose.yml` plus `.env` cover the most common local
 customisations without editing any Go code. The full list of local variables is
 in `.env.example`. The hosted override additionally requires the platform
-credentials below. `TILLER_ADMIN_*` is only needed there when converting an
-existing local installation:
+credentials below. `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated
+`TILLER_ADMIN_*` aliases) are only needed there when converting an existing
+local installation:
 
 ```bash
 TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
 TILLER_PLATFORM_ADMIN_PASSWORD=replace-with-a-long-random-password
-TILLER_ADMIN_USERNAME=owner@example.com               # optional one-time migration input
-TILLER_ADMIN_PASSWORD=existing-local-password         # optional one-time migration input
+TILLER_USERNAME=owner@example.com                     # optional one-time migration input
+TILLER_PASSWORD=existing-local-password               # optional one-time migration input
 TILLER_PORT=8080                                     # host port (default 8080)
 TILLER_RUN_UID=1000                                  # runtime uid (default 65532)
 TILLER_RUN_GID=1000                                  # runtime gid (default 65532)

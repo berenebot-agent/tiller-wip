@@ -238,7 +238,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	}
 	var sessions *auth.SessionStore
 	if cfg.Mode != config.ModeHosted {
-		sessions, err = auth.NewSessionStoreTiered(db.SQL, cfg.AdminUsername, cfg.AdminPassword, cfg.AdminSessionTTL, options.tokenHasher, options.credentialHasher)
+		sessions, err = auth.NewSessionStoreTiered(db.SQL, cfg.TillerUser, cfg.TillerUserPassword, cfg.AdminSessionTTL, options.tokenHasher, options.credentialHasher)
 		if err != nil {
 			return nil, err
 		}
@@ -266,10 +266,10 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		return nil, err
 	}
 	if cfg.Mode == config.ModeHosted {
-		if err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.AdminUsername, cfg.AdminPassword, db.FreshInstall); err != nil {
+		if err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.TillerUser, cfg.TillerUserPassword, db.FreshInstall); err != nil {
 			return nil, fmt.Errorf("hosted bootstrap: %w", err)
 		}
-		if err := identityStore.SyncPlatformCredential(cfg.PlatformUsername, cfg.PlatformPassword); err != nil {
+		if err := identityStore.SyncPlatformCredential(cfg.TillerPlatformAdminUser, cfg.TillerPlatformAdminPassword); err != nil {
 			return nil, err
 		}
 	}
@@ -541,7 +541,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if !auth.EqualCredential(input.Username, s.config.AdminUsername) || !auth.EqualCredential(input.Password, s.config.AdminPassword) {
+	if !auth.EqualCredential(input.Username, s.config.TillerUser) || !auth.EqualCredential(input.Password, s.config.TillerUserPassword) {
 		if s.loginLimiter.recordFailure(key) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 			return
@@ -556,8 +556,8 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.AdminUsername, clientIP(r, s.config.TrustedProxy)))
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.TillerUser, clientIP(r, s.config.TrustedProxy)))
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.TillerUser, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 
 // setSessionCookie writes the admin session cookie. Refreshing it on every
@@ -570,7 +570,7 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 
 func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(adminSessionKey).(auth.Session)
-	writeJSON(w, 200, map[string]any{"authenticated": true, "username": s.config.AdminUsername, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+	writeJSON(w, 200, map[string]any{"authenticated": true, "username": s.config.TillerUser, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {

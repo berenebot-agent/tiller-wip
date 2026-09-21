@@ -24,7 +24,7 @@ const otherAccountID = "11111111-1111-1111-1111-111111111111"
 func newTenantServer(t *testing.T, db *database.DB, opts ...serverOption) *Server {
 	t.Helper()
 	all := append([]serverOption{withSecretHasher(fastsecret.Hasher{})}, opts...)
-	app, err := New(config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir()}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), all...)
+	app, err := New(config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir()}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), all...)
 	if err != nil {
 		t.Fatal(err)
 	}

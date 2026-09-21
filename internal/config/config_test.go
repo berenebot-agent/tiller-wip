@@ -8,8 +8,8 @@ import (
 
 func TestModelsDevEnabledFlag(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
@@ -54,8 +54,8 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 
 func TestDebugPprofFlag(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
@@ -100,8 +100,8 @@ func TestDebugPprofFlag(t *testing.T) {
 
 func TestCacheTTLFlags(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 
@@ -151,8 +151,8 @@ func TestCacheTTLFlags(t *testing.T) {
 
 func TestModeAndPublicURL(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin@example.com")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin@example.com")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
@@ -203,8 +203,8 @@ func TestModeAndPublicURL(t *testing.T) {
 
 func TestPublicURLValidation(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin@example.com")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin@example.com")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
@@ -241,8 +241,8 @@ func TestPublicURLValidation(t *testing.T) {
 
 func TestUserSessionTTL(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	t.Setenv("TILLER_MODE", "")
@@ -272,8 +272,8 @@ func TestUserSessionTTL(t *testing.T) {
 
 func TestMailBootstrap(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	t.Setenv("TILLER_MODE", "")
@@ -344,8 +344,8 @@ func TestMailBootstrap(t *testing.T) {
 
 func TestLogLevel(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 
 	// Default when unset.
@@ -388,8 +388,8 @@ func TestLogLevel(t *testing.T) {
 
 func TestTrustedProxy(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("TILLER_ADMIN_USERNAME", "admin")
-	t.Setenv("TILLER_ADMIN_PASSWORD", "secret")
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
 
 	// Unset (default) means proxy-header trust is disabled.
@@ -459,5 +459,76 @@ func TestTrustedProxy(t *testing.T) {
 	t.Setenv("TILLER_TRUSTED_PROXY", "not-a-cidr")
 	if _, err := Load(); err == nil {
 		t.Error("TILLER_TRUSTED_PROXY=not-a-cidr should fail to load")
+	}
+}
+
+// TestLegacyCredentialAliasHonoured proves the pre-rename TILLER_ADMIN_* names
+// still configure the local operator credential and produce a deprecation
+// notice, so an existing deployment survives the rename untouched.
+func TestLegacyCredentialAliasHonoured(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_USERNAME", "")
+	t.Setenv("TILLER_PASSWORD", "")
+	t.Setenv("TILLER_ADMIN_USERNAME", "legacy-admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "legacy-secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_MODE", "")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("legacy credentials should load: %v", err)
+	}
+	if c.TillerUser != "legacy-admin" || c.TillerUserPassword != "legacy-secret" {
+		t.Errorf("legacy alias not applied: user=%q pass=%q", c.TillerUser, c.TillerUserPassword)
+	}
+	if len(c.Deprecations) != 2 {
+		t.Fatalf("Deprecations = %v, want one per legacy var", c.Deprecations)
+	}
+}
+
+// TestNewCredentialWinsOverLegacy proves that when both names are set the new
+// name is authoritative and the ignored legacy var is reported, so a
+// half-migrated .env can never silently change which credential is trusted.
+func TestNewCredentialWinsOverLegacy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_USERNAME", "new-admin")
+	t.Setenv("TILLER_PASSWORD", "new-secret")
+	t.Setenv("TILLER_ADMIN_USERNAME", "old-admin")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "old-secret")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_MODE", "")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("both names should load: %v", err)
+	}
+	if c.TillerUser != "new-admin" || c.TillerUserPassword != "new-secret" {
+		t.Errorf("new name should win: user=%q pass=%q", c.TillerUser, c.TillerUserPassword)
+	}
+	if len(c.Deprecations) != 2 {
+		t.Fatalf("Deprecations = %v, want one per ignored legacy var", c.Deprecations)
+	}
+}
+
+// TestNoDeprecationWhenOnlyNewNamesSet keeps the clean path quiet: a fully
+// migrated deployment must not emit any startup notice.
+func TestNoDeprecationWhenOnlyNewNamesSet(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	t.Setenv("TILLER_ADMIN_USERNAME", "")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_MODE", "")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Deprecations) != 0 {
+		t.Errorf("Deprecations = %v, want none for new-only config", c.Deprecations)
 	}
 }

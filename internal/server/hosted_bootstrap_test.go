@@ -54,12 +54,12 @@ func openExistingLocalDatabase(t *testing.T) *database.DB {
 
 func hostedBootstrapConfig(adminUsername, adminPassword string) config.Config {
 	return config.Config{
-		Mode:             config.ModeHosted,
-		AdminUsername:    adminUsername,
-		AdminPassword:    adminPassword,
-		PlatformUsername: "platform-admin",
-		PlatformPassword: "platform-secret",
-		PublicURL:        "https://tiller.example.com",
+		Mode:                        config.ModeHosted,
+		TillerUser:                  adminUsername,
+		TillerUserPassword:          adminPassword,
+		TillerPlatformAdminUser:     "platform-admin",
+		TillerPlatformAdminPassword: "platform-secret",
+		PublicURL:                   "https://tiller.example.com",
 	}
 }
 

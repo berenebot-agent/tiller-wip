@@ -28,7 +28,7 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.PlatformUsername, s.config.PlatformPassword) {
+	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.TillerPlatformAdminUser, s.config.TillerPlatformAdminPassword) {
 		s.loginLimiter.recordFailure(key)
 		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid platform credentials.")
 		return

@@ -63,7 +63,7 @@ func TestRequestClientIPTrustBoundary(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			app, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: tt.trusted})
+			app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: tt.trusted})
 			r := httptest.NewRequest(http.MethodPost, "http://router.test/v1/chat/completions", nil)
 			r.RemoteAddr = tt.remote
 			if tt.realIP != "" {
@@ -80,7 +80,7 @@ func TestRequestClientIPTrustBoundary(t *testing.T) {
 }
 
 func TestEveryAdministrativeRouteRequiresAuthentication(t *testing.T) {
-	app, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
+	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/admin/session"}, {http.MethodDelete, "/api/admin/session"},
 		{http.MethodGet, "/api/admin/provider-types"}, {http.MethodGet, "/api/admin/providers"}, {http.MethodPost, "/api/admin/providers"},
@@ -124,7 +124,7 @@ func newSecurityTestServer(t *testing.T, cfg config.Config) (*Server, *database.
 }
 
 func TestAdminSessionCookieFlagsAndCSRF(t *testing.T) {
-	app, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
+	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
@@ -197,7 +197,7 @@ func TestAdminSessionCookieFlagsAndCSRF(t *testing.T) {
 
 func TestSecureCookieTrustedProxyAndTLS(t *testing.T) {
 	trusted := netip.MustParsePrefix("127.0.0.0/8")
-	app, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
+	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	req, _ := http.NewRequest(http.MethodPost, router.URL+"/api/admin/session", strings.NewReader(`{"username":"admin","password":"correct horse"}`))
@@ -212,7 +212,7 @@ func TestSecureCookieTrustedProxyAndTLS(t *testing.T) {
 		t.Fatalf("trusted HTTPS proxy cookie missing Secure: %q", resp.Header.Get("Set-Cookie"))
 	}
 
-	tlsApp, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
+	tlsApp, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
 	tlsRouter := httptest.NewTLSServer(tlsApp.Handler())
 	t.Cleanup(tlsRouter.Close)
 	tlsClient := tlsRouter.Client()
@@ -231,7 +231,7 @@ func TestSecureCookieTrustedProxyAndTLS(t *testing.T) {
 
 func TestSpoofedForwardedProtoFromUntrustedPeerDoesNotSetSecureCookie(t *testing.T) {
 	trusted := netip.MustParsePrefix("172.18.0.0/16")
-	app, _ := newSecurityTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
+	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 

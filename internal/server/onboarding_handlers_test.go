@@ -44,8 +44,8 @@ func hostedServerHarness(t *testing.T, dropActivity bool) (*Server, *testAPI, st
 		t.Cleanup(func() { db.Close() })
 	}
 	app, err := New(config.Config{
-		Mode: config.ModeHosted, AdminUsername: "owner@example.com", AdminPassword: "correct horse battery staple",
-		PlatformUsername: "platform-admin", PlatformPassword: "platform-secret",
+		Mode: config.ModeHosted, TillerUser: "owner@example.com", TillerUserPassword: "correct horse battery staple",
+		TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
 		PublicURL: "https://tiller.example.com", DataDir: t.TempDir(),
 	}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if err != nil {

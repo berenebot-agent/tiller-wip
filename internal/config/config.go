@@ -53,19 +53,27 @@ type Config struct {
 	UserSessionTTL time.Duration
 	// Mail is the optional bootstrap seed for mail delivery.
 	Mail MailBootstrap
-	// AdminUsername and AdminPassword are local credentials. In hosted mode
-	// they are optional one-time bootstrap credentials for the local account.
-	AdminUsername     string
-	AdminPassword     string
-	PlatformUsername  string
-	PlatformPassword  string
-	AdminCookieSecure bool
-	AdminSessionTTL   time.Duration
-	DataDir           string
-	ListenAddr        string
-	TrustedProxy      netip.Prefix
-	ModelsDevEnabled  bool
-	LogLevel          string
+	// TillerUser and TillerUserPassword are the local operator credential
+	// (env TILLER_USERNAME / TILLER_PASSWORD). In hosted mode they are the
+	// optional one-time bootstrap credentials that migrate the existing local
+	// account into the first hosted customer. The legacy TILLER_ADMIN_USERNAME
+	// / TILLER_ADMIN_PASSWORD names are still accepted, with a deprecation
+	// warning, so an existing deployment never breaks on rename.
+	TillerUser         string
+	TillerUserPassword string
+	// TillerPlatformAdminUser and TillerPlatformAdminPassword are the hosted
+	// platform-console credentials (env TILLER_PLATFORM_ADMIN_USERNAME /
+	// TILLER_PLATFORM_ADMIN_PASSWORD). They are environment-only and carry no
+	// account authority.
+	TillerPlatformAdminUser     string
+	TillerPlatformAdminPassword string
+	AdminCookieSecure           bool
+	AdminSessionTTL             time.Duration
+	DataDir                     string
+	ListenAddr                  string
+	TrustedProxy                netip.Prefix
+	ModelsDevEnabled            bool
+	LogLevel                    string
 	// DebugPprof enables the admin-gated memory/pprof debug endpoints. It is
 	// off by default and only turns on when TILLER_DEBUG_PPROF is explicitly
 	// true, so a normal deployment never exposes profiling surfaces.
@@ -94,17 +102,22 @@ type Config struct {
 	// <DataDir>/master.key or generated there (see internal/crypto).
 	MasterKey     string
 	MasterKeyFile string
+	// Deprecations lists configuration notices to surface at startup: a
+	// legacy env var that was honoured, or a legacy var that was ignored
+	// because the new name was also set. Load always succeeds; the caller
+	// decides how loudly to report these.
+	Deprecations []string
 }
 
 func Load() (Config, error) {
 	c := Config{
-		AdminUsername:     os.Getenv("TILLER_ADMIN_USERNAME"),
-		AdminPassword:     os.Getenv("TILLER_ADMIN_PASSWORD"),
-		PlatformUsername:  os.Getenv("TILLER_PLATFORM_ADMIN_USERNAME"),
-		PlatformPassword:  os.Getenv("TILLER_PLATFORM_ADMIN_PASSWORD"),
-		AdminCookieSecure: false,
-		AdminSessionTTL:   30 * 24 * time.Hour,
-		UserSessionTTL:    30 * 24 * time.Hour,
+		TillerUser:                  os.Getenv("TILLER_USERNAME"),
+		TillerUserPassword:          os.Getenv("TILLER_PASSWORD"),
+		TillerPlatformAdminUser:     os.Getenv("TILLER_PLATFORM_ADMIN_USERNAME"),
+		TillerPlatformAdminPassword: os.Getenv("TILLER_PLATFORM_ADMIN_PASSWORD"),
+		AdminCookieSecure:           false,
+		AdminSessionTTL:             30 * 24 * time.Hour,
+		UserSessionTTL:              30 * 24 * time.Hour,
 		// Verified keys/sessions are cached in memory and renewed on use, so a
 		// longer window cuts hash-verification CPU with no revocation penalty:
 		// explicit invalidation is independent of the TTL.
@@ -119,6 +132,7 @@ func Load() (Config, error) {
 		MasterKey:         os.Getenv("TILLER_MASTER_KEY"),
 		MasterKeyFile:     os.Getenv("TILLER_MASTER_KEY_FILE"),
 	}
+	c.Deprecations = append(c.Deprecations, resolveLegacyCredentials(&c)...)
 	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
@@ -252,18 +266,18 @@ func Load() (Config, error) {
 		c.BackupDir = raw
 	}
 	if c.Mode == ModeLocal {
-		if c.AdminUsername == "" || c.AdminPassword == "" {
-			return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD are required")
+		if c.TillerUser == "" || c.TillerUserPassword == "" {
+			return Config{}, errors.New("TILLER_USERNAME and TILLER_PASSWORD are required")
 		}
 	} else {
-		if c.PlatformUsername == "" || c.PlatformPassword == "" {
+		if c.TillerPlatformAdminUser == "" || c.TillerPlatformAdminPassword == "" {
 			return Config{}, errors.New("TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD are required in hosted mode")
 		}
-		if err := validatePlatformUsername(c.PlatformUsername); err != nil {
+		if err := validatePlatformUsername(c.TillerPlatformAdminUser); err != nil {
 			return Config{}, fmt.Errorf("TILLER_PLATFORM_ADMIN_USERNAME: %w", err)
 		}
-		if (c.AdminUsername == "") != (c.AdminPassword == "") {
-			return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD must be provided together for hosted bootstrap")
+		if (c.TillerUser == "") != (c.TillerUserPassword == "") {
+			return Config{}, errors.New("TILLER_USERNAME and TILLER_PASSWORD must be provided together for hosted bootstrap")
 		}
 	}
 	if err := os.MkdirAll(c.DataDir, 0o700); err != nil {
@@ -296,6 +310,40 @@ func validatePlatformUsername(value string) error {
 		}
 	}
 	return nil
+}
+
+// resolveLegacyCredentials applies the pre-rename TILLER_ADMIN_USERNAME /
+// TILLER_ADMIN_PASSWORD values onto the TILLER_USERNAME / TILLER_PASSWORD
+// fields when the new names are unset, and reports a deprecation for any
+// legacy var that was seen. The new names always win: if both are set the
+// legacy value is ignored and that is reported too, so a half-migrated .env
+// never silently changes which credential the router trusts. It returns the
+// notices to surface at startup and never returns an error, so an existing
+// deployment keeps running through the rename.
+func resolveLegacyCredentials(c *Config) []string {
+	var notices []string
+	type pair struct {
+		name    string
+		value   *string
+		current string
+	}
+	for _, p := range []pair{
+		{"TILLER_ADMIN_USERNAME", &c.TillerUser, c.TillerUser},
+		{"TILLER_ADMIN_PASSWORD", &c.TillerUserPassword, c.TillerUserPassword},
+	} {
+		legacy := os.Getenv(p.name)
+		if legacy == "" {
+			continue
+		}
+		newName := strings.Replace(p.name, "TILLER_ADMIN_", "TILLER_", 1)
+		if p.current == "" {
+			*p.value = legacy
+			notices = append(notices, fmt.Sprintf("%s is deprecated; rename it to %s", p.name, newName))
+		} else {
+			notices = append(notices, fmt.Sprintf("%s is deprecated and was ignored because %s is set; remove %s", p.name, newName, p.name))
+		}
+	}
+	return notices
 }
 
 // validatePublicURL normalizes and validates TILLER_PUBLIC_URL. Only an HTTPS

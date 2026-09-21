@@ -37,7 +37,7 @@ func notificationTestHarness(t *testing.T, failUpstream, okUpstream http.Handler
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
@@ -661,7 +661,7 @@ func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	t.Cleanup(webhook.Close)
 	for key, value := range map[string]string{
 		store.SettingNotificationsEnabled:         "true",

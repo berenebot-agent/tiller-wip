@@ -19,7 +19,7 @@ func newLogWriterServer(t *testing.T) (*Server, *database.DB) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	return app, db
 }
 

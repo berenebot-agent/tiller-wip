@@ -37,7 +37,7 @@ func activityUnavailableHarness(t *testing.T, upstream http.HandlerFunc) (*testA
 	if db.Activity != nil {
 		t.Fatal("test setup: activity handle should be nil")
 	}
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
@@ -143,7 +143,7 @@ func TestHostedScopeNeverFallsBackToLocalAccount(t *testing.T) {
 	defer db.Close()
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hosted, err := New(config.Config{Mode: config.ModeHosted, PlatformUsername: "platform-admin", PlatformPassword: "correct horse", PublicURL: "https://tiller.example.com", DataDir: t.TempDir()}, db, discard)
+	hosted, err := New(config.Config{Mode: config.ModeHosted, TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "correct horse", PublicURL: "https://tiller.example.com", DataDir: t.TempDir()}, db, discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestHostedScopeNeverFallsBackToLocalAccount(t *testing.T) {
 	}
 
 	// Local mode without a principal still resolves to the single local account.
-	local := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	local := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	localReq := httptest.NewRequest(http.MethodGet, "/api/admin/providers", nil)
 	if got := local.scope(localReq).AccountID(); got != database.LocalAccountID {
 		t.Fatalf("local scope account = %q, want local account id", got)

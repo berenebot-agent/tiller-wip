@@ -72,7 +72,7 @@ func oauthVirtualHarness(t *testing.T, failures int) (*testAPI, string, string, 
 	}
 	t.Cleanup(func() { db.Close() })
 
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	app.providers.Registry().SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: oauthServer}})
 
 	router := httptest.NewServer(app.Handler())

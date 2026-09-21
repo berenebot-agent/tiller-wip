@@ -119,7 +119,7 @@ func TestCodexHeaderlessSSEStreamsIncrementally(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 	var logs bytes.Buffer
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	app.logger = slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)

@@ -34,6 +34,14 @@ func main() {
 		os.Exit(1)
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: parseLogLevel(cfg.LogLevel)}))
+	for _, notice := range cfg.Deprecations {
+		// Two channels on purpose: the structured WARN lands in the JSON log
+		// stream even when the operator only grep's for it, while the stderr
+		// banner stays visible at TILLER_LOG_LEVEL=error and during a
+		// `docker compose up` attach where nobody reads the JSON.
+		logger.Warn("deprecated configuration", "detail", notice)
+		fmt.Fprintf(os.Stderr, "WARNING: %s\n", notice)
+	}
 	if err := run(cfg, logger); err != nil {
 		logger.Error("tiller-router stopped", "error", err.Error())
 		os.Exit(1)

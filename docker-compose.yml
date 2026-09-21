@@ -17,6 +17,12 @@ services:
     restart: unless-stopped
 
     environment:
+      # Local operator credential. TILLER_USERNAME / TILLER_PASSWORD are the
+      # current names. The legacy TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD
+      # are still honoured with a startup deprecation warning; the new names
+      # win if both are set. See .env.example.
+      TILLER_USERNAME: ${TILLER_USERNAME:-}
+      TILLER_PASSWORD: ${TILLER_PASSWORD:-}
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:-}
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:-}
 
