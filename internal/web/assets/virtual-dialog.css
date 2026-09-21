@@ -75,6 +75,11 @@
 .attempt-cooldown[data-error-key]:hover .attempt-status { text-decoration: underline; }
 .attempt-neutral[data-error-key]:hover { background: #eef2f5; }
 .attempt-neutral[data-error-key]:hover .attempt-status { text-decoration: underline; }
+.activity-detail-pending { display: inline-block; margin-left: 5px; color: var(--muted); font: 700 11px var(--mono); animation: activity-pending-pulse 1s ease-in-out infinite; }
+@keyframes activity-pending-pulse { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
+.activity-attempts-error { display: inline-block; margin-left: 6px; font-size: 11px; }
+.activity-retry { margin-left: 6px; padding: 0; border: 0; background: none; color: var(--blue); font: 700 11px var(--mono); cursor: pointer; text-decoration: underline; }
+.activity-retry:hover { color: var(--blue-dark); }
 .error-dialog { width: min(560px, calc(100vw - 30px)); }
 .error-dialog > section { display: flex; flex-direction: column; }
 .error-content { padding: 18px 22px 0; }

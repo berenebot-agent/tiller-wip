@@ -1430,8 +1430,181 @@ $('#save-permissions').onclick = async () => {
   finally { button.disabled = false; }
 };
 
-const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true, loading: false, attemptsLoading: new Set() };
+const ACTIVITY_PAGE_SIZE = 20;
+const ATTEMPT_HYDRATE_CONCURRENCY = 4;
+
+function activityNeedsAttempts(row) { return !row.attempts && !row.attemptsError && (row.attempt_rows > 1 || row.error_text || row.fallback_used); }
+
+// activityDetailHTML is the shared "Resolved" cell / card-detail body. The full
+// attempt list is rendered here once row.attempts has been backfilled, so both
+// the table and the mobile card surface stay identical.
+function activityDetailHTML(row, kind) {
+  const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', failure_class: row.error_text, latency_ms: row.latency_ms, http_status: row.http_status, error_message: row.error_message, error_body: row.error_body, error_body_truncated: row.error_body_truncated, request_body: row.request_body, request_body_truncated: row.request_body_truncated, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null;
+  const resolved = row.fallback_used ? '' : fixedAttempt ? (row.attempt_rows > 1 ? '' : `<div class="attempt-sequence">${activityAttemptDetails(fixedAttempt, 0)}</div>`) : '';
+  const sequence = (row.fallback_used || !fixedAttempt || row.attempt_rows > 1) ? attemptSequence(row) : '';
+  const errorHover = [row.error_message, row.latency_ms ? `Latency: ${row.latency_ms} ms` : ''].filter(Boolean).join(' · ');
+  const error = sequence ? '' : (row.error_text ? `<span class="error-text"${errorHover ? ` title="${h(errorHover)}"` : ''}>${h(row.error_text)}</span>` : '');
+  const loadError = row.attemptsError ? `<span class="error-text activity-attempts-error">${h(row.attemptsError)}</span><button type="button" class="activity-retry" data-activity-retry="${h(row.id)}">Retry</button>` : '';
+  const pending = activityNeedsAttempts(row) ? '<span class="activity-detail-pending" aria-hidden="true">…</span>' : '';
+  // The mobile card already shows error_text in its footer, so its detail body
+  // only carries the hydrated attempt sequence (plus load errors / retry).
+  const parts = kind === 'card' ? [sequence] : [resolved, sequence, error];
+  return `${parts.join('')}${loadError}${pending}`;
+}
+function resolvedActivity(row) { return activityDetailHTML(row, 'table'); }
+function activityCardDetail(row) { return activityDetailHTML(row, 'card'); }
+
+// createActivityFeed renders a window of rows immediately, backfills each row's
+// attempt details as it scrolls into view (bounded concurrency), and loads
+// older pages when the scroll container nears its end. No detail fetch blocks
+// the render.
+function createActivityFeed(options) {
+  const state = options.state;
+  state.rows = state.rows || [];
+  state.offset = state.offset || 0;
+  state.limit = state.limit || ACTIVITY_PAGE_SIZE;
+  state.search = state.search || '';
+  if (state.hasMore === undefined) state.hasMore = true;
+  state.loading = false;
+  state.appending = false;
+  state.controller = null;
+  state.hydrating = new Set();
+  state.queued = new Set();
+  state.queue = [];
+  state.active = 0;
+  let rowsIO = null;
+  const scrollHosts = new Set();
+  const feed = { state, reload: () => load(true), setSearch(value) { state.search = value; state.offset = 0; return load(true); }, loadMore, hydrate };
+  const containers = () => (options.containers ? options.containers() : []);
+  function observeRows() {
+    if (rowsIO) rowsIO.disconnect();
+    rowsIO = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        rowsIO.unobserve(entry.target);
+        const row = state.rows.find(item => item.id === entry.target.dataset.activityRow);
+        if (row) hydrate(row);
+      });
+    }, { rootMargin: '120px' });
+    containers().forEach(container => { if (container) $$('[data-activity-row]', container).forEach(el => rowsIO.observe(el)); });
+  }
+  function onScroll(event) {
+    const el = event.currentTarget === window ? document.scrollingElement : event.currentTarget;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 160) return;
+    if (options.scrollGuard && !options.scrollGuard(event.currentTarget)) return;
+    loadMore();
+  }
+  function attachScrollLoading() {
+    (options.scrollHosts ? options.scrollHosts() : []).forEach(host => {
+      if (!host || scrollHosts.has(host)) return;
+      scrollHosts.add(host);
+      host.addEventListener('scroll', onScroll, { passive: true });
+    });
+  }
+  function patch(row) {
+    containers().forEach(container => {
+      if (!container) return;
+      $$('[data-activity-resolved]', container).forEach(el => {
+        if (el.dataset.activityResolved !== row.id) return;
+        el.innerHTML = el.dataset.activityDetailKind === 'card' ? activityCardDetail(row) : resolvedActivity(row);
+      });
+    });
+  }
+  function hydrate(row) {
+    if (!activityNeedsAttempts(row) || state.queued.has(row.id) || state.hydrating.has(row.id)) return;
+    state.queued.add(row.id);
+    state.queue.push(row);
+    pump();
+  }
+  function pump() {
+    while (state.active < ATTEMPT_HYDRATE_CONCURRENCY && state.queue.length) {
+      const row = state.queue.shift();
+      state.queued.delete(row.id);
+      if (row.attempts || state.hydrating.has(row.id)) continue;
+      state.hydrating.add(row.id);
+      state.active += 1;
+      const controller = state.controller;
+      api(`/api/admin/activity/${encodeURIComponent(row.id)}/attempts`, { signal: controller?.signal })
+        .then(result => { row.attempts = result.data || []; delete row.attemptsError; })
+        .catch(error => { if (error.name !== 'AbortError') row.attemptsError = errorMessage(error, 'Could not load attempt details.'); })
+        .finally(() => { state.hydrating.delete(row.id); state.active -= 1; if (controller === state.controller) patch(row); pump(); });
+    }
+  }
+  function loadMore() { if (state.loading || state.appending || !state.hasMore) return; state.appending = true; load(false); }
+  async function load(reset) {
+    if (reset) {
+      state.controller?.abort();
+      state.controller = new AbortController();
+      state.queue.length = 0;
+      state.queued.clear();
+      state.loading = true;
+      state.appending = false;
+      state.offset = 0;
+      state.rows = [];
+      options.render(state);
+      observeRows();
+      options.resetScroll();
+    }
+    const signal = state.controller?.signal;
+    try {
+      const result = await options.fetch(state.offset, state.limit, state.search, signal);
+      const fetched = result.data || [];
+      state.hasMore = fetched.length > state.limit;
+      const page = fetched.slice(0, state.limit);
+      state.rows = reset ? page : state.rows.concat(page);
+      state.offset = state.rows.length;
+      state.loading = false;
+      state.appending = false;
+      options.showError('');
+      if (reset) options.render(state); else options.append(state, page);
+      observeRows();
+      attachScrollLoading();
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      state.loading = false;
+      state.appending = false;
+      if (reset) { state.rows = []; options.render(state); observeRows(); }
+      options.showError(errorMessage(error));
+    }
+  }
+  containers().forEach(container => {
+    if (!container) return;
+    container.addEventListener('click', event => {
+      const button = event.target.closest('[data-activity-retry]');
+      if (!button) return;
+      const row = state.rows.find(item => item.id === button.dataset.activityRetry);
+      if (!row) return;
+      delete row.attemptsError;
+      patch(row);
+      hydrate(row);
+    });
+  });
+  return feed;
+}
+
+function updateActivityCount(state, selector) { $(selector).textContent = state.loading ? 'Loading…' : (state.rows.length ? `1–${state.rows.length}` : '0 results'); }
+function activityTableRow(row, showClient) { return `<tr data-activity-row="${h(row.id)}"><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td data-activity-resolved="${h(row.id)}" data-activity-detail-kind="table">${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`; }
+
+const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
 function resetActivityScroll() { $('.activity-table-shell', $('#activity-dialog')).scrollTop = 0; }
+function activityFeedURL(kind, client, modelID, offset, limit, search) {
+  const base = kind === 'client' ? `/api/admin/client-keys/${client.id}/activity` : kind === 'real' ? `/api/admin/models/${modelID}/activity` : `/api/admin/virtual-models/${modelID}/activity`;
+  return `${base}?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`;
+}
+function renderActivity(state) { errorDetails.clear(); errorDetailSeq = 0; const showClient = !state.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = state.loading || state.rows.length > 0; $('#activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, showClient)).join(''); $('#activity-mobile-body').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, showClient)).join(''); updateActivityCount(state, '#activity-count'); }
+function appendActivity(state, page) { const showClient = !state.client; const table = $('#activity-body'); const cards = $('#activity-mobile-body'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, showClient)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, showClient)); }); $('#activity-empty').hidden = state.rows.length > 0; updateActivityCount(state, '#activity-count'); }
+const activityFeed = createActivityFeed({
+  state: activityState,
+  containers: () => [$('#activity-body'), $('#activity-mobile-body')],
+  scrollHosts: () => [$('#activity-dialog .activity-table-shell'), $('#activity-mobile-body')],
+  resetScroll: resetActivityScroll,
+  showError: message => { $('#activity-error').textContent = message; },
+  fetch: (offset, limit, search, signal) => api(activityFeedURL(activityState.kind, activityState.client, activityState.modelID, offset, limit, search), { signal }),
+  render: renderActivity,
+  append: appendActivity,
+});
+function loadActivity() { if (!activityState.kind) return Promise.resolve(); return activityFeed.reload(); }
 async function openActivity(client) {
   activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = '';
   $('#activity-search').value = '';
@@ -1451,9 +1624,6 @@ async function openActivity(client) {
   await loadActivity();
 }
 async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; document.getElementById('activity-client-info')?.remove(); $('#activity-dialog').showModal(); resetActivityScroll(); await loadActivity(); }
-async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; activityState.loading = true; activityState.attemptsLoading.clear(); renderActivity(); try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); activityState.loading = false; $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; activityState.loading = false; activityState.rows = []; renderActivity(); $('#activity-empty').hidden = true; $('#activity-error').textContent = errorMessage(error); } }
-async function loadActivityAttempts(row) { if (row.attempts || activityState.attemptsLoading.has(row.id)) return; activityState.attemptsLoading.add(row.id); renderActivity(); try { const result = await api(`/api/admin/activity/${row.id}/attempts`, { signal: activityState.controller?.signal }); row.attempts = result.data || []; } catch (error) { if (error.name !== 'AbortError') row.attemptsError = errorMessage(error, 'Could not load attempt details.'); } finally { activityState.attemptsLoading.delete(row.id); renderActivity(); } }
-function activityAttemptsControl(row) { if (!(row.attempt_rows > 1 || row.error_text || row.fallback_used) || row.attempts) return ''; return `<button class="btn btn-small btn-secondary activity-attempts-load" data-activity-attempts="${h(row.id)}"${activityState.attemptsLoading.has(row.id) ? ' disabled' : ''}>${activityState.attemptsLoading.has(row.id) ? 'Loading attempts…' : 'Show attempts'}</button>${row.attemptsError ? `<span class="error-text">${h(row.attemptsError)}</span>` : ''}`; }
 function activityAttemptDetails(attempt, index) {
   const route = `${attempt.provider}/${attempt.model}`;
   const isCooldown = attempt.failure_class === 'cooldown';
@@ -1536,9 +1706,7 @@ document.addEventListener('click', event => { const target = event.target.closes
 $('#copy-error').onclick = async () => { const text = $('#error-body').textContent; const state = $('#error-copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { state.textContent = 'Clipboard copy was denied — select the text and press Ctrl/Cmd+C.'; } };
 $('#close-error').onclick = $('#done-error').onclick = () => { clearCooldownTick(); $('#error-dialog').close(); };
   function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map((attempt, index) => activityAttemptDetails(index === 0 ? { ...attempt, request_body: row.request_body, request_body_truncated: row.request_body_truncated } : attempt, index)).join('')}</div>`; }
- function resolvedActivity(row) { const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', failure_class: row.error_text, latency_ms: row.latency_ms, http_status: row.http_status, error_message: row.error_message, error_body: row.error_body, error_body_truncated: row.error_body_truncated, request_body: row.request_body, request_body_truncated: row.request_body_truncated, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null;   const resolved = row.fallback_used ? '' : fixedAttempt ? (row.attempt_rows > 1 ? '' : `<div class="attempt-sequence">${activityAttemptDetails(fixedAttempt, 0)}</div>`) : '';
-    const sequence = (row.fallback_used || !fixedAttempt || row.attempt_rows > 1) ? attemptSequence(row) : ''; const errorHover = [row.error_message, row.latency_ms ? `Latency: ${row.latency_ms} ms` : ''].filter(Boolean).join(' · '); const error = sequence ? '' : (row.error_text ? `<span class="error-text"${errorHover ? ` title="${h(errorHover)}"` : ''}>${h(row.error_text)}</span>` : ''); return `${resolved}${sequence}${activityAttemptsControl(row)}${error}`; }
-function requestIdentity(row) { const requestedModel = h(row.requested_model); const requestedTitle = h(row.requested_model); if (row.exposed_model && row.exposed_model !== row.requested_model) { return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code><br><span class="meta-line activity-exposed-model" title="${h(row.exposed_model)}">map &gt; ${h(row.exposed_model)}</span>`; } return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code>`; }
+ function requestIdentity(row) { const requestedModel = h(row.requested_model); const requestedTitle = h(row.requested_model); if (row.exposed_model && row.exposed_model !== row.requested_model) { return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code><br><span class="meta-line activity-exposed-model" title="${h(row.exposed_model)}">map &gt; ${h(row.exposed_model)}</span>`; } return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code>`; }
 function activityRequestID(row) { const id = row.client_request_id || ''; const short = id.length > 8 ? `${id.slice(0, 8)}…` : id; const copyable = id && (window.isSecureContext && navigator.clipboard?.writeText); const attrs = copyable ? ` data-copy-request-id="${h(id)}" role="button" tabindex="0" aria-label="Copy request ID ${h(id)}"` : ''; return `<code class="model-id activity-request-id"${attrs} title="${h(id)}">${h(short)}</code>`; }
 async function copyRequestID(button) { const id = button.dataset.copyRequestId; if (!id) return; if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(id); const original = button.textContent; button.classList.add('copied'); button.textContent = 'Copied'; setTimeout(() => { button.classList.remove('copied'); button.textContent = original; }, 1200); } catch { const range = document.createRange(); range.selectNodeContents(button); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); button.title = 'Press Ctrl/Cmd+C to copy'; } }
 document.addEventListener('click', event => { const target = event.target.closest('[data-copy-request-id]'); if (target) copyRequestID(target); });
@@ -1547,15 +1715,9 @@ document.addEventListener('keydown', event => { if (event.key !== 'Enter' && eve
   const status = row.http_status >= 200 && row.http_status < 300 ? 'Succeeded' : `HTTP ${row.http_status || 'error'}`;
   const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
   const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
-   return `<article class="history-card"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div>${activityAttemptsControl(row)}<div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
+   return `<article class="history-card" data-activity-row="${h(row.id)}"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div data-activity-resolved="${h(row.id)}" data-activity-detail-kind="card">${activityCardDetail(row)}</div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
 }
- function renderActivity() { errorDetails.clear(); errorDetailSeq = 0; const showClient = !activityState.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = activityState.loading || activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#activity-mobile-body').innerHTML = activityState.loading ? '<p class="meta-line">Loading activity…</p>' : activityState.rows.map(row => activityHistoryCard(row, showClient)).join(''); $('#activity-count').textContent = activityState.loading ? 'Loading…' : (activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'); $('#activity-prev').disabled = activityState.loading || activityState.offset === 0; $('#activity-next').disabled = activityState.loading || !activityState.hasMore; resetActivityScroll(); }
-const loadAttemptsFromClick = event => { const button = event.target.closest('[data-activity-attempts]'); if (!button) return; const row = activityState.rows.find(item => item.id === button.dataset.activityAttempts); if (row) loadActivityAttempts(row); };
-$('#activity-body').addEventListener('click', loadAttemptsFromClick);
-$('#activity-mobile-body').addEventListener('click', loadAttemptsFromClick);
- filterInput('#activity-search', value => { activityState.search = value; activityState.offset = 0; loadActivity(); });
-$('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activityState.offset - activityState.limit); loadActivity(); };
-$('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
+ filterInput('#activity-search', value => { activityFeed.setSearch(value); });
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
 $('#export-activity').onclick = () => $('#export-dialog').showModal();
 $('#clear-activity').onclick = async () => {
@@ -1575,41 +1737,57 @@ $$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick
 
 // Global activity is a read-only section in the Settings view, distinct from
 // the per-client Activity dialog. It shows metadata across all client keys and
-// renders rows through the same helpers as the dialog (resolvedActivity(),
-// requestIdentity(), rowCache(), lazy attempt fetches) so fallbacks appear
-// identically — the extra Client column is the only difference.
-const globalActivityState = { rows: [], offset: 0, limit: 50, search: '', hasMore: true };
-async function loadGlobalActivity() { globalActivityState.controller?.abort(); globalActivityState.controller = new AbortController(); const { signal } = globalActivityState.controller; try { const result = await api(`/api/admin/activity?limit=${globalActivityState.limit + 1}&offset=${globalActivityState.offset}&search=${encodeURIComponent(globalActivityState.search || '')}`, { signal }); const fetched = result.data; globalActivityState.hasMore = fetched.length > globalActivityState.limit; globalActivityState.rows = fetched.slice(0, globalActivityState.limit); await Promise.all(globalActivityState.rows.filter(row => row.attempt_rows > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#global-activity-error').textContent = ''; renderGlobalActivity(); } catch (error) { if (error.name === 'AbortError') return; globalActivityState.rows = []; renderGlobalActivity(); $('#global-activity-empty').hidden = true; $('#global-activity-empty-mobile').hidden = true; $('#global-activity-error').textContent = errorMessage(error); } }
-function renderGlobalActivity() { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-empty-mobile').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong class="client-name">${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#global-activity-cards').innerHTML = globalActivityState.rows.map(row => activityHistoryCard(row, true)).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
-filterInput('#global-activity-search', value => { globalActivityState.search = value; globalActivityState.offset = 0; loadGlobalActivity(); });
-$('#global-activity-prev').onclick = () => { globalActivityState.offset = Math.max(0, globalActivityState.offset - globalActivityState.limit); loadGlobalActivity(); };
-$('#global-activity-next').onclick = () => { globalActivityState.offset += globalActivityState.limit; loadGlobalActivity(); };
+// renders rows through the same helpers as the dialog (activityTableRow(),
+// resolvedActivity(), requestIdentity(), rowCache(), background attempt
+// hydration) so fallbacks appear identically — the extra Client column is the
+// only difference.
+const globalActivityState = { rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
+function renderGlobalActivity(state) { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = state.loading || state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.loading || state.rows.length > 0; $('#global-activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, true)).join(''); $('#global-activity-cards').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, true)).join(''); updateActivityCount(state, '#global-activity-count'); }
+function appendGlobalActivity(state, page) { const table = $('#global-activity-body'); const cards = $('#global-activity-cards'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, true)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, true)); }); $('#global-activity-empty').hidden = state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.rows.length > 0; updateActivityCount(state, '#global-activity-count'); }
+const globalActivityFeed = createActivityFeed({
+  state: globalActivityState,
+  containers: () => [$('#global-activity-body'), $('#global-activity-cards')],
+  scrollHosts: () => [$('#global-activity-body').closest('.activity-table-shell'), window],
+  scrollGuard: host => {
+    const shell = $('#global-activity-body').closest('.activity-table-shell');
+    const shellVisible = !!shell && shell.clientHeight > 0;
+    return host === window ? !shellVisible : shellVisible;
+  },
+  resetScroll: () => { const shell = $('#global-activity-body').closest('.activity-table-shell'); if (shell) shell.scrollTop = 0; },
+  showError: message => { $('#global-activity-error').textContent = message; },
+  fetch: (offset, limit, search, signal) => api(`/api/admin/activity?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`, { signal }),
+  render: renderGlobalActivity,
+  append: appendGlobalActivity,
+});
+function loadGlobalActivity() { return globalActivityFeed.reload(); }
+filterInput('#global-activity-search', value => { globalActivityFeed.setSearch(value); });
 
-const mobileHistoryState = { rows: [], offset: 0, limit: 25, search: '', hasMore: true };
-async function loadMobileHistory() {
-  mobileHistoryState.controller?.abort();
-  mobileHistoryState.controller = new AbortController();
-  const { signal } = mobileHistoryState.controller;
-  try {
-    const result = await api(`/api/admin/activity?limit=${mobileHistoryState.limit + 1}&offset=${mobileHistoryState.offset}&search=${encodeURIComponent(mobileHistoryState.search || '')}`, { signal });
-    const fetched = result.data || [];
-    mobileHistoryState.hasMore = fetched.length > mobileHistoryState.limit;
-    mobileHistoryState.rows = fetched.slice(0, mobileHistoryState.limit);
-    $('#mobile-history-body').innerHTML = mobileHistoryState.rows.map(row => activityHistoryCard(row, true)).join('');
-    $('#mobile-history-empty').hidden = mobileHistoryState.rows.length > 0;
-    $('#mobile-history-count').textContent = mobileHistoryState.rows.length ? `${mobileHistoryState.offset + 1}–${mobileHistoryState.offset + mobileHistoryState.rows.length}` : '0 results';
-    $('#mobile-history-prev').disabled = mobileHistoryState.offset === 0;
-    $('#mobile-history-next').disabled = !mobileHistoryState.hasMore;
-    $('#mobile-history-error').textContent = '';
-  } catch (error) {
-    if (error.name !== 'AbortError') $('#mobile-history-error').textContent = errorMessage(error);
-  }
+const mobileHistoryState = { rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
+function renderMobileHistory(state) {
+  $('#mobile-history-body').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, true)).join('');
+  $('#mobile-history-empty').hidden = state.loading || state.rows.length > 0;
+  updateActivityCount(state, '#mobile-history-count');
 }
-$('#open-mobile-history').onclick = () => { mobileHistoryState.offset = 0; mobileHistoryState.search = ''; $('#mobile-history-search').value = ''; loadMobileHistory(); $('#mobile-history-dialog').showModal(); };
+function appendMobileHistory(state, page) {
+  const list = $('#mobile-history-body');
+  page.forEach(row => list.insertAdjacentHTML('beforeend', activityHistoryCard(row, true)));
+  $('#mobile-history-empty').hidden = state.rows.length > 0;
+  updateActivityCount(state, '#mobile-history-count');
+}
+const mobileHistoryFeed = createActivityFeed({
+  state: mobileHistoryState,
+  containers: () => [$('#mobile-history-body')],
+  scrollHosts: () => [$('#mobile-history-body')],
+  resetScroll: () => { $('#mobile-history-body').scrollTop = 0; },
+  showError: message => { $('#mobile-history-error').textContent = message; },
+  fetch: (offset, limit, search, signal) => api(`/api/admin/activity?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`, { signal }),
+  render: renderMobileHistory,
+  append: appendMobileHistory,
+});
+function loadMobileHistory() { return mobileHistoryFeed.reload(); }
+$('#open-mobile-history').onclick = () => { mobileHistoryState.search = ''; $('#mobile-history-search').value = ''; loadMobileHistory(); $('#mobile-history-dialog').showModal(); };
 $('#close-mobile-history').onclick = $('#done-mobile-history').onclick = () => $('#mobile-history-dialog').close();
-filterInput('#mobile-history-search', value => { mobileHistoryState.search = value; mobileHistoryState.offset = 0; loadMobileHistory(); });
-$('#mobile-history-prev').onclick = () => { mobileHistoryState.offset = Math.max(0, mobileHistoryState.offset - mobileHistoryState.limit); loadMobileHistory(); };
-$('#mobile-history-next').onclick = () => { mobileHistoryState.offset += mobileHistoryState.limit; loadMobileHistory(); };
+filterInput('#mobile-history-search', value => { mobileHistoryFeed.setSearch(value); });
 
 let authHeaderDirty = false;
 let authHeaderClear = false;

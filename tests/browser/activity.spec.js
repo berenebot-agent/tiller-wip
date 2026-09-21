@@ -101,9 +101,9 @@ test('activity records real inference: success, upstream failure, and ordered fa
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(3);
 
-  // Opening a client Activity dialog must not eagerly fan out into one
-  // attempts request per row. Attempt details are fetched only after the
-  // operator explicitly asks for them.
+  // Opening a client Activity dialog renders the newest window immediately and
+  // backfills attempt details as rows scroll into view. There is no "Show
+  // attempts" button, and hydration must happen without any click.
   let attemptRequests = 0;
   await page.route('**/api/admin/activity/*/attempts', async route => {
     attemptRequests += 1;
@@ -115,17 +115,15 @@ test('activity records real inference: success, upstream failure, and ordered fa
   await clientRow.locator('[data-client-activity]').click();
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await expect(page.locator('#activity-body tr')).toHaveCount(3);
-  await expect(page.locator('#activity-body .activity-attempts-load').first()).toBeVisible();
-  expect(attemptRequests).toBe(0);
-  await page.locator('#activity-body .activity-attempts-load').first().click();
-  await expect.poll(() => attemptRequests).toBe(1);
-  await expect(page.locator('#activity-body .attempt-sequence').first()).toBeVisible();
+  await expect(page.locator('#activity-body .activity-attempts-load')).toHaveCount(0);
+  await expect.poll(() => attemptRequests).toBeGreaterThan(0);
+  await expect(page.locator('#activity-body .attempt-failed').first()).toBeVisible();
 });
 
 // Data-volume: 55 rows seeded directly (28 client-one + 27 client-two) exercise
 // the same global-activity pagination/search surface the test used to reach
 // with 55 real proxy calls.
-test('global activity renders across clients, searches, and pages', async ({ page }) => {
+test('global activity renders across clients, searches, and loads older rows on scroll', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openAdmin(page);
   const csrf = await adminCsrf(page);
@@ -136,29 +134,29 @@ test('global activity renders across clients, searches, and pages', async ({ pag
   const client2 = await createClient(page, csrf, client2Name);
   seedActivity(client1.id, 28);
   seedActivity(client2.id, 27);
+  const scrollGlobalToBottom = async () => { await page.locator('.global-activity-table-shell').scrollIntoViewIfNeeded(); await page.locator('.global-activity-table-shell').evaluate(el => { el.scrollTop = el.scrollHeight; }); };
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
   await page.locator('[data-settings-tab="data"]').click();
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
-  await expect(page.locator('#global-activity-count')).toHaveText('1–50');
-  await expect(page.locator('#global-activity-prev')).toBeDisabled();
-  await expect(page.locator('#global-activity-next')).toBeEnabled();
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(20);
+  await expect(page.locator('#global-activity-count')).toHaveText('1–20');
+  await scrollGlobalToBottom();
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(40);
+  await expect(page.locator('#global-activity-count')).toHaveText('1–40');
+  await scrollGlobalToBottom();
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(55);
+  await expect(page.locator('#global-activity-count')).toHaveText('1–55');
   await page.locator('#global-activity-search').fill(client2Name);
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(27);
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(20);
   await expect(page.locator('#global-activity-empty')).toBeHidden();
+  await scrollGlobalToBottom();
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(27);
   await page.locator('#global-activity-search').fill('zzz-no-match');
   await expect(page.locator('#global-activity-empty')).toBeVisible();
   await page.locator('#global-activity-search').fill('');
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
-  await page.locator('#global-activity-next').click();
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(5);
-  await expect(page.locator('#global-activity-count')).toHaveText('51–55');
-  await expect(page.locator('#global-activity-prev')).toBeEnabled();
-  await expect(page.locator('#global-activity-next')).toBeDisabled();
-  await page.locator('#global-activity-prev').click();
-  await expect(page.locator('#global-activity-body tr')).toHaveCount(50);
-  await expect(page.locator('#global-activity-count')).toHaveText('1–50');
+  await expect(page.locator('#global-activity-body tr')).toHaveCount(20);
+  await expect(page.locator('#global-activity-count')).toHaveText('1–20');
 });
 
 // Data-volume + destructive: exactly 50 seeded rows hit the exact-page boundary
@@ -179,8 +177,6 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await expect(page.locator('#activity-empty')).toBeVisible();
   await expect(page.locator('#activity-count')).not.toHaveText('1–0');
   await expect(page.locator('#activity-count')).toHaveText('0 results');
-  await expect(page.locator('#activity-prev')).toBeDisabled();
-  await expect(page.locator('#activity-next')).toBeDisabled();
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
   await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
@@ -190,7 +186,6 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await expect(page.locator('#global-activity-empty')).toBeVisible();
   await expect(page.locator('#global-activity-count')).not.toHaveText('1–0');
   await expect(page.locator('#global-activity-count')).toHaveText('0 results');
-  await expect(page.locator('#global-activity-next')).toBeDisabled();
   await page.locator('#global-activity-search').fill('');
   seedActivity(clientB.id, 50);
   await page.getByRole('link', { name: 'Clients' }).click();
@@ -199,10 +194,13 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await clientBRow.getByRole('button', { name: 'Activity' }).click();
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await expect(page.locator('#activity-empty')).toBeHidden();
+  await expect(page.locator('#activity-body tr')).toHaveCount(20);
+  await expect(page.locator('#activity-count')).toHaveText('1–20');
+  await page.locator('#activity-dialog .activity-table-shell').evaluate(el => { el.scrollTop = el.scrollHeight; });
+  await expect(page.locator('#activity-body tr')).toHaveCount(40);
+  await page.locator('#activity-dialog .activity-table-shell').evaluate(el => { el.scrollTop = el.scrollHeight; });
   await expect(page.locator('#activity-body tr')).toHaveCount(50);
   await expect(page.locator('#activity-count')).toHaveText('1–50');
-  await expect(page.locator('#activity-next')).toBeDisabled();
-  await expect(page.locator('#activity-prev')).toBeDisabled();
   await page.getByRole('button', { name: 'Clear activity' }).click();
   await expect(page.locator('#confirm-dialog')).toBeVisible();
   await expect(page.locator('#confirm-copy')).toContainText('permanently deleted');
