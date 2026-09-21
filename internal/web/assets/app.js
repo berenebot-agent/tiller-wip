@@ -142,13 +142,13 @@ function deferUsage() {
   loadUsage().then(() => reconcileLive()).catch(() => {});
 }
 function authView(name) {
-  ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form','legal-panel'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
 }
 function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
-function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#app').hidden = false; liveStart(); navigate(state.view); }
+function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
 
@@ -175,7 +175,7 @@ $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
 $('#show-login-from-signup').onclick = () => authView('login-form');
 $('#show-login-from-forgot').onclick = () => authView('login-form');
-$('#signup-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const result = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password') }) }); $('#signup-error').textContent = result.message || 'Check your email.'; exposeResend('#resend-signup-verification', '#signup-form [name="email"]', '#signup-error'); } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } });
+$('#signup-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; } try { const result = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true }) }); $('#signup-error').textContent = result.message || 'Check your email.'; exposeResend('#resend-signup-verification', '#signup-form [name="email"]', '#signup-error'); } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } });
 $('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email') }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } });
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-login').onclick = () => authView('login-form');
@@ -1599,7 +1599,7 @@ $('#settings-tab-account').hidden = runtimeMode !== 'hosted';
 async function loadAccount() {
   if (runtimeMode !== 'hosted') return;
   try {
-    const [profile, usage] = await Promise.all([api('/api/auth/account'), api('/api/admin/usage')]);
+    const [profile, usage, plan] = await Promise.all([api('/api/auth/account'), api('/api/admin/usage'), api('/api/auth/account/plan')]);
     $('#account-email').textContent = profile.email;
     $('#account-id').textContent = profile.account_id;
     $('#account-plan').textContent = profile.plan;
@@ -1609,10 +1609,117 @@ async function loadAccount() {
     const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
+    renderPlanCard(plan);
   } catch (error) {
     flash(errorMessage(error, 'Could not load account details.'), 'error');
   }
 }
+
+// renderPlanCard shows the plan caps and current consumption. A cap of -1 is
+// rendered as "Unlimited" rather than a number.
+function renderPlanCard(plan) {
+  const el = $('#account-plan-card'); if (!el) return;
+  const fmt = value => (value === -1 ? 'Unlimited' : String(value));
+  const usage = plan.usage || {}; const limits = plan.limits || {};
+  const row = (label, used, cap) => `<div class="plan-row"><span class="plan-label">${h(label)}</span><span class="plan-value${cap !== -1 && used >= cap ? ' plan-full' : ''}">${h(used)} / ${h(fmt(cap))}</span></div>`;
+  el.innerHTML = [
+    row('Providers', usage.providers ?? 0, limits.max_providers ?? -1),
+    row('Client keys', usage.client_keys ?? 0, limits.max_client_keys ?? -1),
+    row('Virtual models', usage.virtual_models ?? 0, limits.max_virtual_models ?? -1),
+    row('Concurrent streams', '—', limits.max_concurrent_streams ?? -1),
+    row('Monthly requests', usage.monthly_requests ?? 0, limits.monthly_requests ?? -1),
+    `<div class="plan-row"><span class="plan-label">Activity retention</span><span class="plan-value">${h(fmt(limits.activity_retention_days ?? -1))} days</span></div>`,
+  ].join('');
+}
+
+// loadFooterVersion shows the deployed version/commit with an AGPL source link.
+async function loadFooterVersion() {
+  try {
+    const info = await fetch('/health/version').then(res => res.json());
+    const commit = info.commit || ''; const version = info.version || '';
+    const label = [version, commit].filter(Boolean).join(' · ') || 'development build';
+    const url = commit ? `https://github.com/dellarb/tiller-router/commit/${encodeURIComponent(commit)}` : 'https://github.com/dellarb/tiller-router';
+    $('#footer-source').innerHTML = `${h(label)} — <a href="${h(url)}" target="_blank" rel="noopener">source</a>`;
+  } catch { /* footer is best-effort */ }
+}
+
+// showLegalDocument renders a published legal document. Bodies are plain text
+// (no rich rendering), so they are inserted as textContent with preserved
+// whitespace to avoid any injection path.
+async function showLegalDocument(slug) {
+  $('#login-shell').hidden = false; $('#app').hidden = true; $('#platform-shell').hidden = true;
+  authView('legal-panel');
+  const body = $('#legal-body');
+  body.textContent = 'Loading…';
+  try {
+    const doc = await api(`/api/legal/${encodeURIComponent(slug)}`);
+    $('#legal-title').textContent = doc.title;
+    $('#legal-updated').textContent = doc.updated_at ? `Last updated ${date(doc.updated_at)}` : '';
+    body.textContent = doc.body;
+  } catch (error) {
+    $('#legal-title').textContent = 'Not found';
+    body.textContent = errorMessage(error, 'This document is not available.');
+  }
+}
+
+// refreshWizardButton shows/hides the top-bar Get started button based on
+// whether onboarding is still outstanding, and auto-opens the wizard on the
+// first hosted login when setup is incomplete.
+async function refreshWizardButton(autoOpen = false) {
+  if (runtimeMode !== 'hosted') { $('#open-wizard').hidden = true; return; }
+  try {
+    const status = await api('/api/auth/onboarding');
+    const show = Boolean(status.needs_onboarding);
+    $('#open-wizard').hidden = !show;
+    if (show && autoOpen) openWizard();
+  } catch { $('#open-wizard').hidden = true; }
+}
+
+const WIZARD_STEPS = ['Provider', 'Target', 'Client key', 'Connect'];
+let wizardStep = 0;
+const wizardState = { clientKey: '', modelName: '' };
+
+function openWizard() {
+  wizardStep = 0;
+  renderWizard();
+  const dialog = $('#wizard-dialog'); if (dialog && !dialog.open) dialog.showModal();
+}
+
+function renderWizard() {
+  const steps = $('#wizard-steps');
+  if (steps) steps.innerHTML = WIZARD_STEPS.map((label, index) => `<span class="wizard-step${index === wizardStep ? ' active' : ''}${index < wizardStep ? ' done' : ''}">${h(label)}</span>`).join('');
+  const body = $('#wizard-body'); if (!body) return;
+  $('#wizard-prev').disabled = wizardStep === 0;
+  $('#wizard-next').textContent = wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Continue';
+  if (wizardStep === 0) {
+    body.innerHTML = `<h3>Connect a provider</h3><p>Add the AI provider you want Tiller to route to. Your credential is encrypted at rest and never shown again.</p><button class="btn btn-primary" id="wizard-add-provider" type="button">Add provider</button><p class="meta-line">${state.providers.length ? h(state.providers.length + ' provider(s) configured.') : 'No providers configured yet.'}</p>`;
+    const button = $('#wizard-add-provider'); if (button) button.onclick = () => openProvider();
+  } else if (wizardStep === 1) {
+    body.innerHTML = `<h3>Choose a target</h3><p>Point the client at a real model, or create a virtual route to map a stable name and add fallbacks.</p><div class="wizard-actions"><button class="btn btn-secondary" id="wizard-add-virtual" type="button">Create virtual route (optional)</button></div><p class="meta-line">You can skip this and use a real model directly.</p>`;
+    const button = $('#wizard-add-virtual'); if (button) button.onclick = () => openVirtualModel();
+  } else if (wizardStep === 2) {
+    body.innerHTML = `<h3>Create a client key</h3><p>A client key is the API key your tools use. Tiller shows the secret once.</p><button class="btn btn-primary" id="wizard-add-client" type="button">Create client key</button>`;
+    const button = $('#wizard-add-client'); if (button) button.onclick = () => openClient();
+  } else {
+    const base = location.origin + '/v1';
+    const snippet = `curl ${base}/chat/completions -H "Authorization: Bearer $TILLER_API_KEY" -H "Content-Type: application/json" -d '{"model":"${wizardState.modelName || 'main'}","messages":[{"role":"user","content":"Hello"}]}'`;
+    body.innerHTML = `<h3>Point your tool at Tiller</h3><p>Use this endpoint and your client key (model name: <code>${h(wizardState.modelName || 'main')}</code>).</p><div class="secret-box"><code>${h(snippet)}</code><button class="btn btn-secondary" id="wizard-copy" type="button">Copy</button></div><p class="meta-line">Setup completes automatically when your first request routes successfully.</p>`;
+    const button = $('#wizard-copy'); if (button) button.onclick = () => navigator.clipboard?.writeText(snippet);
+  }
+}
+$('#wizard-prev').addEventListener('click', () => { if (wizardStep > 0) { wizardStep--; renderWizard(); } });
+$('#wizard-next').addEventListener('click', async () => {
+  if (wizardStep < WIZARD_STEPS.length - 1) { wizardStep++; renderWizard(); return; }
+  $('#wizard-dialog').close();
+  await refreshWizardButton(false);
+});
+$('#wizard-dismiss').addEventListener('click', async () => {
+  try { await api('/api/auth/onboarding/dismiss', { method: 'POST', body: '{}' }); } catch { /* best-effort */ }
+  $('#wizard-dialog').close(); $('#open-wizard').hidden = true;
+});
+$('#close-wizard').addEventListener('click', () => $('#wizard-dialog').close());
+$('#open-wizard').addEventListener('click', openWizard);
+$('#legal-back').addEventListener('click', () => { history.replaceState(null, '', '/login'); showLogin(); });
 
 $('#account-password-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-password-error').textContent = '';
@@ -1628,6 +1735,17 @@ $('#account-revoke-sessions').addEventListener('click', async () => {
   const button = $('#account-revoke-sessions'); button.disabled = true; $('#account-sessions-error').textContent = '';
   try { await api('/api/auth/account/sessions/revoke-all', { method: 'POST', body: '{}' }); showLogin(); }
   catch (error) { $('#account-sessions-error').textContent = errorMessage(error, 'Could not sign out sessions.'); button.disabled = false; }
+});
+$('#account-export').addEventListener('click', async event => {
+  event.preventDefault(); $('#account-export-error').textContent = '';
+  try {
+    const response = await fetch('/api/auth/account/export', { credentials: 'same-origin' });
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(payload?.error?.message || `Export failed (${response.status})`); }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob); const link = document.createElement('a');
+    link.href = url; link.download = `tiller-account-export-${new Date().toISOString().slice(0, 10)}.zip`;
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+  } catch (error) { $('#account-export-error').textContent = errorMessage(error, 'Could not export your data.'); }
 });
 $('#account-delete-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-delete-error').textContent = '';
@@ -2145,7 +2263,7 @@ function liveStop() { live.stop(); }
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
-      try { await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; history.replaceState(null, '', '/login'); } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; $('#resend-verification').hidden = false; $('#resend-verification').onclick = async () => { try { await resendVerification($('#verify-email').value, '#verify-error'); } catch (resendError) { showAuthError('verify-error', resendError, 'Could not resend verification email.'); } }; }
+      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; $('#resend-verification').hidden = false; $('#resend-verification').onclick = async () => { try { await resendVerification($('#verify-email').value, '#verify-error'); } catch (resendError) { showAuthError('verify-error', resendError, 'Could not resend verification email.'); } }; }
       return;
     }
     if (runtimeMode === 'hosted' && path === '/reset-password' && token) authView('reset-form');
@@ -2160,6 +2278,10 @@ function liveStop() { live.stop(); }
         $('#verify-message').textContent = '';
         showAuthError('verify-error', error, 'This email-change link is invalid or expired.');
       }
+      return;
+    }
+    else if (runtimeMode === 'hosted' && path.startsWith('/legal/')) {
+      await showLegalDocument(path.slice('/legal/'.length));
       return;
     }
     else {
@@ -2191,7 +2313,7 @@ async function loadPlatformDashboard() {
   const users = await api(`/api/platform/users?${params}`);
   if (token !== state.platformUsersLoadToken) return;
   const userRows = users.data || [];
-  $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
+  $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<button class="btn btn-small btn-secondary" data-account-plan="${h(user.account_id)}" data-current-plan="${h(user.plan)}">Plan</button><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
   $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
   $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
   $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || userRows.length < 100;
@@ -2205,7 +2327,48 @@ async function loadPlatformDashboard() {
   } catch (error) {
     $('#platform-mail-error').textContent = errorMessage(error, 'Could not load the mail queue.');
   }
+  await loadPlatformPlans();
+  await loadPlatformLegal();
 }
+
+// loadPlatformPlans renders the entitlements catalogue as editable rows.
+async function loadPlatformPlans() {
+  const list = $('#platform-plans-list'); if (!list) return;
+  try {
+    const result = await api('/api/platform/plans');
+    const fields = [['max_providers', 'Providers'], ['max_client_keys', 'Client keys'], ['max_virtual_models', 'Virtual models'], ['max_concurrent_streams', 'Streams'], ['activity_retention_days', 'Retention days'], ['monthly_requests', 'Monthly requests']];
+    list.innerHTML = (result.data || []).map(plan => `<form class="platform-plan-form" data-plan="${h(plan.name)}"><strong>${h(plan.name)}</strong><div class="platform-plan-fields">${fields.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${h(plan[key])}"></label>`).join('')}</div><button class="btn btn-small btn-secondary" type="submit">Save</button></form>`).join('') || '<p class="meta-line">No plans.</p>';
+    $('#platform-plans-error').textContent = '';
+  } catch (error) {
+    $('#platform-plans-error').textContent = errorMessage(error, 'Could not load plans.');
+  }
+}
+
+// loadPlatformLegal renders the editable legal documents.
+async function loadPlatformLegal() {
+  const list = $('#platform-legal-list'); if (!list) return;
+  try {
+    const result = await api('/api/platform/legal');
+    list.innerHTML = (result.data || []).map(doc => `<form class="platform-legal-form" data-slug="${h(doc.slug)}"><strong>${h(doc.title)}</strong><label>Title<input type="text" name="title" value="${h(doc.title)}"></label><label>Body<textarea name="body" rows="8">${h(doc.body)}</textarea></label><button class="btn btn-small btn-secondary" type="submit">Publish</button></form>`).join('') || '<p class="meta-line">No documents.</p>';
+    $('#platform-legal-error').textContent = '';
+  } catch (error) {
+    $('#platform-legal-error').textContent = errorMessage(error, 'Could not load legal documents.');
+  }
+}
+
+$('#platform-plans-list').addEventListener('submit', async event => {
+  const form = event.target.closest('.platform-plan-form'); if (!form) return;
+  event.preventDefault(); const data = new FormData(form);
+  const payload = { max_providers: Number(data.get('max_providers')), max_client_keys: Number(data.get('max_client_keys')), max_virtual_models: Number(data.get('max_virtual_models')), max_concurrent_streams: Number(data.get('max_concurrent_streams')), activity_retention_days: Number(data.get('activity_retention_days')), monthly_requests: Number(data.get('monthly_requests')) };
+  try { await api(`/api/platform/plans/${encodeURIComponent(form.dataset.plan)}`, { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-plans-error').textContent = 'Saved.'; $('#platform-plans-error').style.color = 'var(--green)'; }
+  catch (error) { $('#platform-plans-error').style.color = ''; $('#platform-plans-error').textContent = errorMessage(error, 'Could not save the plan.'); }
+});
+$('#platform-legal-list').addEventListener('submit', async event => {
+  const form = event.target.closest('.platform-legal-form'); if (!form) return;
+  event.preventDefault(); const data = new FormData(form);
+  try { await api(`/api/platform/legal/${encodeURIComponent(form.dataset.slug)}`, { method: 'PUT', body: JSON.stringify({ title: data.get('title'), body: data.get('body') }) }); $('#platform-legal-error').textContent = 'Published.'; $('#platform-legal-error').style.color = 'var(--green)'; }
+  catch (error) { $('#platform-legal-error').style.color = ''; $('#platform-legal-error').textContent = errorMessage(error, 'Could not publish the document.'); }
+});
 function applyMailProviderVisibility(provider) {
   document.querySelectorAll('#platform-settings-form [data-mail-when]').forEach(el => {
     el.hidden = provider === '' || (el.dataset.mailWhen !== 'any' && el.dataset.mailWhen !== provider);
@@ -2213,7 +2376,7 @@ function applyMailProviderVisibility(provider) {
 }
 document.querySelector('#platform-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
 $('#platform-settings-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on', audit_retention_days: Number(form.get('audit_retention_days')), mail_provider: form.get('mail_provider'), mail_from: form.get('mail_from'), mail_smtp_host: form.get('mail_smtp_host'), mail_smtp_port: Number(form.get('mail_smtp_port')) || 0, mail_smtp_mode: form.get('mail_smtp_mode'), mail_smtp_username: form.get('mail_smtp_username') }; const resendKey = String(form.get('mail_resend_api_key') || ''); const brevoKey = String(form.get('mail_brevo_api_key') || ''); const smtpPassword = String(form.get('mail_smtp_password') || ''); if (resendKey) payload.mail_resend_api_key = resendKey; if (brevoKey) payload.mail_brevo_api_key = brevoKey; if (smtpPassword) payload.mail_smtp_password = smtpPassword; try { await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-settings-error').textContent = 'Saved.'; $('#platform-settings-error').style.color = 'var(--green)'; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-settings-error', error, 'Could not save platform settings.'); } });
-$('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
+$('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); const planButton = event.target.closest('[data-account-plan]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } if (planButton) { const accountID = planButton.dataset.accountPlan; const plan = window.prompt('Plan name for this account:', planButton.dataset.currentPlan || 'free'); if (plan) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
   $('#platform-users-prev').onclick = () => { state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100); loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
 $('#platform-users-next').onclick = () => { state.platformUsersOffset += 100; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
 filterInput('#platform-user-search', value => { state.platformUsersSearch = value.trim(); state.platformUsersOffset = 0; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); });

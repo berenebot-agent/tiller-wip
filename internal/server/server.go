@@ -402,6 +402,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health/live", s.liveHealth)
 	mux.HandleFunc("GET /health/ready", s.ready)
 	mux.HandleFunc("GET /health/version", s.versionHealth)
+	mux.HandleFunc("GET /security.txt", s.handleSecurityTxt)
+	mux.HandleFunc("GET /.well-known/security.txt", s.handleSecurityTxt)
 	if s.config.Mode == config.ModeHosted {
 		mux.HandleFunc("POST /api/auth/signup", s.signup)
 		mux.HandleFunc("POST /api/auth/login", s.userLogin)
