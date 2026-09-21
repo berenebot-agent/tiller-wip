@@ -100,6 +100,26 @@ test('activity records real inference: success, upstream failure, and ordered fa
   await expect(page.locator('#view-settings')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
   await expect(page.locator('#global-activity-body tr')).toHaveCount(3);
+
+  // Opening a client Activity dialog must not eagerly fan out into one
+  // attempts request per row. Attempt details are fetched only after the
+  // operator explicitly asks for them.
+  let attemptRequests = 0;
+  await page.route('**/api/admin/activity/*/attempts', async route => {
+    attemptRequests += 1;
+    await route.continue();
+  });
+  await page.getByRole('link', { name: 'Clients' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: client.name });
+  await expect(clientRow).toBeVisible();
+  await clientRow.locator('[data-client-activity]').click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+  await expect(page.locator('#activity-body tr')).toHaveCount(3);
+  await expect(page.locator('#activity-body .activity-attempts-load').first()).toBeVisible();
+  expect(attemptRequests).toBe(0);
+  await page.locator('#activity-body .activity-attempts-load').first().click();
+  await expect.poll(() => attemptRequests).toBe(1);
+  await expect(page.locator('#activity-body .attempt-sequence').first()).toBeVisible();
 });
 
 // Data-volume: 55 rows seeded directly (28 client-one + 27 client-two) exercise
