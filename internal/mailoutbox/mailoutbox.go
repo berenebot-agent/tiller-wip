@@ -142,7 +142,13 @@ func (o *Outbox) open(rowID, stored string) (string, error) {
 	if stored == "" {
 		return "", nil
 	}
-	if o.cipher == nil || !o.cipher.Enabled() {
+	if o.cipher == nil {
+		return stored, nil
+	}
+	if o.cipher.Locked() {
+		return "", crypto.ErrLocked
+	}
+	if !o.cipher.Enabled() {
 		return stored, nil
 	}
 	return o.cipher.Decrypt(aad(rowID), stored)

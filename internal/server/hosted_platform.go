@@ -306,12 +306,12 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "confirmation_required", "Type the account ID to confirm deletion.")
 		return
 	}
-	if err := s.identity.SetAccountStatus(r.Context(), accountID, "deleting"); err != nil {
-		adminError(w, http.StatusNotFound, "not_found", "Account not found.")
-		return
-	}
 	if err := s.purgeAccount(r.Context(), accountID); err != nil {
-		adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account.")
+		if errors.Is(err, identity.ErrNotFound) {
+			adminError(w, http.StatusNotFound, "not_found", "Account not found.")
+		} else {
+			adminError(w, http.StatusInternalServerError, "delete_failed", "Could not delete account.")
+		}
 		return
 	}
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_deleted", ActorType: "platform", TargetType: "account", TargetID: accountID})

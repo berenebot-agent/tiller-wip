@@ -129,15 +129,6 @@ func (w *logWriter) run(ctx context.Context) {
 			if err := w.scopeFor(account).InsertRequestLogs(context.Background(), rows); err != nil && w.logger != nil {
 				w.logger.Warn("activity batch write failed", "error_class", fmt.Sprintf("%T", err))
 			}
-			// One monthly-counter increment per routed inference request: each
-			// row in the batch is one request log insert. Best-effort and
-			// account-scoped; a failure under-counts slightly rather than
-			// blocking. Rejected (over-quota) requests never reach this writer.
-			for range rows {
-				if err := w.scopeFor(account).IncrementUsageCounter(context.Background(), store.UsagePeriod(time.Now())); err != nil && w.logger != nil {
-					w.logger.Warn("usage counter increment failed", "error_class", fmt.Sprintf("%T", err))
-				}
-			}
 			delete(pending, account)
 		}
 		total = 0

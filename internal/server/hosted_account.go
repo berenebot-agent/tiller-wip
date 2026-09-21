@@ -176,11 +176,15 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"message": genericAccountDeleted})
 }
 
-// purgeAccount runs the synchronous, terminal account purge. The caller must
-// first move the account to the terminal `deleting` status. It is shared by
-// operator deletion and self-service deletion; all coordination state is
-// durable, so it is safe to call again after a partial failure.
+// purgeAccount runs the synchronous, terminal account purge. It establishes the
+// terminal `deleting` status itself, so both operator deletion and self-service
+// deletion share the same invariant: a client API key can never re-authenticate
+// against an active account while the purge is in flight. All coordination
+// state is durable, so it is safe to call again after a partial failure.
 func (s *Server) purgeAccount(ctx context.Context, accountID string) error {
+	if err := s.identity.SetAccountStatus(ctx, accountID, "deleting"); err != nil {
+		return err
+	}
 	s.identity.InvalidateAccount(accountID)
 	s.clients.InvalidateAccount(accountID)
 	if err := s.storeHandle().BeginActivityCleanup(accountID, ""); err != nil {

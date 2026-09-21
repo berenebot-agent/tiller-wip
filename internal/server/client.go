@@ -591,9 +591,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		if activeTargetID != "" {
 			s.inflight.targetEnd(row.accountID, route.RouteModelID, activeTargetID)
 		}
-		// A request rejected by the plan quota is not a routed inference
-		// request: it must not reach Activity (and so must not increment the
-		// monthly counter in the async writer).
+		// beginClientRequest reserves (or, in local mode, only starts) the
+		// client ticket. A concurrency rejection never acquired a ticket and a
+		// monthly rejection releases its ticket before returning, so a rejected
+		// request writes no Activity row and consumes no monthly slot.
 		if !quotaRejected {
 			s.writeLog(context.Background(), row)
 		}
@@ -628,11 +629,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
-	if s.enforceHostedQuotas(w, r, identity, incoming == providers.ProtocolMessages) {
+	if s.beginClientRequest(w, r, identity, route.RouteModelID, requested, incoming == providers.ProtocolMessages) {
 		quotaRejected = true
 		return
 	}
-	s.inflight.clientStart(row.accountID, row.clientKeyID, route.RouteModelID, requested)
 	clientTracked = true
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
@@ -1411,41 +1411,50 @@ routeDone:
 	clearSelectedCooldown()
 }
 
-// enforceHostedQuotas applies the plan's concurrency and monthly-request caps
-// after authentication and model resolution but before any upstream work. It
-// returns true when it has written a 429 and the caller must stop; it is a
-// no-op (false) in local mode or when enforcement is off. A plan lookup failure
-// is logged and allowed through: a quota read must never fail-open into a 500
-// for the request.
-func (s *Server) enforceHostedQuotas(w http.ResponseWriter, r *http.Request, identity auth.ClientIdentity, anthropic bool) bool {
+// beginClientRequest starts the client ticket and, when hosted limit
+// enforcement is on, atomically reserves the plan's concurrency and monthly
+// slots before any upstream work. It returns true when it has written a 429 and
+// the caller must stop.
+//
+// Concurrency is reserved first: a request rejected on concurrency never
+// acquires a ticket and never consumes a monthly slot. A request rejected on the
+// monthly cap has already acquired its concurrency ticket, so this releases it
+// before returning. The caller starts the ticket unconditionally on admission
+// and the request's deferred clientEnd releases it; on rejection the tracker is
+// left exactly as it was. Plan lookup failure is logged and allowed through: a
+// quota read must never fail-open into a 500 for the request. Local mode and an
+// off enforcement flag only start the ticket (unlimited).
+func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, identity auth.ClientIdentity, routeID, requested string, anthropic bool) bool {
 	if s.config.Mode != config.ModeHosted || !s.scope(r).EnforcingLimits() {
+		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
 		return false
 	}
-	sc := s.scopeFor(identity.AccountID)
 	plan, err := s.storeHandle().EntitlementsForAccount(r.Context(), identity.AccountID)
 	if err != nil {
 		if s.logger != nil {
 			s.logger.Warn("plan lookup failed; allowing request", "error_class", fmt.Sprintf("%T", err))
 		}
+		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
 		return false
 	}
 	now := time.Now()
-	if plan.MaxConcurrentStreams != store.Unlimited {
-		if active := s.inflight.activeClientTickets(identity.AccountID); active >= plan.MaxConcurrentStreams {
-			w.Header().Set("Retry-After", "1")
-			inferenceError(w, http.StatusTooManyRequests, "rate_limited", "stream_limit_exceeded", "Too many concurrent requests for your plan. Retry shortly.", anthropic)
-			return true
-		}
+	// A limit of store.Unlimited always acquires, so a rejection here is only
+	// possible when the plan sets a finite concurrency cap.
+	if !s.inflight.tryAcquire(identity.AccountID, plan.MaxConcurrentStreams, identity.ID, routeID, requested) {
+		w.Header().Set("Retry-After", "1")
+		inferenceError(w, http.StatusTooManyRequests, "rate_limited", "stream_limit_exceeded", "Too many concurrent requests for your plan. Retry shortly.", anthropic)
+		return true
 	}
 	if plan.MonthlyRequests != store.Unlimited {
-		count, err := sc.UsageCount(r.Context(), store.UsagePeriod(now))
+		reserved, err := s.scopeFor(identity.AccountID).ReserveUsageCounter(r.Context(), store.UsagePeriod(now), plan.MonthlyRequests)
 		if err != nil {
 			if s.logger != nil {
-				s.logger.Warn("usage count read failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+				s.logger.Warn("usage reservation failed; allowing request", "error_class", fmt.Sprintf("%T", err))
 			}
 			return false
 		}
-		if count >= plan.MonthlyRequests {
+		if !reserved {
+			s.inflight.clientEnd(identity.AccountID, identity.ID, routeID, false)
 			seconds := int(time.Until(store.NextPeriodStart(now)).Seconds())
 			if seconds < 1 {
 				seconds = 1
@@ -1453,6 +1462,12 @@ func (s *Server) enforceHostedQuotas(w http.ResponseWriter, r *http.Request, ide
 			w.Header().Set("Retry-After", strconv.Itoa(seconds))
 			inferenceError(w, http.StatusTooManyRequests, "rate_limited", "monthly_limit_exceeded", "Monthly request limit reached. Your allowance resets at the start of next month (UTC).", anthropic)
 			return true
+		}
+	} else {
+		// Unlimited: no reservation is needed, but still record usage for the
+		// plan card. Best-effort and independent of Activity logging.
+		if err := s.scopeFor(identity.AccountID).IncrementUsageCounter(r.Context(), store.UsagePeriod(now)); err != nil && s.logger != nil {
+			s.logger.Warn("usage counter increment failed", "error_class", fmt.Sprintf("%T", err))
 		}
 	}
 	return false

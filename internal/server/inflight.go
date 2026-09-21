@@ -63,6 +63,13 @@ func inflightTargetKey(accountID, routeID, targetID string) string {
 // happened yet (delta keeps today's client-only shape).
 func (t *inflightTracker) clientStart(accountID, id, routeID, requestedModel string) {
 	t.mu.Lock()
+	t.clientStartLocked(accountID, id, routeID, requestedModel)
+	t.mu.Unlock()
+	t.emit(accountID, inflightDelta{ID: routeID, ClientID: id, Active: 1, RequestedModel: requestedModel})
+}
+
+// clientStartLocked reserves one client+route ticket. The caller must hold t.mu.
+func (t *inflightTracker) clientStartLocked(accountID, id, routeID, requestedModel string) {
 	key := inflightClientKey(accountID, id, routeID)
 	state := t.clientStates[key]
 	state.Active++
@@ -70,8 +77,26 @@ func (t *inflightTracker) clientStart(accountID, id, routeID, requestedModel str
 	state.ClientID = id
 	state.RouteID = routeID
 	t.clientStates[key] = state
+}
+
+// tryAcquire atomically reserves one concurrency slot for the account and starts
+// its client+route ticket. It returns false without reserving when the account
+// is already at limit. The count and the increment happen under one lock, so
+// concurrent same-route requests cannot all observe the same pre-burst count the
+// way a separate count-then-start would; live requests are counted by their
+// Active value rather than by map entries, so N parallel requests on one route
+// count as N. A limit of store.Unlimited (< 0) always acquires; a limit of zero
+// rejects everything. Callers invoke it before any upstream work.
+func (t *inflightTracker) tryAcquire(accountID string, limit int, id, routeID, requestedModel string) bool {
+	t.mu.Lock()
+	if limit >= 0 && t.activeClientRequestsLocked(accountID) >= limit {
+		t.mu.Unlock()
+		return false
+	}
+	t.clientStartLocked(accountID, id, routeID, requestedModel)
 	t.mu.Unlock()
 	t.emit(accountID, inflightDelta{ID: routeID, ClientID: id, Active: 1, RequestedModel: requestedModel})
+	return true
 }
 
 func (t *inflightTracker) clientStreaming(accountID, id, routeID string) {
@@ -165,22 +190,16 @@ func (t *inflightTracker) clientSnapshot(accountID string) map[string]inflightSt
 	return out
 }
 
-// activeClientTickets returns the number of live client tickets for one
-// account. Tickets are keyed by account + NUL + client key id + NUL + route id,
-// so counting entries whose key starts with the account prefix counts every
-// in-flight routed request for the account across all its client keys. The
-// returned count feeds the plan's max_concurrent_streams check.
-func (t *inflightTracker) activeClientTickets(accountID string) int {
-	if t == nil {
-		return 0
-	}
-	t.mu.Lock()
-	defer t.mu.Unlock()
+// activeClientRequestsLocked returns the number of live client tickets for one
+// account, counting each ticket's Active value so concurrent requests that share
+// a (client, route) entry are all counted. The returned count feeds the plan's
+// max_concurrent_streams reservation. The caller must hold t.mu.
+func (t *inflightTracker) activeClientRequestsLocked(accountID string) int {
 	prefix := accountID + "\x00"
 	count := 0
 	for key, state := range t.clientStates {
-		if len(key) >= len(prefix) && key[:len(prefix)] == prefix && state.Active > 0 {
-			count++
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			count += state.Active
 		}
 	}
 	return count

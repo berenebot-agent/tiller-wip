@@ -178,15 +178,20 @@ func TestMonthlyLimitEnforcementReturns429(t *testing.T) {
 	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: -1, MaxVirtualModels: -1, MaxConcurrentStreams: -1, ActivityRetentionDays: 7, MonthlyRequests: 1}); err != nil {
 		t.Fatal(err)
 	}
-	sc := app.storeHandle().For(accountID)
-	if err := sc.IncrementUsageCounter(ctx, store.UsagePeriod(time.Now())); err != nil {
-		t.Fatal(err)
-	}
+	identity := auth.ClientIdentity{ID: "ck-1", AccountID: accountID}
 
+	// The first request reserves the only slot and is admitted.
 	req := requestWithIdentity(accountID, "ck-1")
 	rec := httptest.NewRecorder()
-	identity := auth.ClientIdentity{ID: "ck-1", AccountID: accountID}
-	if !app.enforceHostedQuotas(rec, req, identity, false) {
+	if app.beginClientRequest(rec, req, identity, "route-1", "model-a", false) {
+		t.Fatal("first request under monthly cap was rejected")
+	}
+	app.inflight.clientEnd(accountID, "ck-1", "route-1", false)
+
+	// The second request is over the cap: 429 monthly_limit_exceeded, and the
+	// reservation count does not advance past the cap.
+	rec = httptest.NewRecorder()
+	if !app.beginClientRequest(rec, req, identity, "route-1", "model-a", false) {
 		t.Fatal("monthly cap at limit did not reject")
 	}
 	if rec.Code != http.StatusTooManyRequests {
@@ -198,14 +203,46 @@ func TestMonthlyLimitEnforcementReturns429(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "monthly_limit_exceeded") {
 		t.Fatalf("body = %s, want monthly_limit_exceeded", rec.Body.String())
 	}
+	sc := app.storeHandle().For(accountID)
+	if got, err := sc.UsageCount(ctx, store.UsagePeriod(time.Now())); err != nil || got != 1 {
+		t.Fatalf("usage count after rejection = %d (err %v), want 1", got, err)
+	}
+}
 
-	// Under the cap the request is allowed.
-	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: -1, MaxVirtualModels: -1, MaxConcurrentStreams: -1, ActivityRetentionDays: 7, MonthlyRequests: 5}); err != nil {
+// TestMonthlyLimitIndependentOfActivityLogging covers the bypass where a client
+// key with logging disabled never reached the async writer's counter increment,
+// so the monthly quota never advanced. The reservation lives on the request path
+// now, so logging settings are irrelevant to enforcement.
+func TestMonthlyLimitIndependentOfActivityLogging(t *testing.T) {
+	app, _, accountID := hostedServerHarness(t, false)
+	ctx := context.Background()
+	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: -1, MaxVirtualModels: -1, MaxConcurrentStreams: -1, ActivityRetentionDays: 7, MonthlyRequests: 1}); err != nil {
 		t.Fatal(err)
 	}
+	identity := auth.ClientIdentity{ID: "ck-1", AccountID: accountID}
+	// Disable Activity logging for the client key, which is the key's setting on
+	// the request log path (the reservation must not consult it).
+	if _, err := app.db.SQL.Exec(`UPDATE client_keys SET logging_enabled=0 WHERE id=? AND account_id=?`, "ck-1", accountID); err != nil {
+		t.Fatal(err)
+	}
+	req := requestWithIdentity(accountID, "ck-1")
+	rec := httptest.NewRecorder()
+	if app.beginClientRequest(rec, req, identity, "route-1", "model-a", false) {
+		t.Fatal("first request under monthly cap was rejected")
+	}
+	app.inflight.clientEnd(accountID, "ck-1", "route-1", false)
+
+	sc := app.storeHandle().For(accountID)
+	if got, err := sc.UsageCount(ctx, store.UsagePeriod(time.Now())); err != nil || got != 1 {
+		t.Fatalf("usage count with logging disabled = %d (err %v), want 1", got, err)
+	}
+
 	rec = httptest.NewRecorder()
-	if app.enforceHostedQuotas(rec, req, identity, false) {
-		t.Fatal("request under monthly cap was rejected")
+	if !app.beginClientRequest(rec, req, identity, "route-1", "model-a", false) {
+		t.Fatal("logging-disabled client bypassed the monthly cap")
+	}
+	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "monthly_limit_exceeded") {
+		t.Fatalf("logging-disabled rejection = %d %s, want 429 monthly_limit_exceeded", rec.Code, rec.Body.String())
 	}
 }
 
@@ -215,13 +252,14 @@ func TestConcurrencyLimitEnforcementReturns429(t *testing.T) {
 	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: -1, MaxVirtualModels: -1, MaxConcurrentStreams: 1, ActivityRetentionDays: 7, MonthlyRequests: -1}); err != nil {
 		t.Fatal(err)
 	}
+	identity := auth.ClientIdentity{ID: "ck-1", AccountID: accountID}
+	req := requestWithIdentity(accountID, "ck-1")
+
 	// One live ticket for the account at the cap.
 	app.inflight.clientStart(accountID, "ck-1", "route-1", "model-a")
 
-	req := requestWithIdentity(accountID, "ck-1")
 	rec := httptest.NewRecorder()
-	identity := auth.ClientIdentity{ID: "ck-1", AccountID: accountID}
-	if !app.enforceHostedQuotas(rec, req, identity, false) {
+	if !app.beginClientRequest(rec, req, identity, "route-1", "model-a", false) {
 		t.Fatal("concurrency cap at limit did not reject")
 	}
 	if rec.Code != http.StatusTooManyRequests {
@@ -235,10 +273,36 @@ func TestConcurrencyLimitEnforcementReturns429(t *testing.T) {
 	}
 	app.inflight.clientEnd(accountID, "ck-1", "route-1", false)
 
-	// Under the cap (ticket released) the request is allowed.
+	// Under the cap (ticket released) the request is allowed and acquires.
 	rec = httptest.NewRecorder()
-	if app.enforceHostedQuotas(rec, req, identity, false) {
+	if app.beginClientRequest(rec, req, identity, "route-1", "model-a", false) {
 		t.Fatal("request under concurrency cap was rejected")
+	}
+	app.inflight.clientEnd(accountID, "ck-1", "route-1", false)
+}
+
+// TestConcurrencyCountsConcurrentSameRouteRequests covers the undercount where
+// five parallel requests from one client key to one route shared a single map
+// entry (Active=5) but were counted as one.
+func TestConcurrencyCountsConcurrentSameRouteRequests(t *testing.T) {
+	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(string, inflightDelta) {}}
+	for i := 0; i < 5; i++ {
+		if !tracker.tryAcquire(testAcct, 5, "client-1", "route-1", "main") {
+			t.Fatalf("request %d rejected below the cap of 5", i+1)
+		}
+	}
+	if got := tracker.activeClientRequestsLocked(testAcct); got != 5 {
+		t.Fatalf("active requests = %d, want 5", got)
+	}
+	if tracker.tryAcquire(testAcct, 5, "client-1", "route-1", "main") {
+		t.Fatal("request at the concurrency cap of 5 was admitted")
+	}
+	tracker.clientEnd(testAcct, "client-1", "route-1", false)
+	if got := tracker.activeClientRequestsLocked(testAcct); got != 4 {
+		t.Fatalf("active requests after one end = %d, want 4", got)
+	}
+	if !tracker.tryAcquire(testAcct, 5, "client-1", "route-1", "main") {
+		t.Fatal("request below the cap after a release was rejected")
 	}
 }
 
@@ -256,9 +320,10 @@ func TestConcurrencyLimitIsAccountScoped(t *testing.T) {
 	app.inflight.clientStart(accountA, "ck-a", "route-1", "model-a")
 	reqB := requestWithIdentity(accountB, "ck-b")
 	rec := httptest.NewRecorder()
-	if app.enforceHostedQuotas(rec, reqB, auth.ClientIdentity{ID: "ck-b", AccountID: accountB}, false) {
+	if app.beginClientRequest(rec, reqB, auth.ClientIdentity{ID: "ck-b", AccountID: accountB}, "route-1", "model-a", false) {
 		t.Fatal("account A's live ticket rejected account B's request")
 	}
+	app.inflight.clientEnd(accountB, "ck-b", "route-1", false)
 	app.inflight.clientEnd(accountA, "ck-a", "route-1", false)
 }
 
@@ -275,34 +340,10 @@ func TestLocalModeSkipsQuotaEnforcement(t *testing.T) {
 	req := requestWithIdentity(accountID, "ck-1")
 	rec := httptest.NewRecorder()
 	identity := auth.ClientIdentity{ID: "ck-1", AccountID: accountID}
-	if app.enforceHostedQuotas(rec, req, identity, false) {
+	if app.beginClientRequest(rec, req, identity, "route-1", "model-a", false) {
 		t.Fatal("local mode enforced a hosted quota")
 	}
-}
-
-func TestLogWriterIncrementsUsageCounterPerRow(t *testing.T) {
-	app, db := newLogWriterServer(t)
-	w := newLogWriter(app.scopeFor, app.logger)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	w.start(ctx)
-	for i := 0; i < 3; i++ {
-		w.enqueue(writerRow("usage-row-" + string(rune('a'+i))))
-	}
-	period := store.UsagePeriod(time.Now())
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		var n int
-		if err := db.SQL.QueryRow(`SELECT requests FROM usage_counters WHERE account_id=? AND period=?`, database.LocalAccountID, period).Scan(&n); err == nil && n == 3 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("usage counter did not reach 3 within deadline")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	cancel()
-	w.wait()
+	app.inflight.clientEnd(accountID, "ck-1", "route-1", false)
 }
 
 func TestCreateLimitReturns409LimitExceeded(t *testing.T) {

@@ -84,6 +84,25 @@ func TestEnqueueEncryptsTokenAtRest(t *testing.T) {
 	}
 }
 
+// TestLockedCipherNeverReturnsCiphertextAsPlaintext covers the bug where a
+// locked cipher reported Enabled()==false and open() handed the stored enc:v1:
+// value back as if it were plaintext.
+func TestLockedCipherNeverReturnsCiphertextAsPlaintext(t *testing.T) {
+	o, _ := newTestOutbox(t)
+	id := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "raw-secret-token"})
+	var stored string
+	if err := o.db.QueryRow(`SELECT token_ciphertext FROM mail_outbox WHERE id=?`, id).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !crypto.Encrypted(stored) {
+		t.Fatalf("token at rest = %q, want enc:v1 ciphertext", stored)
+	}
+	o.cipher = crypto.Locked()
+	if plain, err := o.open(id, stored); !errors.Is(err, crypto.ErrLocked) {
+		t.Fatalf("open on locked cipher = (%q, %v), want crypto.ErrLocked", plain, err)
+	}
+}
+
 func TestNotConfiguredDefersWithoutConsumingAttempt(t *testing.T) {
 	o, _ := newTestOutbox(t)
 	enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})

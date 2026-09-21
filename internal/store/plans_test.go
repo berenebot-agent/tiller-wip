@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -207,6 +209,45 @@ func TestEffectiveRetentionDaysClamps(t *testing.T) {
 				t.Fatalf("EffectiveRetentionDays(%d,%d) = %d, want %d", tc.configured, tc.planMax, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestReserveUsageCounterIsAtomicAtTheCap proves the monthly reservation admits
+// exactly `limit` concurrent requests: no request sees a stale count, and a
+// rejected reservation performs no increment.
+func TestReserveUsageCounterIsAtomicAtTheCap(t *testing.T) {
+	_, st := openPlanStore(t)
+	ctx := context.Background()
+	sc := st.For(planTestAccount)
+
+	const limit = 7
+	const attempts = 40
+	var reserved atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ok, err := sc.ReserveUsageCounter(ctx, "2026-09", limit)
+			if err != nil {
+				t.Errorf("reserve: %v", err)
+				return
+			}
+			if ok {
+				reserved.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := reserved.Load(); got != limit {
+		t.Fatalf("admitted %d concurrent requests, want exactly %d", got, limit)
+	}
+	if got, err := sc.UsageCount(ctx, "2026-09"); err != nil || got != limit {
+		t.Fatalf("usage count after burst = %d (err %v), want %d", got, err, limit)
+	}
+	// Unlimited always reserves and never blocks.
+	if ok, err := sc.ReserveUsageCounter(ctx, "2026-09", store.Unlimited); err != nil || !ok {
+		t.Fatalf("unlimited reserve = %v (err %v), want true", ok, err)
 	}
 }
 
