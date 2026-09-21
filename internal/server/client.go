@@ -690,16 +690,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			attemptStart := time.Now()
 			if !candidate.Available {
 				nonTranslationFailure = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
-				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unavailable")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unavailable"}, i < len(candidates)-1)
 				continue
 			}
 			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(row.accountID, candidate.ProviderModelID, attemptStart) {
 				skippedCooled = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
-				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "cooldown")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 				continue
 			}
 			if candidate.Provider.Credential != "" && (candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go") && providers.IsOpenCodeFreeModel(candidate.UpstreamModelID) {
@@ -716,18 +712,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					return
 				}
 				nonTranslationFailure = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
-				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "free_model_requires_keyless")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 				continue
 			}
 			target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
 			if target == "" {
 				protocolUnavailable = true
 				nonTranslationFailure = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
-				s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "protocol_unavailable")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "protocol_unavailable"}, i < len(candidates)-1)
 				continue
 			}
 			translated = target != incoming
@@ -750,8 +742,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						return
 					}
 					translationFailureClass = code
-					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
-					s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, code)
+					s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 					continue
 				}
 				// After translation, re-apply the canonical selector for the target.
@@ -776,8 +767,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 							inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires reasoning and cannot serve a plain non-reasoning request.", incoming == providers.ProtocolMessages)
 							return
 						}
-						row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
-						s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
+						s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 						continue
 					}
 					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
@@ -830,8 +820,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires a higher minimum output length than requested.", incoming == providers.ProtocolMessages)
 						return
 					}
-					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
-					s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
+					s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 					continue
 				}
 			}
@@ -1004,6 +993,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if attemptTimedOut.Load() {
 					class = "upstream_timeout"
 				}
+				var detail upstreamErrorDetail
+				if class != "upstream_timeout" && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+					detail = parseUpstreamErrorDetail(upstreamErrorBody, response.Header.Get("Content-Type"))
+					if isContextLimitError(detail) {
+						class = "context_limit_exceeded"
+					}
+				}
 				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
 				freeTierRejection := upstreamErrorReadErr == nil && isOpenCodeFreeTierRejection(upstreamErrorBody)
 				if freeTierRejection {
@@ -1019,7 +1015,6 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if logErrorBodies {
 						attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
-					detail := parseUpstreamErrorDetail(upstreamErrorBody, response.Header.Get("Content-Type"))
 					attempt.clientError = redactProviderSecrets(detail.clientMessage(), candidate.Provider)
 				}
 				idle.Stop()
@@ -1073,7 +1068,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = response.StatusCode
 					errorCode := "upstream_error"
 					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
-					if freeTierRejection {
+					if class == "context_limit_exceeded" {
+						row.errorText = strPtr(class)
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+						errorCode = class
+						message = fixedUpstreamErrorMessage(class)
+						if attempt.clientError != "" {
+							message += " " + attempt.clientError
+						}
+					} else if freeTierRejection {
 						// Fail loud with the router-owned remediation on direct
 						// routes: the raw Console text names no fix.
 						row.httpStatus = 400
@@ -1246,6 +1249,13 @@ routeDone:
 			row.errorText = strPtr("protocol_unavailable")
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("protocol_unavailable"))
 			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
+			return
+		}
+		if route.Virtual && allAttemptsFailureClass(row.attempts, "context_limit_exceeded") {
+			row.httpStatus = 400
+			row.errorText = strPtr("context_limit_exceeded")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("context_limit_exceeded"))
+			inferenceError(w, 400, "invalid_request_error", "context_limit_exceeded", fixedUpstreamErrorMessage("context_limit_exceeded"), incoming == providers.ProtocolMessages)
 			return
 		}
 		if route.Virtual && allSkippedUnsupportedFeature(row.attempts) {
@@ -1883,13 +1893,16 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 // before any upstream attempt, so an upstream 400 that survives to this point
 // is overwhelmingly a target-side signal.
 //
-// Only request-specific signals stay excluded: 409, 422, 405, 413 and 415
-// commonly reflect the individual request (conflict, validation, wrong
-// method, oversized payload, unsupported media) rather than the health or
-// availability of the upstream model, and must not hide a working model
-// chain-wide for other clients. upstream_response_too_large is a
+// Only request-specific signals stay excluded: context_limit_exceeded, 409,
+// 422, 405, 413 and 415 commonly reflect the individual request (context,
+// conflict, validation, wrong method, oversized payload, unsupported media)
+// rather than the health or availability of the upstream model, and must not
+// hide a working model chain-wide for other clients. upstream_response_too_large is a
 // router-side guard and never reaches this helper as a status.
 func cooldownTrigger(class string, httpStatus int) bool {
+	if class == "context_limit_exceeded" {
+		return false
+	}
 	switch class {
 	case "upstream_unreachable", "upstream_timeout", "upstream_read_error",
 		"empty_response", "upstream_stream_error":
@@ -1915,6 +1928,18 @@ func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
 	}
 	for _, a := range attempts {
 		if a.result != "skipped" || a.failureClass != "unsupported_feature" {
+			return false
+		}
+	}
+	return true
+}
+
+func allAttemptsFailureClass(attempts []requestAttempt, class string) bool {
+	if len(attempts) == 0 {
+		return false
+	}
+	for _, attempt := range attempts {
+		if attempt.result != "failed" || attempt.failureClass != class {
 			return false
 		}
 	}
@@ -2064,5 +2089,22 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 		s.logger.Info("provider request skipped", attrs...)
 		return
 	}
+	if attempt.failureClass == "context_limit_exceeded" || attempt.failureClass == "translation_error" || attempt.failureClass == "unsupported_feature" || attempt.failureClass == "protocol_unavailable" || attempt.failureClass == "free_model_requires_keyless" {
+		s.logger.Info("provider request skipped", attrs...)
+		return
+	}
 	s.logger.Debug("provider request skipped", attrs...)
+}
+
+func (s *Server) recordSkippedAttempt(row *logRow, route resolvedRoute, attempt requestAttempt, advancesFallback bool) {
+	attempt.result = "skipped"
+	row.attempts = append(row.attempts, attempt)
+	if advancesFallback && route.Virtual && route.RoutingMode == "ordered_fallback" {
+		row.fallbackUsed = true
+		if row.fallbackReason == nil {
+			row.fallbackReason = strPtr(attempt.failureClass)
+		}
+	}
+	s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, attempt.providerModelID, attempt.failureClass)
+	s.logAttempt(row, attempt)
 }

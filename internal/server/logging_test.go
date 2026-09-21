@@ -411,6 +411,52 @@ func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
 	}
 }
 
+func TestRecordSkippedAttemptPersistsReasonAndFallback(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	row := &logRow{
+		clientKeyID:      clientID,
+		clientRequestID:  "req-skipped-fallback",
+		requestedModel:   "main/daily",
+		routeKind:        strPtr("virtual"),
+		routeModelID:     strPtr("virtual-id"),
+		routeModel:       strPtr("main/daily"),
+		protocol:         "chat",
+		httpStatus:       200,
+		resolvedProvider: strPtr("provider-a"),
+		resolvedModel:    strPtr("model-a"),
+		createdAt:        database.Now(),
+	}
+	api.server.recordSkippedAttempt(row, resolvedRoute{Virtual: true, RoutingMode: "ordered_fallback", RouteModelID: "virtual-id"}, requestAttempt{
+		providerModelID: "pm-skipped",
+		provider:        "provider-a",
+		model:           "model-skipped",
+		failureClass:    "context_limit_exceeded",
+		errorMessage:    strPtr(fixedUpstreamErrorMessage("context_limit_exceeded")),
+	}, true)
+	row.attempts = append(row.attempts, requestAttempt{providerModelID: "pm-success", provider: "provider-a", model: "model-a", result: "success", httpStatus: 200})
+	api.server.writeLog(context.Background(), row)
+
+	var fallbackUsed int
+	if err := db.Activity.QueryRow(`SELECT fallback_used FROM request_logs WHERE id=?`, row.clientRequestID).Scan(&fallbackUsed); err != nil {
+		t.Fatal(err)
+	}
+	if fallbackUsed != 1 {
+		t.Fatalf("fallback_used = %d, want 1", fallbackUsed)
+	}
+	status, payload, _ := api.request("GET", "/api/admin/activity/"+row.clientRequestID+"/attempts", nil)
+	if status != http.StatusOK {
+		t.Fatalf("attempts: %d %v", status, payload)
+	}
+	attempts := payload["data"].([]any)
+	if len(attempts) != 2 {
+		t.Fatalf("expected skipped and successful attempts, got %v", attempts)
+	}
+	first := attempts[0].(map[string]any)
+	if first["result"] != "skipped" || first["failure_class"] != "context_limit_exceeded" || first["error_message"] == "" {
+		t.Fatalf("skipped attempt reason missing: %v", first)
+	}
+}
+
 func TestUpstreamErrorDetailIsRedactedButSurfacedToClient(t *testing.T) {
 	// Direct (non-virtual) routes surface a sanitized provider error so the
 	// client can act on it, but any credential the provider echoes back must be
@@ -473,6 +519,43 @@ func TestUpstreamErrorDetailIsRedactedButSurfacedToClient(t *testing.T) {
 	attemptRow := attempts["data"].([]any)[0].(map[string]any)
 	if attemptRow["failure_class"] != "http_400" {
 		t.Fatalf("provider attempt metadata = %v", attemptRow)
+	}
+}
+
+func TestContextLimitErrorIsClassifiedAndExplained(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+			"message": "This request exceeds the context window for this model",
+			"code":    "context_length_exceeded",
+		}})
+	})
+	api, _, clientID, secret := loggingTestHarness(t, upstream)
+	resp, payload := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{}})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("context-limit status = %d, want 400", resp.StatusCode)
+	}
+	errObj, ok := payload["error"].(map[string]any)
+	if !ok || errObj["code"] != "context_limit_exceeded" || !strings.Contains(errObj["message"].(string), "context window") {
+		t.Fatalf("context-limit response not actionable: %v", payload)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != http.StatusOK {
+		t.Fatalf("attempts: %d %v", status, attempts)
+	}
+	rows := attempts["data"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["failure_class"] != "context_limit_exceeded" {
+		t.Fatalf("context-limit attempt not classified: %v", attempts)
+	}
+	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK || activity["data"].([]any)[0].(map[string]any)["error_text"] != "context_limit_exceeded" {
+		t.Fatalf("context-limit activity row not classified: %v", activity)
 	}
 }
 

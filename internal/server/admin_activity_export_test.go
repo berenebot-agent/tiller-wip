@@ -585,6 +585,19 @@ func TestLogAttemptCooldownSkipIsInfo(t *testing.T) {
 	}
 }
 
+func TestLogAttemptCompatibilitySkipIsInfo(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	s := &Server{logger: logger}
+	s.logAttempt(&logRow{clientRequestID: "req-compat", requestedModel: "main/virtual"}, requestAttempt{
+		provider: "provider-a", model: "model-a", result: "skipped", failureClass: "context_limit_exceeded",
+		errorMessage: strPtr(fixedUpstreamErrorMessage("context_limit_exceeded")),
+	})
+	if !strings.Contains(buf.String(), "provider request skipped") || !strings.Contains(buf.String(), "context_limit_exceeded") {
+		t.Fatalf("context skip not visible at Info: %q", buf.String())
+	}
+}
+
 // TestAttributionHelperConsistency guards against drift between list, CSV
 // export, and usage: for a given virtual model they must all attribute the same
 // set of rows (new route_kind='virtual' rows plus legacy NULL-route rows).

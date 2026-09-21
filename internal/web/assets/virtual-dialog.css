@@ -68,11 +68,13 @@
 .attempt-route { min-width: 0; }
 .attempt-route code { display: block; overflow: hidden; text-overflow: ellipsis; font-size: 12px; }
 .attempt-status { font: 700 11px var(--mono); }
-.attempt-failed[data-error-key], .attempt-cooldown[data-error-key] { cursor: pointer; }
+.attempt-failed[data-error-key], .attempt-cooldown[data-error-key], .attempt-neutral[data-error-key] { cursor: pointer; }
 .attempt-failed[data-error-key]:hover { background: #f8e8e7; }
 .attempt-failed[data-error-key]:hover .attempt-status { text-decoration: underline; }
 .attempt-cooldown[data-error-key]:hover { background: #eef2f5; }
 .attempt-cooldown[data-error-key]:hover .attempt-status { text-decoration: underline; }
+.attempt-neutral[data-error-key]:hover { background: #eef2f5; }
+.attempt-neutral[data-error-key]:hover .attempt-status { text-decoration: underline; }
 .error-dialog { width: min(560px, calc(100vw - 30px)); }
 .error-dialog > section { display: flex; flex-direction: column; }
 .error-content { padding: 18px 22px 0; }

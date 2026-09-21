@@ -87,6 +87,31 @@ func TestParseUpstreamErrorDetailTolerantForms(t *testing.T) {
 	}
 }
 
+func TestIsContextLimitError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		detail upstreamErrorDetail
+		want   bool
+	}{
+		{name: "structured code", detail: upstreamErrorDetail{Code: "context_length_exceeded"}, want: true},
+		{name: "window message", detail: upstreamErrorDetail{Message: "The request exceeds the context window for this model."}, want: true},
+		{name: "input message", detail: upstreamErrorDetail{Message: "The input is too long."}, want: true},
+		{name: "unrelated validation", detail: upstreamErrorDetail{Message: "Invalid value for reasoning.effort", Code: "invalid_value"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isContextLimitError(tc.detail); got != tc.want {
+				t.Fatalf("isContextLimitError(%+v) = %v, want %v", tc.detail, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContextLimitDoesNotTriggerCooldown(t *testing.T) {
+	if cooldownTrigger("context_limit_exceeded", http.StatusBadRequest) {
+		t.Fatal("context-limit rejection must not cool a target")
+	}
+}
+
 func TestParseUpstreamErrorDetailGarbageAndPlain(t *testing.T) {
 	if got := parseUpstreamErrorDetail([]byte("<html>502</html>"), "application/json"); got.clientMessage() != "" {
 		t.Fatalf("html should not parse: %+v", got)

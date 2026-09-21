@@ -20,6 +20,20 @@ func TestUpstreamHTTPFailuresAreFallbackEligible(t *testing.T) {
 	}
 }
 
+func TestAllAttemptsFailureClass(t *testing.T) {
+	base := []requestAttempt{
+		{result: "failed", failureClass: "context_limit_exceeded"},
+		{result: "failed", failureClass: "context_limit_exceeded"},
+	}
+	if !allAttemptsFailureClass(base, "context_limit_exceeded") {
+		t.Fatal("expected all context-limit attempts to match")
+	}
+	base[1].failureClass = "upstream_timeout"
+	if allAttemptsFailureClass(base, "context_limit_exceeded") {
+		t.Fatal("mixed failure classes must not match")
+	}
+}
+
 func TestStreamingMetadataUsesActualSSEResponse(t *testing.T) {
 	for _, test := range []struct {
 		name   string

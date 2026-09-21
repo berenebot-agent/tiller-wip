@@ -21,6 +21,8 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "The upstream provider reported a stream error"
 	case "upstream_response_too_large":
 		return "Upstream provider response exceeded Tiller's size limit"
+	case "context_limit_exceeded":
+		return "The request exceeds this target's context window. Shorten the conversation or use a target with a larger context window."
 	case "model_not_found":
 		return "The requested model was not found or is not configured"
 	case "database_error":

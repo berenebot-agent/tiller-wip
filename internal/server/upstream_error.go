@@ -141,6 +141,32 @@ func (d upstreamErrorDetail) clientMessage() string {
 	return b.String()
 }
 
+// isContextLimitError recognizes provider-reported context exhaustion without
+// relying on model names or provider-specific endpoint assumptions. The raw
+// body has already been reduced to bounded, sanitized metadata by the parser.
+func isContextLimitError(d upstreamErrorDetail) bool {
+	code := strings.ToLower(strings.TrimSpace(d.Code))
+	switch code {
+	case "context_length_exceeded", "context_window_exceeded", "input_too_long", "prompt_too_long":
+		return true
+	}
+	message := strings.ToLower(d.Message)
+	for _, phrase := range []string{
+		"maximum context length",
+		"context length exceeded",
+		"exceeds the context window",
+		"exceeded the context window",
+		"context window exceeded",
+		"input is too long",
+		"prompt is too long",
+	} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
 // redactProviderSecrets removes every known active secret for the provider
 // instance from text. Only secrets the router actually sent for this instance
 // are redacted (the API key/OAuth token, OAuth provider-data token values, and
@@ -208,6 +234,12 @@ func exhaustedRouteMessage(attempts []requestAttempt) string {
 			route = "target"
 		}
 		switch {
+		case attempt.failureClass == "context_limit_exceeded":
+			reason := fixedUpstreamErrorMessage(attempt.failureClass)
+			if attempt.clientError != "" {
+				reason += " " + attempt.clientError
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", route, reason))
 		case attempt.result == "failed" && attempt.clientError != "":
 			prefix := ""
 			if attempt.httpStatus > 0 {
