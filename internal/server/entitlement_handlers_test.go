@@ -305,6 +305,31 @@ func TestLogWriterIncrementsUsageCounterPerRow(t *testing.T) {
 	w.wait()
 }
 
+func TestCreateLimitReturns409LimitExceeded(t *testing.T) {
+	app, api, _ := hostedServerHarness(t, false)
+	ctx := context.Background()
+	// One client key allowed; unlimited everywhere else.
+	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: 1, MaxVirtualModels: -1, MaxConcurrentStreams: -1, ActivityRetentionDays: 7, MonthlyRequests: -1}); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "first", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("first client key: %d %v", status, payload)
+	}
+	// The second create must be a 409 limit_exceeded, not a 500.
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "second", "type": "catalogue"})
+	if status != http.StatusConflict {
+		t.Fatalf("second client key: %d %v, want 409", status, payload)
+	}
+	errObj, _ := payload["error"].(map[string]any)
+	if errObj["code"] != "limit_exceeded" {
+		t.Fatalf("second client key code = %v, want limit_exceeded (%v)", errObj["code"], payload)
+	}
+	if errObj["kind"] != "client_keys" {
+		t.Fatalf("limit kind = %v, want client_keys", errObj["kind"])
+	}
+}
+
 func auditContains(payload map[string]any, event string) bool {
 	data, _ := payload["data"].([]any)
 	for _, raw := range data {

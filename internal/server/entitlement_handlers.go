@@ -22,9 +22,12 @@ func writeLimitExceeded(w http.ResponseWriter, err error) bool {
 		return false
 	}
 	writeJSON(w, http.StatusConflict, map[string]any{
-		"error": "limit_exceeded",
-		"kind":  limit.Kind,
-		"limit": limit.Limit,
+		"error": map[string]any{
+			"code":    "limit_exceeded",
+			"message": "Your plan's limit for this resource has been reached.",
+			"kind":    limit.Kind,
+			"limit":   limit.Limit,
+		},
 	})
 	return true
 }
