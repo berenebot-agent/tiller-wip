@@ -1,3 +1,10 @@
+# Project name pinned explicitly. Without this, Compose derives it from the
+# directory basename — and since the gatehouse layout puts the checkout in
+# repo/, both this project and gatehouse-mail resolve to the project name
+# "repo". That makes each project see the other's containers as orphans, and
+# `--remove-orphans` in one would tear down the other's live stack.
+name: tiller-router
+
 services:
   tiller-router:
     container_name: tiller-router
