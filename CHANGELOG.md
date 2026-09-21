@@ -8,6 +8,25 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Hosted product shell (private alpha).** The hosted product now has plan
+  entitlements (creation limits, concurrent-stream and monthly-request limits,
+  Activity retention clamp), all enforced only in hosted mode and operator-
+  tunable from the platform dashboard. A first-run setup wizard (provider →
+  target → client key → curl snippet) opens on first hosted login and completion
+  is derived from Activity. Email verification now signs the user straight in.
+- **Published legal pack.** First-draft Terms, Privacy Policy, Acceptable Use,
+  Subprocessor List, Security/Data Handling, and a signup collection notice are
+  embedded in the binary, seeded at startup, editable from the platform
+  dashboard, and served publicly (e.g. `/legal/terms`). Signup requires an
+  explicit Terms acceptance recorded with a timestamp.
+- **Account data export.** Hosted customers can download an account-scoped ZIP
+  containing their configuration, Activity metadata, and audit history. Provider
+  credentials and client secrets are never included.
+- **`security.txt`** served at `/security.txt` and `/.well-known/security.txt`,
+  and an AGPL source/version link in the hosted footer.
+- **Load-test harness** (`tests/load/loadtest.py`) that measures sustained
+  request rate, failure count, and router latency percentiles against a mock
+  upstream without spending provider credits.
 - **Hosted Account page.** A hosted-only Account tab in Settings lets customers
   view their identity, change password, change email (verify-new-first with a
   warning to the current address), sign out everywhere, and delete their account

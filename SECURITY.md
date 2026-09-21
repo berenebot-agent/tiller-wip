@@ -135,5 +135,22 @@ disabled and is presented with a warning in the admin UI. This is the documented
 exception to the AGENTS.md no-content guardrail, which is scoped to default
 logging.
 
+**Hosted quota and onboarding controls.** Hosted accounts are subject to plan
+entitlements (provider/client-key/virtual-model creation, concurrent streams,
+monthly routed requests, and Activity retention). Quota rejections are `429`
+with `Retry-After` and occur after authentication and model resolution but
+before any upstream request. Local/self-hosted mode is exempt.
+
+**Account data export.** Hosted customers can export their own account as a ZIP
+(configuration JSON, Activity CSV, audit CSV). The export is account-scoped from
+the verified session and never contains provider credentials, OAuth tokens, or
+client-key secrets or hashes. It is distinct from the administrator-only
+whole-database backup export, which remains restricted to local mode.
+
+**Published legal documents.** Terms, Privacy, AUP, Subprocessor List, and the
+Security/Data Handling page are operator-editable and served publicly so signup
+can link them before authentication. Signup records the accepted document
+timestamps in `legal_acceptances`.
+
 For questions that are not security reports, please use the project's normal
 public issue and discussion channels.
