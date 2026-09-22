@@ -16,10 +16,44 @@ import (
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
-	for _, providerType := range []string{"openai", "codex-subscription", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
+	for _, providerType := range []string{"openai", "codex-subscription", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "commandcode", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
 		if _, ok := Lookup(providerType); !ok {
 			t.Errorf("missing provider type %s", providerType)
 		}
+	}
+}
+
+func TestDiscoverCommandCodeUsesSupportedEndpoints(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/provider/v1/models" {
+			t.Errorf("discovery path = %q, want /provider/v1/models", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("authorization = %q, want bearer credential", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "object": "model", "context_length": 1000000, "supported_endpoints": []string{"/v1/chat/completions", "/v1/responses"}, "supported_parameters": []string{"tools"}},
+			map[string]any{"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "object": "model", "supported_endpoints": []string{"/v1/messages"}},
+			map[string]any{"id": "embedding-only", "object": "embedding"},
+		}})
+	}))
+	defer upstream.Close()
+
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "commandcode", BaseURL: upstream.URL + "/provider/v1", Credential: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	if models[0].ID != "claude-sonnet-5" || models[0].NativeProtocol != ProtocolMessages {
+		t.Fatalf("Claude model = %+v, want Messages-native", models[0])
+	}
+	if models[1].ID != "deepseek/deepseek-v4-flash" || models[1].NativeProtocol != ProtocolResponses {
+		t.Fatalf("DeepSeek model = %+v, want Responses-native", models[1])
+	}
+	if models[1].ContextLength != 1000000 || models[1].SupportsTools == nil || !*models[1].SupportsTools {
+		t.Fatalf("DeepSeek metadata = %+v, want live metadata", models[1])
 	}
 }
 

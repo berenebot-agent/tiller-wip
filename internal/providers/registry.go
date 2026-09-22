@@ -78,6 +78,7 @@ var descriptors = []Descriptor{
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, MinOutputTokens: 16, Discovery: "opencode"},
+	{Type: "commandcode", Label: "Command Code", DefaultBaseURL: "https://api.commandcode.ai/provider/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "commandcode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "lm-studio", Label: "LM Studio", DefaultBaseURL: "http://host.docker.internal:1234/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -468,6 +469,8 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 		models, err = r.discoverHuggingFace(ctx, provider)
 	case "cloudflare":
 		models, err = r.discoverCloudflare(ctx, provider)
+	case "commandcode":
+		models, err = r.discoverCommandCode(ctx, provider)
 	default:
 		models, err = r.discoverPaged(ctx, provider, d.Discovery == "anthropic")
 	}
@@ -492,6 +495,69 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	// provider does not report capabilities still surface useful metadata. The
 	// merged slice flows into Manager.applyCatalogue and is stored in the DB.
 	return r.enrich(models, provider.Type), nil
+}
+
+// discoverCommandCode discovers the live Command Code Provider API catalogue.
+// Command Code exposes OpenAI and Anthropic-compatible endpoints from one
+// catalogue, so each model's supported_endpoints determines its native wire
+// protocol rather than a model-name heuristic.
+func (r *Registry) discoverCommandCode(ctx context.Context, provider Instance) ([]Model, error) {
+	endpoint, err := appendEndpoint(provider.BaseURL, "models")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	ApplyRequestAuth(req, provider)
+	var payload struct {
+		Data []struct {
+			ID                  string   `json:"id"`
+			Name                string   `json:"name"`
+			Object              string   `json:"object"`
+			ContextLength       int      `json:"context_length"`
+			MaxOutputTokens     int      `json:"max_output_tokens"`
+			SupportedEndpoints  []string `json:"supported_endpoints"`
+			SupportedParameters []string `json:"supported_parameters"`
+			Architecture        struct {
+				InputModalities  []string `json:"input_modalities"`
+				OutputModalities []string `json:"output_modalities"`
+			} `json:"architecture"`
+		} `json:"data"`
+	}
+	if err := r.doJSON(req, &payload); err != nil {
+		return nil, err
+	}
+	models := make([]Model, 0, len(payload.Data))
+	seen := make(map[string]bool, len(payload.Data))
+	for _, item := range payload.Data {
+		modelID := item.ID
+		if modelID == "" {
+			modelID = item.Name
+		}
+		if modelID == "" || seen[modelID] || (item.Object != "" && item.Object != "model") {
+			continue
+		}
+		seen[modelID] = true
+		display := item.Name
+		if display == "" {
+			display = modelID
+		}
+		sp := item.SupportedParameters
+		models = append(models, Model{
+			ID: modelID, DisplayName: display,
+			ContextLength: item.ContextLength, MaxOutputTokens: item.MaxOutputTokens,
+			NativeProtocol:           copilotNativeProtocol(item.SupportedEndpoints),
+			SupportsTools:            triBool(len(sp) > 0, slices.Contains(sp, "tools")),
+			SupportsVision:           triBool(len(item.Architecture.InputModalities) > 0, slices.Contains(item.Architecture.InputModalities, "image")),
+			SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")),
+			InputModalities:          item.Architecture.InputModalities,
+			OutputModalities:         item.Architecture.OutputModalities,
+		})
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models, nil
 }
 
 func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Model, error) {

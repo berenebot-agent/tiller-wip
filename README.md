@@ -120,6 +120,7 @@ Tiller includes adapters for a broad set of native and OpenAI-compatible provide
 - MiniMax
 - OpenCode Zen
 - OpenCode Go
+- Command Code
 - Ollama Local
 - Ollama Cloud
 - Generic OpenAI-compatible
