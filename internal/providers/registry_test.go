@@ -460,12 +460,21 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&input)
 			switch input["model"] {
 			case "qwen3.5:397b":
-				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{"llama.context_length": 262144}, "parameters": map[string]any{"num_ctx": 4096}})
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"model_info":   map[string]any{"llama.context_length": 262144},
+					"parameters":   map[string]any{"num_ctx": 4096},
+					"capabilities": []string{"completion", "thinking", "tools", "vision"},
+					"thinking":     map[string]any{"values": []any{"low", "high", "max"}, "default": "max"},
+				})
 			case "llama3:8b":
 				// No trained context reported; fall back to runtime num_ctx.
 				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{}, "parameters": map[string]any{"num_ctx": 8192}})
 			case "deepseek-v4-flash:0731":
-				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{"deepseek.context_length": 1048576}, "parameters": map[string]any{}})
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"model_info":   map[string]any{"deepseek.context_length": 1048576},
+					"parameters":   map[string]any{},
+					"capabilities": []string{"completion", "tools"},
+				})
 			default:
 				http.Error(w, "unknown model", 404)
 			}
@@ -489,6 +498,105 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 	}
 	if models[2].ID != "deepseek-v4-flash:0731" || models[2].ContextLength != 1048576 {
 		t.Fatalf("deepseek-v4-flash:0731 architecture context not captured: %+v", models[2])
+	}
+	// Provider-reported capabilities land on the model and are not left to
+	// models.dev.
+	qwen := models[0]
+	if qwen.SupportsVision == nil || !*qwen.SupportsVision {
+		t.Errorf("qwen3.5 vision = %v, want true", qwen.SupportsVision)
+	}
+	if qwen.SupportsTools == nil || !*qwen.SupportsTools {
+		t.Errorf("qwen3.5 tools = %v, want true", qwen.SupportsTools)
+	}
+	if qwen.SupportsReasoning == nil || !*qwen.SupportsReasoning {
+		t.Errorf("qwen3.5 reasoning = %v, want true", qwen.SupportsReasoning)
+	}
+	if len(qwen.InputModalities) != 2 || qwen.InputModalities[0] != "text" || qwen.InputModalities[1] != "image" {
+		t.Errorf("qwen3.5 input modalities = %v, want [text image]", qwen.InputModalities)
+	}
+	if qwen.ReasoningCapabilities == nil || len(qwen.ReasoningCapabilities.Options) != 1 {
+		t.Fatalf("qwen3.5 reasoning capabilities = %+v", qwen.ReasoningCapabilities)
+	}
+	if got := qwen.ReasoningCapabilities.Options[0]; got.Type != ReasoningOptionEffort || !reflect.DeepEqual(got.Values, []string{"low", "high", "max"}) {
+		t.Errorf("qwen3.5 reasoning option = %+v", got)
+	}
+	if qwen.ReasoningCapabilities.DefaultEffort != "max" {
+		t.Errorf("qwen3.5 default effort = %q, want max", qwen.ReasoningCapabilities.DefaultEffort)
+	}
+	// A capabilities array without vision leaves vision unknown (nil), not
+	// false: Ollama's absence is not an explicit denial.
+	ds := models[2]
+	if ds.SupportsVision != nil {
+		t.Errorf("deepseek vision = %v, want nil (unknown)", ds.SupportsVision)
+	}
+	if ds.SupportsTools == nil || !*ds.SupportsTools {
+		t.Errorf("deepseek tools = %v, want true", ds.SupportsTools)
+	}
+	// A model whose /api/show omits capabilities entirely keeps every flag
+	// unknown.
+	llama := models[1]
+	if llama.SupportsTools != nil || llama.SupportsVision != nil || llama.SupportsReasoning != nil {
+		t.Errorf("llama3 flags should be unknown, got tools=%v vision=%v reasoning=%v", llama.SupportsTools, llama.SupportsVision, llama.SupportsReasoning)
+	}
+	if llama.InputModalities != nil {
+		t.Errorf("llama3 input modalities = %v, want nil", llama.InputModalities)
+	}
+}
+
+func TestOllamaThinkingDescriptorNormalization(t *testing.T) {
+	cases := []struct {
+		name        string
+		values      []any
+		def         any
+		wantValues  []string
+		wantDefault string
+		wantNil     bool
+	}{
+		{
+			name:        "named effort levels",
+			values:      []any{"low", "high", "max"},
+			def:         "max",
+			wantValues:  []string{"low", "high", "max"},
+			wantDefault: "max",
+		},
+		{
+			name:        "boolean false becomes the none effort",
+			values:      []any{false, "low", "high"},
+			def:         "high",
+			wantValues:  []string{"none", "low", "high"},
+			wantDefault: "high",
+		},
+		{
+			name:       "boolean-only descriptor is an unrestricted selector",
+			values:     []any{false, true},
+			def:        true,
+			wantValues: []string{"none"},
+		},
+		{
+			name:    "no values is unknown",
+			values:  nil,
+			wantNil: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ollamaReasoningCapabilities(&ollamaThinking{Values: tc.values, Default: tc.def})
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("want nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil || len(got.Options) != 1 {
+				t.Fatalf("unexpected capabilities: %+v", got)
+			}
+			if opt := got.Options[0]; opt.Type != ReasoningOptionEffort || !reflect.DeepEqual(opt.Values, tc.wantValues) {
+				t.Errorf("option = %+v, want effort %v", opt, tc.wantValues)
+			}
+			if got.DefaultEffort != tc.wantDefault {
+				t.Errorf("default effort = %q, want %q", got.DefaultEffort, tc.wantDefault)
+			}
+		})
 	}
 }
 
