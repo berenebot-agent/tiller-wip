@@ -344,7 +344,16 @@ type Registry struct {
 	mu               sync.Mutex
 	modelsDev        modelsDevDataset
 	modelsDevEnabled bool
+	// codexVersion caches the last successfully resolved Codex client version
+	// and when it was fetched, so discovery does not hit the release channel on
+	// every refresh.
+	codexVersion   string
+	codexVersionAt time.Time
 }
+
+// codexVersionTTL bounds how long a resolved Codex client version is reused
+// before discovery re-resolves it from the release channel.
+const codexVersionTTL = time.Hour
 
 func NewRegistry() *Registry {
 	transport := &http.Transport{
@@ -560,6 +569,36 @@ func (r *Registry) discoverCommandCode(ctx context.Context, provider Instance) (
 	return models, nil
 }
 
+// codexClientVersion resolves the Codex client version to advertise during
+// model discovery. The Codex backend gates each model on its
+// minimal_client_version, so a hardcoded value silently hides newer models
+// (e.g. gpt-6-luna, gated at 0.155.0). The live release channel is the primary
+// source; a resolved value is cached for codexVersionTTL, and any failure
+// degrades to the pinned codex.ClientVersion floor so a channel outage never
+// fails a refresh.
+func (r *Registry) codexClientVersion(ctx context.Context) string {
+	r.mu.Lock()
+	cached := r.codexVersion
+	cachedAt := r.codexVersionAt
+	r.mu.Unlock()
+	if cached != "" && time.Since(cachedAt) < codexVersionTTL {
+		return cached
+	}
+	version, err := codex.ResolveLatestVersion(ctx, r.HTTPClient())
+	if err != nil || version == "" {
+		// Serve a still-recent cached value over the floor if we have one.
+		if cached != "" {
+			return cached
+		}
+		return codex.ClientVersion
+	}
+	r.mu.Lock()
+	r.codexVersion = version
+	r.codexVersionAt = time.Now()
+	r.mu.Unlock()
+	return version
+}
+
 func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Model, error) {
 	endpoint, err := appendEndpoint(provider.BaseURL, "models")
 	if err != nil {
@@ -570,7 +609,7 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		return nil, err
 	}
 	q := u.Query()
-	q.Set("client_version", codex.ClientVersion)
+	q.Set("client_version", r.codexClientVersion(ctx))
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)

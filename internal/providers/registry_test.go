@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -884,14 +885,22 @@ func TestValidateBaseURL(t *testing.T) {
 }
 
 func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
+	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.156.1"})
+	}))
+	defer release.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = release.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
 			t.Errorf("discovery path = %q, want /models", r.URL.Path)
 			http.Error(w, "wrong path", http.StatusNotFound)
 			return
 		}
-		if got := r.URL.Query().Get("client_version"); got != codex.ClientVersion {
-			t.Errorf("client_version = %q, want %q", got, codex.ClientVersion)
+		if got := r.URL.Query().Get("client_version"); got != "0.156.1" {
+			t.Errorf("client_version = %q, want resolved 0.156.1", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{
 			map[string]any{
@@ -975,5 +984,98 @@ func TestCodexEffortAliases(t *testing.T) {
 				t.Fatalf("codexEffortAliases = %v, want ultra->%s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolveLatestVersionParsesTag(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("accept = %q, want application/json", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.156.1", "assets": []any{}})
+	}))
+	defer upstream.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = upstream.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
+	got, err := codex.ResolveLatestVersion(context.Background(), upstream.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "0.156.1" {
+		t.Fatalf("version = %q, want 0.156.1", got)
+	}
+}
+
+func TestResolveLatestVersionRejectsBadPayloads(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   map[string]any
+	}{
+		{name: "http error", status: http.StatusBadGateway},
+		{name: "missing tag", status: http.StatusOK, body: map[string]any{}},
+		{name: "non-rust tag", status: http.StatusOK, body: map[string]any{"tag_name": "v1.2.3"}},
+		{name: "unparseable version", status: http.StatusOK, body: map[string]any{"tag_name": "rust-vgarbage"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if tc.body != nil {
+					_ = json.NewEncoder(w).Encode(tc.body)
+				}
+			}))
+			defer upstream.Close()
+			original := codex.ReleaseChannelURL
+			codex.ReleaseChannelURL = upstream.URL
+			defer func() { codex.ReleaseChannelURL = original }()
+
+			if _, err := codex.ResolveLatestVersion(context.Background(), upstream.Client()); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+// TestCodexClientVersionFallsBackToFloor verifies discovery degrades to the
+// pinned floor when the release channel is unreachable, rather than failing.
+func TestCodexClientVersionFallsBackToFloor(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = upstream.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
+	r := NewRegistry()
+	if got := r.codexClientVersion(context.Background()); got != codex.ClientVersion {
+		t.Fatalf("version = %q, want floor %q", got, codex.ClientVersion)
+	}
+}
+
+// TestCodexClientVersionCachesResolution verifies a successful resolution is
+// reused without contacting the release channel again within the TTL.
+func TestCodexClientVersionCachesResolution(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.160.0"})
+	}))
+	defer upstream.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = upstream.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
+	r := NewRegistry()
+	for i := 0; i < 3; i++ {
+		if got := r.codexClientVersion(context.Background()); got != "0.160.0" {
+			t.Fatalf("version = %q, want 0.160.0", got)
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("release channel hits = %d, want 1", got)
 	}
 }
