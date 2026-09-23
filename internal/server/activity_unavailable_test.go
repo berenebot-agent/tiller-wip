@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"testing"
 
@@ -143,7 +144,7 @@ func TestHostedScopeNeverFallsBackToLocalAccount(t *testing.T) {
 	defer db.Close()
 
 	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	hosted, err := New(config.Config{Mode: config.ModeHosted, TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "correct horse", PublicURL: "https://tiller.example.com", DataDir: t.TempDir()}, db, discard)
+	hosted, err := New(config.Config{Mode: config.ModeHosted, TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "correct horse", PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"), DataDir: t.TempDir()}, db, discard)
 	if err != nil {
 		t.Fatal(err)
 	}

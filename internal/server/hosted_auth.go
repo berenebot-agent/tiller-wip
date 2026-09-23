@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +15,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
+
+const authRequestMaxBytes = 8 << 10
 
 const (
 	genericSignupMessage = "If the address can receive mail, a verification message will arrive shortly."
@@ -37,7 +42,7 @@ func (s *Server) runtime(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	key := clientIP(r, s.config.TrustedProxy)
-	if s.signupLimiter.locked(key) {
+	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
 	}
@@ -51,7 +56,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		Password    string `json:"password"`
 		AcceptTerms bool   `json:"accept_terms"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -85,18 +90,16 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
 			return
 		}
-		s.signupLimiter.recordFailure(key)
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 		return
 	}
-	s.signupLimiter.success(key)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "user.signup", ActorType: "anonymous", TargetType: "user", TargetID: result.User.ID})
 	writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 }
 
 func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 	key := clientIP(r, s.config.TrustedProxy)
-	if s.userLoginLimiter.locked(key) {
+	if s.userLoginIPLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
 		return
 	}
@@ -104,13 +107,25 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	emailKey := s.authRateLimitEmailKey(input.Email)
+	if s.userLoginEmailLimiter.locked(emailKey) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
+		return
+	}
+	if len([]byte(input.Password)) > 1024 {
+		s.userLoginIPLimiter.recordFailure(key)
+		s.userLoginEmailLimiter.recordFailure(emailKey)
+		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password.")
 		return
 	}
 	u, err := s.identity.AuthenticatePassword(r.Context(), input.Email, input.Password)
 	if err != nil {
-		s.userLoginLimiter.recordFailure(key)
+		s.userLoginIPLimiter.recordFailure(key)
+		s.userLoginEmailLimiter.recordFailure(emailKey)
 		if errors.Is(err, identity.ErrNotVerified) {
 			adminError(w, http.StatusForbidden, "email_not_verified", "Verify your email before signing in.")
 			return
@@ -118,7 +133,7 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password.")
 		return
 	}
-	s.userLoginLimiter.success(key)
+	s.userLoginEmailLimiter.success(emailKey)
 	session, err := s.identity.CreateUserSession(r.Context(), u)
 	if err != nil {
 		adminError(w, http.StatusInternalServerError, "internal_error", "Could not create session.")
@@ -170,7 +185,7 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Token string `json:"token"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -203,41 +218,47 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 	key := clientIP(r, s.config.TrustedProxy)
-	if s.recoveryLimiter.locked(key) {
+	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 		return
 	}
 	var input struct {
 		Email string `json:"email"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !s.recoveryEmailLimiter.allowAttempt(s.authRateLimitEmailKey(input.Email)) {
+		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 		return
 	}
 	if _, _, err := s.identity.IssueVerification(r.Context(), input.Email); err != nil && s.logger != nil {
 		s.logger.Warn("verification issue failed", "error_class", fmt.Sprintf("%T", err))
 	}
-	s.recoveryLimiter.success(key)
 	writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 }
 
 func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	key := clientIP(r, s.config.TrustedProxy)
-	if s.recoveryLimiter.locked(key) {
+	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
 		return
 	}
 	var input struct {
 		Email string `json:"email"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !s.recoveryEmailLimiter.allowAttempt(s.authRateLimitEmailKey(input.Email)) {
+		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
 		return
 	}
 	if _, _, err := s.identity.IssuePasswordReset(r.Context(), input.Email); err != nil && s.logger != nil {
 		s.logger.Warn("password reset issue failed", "error_class", fmt.Sprintf("%T", err))
 	}
-	s.recoveryLimiter.success(key)
 	writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
 }
 
@@ -246,7 +267,7 @@ func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 		Token    string `json:"token"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -261,6 +282,12 @@ func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.password_reset", ActorType: "user", ActorID: u.ID})
 	writeJSON(w, http.StatusOK, map[string]any{"reset": true})
+}
+
+func (s *Server) authRateLimitEmailKey(email string) string {
+	mac := hmac.New(sha256.New, s.authRateLimitHashKey[:])
+	_, _ = mac.Write([]byte(identity.NormalizeEmail(email)))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func (s *Server) setUserSessionCookie(w http.ResponseWriter, _ *http.Request, token string, expires time.Time) {

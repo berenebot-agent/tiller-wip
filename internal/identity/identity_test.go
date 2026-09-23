@@ -99,6 +99,45 @@ func TestAccountSuspensionInvalidatesSessions(t *testing.T) {
 	}
 }
 
+func TestUserSessionRejectsMismatchedAccountOwner(t *testing.T) {
+	st, db := newTestStore(t)
+	ctx := context.Background()
+	firstSignup, err := st.CreateSignup(ctx, "first@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstUser, err := st.ConsumeVerification(ctx, firstSignup.VerificationToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstSession, err := st.CreateUserSession(ctx, firstUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondSignup, err := st.CreateSignup(ctx, "second@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondUser, err := st.ConsumeVerification(ctx, secondSignup.VerificationToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selector, _, ok := parseOpaqueToken(firstSession.Token)
+	if !ok {
+		t.Fatal("new user session token did not parse")
+	}
+	if _, err := db.Exec(`UPDATE user_sessions SET account_id=? WHERE id=?`, secondUser.AccountID, selector); err != nil {
+		t.Fatal(err)
+	}
+	freshStore, err := New(db, st.passwordHasher, st.tokenHasher, st.credentialHasher, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, valid := freshStore.GetUserSession(ctx, firstSession.Token); valid {
+		t.Fatal("session with an account not owned by its user was accepted")
+	}
+}
+
 func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 	st, db := newTestStore(t)
 	ctx := context.Background()

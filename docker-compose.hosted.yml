@@ -1,6 +1,6 @@
 # Hosted deployment override. Use with:
 #
-#   docker compose -f docker-compose.yml -f docker-compose.hosted.yml up -d --build
+#   TILLER_TRUSTED_PROXY=172.20.0.2/32 docker compose -f docker-compose.yml -f docker-compose.hosted.yml up -d --build
 #
 # The base Compose file remains the simple self-hosted appliance. This override
 # removes its direct host port and supplies the reverse-proxy network boundary.
@@ -9,6 +9,7 @@ services:
     environment:
       TILLER_MODE: hosted
       TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:?set TILLER_PUBLIC_URL}
+      TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:?set TILLER_TRUSTED_PROXY to the reverse proxy IP or CIDR}
       TILLER_PLATFORM_ADMIN_USERNAME: ${TILLER_PLATFORM_ADMIN_USERNAME:?set TILLER_PLATFORM_ADMIN_USERNAME}
       TILLER_PLATFORM_ADMIN_PASSWORD: ${TILLER_PLATFORM_ADMIN_PASSWORD:?set TILLER_PLATFORM_ADMIN_PASSWORD}
       # Set these only when converting an existing local deployment. They are

@@ -45,7 +45,7 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword string `json:"current_password"`
 		NewPassword     string `json:"new_password"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -74,7 +74,7 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		NewEmail string `json:"new_email"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -113,7 +113,7 @@ func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Token string `json:"token"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -153,7 +153,7 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Confirm  string `json:"confirm"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}

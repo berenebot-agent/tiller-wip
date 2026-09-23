@@ -36,7 +36,9 @@ containing only Tiller and to an ingress network used by the reverse proxy. A
 proxy in another Compose project can use an existing network with
 `TILLER_INGRESS_NETWORK` and `TILLER_INGRESS_NETWORK_EXTERNAL=true`. This
 network layout requires no host firewall configuration and does not alter
-local/LAN provider support. It is defense in depth only: hosted outbound
+local/LAN provider support. Hosted mode requires `TILLER_TRUSTED_PROXY` to
+identify the direct reverse proxy peer so client IP limits and audit records
+use the forwarded client address. It is defense in depth only: hosted outbound
 requests remain subject to the application `SafeTransport`, and operators may
 add provider-specific VPS firewall rules separately.
 
@@ -91,7 +93,11 @@ single-use, short-lived, and hash-only at rest. Customer sessions and platform
 operator sessions use separate host-only Secure/HttpOnly/SameSite cookies and
 CSRF tokens. Account suspension immediately revokes customer sessions and
 blocks client-key traffic. Hosted detailed body logging is unavailable even if
-the account settings request attempts to enable it.
+the account settings request attempts to enable it. Customer login and recovery
+requests have in-memory per-IP budgets; login and recovery also use normalized-
+email keyed throttles. The per-email login failure lockout can temporarily block
+an account after repeated failed attempts regardless of source IP; this targeted
+denial-of-service tradeoff is accepted for beta and can be revisited if observed.
 
 **Account self-service.** Hosted customers manage their identity from the
 Account tab. Changing the password or email, signing out everywhere, and

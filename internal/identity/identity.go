@@ -789,7 +789,7 @@ func (s *Store) loadUserSession(ctx context.Context, selector, secret string, no
 	var session UserSession
 	var hash, expires string
 	var status, accountStatus string
-	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id WHERE us.id=?`, selector).
+	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id AND a.owner_user_id=u.id WHERE us.id=?`, selector).
 		Scan(&session.CSRFToken, &hash, &expires, &session.User.ID, &session.User.Email, &status, &session.User.VerifiedAt, &session.User.AccountID, &accountStatus); err != nil {
 		return UserSession{}, false
 	}

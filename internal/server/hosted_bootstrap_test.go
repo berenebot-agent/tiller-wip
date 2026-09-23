@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
@@ -60,6 +62,21 @@ func hostedBootstrapConfig(adminUsername, adminPassword string) config.Config {
 		TillerPlatformAdminUser:     "platform-admin",
 		TillerPlatformAdminPassword: "platform-secret",
 		PublicURL:                   "https://tiller.example.com",
+		TrustedProxy:                netip.MustParsePrefix("127.0.0.1/32"),
+	}
+}
+
+func TestHostedStartupRequiresTrustedProxy(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	cfg := hostedBootstrapConfig("", "")
+	cfg.TrustedProxy = netip.Prefix{}
+	_, err = New(cfg, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
+	if err == nil || !strings.Contains(err.Error(), "TILLER_TRUSTED_PROXY") {
+		t.Fatalf("hosted startup error = %v, want TILLER_TRUSTED_PROXY requirement", err)
 	}
 }
 

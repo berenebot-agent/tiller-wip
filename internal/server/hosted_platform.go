@@ -24,7 +24,7 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}

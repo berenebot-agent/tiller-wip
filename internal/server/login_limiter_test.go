@@ -86,6 +86,20 @@ func TestLoginLimiterSuccessClearsFailures(t *testing.T) {
 	}
 }
 
+func TestLoginLimiterAttemptBudgetIsNotClearedBySuccess(t *testing.T) {
+	l := newLoginLimiter(2, time.Hour, time.Hour)
+	if !l.allowAttempt("1.2.3.4") || !l.allowAttempt("1.2.3.4") {
+		t.Fatal("first two requests should be within budget")
+	}
+	if l.allowAttempt("1.2.3.4") {
+		t.Fatal("request beyond the budget should be rejected")
+	}
+	l.success("1.2.3.4")
+	if l.allowAttempt("1.2.3.4") {
+		t.Fatal("success must not clear an attempt budget")
+	}
+}
+
 // TestLoginLimiterHardBoundRefusesEntryWhenFull verifies the 4096-entry map
 // is a true hard bound: with every slot holding an active lockout (nothing
 // safely evictable), a new IP is let through without growing the map, and

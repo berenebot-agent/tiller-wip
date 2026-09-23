@@ -210,7 +210,8 @@ func Load() (Config, error) {
 	// Setting TILLER_TRUSTED_PROXY to a CIDR is the switch that enables
 	// proxy-header trust: forwarded headers are only honoured when the direct
 	// peer is inside that CIDR, so a spoofable header can never be trusted
-	// from an untrusted peer. Leaving it unset disables proxy-header trust.
+	// from an untrusted peer. Hosted mode requires this setting; local mode may
+	// leave it unset to disable proxy-header trust.
 	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
 		var v netip.Prefix
 		if strings.Contains(raw, "/") {
@@ -227,6 +228,9 @@ func Load() (Config, error) {
 			v = netip.PrefixFrom(addr, addr.BitLen())
 		}
 		c.TrustedProxy = v
+	}
+	if c.Mode == ModeHosted && !c.TrustedProxy.IsValid() {
+		return Config{}, errors.New("TILLER_TRUSTED_PROXY is required in hosted mode and must identify the direct reverse proxy")
 	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
 		v, err := strconv.ParseBool(raw)

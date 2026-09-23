@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,7 +48,7 @@ func hostedServerHarness(t *testing.T, dropActivity bool) (*Server, *testAPI, st
 	app, err := New(config.Config{
 		Mode: config.ModeHosted, TillerUser: "owner@example.com", TillerUserPassword: "correct horse battery staple",
 		TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
-		PublicURL: "https://tiller.example.com", DataDir: t.TempDir(),
+		PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"), DataDir: t.TempDir(),
 	}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if err != nil {
 		t.Fatal(err)
@@ -313,6 +315,146 @@ func TestSignupRequiresTermsAcceptance(t *testing.T) {
 	}
 	if users != 0 {
 		t.Fatalf("rejected signup still created %d user rows", users)
+	}
+}
+
+func TestSignupAttemptBudgetSurvivesSuccessfulSignup(t *testing.T) {
+	_, api, _ := hostedServerHarness(t, false)
+	for i := 0; i < 5; i++ {
+		status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{
+			"email": fmt.Sprintf("signup-%d@example.com", i), "password": "correct horse battery staple", "accept_terms": true,
+		})
+		if status != http.StatusAccepted {
+			t.Fatalf("signup %d: %d %v", i+1, status, payload)
+		}
+	}
+	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{
+		"email": "signup-over-budget@example.com", "password": "correct horse battery staple", "accept_terms": true,
+	})
+	if status != http.StatusTooManyRequests || errorCode(payload) != "rate_limited" {
+		t.Fatalf("signup beyond per-IP budget = %d %v, want 429 rate_limited", status, payload)
+	}
+}
+
+func TestRecoveryBudgetCountsRequestsAcrossEndpoints(t *testing.T) {
+	app, api, _ := hostedServerHarness(t, false)
+	for i := 0; i < 5; i++ {
+		status, payload, _ := api.request("POST", "/api/auth/password-reset/request", map[string]any{"email": fmt.Sprintf("unknown-%d@example.com", i)})
+		if status != http.StatusAccepted {
+			t.Fatalf("password reset %d: %d %v", i+1, status, payload)
+		}
+	}
+	status, payload, _ := api.request("POST", "/api/auth/verification/resend", map[string]any{"email": "owner@example.com"})
+	if status != http.StatusAccepted || payload["message"] != genericSignupMessage {
+		t.Fatalf("resend after recovery budget = %d %v, want generic 202", status, payload)
+	}
+	var queued int
+	if err := app.db.SQL.QueryRow(`SELECT count(*) FROM mail_outbox WHERE type='password_reset' AND recipient='owner@example.com'`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("queued reset messages for final email = %d, want 0 because IP budget spans recovery endpoints", queued)
+	}
+}
+
+func TestRecoveryEmailBudgetIsHashedAndSharedAcrossEndpoints(t *testing.T) {
+	app, _, _ := hostedServerHarness(t, false)
+	created, err := app.identity.CreateSignup(context.Background(), "unverified@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(remote, path string) (int, map[string]any) {
+		t.Helper()
+		body, err := json.Marshal(map[string]string{"email": "UNVERIFIED@example.com"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		r.RemoteAddr = remote
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		app.Handler().ServeHTTP(w, r)
+		var payload map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		return w.Code, payload
+	}
+	for i := 0; i < 5; i++ {
+		status, payload := request(fmt.Sprintf("192.0.2.%d:12345", i+1), "/api/auth/verification/resend")
+		if status != http.StatusAccepted || payload["message"] != genericSignupMessage {
+			t.Fatalf("verification resend %d = %d %v, want generic 202", i+1, status, payload)
+		}
+	}
+	status, payload := request("192.0.2.6:12345", "/api/auth/password-reset/request")
+	if status != http.StatusAccepted || payload["message"] != genericResetMessage {
+		t.Fatalf("password reset after email budget = %d %v, want generic 202", status, payload)
+	}
+	var queued int
+	if err := app.db.SQL.QueryRow(`SELECT count(*) FROM mail_outbox WHERE type='password_reset' AND user_id=?`, created.User.ID).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("queued password reset messages = %d, want 0 due shared per-email recovery budget", queued)
+	}
+}
+
+func TestUserLoginSuccessDoesNotClearIPFailureBudget(t *testing.T) {
+	_, api, _ := hostedServerHarness(t, false)
+	for i := 0; i < 7; i++ {
+		status, _, _ := api.request("POST", "/api/auth/login", map[string]any{"email": fmt.Sprintf("victim-%d@example.com", i), "password": "wrong password"})
+		if status != http.StatusUnauthorized {
+			t.Fatalf("failed login %d = %d, want 401", i+1, status)
+		}
+	}
+	status, payload, _ := api.request("POST", "/api/auth/login", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"})
+	if status != http.StatusOK {
+		t.Fatalf("successful own-account login = %d %v, want 200", status, payload)
+	}
+	status, _, _ = api.request("POST", "/api/auth/login", map[string]any{"email": "victim-7@example.com", "password": "wrong password"})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("eighth failed login = %d, want 401 while recording lockout", status)
+	}
+	status, payload, _ = api.request("POST", "/api/auth/login", map[string]any{"email": "victim-8@example.com", "password": "wrong password"})
+	if status != http.StatusTooManyRequests || errorCode(payload) != "rate_limited" {
+		t.Fatalf("login after IP failure budget = %d %v, want 429 rate_limited", status, payload)
+	}
+}
+
+func TestUserLoginSuccessClearsOnlyThatEmailFailureBudget(t *testing.T) {
+	_, api, _ := hostedServerHarness(t, false)
+	for i := 0; i < 7; i++ {
+		status, _, _ := api.request("POST", "/api/auth/login", map[string]any{"email": "owner@example.com", "password": "wrong password"})
+		if status != http.StatusUnauthorized {
+			t.Fatalf("failed login %d = %d, want 401", i+1, status)
+		}
+	}
+	status, payload, _ := api.request("POST", "/api/auth/login", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"})
+	if status != http.StatusOK {
+		t.Fatalf("successful account login = %d %v, want 200", status, payload)
+	}
+	status, _, _ = api.request("POST", "/api/auth/login", map[string]any{"email": "owner@example.com", "password": "wrong password"})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("failed login after success = %d, want 401 after email streak reset", status)
+	}
+}
+
+func TestAuthLoginRejectsOversizedPasswordAndBody(t *testing.T) {
+	app, api, _ := hostedServerHarness(t, false)
+	status, payload, _ := api.request("POST", "/api/auth/login", map[string]any{
+		"email": "owner@example.com", "password": strings.Repeat("x", 1025),
+	})
+	if status != http.StatusUnauthorized || errorCode(payload) != "invalid_credentials" {
+		t.Fatalf("oversized password login = %d %v, want generic 401", status, payload)
+	}
+
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", strings.NewReader(`{"email":"owner@example.com","password":"correct horse battery staple"}`+strings.Repeat(" ", authRequestMaxBytes)))
+	r.RemoteAddr = "192.0.2.25:12345"
+	r.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("oversized auth body = %d, want 400", w.Code)
 	}
 }
 

@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net"
@@ -79,9 +81,12 @@ type Server struct {
 	notifyInFlight   map[string]bool
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
 	loginLimiter          *loginLimiter
-	userLoginLimiter      *loginLimiter
+	userLoginIPLimiter    *loginLimiter
+	userLoginEmailLimiter *loginLimiter
 	signupLimiter         *loginLimiter
-	recoveryLimiter       *loginLimiter
+	recoveryIPLimiter     *loginLimiter
+	recoveryEmailLimiter  *loginLimiter
+	authRateLimitHashKey  [32]byte
 	clientSelectorLimiter *loginLimiter
 	clientAddressLimiter  *loginLimiter
 	oauthStartLimiter     *loginLimiter
@@ -232,6 +237,15 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	for _, opt := range opts {
 		opt(&options)
 	}
+	if cfg.Mode == config.ModeHosted && !cfg.TrustedProxy.IsValid() {
+		return nil, errors.New("TILLER_TRUSTED_PROXY is required in hosted mode and must identify the direct reverse proxy")
+	}
+	var authRateLimitHashKey [32]byte
+	if cfg.Mode == config.ModeHosted {
+		if _, err := rand.Read(authRateLimitHashKey[:]); err != nil {
+			return nil, fmt.Errorf("initialize auth rate-limit key: %w", err)
+		}
+	}
 	clients, err := auth.NewClientAuthenticatorWithHasher(db.SQL, options.tokenHasher)
 	if err != nil {
 		return nil, err
@@ -305,7 +319,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if cfg.Mode == config.ModeHosted {
 		notifyClient = hostednet.NewClient(notificationTimeout)
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryLimiter: newLoginLimiter(5, time.Hour, time.Hour), clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	if cfg.Mode == config.ModeHosted {
@@ -537,7 +551,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct{ Username, Password string }
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
@@ -788,11 +802,25 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	return decodeJSONBody(w, r, target, 32<<20, false)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
+	return decodeJSONBody(w, r, target, maxBytes, true)
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, maxBytes int64, requireSingleValue bool) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
 		return errors.New("request body must be valid JSON")
+	}
+	if requireSingleValue {
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			return errors.New("request body must contain one JSON value")
+		}
 	}
 	return nil
 }

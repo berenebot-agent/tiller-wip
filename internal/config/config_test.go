@@ -178,14 +178,22 @@ func TestModeAndPublicURL(t *testing.T) {
 		t.Fatalf("TILLER_MODE=local: mode=%q err=%v", c.Mode, err)
 	}
 
-	// Hosted without a public URL is a hard error.
+	// Hosted without a public URL is a hard error, even if proxy trust is set.
 	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.1")
 	if _, err := Load(); err == nil {
 		t.Error("hosted mode without TILLER_PUBLIC_URL should fail")
 	}
 
-	// Hosted with a valid origin succeeds and preserves the origin.
+	// Hosted with a valid origin but no trusted proxy fails closed.
 	t.Setenv("TILLER_PUBLIC_URL", "https://app.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	if _, err := Load(); err == nil {
+		t.Error("hosted mode without TILLER_TRUSTED_PROXY should fail")
+	}
+
+	// Hosted with a valid origin and proxy succeeds and preserves the origin.
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.1")
 	c, err = Load()
 	if err != nil {
 		t.Fatalf("hosted with public URL should load: %v", err)
@@ -208,7 +216,7 @@ func TestPublicURLValidation(t *testing.T) {
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
 	t.Setenv("TILLER_DATA_DIR", dir)
-	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.1")
 	t.Setenv("TILLER_MODE", "hosted")
 
 	bad := []string{

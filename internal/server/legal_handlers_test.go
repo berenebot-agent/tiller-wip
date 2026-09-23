@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/netip"
 	"path/filepath"
 	"testing"
 
@@ -31,7 +32,7 @@ func legalTestServer(t *testing.T) (*Server, *testAPI, *http.Client, string) {
 	app, err := New(config.Config{
 		Mode: config.ModeHosted, TillerUser: "owner@example.com", TillerUserPassword: "correct horse battery staple",
 		TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
-		PublicURL: "https://tiller.example.com", DataDir: t.TempDir(),
+		PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"), DataDir: t.TempDir(),
 	}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if err != nil {
 		t.Fatal(err)

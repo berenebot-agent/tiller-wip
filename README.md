@@ -195,8 +195,13 @@ keeps direct `TILLER_PORT` publishing and does not require a reverse proxy.
 Hosted deployments use the separate `docker-compose.hosted.yml` override:
 
 ```bash
+TILLER_PUBLIC_URL=https://app.example.com TILLER_TRUSTED_PROXY=172.20.0.2/32 \
 docker compose -f docker-compose.yml -f docker-compose.hosted.yml up -d --build
 ```
+
+Set the required platform admin credentials in `.env` as well. Choose the
+trusted proxy IP/CIDR from the router's ingress network; don't trust the entire
+network unless every host on it is a controlled reverse proxy.
 
 The hosted override removes direct host-port publishing and attaches Tiller to
 a managed `tiller-router-egress` network containing only Tiller, plus an
@@ -211,7 +216,9 @@ TILLER_INGRESS_NETWORK=proxy_network
 TILLER_INGRESS_NETWORK_EXTERNAL=true
 ```
 
-The hosted deployment requires `TILLER_PUBLIC_URL` and still uses the
+The hosted deployment requires `TILLER_PUBLIC_URL` and
+`TILLER_TRUSTED_PROXY`, set to the direct reverse proxy's IP/CIDR so client IP
+rate limits and audit records use the real client address. It still uses the
 application-level `SafeTransport` for public HTTPS
 destination validation and SSRF protection. Docker network isolation is only
 defense in depth; it is not a substitute for the application policy or an
@@ -229,6 +236,7 @@ local installation:
 ```bash
 TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
 TILLER_PLATFORM_ADMIN_PASSWORD=replace-with-a-long-random-password
+TILLER_TRUSTED_PROXY=172.20.0.2/32                   # required hosted: direct reverse proxy IP/CIDR
 TILLER_USERNAME=owner@example.com                     # optional one-time migration input
 TILLER_PASSWORD=existing-local-password               # optional one-time migration input
 TILLER_PORT=8080                                     # host port (default 8080)
@@ -236,7 +244,6 @@ TILLER_RUN_UID=1000                                  # runtime uid (default 6553
 TILLER_RUN_GID=1000                                  # runtime gid (default 65532)
 TILLER_UID=1000                                      # build-time uid for baked-in files (default 65532)
 TILLER_GID=1000                                      # build-time gid for baked-in files (default 65532)
-TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy if using one
 TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
 TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
 TILLER_ADMIN_COOKIE_SECURE=true                     # force Secure on the admin cookie (auto set to true if https used)
