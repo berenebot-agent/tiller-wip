@@ -61,6 +61,10 @@ type requestAttempt struct {
 	attemptTimedOut                                        bool
 	upstreamStreaming                                      bool
 	headerLatencyMs                                        int64
+	// firstOutputLatencyMs is the delay from attempt start to the first
+	// client-visible assistant frame (text, reasoning, or tool). It is distinct
+	// from headerLatencyMs, which only measures receipt of upstream headers.
+	firstOutputLatencyMs int64
 	// clientError is the sanitized, client-facing detail for a failed attempt
 	// (provider error message/code/param). It is never persisted or exposed via
 	// Activity; it exists only to build a client error response.
@@ -246,6 +250,56 @@ func clientCausedFailure(attempt requestAttempt) bool {
 func (s *Server) pruneRequestLogs(ctx context.Context) {
 	_ = s.storeHandle().PruneRequestLogs(ctx, time.Now())
 	s.invalidateAllUsageAggregates()
+}
+
+// outputObserver records the delay from an attempt's start to its first
+// client-visible assistant frame. It records only a duration; it never sees or
+// retains any response content. A nil observer is a valid no-op.
+type outputObserver struct {
+	started time.Time
+	done    bool
+	record  func(time.Duration)
+}
+
+// observe records the first-output latency exactly once. Safe on a nil receiver
+// and safe to call from the streaming goroutine.
+func (o *outputObserver) observe() {
+	if o == nil || o.done {
+		return
+	}
+	o.done = true
+	if o.record != nil {
+		o.record(time.Since(o.started))
+	}
+}
+
+// newOutputObserver builds the first-output observer for the committed attempt.
+// It stores the latency on that attempt for the Activity record and, for Codex
+// targets, emits a dedicated log line so a silent reasoning prefill is
+// distinguishable from a genuinely slow header response. Returns nil when there
+// is no committed attempt to attribute the measurement to.
+func (s *Server) newOutputObserver(start time.Time, row *logRow, candidate resolvedRoute, headerLatencyMs int64) *outputObserver {
+	if start.IsZero() || row == nil {
+		return nil
+	}
+	return &outputObserver{
+		started: start,
+		record: func(d time.Duration) {
+			ms := d.Milliseconds()
+			if len(row.attempts) > 0 {
+				row.attempts[len(row.attempts)-1].firstOutputLatencyMs = ms
+			}
+			if s.logger != nil && candidate.Provider.Type == "codex-subscription" {
+				s.logger.Info("codex first output",
+					"client_request_id", row.clientRequestID,
+					"provider", candidate.Provider.Name,
+					"model", candidate.UpstreamModelID,
+					"header_latency_ms", headerLatencyMs,
+					"first_output_latency_ms", ms,
+				)
+			}
+		},
+	}
 }
 
 // usageCapture accumulates token counts extracted from a response body in

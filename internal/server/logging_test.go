@@ -816,3 +816,56 @@ func TestPrunerDeletesByRetention(t *testing.T) {
 		t.Fatalf("old log not pruned: count=%d err=%v", count, err)
 	}
 }
+
+// TestOutputObserverRecordsFirstOutputOnce verifies the first-output observer
+// records exactly one measurement (the first visible frame), and stores it on
+// the most recent attempt.
+func TestOutputObserverRecordsFirstOutputOnce(t *testing.T) {
+	row := &logRow{clientRequestID: "req-1", attempts: []requestAttempt{{result: "success"}}}
+	var got []int64
+	obs := &outputObserver{
+		started: time.Now().Add(-25 * time.Millisecond),
+		record: func(d time.Duration) {
+			got = append(got, d.Milliseconds())
+			row.attempts[len(row.attempts)-1].firstOutputLatencyMs = d.Milliseconds()
+		},
+	}
+	obs.observe()
+	obs.observe()
+	if len(got) != 1 {
+		t.Fatalf("observer recorded %d times, want 1", len(got))
+	}
+	if row.attempts[0].firstOutputLatencyMs < 20 {
+		t.Fatalf("first output latency not recorded on attempt: %d", row.attempts[0].firstOutputLatencyMs)
+	}
+}
+
+// TestOutputObserverNilSafe confirms a nil observer is a no-op, so streaming
+// call sites can pass nil without guards.
+func TestOutputObserverNilSafe(t *testing.T) {
+	var obs *outputObserver
+	obs.observe()
+}
+
+// TestResponsesEventHasOutput pins which Responses events count as the first
+// client-visible frame. Reasoning-summary deltas count, so a Codex prefill
+// driven by summary:auto is not mistaken for silence.
+func TestResponsesEventHasOutput(t *testing.T) {
+	yes := []string{
+		"response.output_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_text.delta",
+		"response.function_call_arguments.delta",
+	}
+	for _, typ := range yes {
+		if !responsesEventHasOutput(map[string]any{"type": typ}) {
+			t.Fatalf("%s should count as output", typ)
+		}
+	}
+	no := []string{"response.created", "response.completed", "response.output_item.added"}
+	for _, typ := range no {
+		if responsesEventHasOutput(map[string]any{"type": typ}) {
+			t.Fatalf("%s should not count as first output", typ)
+		}
+	}
+}

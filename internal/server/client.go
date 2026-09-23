@@ -575,6 +575,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	clientTracked := false
 	activeTargetID := ""
 	quotaRejected := false
+	// selectedAttemptStart / selectedHeaderLatencyMs describe the attempt that
+	// was ultimately committed to the client; both are zero until a target is
+	// selected. They let the first-output observer attribute its measurement to
+	// the serving attempt.
+	selectedAttemptStart := time.Time{}
+	selectedHeaderLatencyMs := int64(0)
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
@@ -1215,6 +1221,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 			}
 			selected, resp, cancel = candidate, response, attemptCancel
+			selectedAttemptStart = attemptStart
+			selectedHeaderLatencyMs = headerLatencyMs
 			// Track the hot leg for the deferred targetEnd, for virtual and
 			// direct real-model routes alike (the 1:1 real leg included).
 			activeTargetID = targetID
@@ -1346,7 +1354,8 @@ routeDone:
 			w.WriteHeader(resp.StatusCode)
 		}
 		row.httpStatus = resp.StatusCode
-		if err := translateResponse(w, streamKeepalive, reader, incoming, target, selected, usage); err != nil {
+		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
+		if err := translateResponseObserved(w, streamKeepalive, reader, incoming, target, selected, usage, outputObs); err != nil {
 			idle.Stop()
 			class := "translation_error"
 			if attemptTimedOut.Load() {
@@ -1377,7 +1386,8 @@ routeDone:
 		s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 		ensureStreamKeepalive()
 		row.httpStatus = resp.StatusCode
-		if err := rewriteSSE(w, streamKeepalive, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
+		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
+		if err := rewriteSSEObserved(w, streamKeepalive, reader, selected.UpstreamModelID, selected.RequestedModel, usage, outputObs); err != nil {
 			class := "upstream_read_error"
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
@@ -1947,6 +1957,12 @@ func allAttemptsFailureClass(attempts []requestAttempt, class string) bool {
 }
 
 func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
+	return rewriteSSEObserved(w, keepalive, r, upstream, requested, usage, nil)
+}
+
+// rewriteSSEObserved is rewriteSSE with an optional first-output observer. The
+// observer records a timestamp only; it never sees or retains response content.
+func rewriteSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, upstream, requested string, usage *usageCapture, obs *outputObserver) error {
 	reader := bufio.NewReader(r)
 	if keepalive == nil {
 		keepalive = newSSEKeepaliveWriter(w, sseKeepaliveInterval)
@@ -1981,6 +1997,9 @@ func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reade
 								setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
 								setCacheFromUsage(u, usage)
 							}
+							if responsesEventHasOutput(m) {
+								obs.observe()
+							}
 						}
 						rewriteModel(value, upstream, requested)
 						if encoded, e := json.Marshal(value); e == nil {
@@ -2003,6 +2022,20 @@ func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reade
 			return err
 		}
 	}
+}
+
+// responsesEventHasOutput reports whether a Responses SSE event type carries
+// client-visible assistant output (text, reasoning summary/content, or a tool
+// call). Used only to time the first visible frame.
+func responsesEventHasOutput(m map[string]any) bool {
+	switch m["type"] {
+	case "response.output_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_text.delta",
+		"response.function_call_arguments.delta":
+		return true
+	}
+	return false
 }
 
 func rewriteModel(value any, upstream, requested string) {
