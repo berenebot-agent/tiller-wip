@@ -224,6 +224,35 @@ destination validation and SSRF protection. Docker network isolation is only
 defense in depth; it is not a substitute for the application policy or an
 optional VPS firewall hardening rule.
 
+### Hosted Google sign-in and Turnstile
+
+Configure customer sign-in from **`/platform` → Signup and mail** after the
+hosted service is running. These integrations are off until enabled there, and
+their secrets are encrypted at rest with the platform settings.
+
+For Google sign-in, create an OAuth client for a web application in Google
+Cloud. Add the redirect URI displayed beside the client ID field in the
+platform dashboard; it is the exact URL
+`https://<your-hostname>/api/auth/google/callback`. Enter the OAuth client ID
+and secret, then enable Google sign-in. Google supplies the verified email and
+stable subject identifier. A Google email that already belongs to a Tiller
+account is never linked automatically: sign in to that account and link Google
+from **Settings → Account**.
+
+For bot protection, create a Cloudflare Turnstile widget and allow your hosted
+hostname in its widget settings. Enter its site key and secret key in the
+platform dashboard, then enable Turnstile. The site key is public; the secret
+is kept server-side. Turnstile protects signup, verification resend, password
+reset requests, and the start of Google sign-in. Password login keeps its
+existing rate limits. Turnstile works without routing the site through
+Cloudflare. See the [Google web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server)
+and [Cloudflare Turnstile setup guide](https://developers.cloudflare.com/turnstile/get-started/).
+
+The Google OAuth client secret and Turnstile secret key are encrypted at rest.
+The browser receives neither secret. If you rotate a secret, enter the new
+value and save; leave it blank to keep the stored value. Use the explicit
+“Clear saved … secret” checkbox to remove one.
+
 ### Other compose / env options
 
 The repo's `docker-compose.yml` plus `.env` cover the most common local

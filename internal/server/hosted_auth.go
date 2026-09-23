@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
+	"github.com/tiller-router/tiller-router/internal/hostedauth"
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
@@ -40,6 +42,59 @@ func (s *Server) runtime(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"mode": string(s.config.Mode)})
 }
 
+func (s *Server) authOptions(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "auth_unavailable", "Sign-in options are temporarily unavailable.")
+		return
+	}
+	signup, err := s.storeHandle().HostedSignupEnabled(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "auth_unavailable", "Sign-in options are temporarily unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"google_enabled":     settings.GoogleEnabled && settings.GoogleClientID != "" && settings.GoogleClientSecret != "",
+		"turnstile_enabled":  settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != "",
+		"turnstile_site_key": settings.TurnstileSiteKey,
+		"signup_enabled":     signup,
+	})
+}
+
+func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token, action string) bool {
+	settings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "captcha_unavailable", "Security verification is temporarily unavailable.")
+		return false
+	}
+	if !settings.TurnstileEnabled {
+		return true
+	}
+	if settings.TurnstileSiteKey == "" || settings.TurnstileSecret == "" {
+		adminError(w, http.StatusServiceUnavailable, "captcha_unavailable", "Security verification is temporarily unavailable.")
+		return false
+	}
+	if token == "" {
+		adminError(w, http.StatusForbidden, "captcha_required", "Complete the security check and try again.")
+		return false
+	}
+	publicURL, err := url.Parse(s.config.PublicURL)
+	if err != nil || publicURL.Hostname() == "" {
+		adminError(w, http.StatusServiceUnavailable, "captcha_unavailable", "Security verification is temporarily unavailable.")
+		return false
+	}
+	err = s.turnstileVerifier.Verify(r.Context(), settings.TurnstileSecret, token, publicURL.Hostname(), action)
+	if errors.Is(err, hostedauth.ErrTurnstileRejected) {
+		adminError(w, http.StatusForbidden, "captcha_rejected", "Security verification failed. Complete the check and try again.")
+		return false
+	}
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "captcha_unavailable", "Security verification is temporarily unavailable.")
+		return false
+	}
+	return true
+}
+
 func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.signupLimiter.allowAttempt(key) {
@@ -52,9 +107,10 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Email       string `json:"email"`
-		Password    string `json:"password"`
-		AcceptTerms bool   `json:"accept_terms"`
+		Email        string `json:"email"`
+		Password     string `json:"password"`
+		AcceptTerms  bool   `json:"accept_terms"`
+		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
@@ -66,6 +122,9 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	if !input.AcceptTerms {
 		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
+		return
+	}
+	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "signup") {
 		return
 	}
 	terms, err := s.storeHandle().GetLegalDoc(r.Context(), "terms")
@@ -223,10 +282,14 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Email string `json:"email"`
+		Email        string `json:"email"`
+		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "recovery") {
 		return
 	}
 	if !s.recoveryEmailLimiter.allowAttempt(s.authRateLimitEmailKey(input.Email)) {
@@ -246,10 +309,14 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Email string `json:"email"`
+		Email        string `json:"email"`
+		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "recovery") {
 		return
 	}
 	if !s.recoveryEmailLimiter.allowAttempt(s.authRateLimitEmailKey(input.Email)) {

@@ -62,6 +62,12 @@ the complete V1 data model:
   (e) Operational logs - metadata only. Operational logs do not contain prompts,
       responses, API keys or tokens.
 
+  (f) Sign-in integration data - if you choose Google sign-in, Google returns
+      your verified email address and stable account subject to Hosted Tiller.
+      Hosted Tiller stores those values to authenticate and link your account.
+      If the operator enables Cloudflare Turnstile, Cloudflare processes the
+      security token and browser signals used to reduce automated abuse.
+
 2.2 We do not ask you to provide, and the Service is not designed to require,
 "special category" or sensitive information. You are responsible for what you
 choose to send through the Service. Because prompt content is processed
@@ -76,6 +82,12 @@ necessarily receive it while routing it.
   (b) automatically when you use the Service, in the form of Activity metadata
       and operational logs; and
   (c) from service providers who process data on our behalf (see section 8).
+
+3.3 If you choose Google sign-in, Google processes the authorization request
+and returns your verified email address and stable account subject. We request
+only the OpenID Connect identity and email scopes. If Turnstile is enabled,
+Cloudflare receives the challenge request and token validation request,
+including browser and network information needed to assess abuse.
 
 3.2 We use only strictly necessary authentication and security cookies. We do
 not use non-essential tracking, advertising or analytics cookies. If that
@@ -110,6 +122,13 @@ never stored or logged in plaintext.
 Sessions expire and are revoked on password reset, account compromise or
 account deletion, as described in the service documentation.
 
+5.3 Google sign-in is optional alongside email and password. We store Google's
+stable subject identifier and verified email so later sign-ins use the same
+identity. We do not connect a Google identity to an existing account based only
+on matching email addresses. OAuth tokens are used to complete sign-in and are
+not retained. Google-first accounts can add a password after confirming their
+identity through Google.
+
 6. ACTIVITY METADATA
 
 6.1 Activity metadata is the routing and outcome information listed in
@@ -136,11 +155,11 @@ see the Security and Data Handling page.
 8. SUBPROCESSORS AND OVERSEAS PROCESSING AND DISCLOSURE
 
 8.1 We use a small number of third-party service providers ("subprocessors") to
-operate the Service. These currently include our cloud/compute host,
-transactional email provider, and DNS/TLS/edge provider, and may include an
-error-monitoring provider. The current list, with purpose, data categories,
-whether data is persisted or transient, country of processing, and transfer
-mechanism, is published in the Subprocessor List.
+operate the Service. These include our cloud/compute host, transactional email
+provider, DNS/TLS/edge provider, and, when the operator enables the relevant
+feature, Google for sign-in and Cloudflare for Turnstile. The current list,
+with purpose, data categories, whether data is persisted or transient, country
+of processing, and transfer mechanism, is published in the Subprocessor List.
 
 8.2 We are an Australian-operated service. Depending on the subprocessor and
 your location, personal information may be processed or disclosed outside

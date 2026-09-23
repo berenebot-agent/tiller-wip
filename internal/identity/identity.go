@@ -53,12 +53,13 @@ var (
 
 // User is the authenticated hosted identity and its one owned account.
 type User struct {
-	ID            string
-	Email         string
-	Status        string
-	AccountID     string
-	AccountStatus string
-	VerifiedAt    sql.NullString
+	ID              string
+	Email           string
+	Status          string
+	AccountID       string
+	AccountStatus   string
+	VerifiedAt      sql.NullString
+	PasswordEnabled bool
 }
 
 func (u User) Verified() bool { return u.VerifiedAt.Valid && u.VerifiedAt.String != "" }
@@ -470,8 +471,8 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 
 func (s *Store) userByEmail(ctx context.Context, email string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email=?`, email).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email=?`, email).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -489,7 +490,10 @@ func (s *Store) AuthenticatePassword(ctx context.Context, email, password string
 		return User{}, err
 	}
 	var passwordHash string
-	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=?`, u.ID).Scan(&passwordHash); err != nil {
+	if !u.PasswordEnabled {
+		return User{}, ErrNotFound
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=? AND password_auth_enabled=1`, u.ID).Scan(&passwordHash); err != nil {
 		return User{}, err
 	}
 	if !s.passwordHasher.Verify(password, passwordHash) {
@@ -600,6 +604,9 @@ func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, str
 	if err != nil {
 		return User{}, "", err
 	}
+	if !u.PasswordEnabled {
+		return User{}, "", nil
+	}
 	raw, selector, hash, err := newOpaqueToken(s.tokenHasher)
 	if err != nil {
 		return User{}, "", err
@@ -637,7 +644,7 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 		return User{}, ErrInvalidToken
 	}
 	var userID, hash, expires string
-	if err := s.db.QueryRowContext(ctx, `SELECT user_id,token_hash,expires_at FROM password_reset_tokens WHERE id=? AND used_at IS NULL`, selector).Scan(&userID, &hash, &expires); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT t.user_id,t.token_hash,t.expires_at FROM password_reset_tokens t JOIN users u ON u.id=t.user_id AND u.password_auth_enabled=1 WHERE t.id=? AND t.used_at IS NULL`, selector).Scan(&userID, &hash, &expires); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrInvalidToken
 		}
@@ -667,7 +674,7 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
@@ -789,11 +796,13 @@ func (s *Store) loadUserSession(ctx context.Context, selector, secret string, no
 	var session UserSession
 	var hash, expires string
 	var status, accountStatus string
-	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id AND a.owner_user_id=u.id WHERE us.id=?`, selector).
-		Scan(&session.CSRFToken, &hash, &expires, &session.User.ID, &session.User.Email, &status, &session.User.VerifiedAt, &session.User.AccountID, &accountStatus); err != nil {
+	var passwordEnabled bool
+	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status,u.password_auth_enabled FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id AND a.owner_user_id=u.id WHERE us.id=?`, selector).
+		Scan(&session.CSRFToken, &hash, &expires, &session.User.ID, &session.User.Email, &status, &session.User.VerifiedAt, &session.User.AccountID, &accountStatus, &passwordEnabled); err != nil {
 		return UserSession{}, false
 	}
 	session.User.Status, session.User.AccountStatus = status, accountStatus
+	session.User.PasswordEnabled = passwordEnabled
 	exp, err := time.Parse(time.RFC3339Nano, expires)
 	if err != nil || !now.Before(exp) || status != "active" || !session.User.Verified() || accountStatus != "active" || !s.tokenHasher.Verify(secret, hash) {
 		return UserSession{}, false
@@ -1106,8 +1115,8 @@ func (s *Store) ensurePlatformCacheRoomLocked(now time.Time) {
 
 func (s *Store) userByID(ctx context.Context, userID string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}

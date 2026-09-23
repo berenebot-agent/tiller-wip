@@ -21,6 +21,12 @@ configure; Hosted Tiller does not persist prompt or response bodies.
 Hosted infrastructure and service providers may process data outside Australia,
 including in the United States.
 
+If you choose Google sign-in, Google provides your verified email address and
+stable account identifier. Hosted Tiller does not connect Google to an existing
+account automatically based only on a matching email. If Cloudflare Turnstile
+is enabled, Cloudflare processes browser and network signals for abuse
+prevention. See the Privacy Policy and Subprocessor List for details.
+
 By creating an account you confirm that you have authority to use any provider
 credentials you connect, and that you will comply with each provider's terms and
 with the Acceptable Use Policy.

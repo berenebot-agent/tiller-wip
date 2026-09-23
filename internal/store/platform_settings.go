@@ -19,12 +19,20 @@ const (
 	PlatformSettingMailSMTPUsername    = "mail_smtp_username"
 	PlatformSettingMailSMTPPassword    = "mail_smtp_password"
 	PlatformSettingMailSMTPMode        = "mail_smtp_mode"
+	PlatformSettingGoogleEnabled       = "google_signin_enabled"
+	PlatformSettingGoogleClientID      = "google_client_id"
+	PlatformSettingGoogleClientSecret  = "google_client_secret"
+	PlatformSettingTurnstileEnabled    = "turnstile_enabled"
+	PlatformSettingTurnstileSiteKey    = "turnstile_site_key"
+	PlatformSettingTurnstileSecret     = "turnstile_secret"
 )
 
 var platformSecretSettings = map[string]bool{
-	PlatformSettingMailResendAPIKey: true,
-	PlatformSettingMailBrevoAPIKey:  true,
-	PlatformSettingMailSMTPPassword: true,
+	PlatformSettingMailResendAPIKey:   true,
+	PlatformSettingMailBrevoAPIKey:    true,
+	PlatformSettingMailSMTPPassword:   true,
+	PlatformSettingGoogleClientSecret: true,
+	PlatformSettingTurnstileSecret:    true,
 }
 
 // GetPlatformSetting reads a platform setting and decrypts mail secrets at the
@@ -84,6 +92,18 @@ type PlatformSettingsProposal struct {
 	HostedSignupEnabled bool
 	AuditRetentionDays  int
 	Mail                PlatformMailSettings
+	Auth                PlatformAuthSettings
+}
+
+// PlatformAuthSettings contains hosted-only login integration settings.
+// Secret values are decrypted only inside the server and never serialized.
+type PlatformAuthSettings struct {
+	GoogleEnabled      bool
+	GoogleClientID     string
+	GoogleClientSecret string
+	TurnstileEnabled   bool
+	TurnstileSiteKey   string
+	TurnstileSecret    string
 }
 
 func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSettingsProposal) error {
@@ -116,7 +136,13 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		PlatformSettingMailResendAPIKey: proposal.Mail.ResendAPIKey, PlatformSettingMailBrevoAPIKey: proposal.Mail.BrevoAPIKey,
 		PlatformSettingMailSMTPHost: proposal.Mail.SMTPHost, PlatformSettingMailSMTPPort: proposal.Mail.SMTPPort,
 		PlatformSettingMailSMTPUsername: proposal.Mail.SMTPUsername, PlatformSettingMailSMTPPassword: proposal.Mail.SMTPPassword,
-		PlatformSettingMailSMTPMode: proposal.Mail.SMTPMode,
+		PlatformSettingMailSMTPMode:       proposal.Mail.SMTPMode,
+		PlatformSettingGoogleEnabled:      boolString(proposal.Auth.GoogleEnabled),
+		PlatformSettingGoogleClientID:     proposal.Auth.GoogleClientID,
+		PlatformSettingGoogleClientSecret: proposal.Auth.GoogleClientSecret,
+		PlatformSettingTurnstileEnabled:   boolString(proposal.Auth.TurnstileEnabled),
+		PlatformSettingTurnstileSiteKey:   proposal.Auth.TurnstileSiteKey,
+		PlatformSettingTurnstileSecret:    proposal.Auth.TurnstileSecret,
 	}
 	for key, value := range values {
 		if err := upsert(key, value); err != nil {
@@ -124,6 +150,48 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		}
 	}
 	return tx.Commit()
+}
+
+// GetPlatformAuthSettings reads hosted sign-in and CAPTCHA settings. Missing
+// rows use disabled/empty defaults. Secrets are decrypted at this boundary.
+func (s *Store) GetPlatformAuthSettings(ctx context.Context) (PlatformAuthSettings, error) {
+	keys := []string{
+		PlatformSettingGoogleEnabled, PlatformSettingGoogleClientID, PlatformSettingGoogleClientSecret,
+		PlatformSettingTurnstileEnabled, PlatformSettingTurnstileSiteKey, PlatformSettingTurnstileSecret,
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
+	args := make([]any, 0, len(keys))
+	for _, key := range keys {
+		args = append(args, key)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM platform_settings WHERE key IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return PlatformAuthSettings{}, err
+	}
+	defer rows.Close()
+	values := make(map[string]string, len(keys))
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return PlatformAuthSettings{}, err
+		}
+		if platformSecretSettings[key] {
+			value, err = decryptWith(s.cipher, secretAAD("platform", "setting", key, "value"), value)
+			if err != nil {
+				return PlatformAuthSettings{}, err
+			}
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return PlatformAuthSettings{}, err
+	}
+	return PlatformAuthSettings{
+		GoogleEnabled:  values[PlatformSettingGoogleEnabled] == "1" || strings.EqualFold(values[PlatformSettingGoogleEnabled], "true"),
+		GoogleClientID: values[PlatformSettingGoogleClientID], GoogleClientSecret: values[PlatformSettingGoogleClientSecret],
+		TurnstileEnabled: values[PlatformSettingTurnstileEnabled] == "1" || strings.EqualFold(values[PlatformSettingTurnstileEnabled], "true"),
+		TurnstileSiteKey: values[PlatformSettingTurnstileSiteKey], TurnstileSecret: values[PlatformSettingTurnstileSecret],
+	}, nil
 }
 
 func boolString(value bool) string {

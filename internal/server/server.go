@@ -22,6 +22,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/hostedauth"
 	"github.com/tiller-router/tiller-router/internal/hostednet"
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/mailer"
@@ -48,11 +49,18 @@ type Server struct {
 	// secretCipher is the resolved recoverable-secret cipher. nil means the
 	// passthrough default; it is reported as "disabled" to the admin status
 	// API. Locked is reported when the cipher holds no usable key.
-	secretCipher store.SecretCipher
-	clients      *auth.ClientAuthenticator
-	sessions     *auth.SessionStore
-	identity     *identity.Store
-	mailer       *mailer.Manager
+	secretCipher      store.SecretCipher
+	clients           *auth.ClientAuthenticator
+	sessions          *auth.SessionStore
+	identity          *identity.Store
+	authClient        *http.Client
+	googleVerifier    *hostedauth.GoogleVerifier
+	turnstileVerifier *hostedauth.TurnstileVerifier
+	googleFlows       *hostedauth.FlowStore
+	googlePending     *hostedauth.PendingSignupStore
+	googleReauthMu    sync.Mutex
+	googleReauth      map[[32]byte]time.Time
+	mailer            *mailer.Manager
 	// outbox is the durable transactional-mail queue. It is nil in local mode,
 	// where identity flows never enqueue.
 	outbox *mailoutbox.Outbox
@@ -316,10 +324,12 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		identityStore.SetMailQueue(outbox)
 	}
 	notifyClient := &http.Client{Timeout: notificationTimeout}
+	authClient := &http.Client{Timeout: 10 * time.Second}
 	if cfg.Mode == config.ModeHosted {
 		notifyClient = hostednet.NewClient(notificationTimeout)
+		authClient = hostednet.NewClient(10 * time.Second)
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	if cfg.Mode == config.ModeHosted {
@@ -419,8 +429,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /security.txt", s.handleSecurityTxt)
 	mux.HandleFunc("GET /.well-known/security.txt", s.handleSecurityTxt)
 	if s.config.Mode == config.ModeHosted {
+		mux.HandleFunc("GET /api/auth/options", s.authOptions)
 		mux.HandleFunc("POST /api/auth/signup", s.signup)
 		mux.HandleFunc("POST /api/auth/login", s.userLogin)
+		mux.HandleFunc("POST /api/auth/google/start", s.startGoogleSignIn)
+		mux.HandleFunc("GET /api/auth/google/callback", s.googleCallback)
+		mux.HandleFunc("POST /api/auth/google/signup/complete", s.completeGoogleSignup)
 		mux.HandleFunc("GET /api/legal/{slug}", s.legalDoc)
 		mux.Handle("GET /api/auth/session", s.requireUser(http.HandlerFunc(s.userSessionStatus)))
 		mux.Handle("DELETE /api/auth/session", s.requireUser(http.HandlerFunc(s.userLogout)))
@@ -436,6 +450,9 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST /api/auth/onboarding/dismiss", s.requireUser(http.HandlerFunc(s.setOnboardingDismissed)))
 		mux.Handle("POST /api/auth/account/password", s.requireUser(http.HandlerFunc(s.changeOwnPassword)))
 		mux.Handle("POST /api/auth/account/email", s.requireUser(http.HandlerFunc(s.requestOwnEmailChange)))
+		mux.Handle("POST /api/auth/google/link/start", s.requireUser(http.HandlerFunc(s.startGoogleLink)))
+		mux.Handle("POST /api/auth/google/reauth/start", s.requireUser(http.HandlerFunc(s.startGoogleReauth)))
+		mux.Handle("DELETE /api/auth/account/google", s.requireUser(http.HandlerFunc(s.unlinkGoogle)))
 		mux.Handle("POST /api/auth/account/sessions/revoke-all", s.requireUser(http.HandlerFunc(s.revokeOwnSessions)))
 		mux.Handle("DELETE /api/auth/account", s.requireUser(http.HandlerFunc(s.deleteOwnAccount)))
 		mux.HandleFunc("POST /api/platform/session", s.platformLogin)
@@ -785,7 +802,11 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
+		csp := "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		if s.config.Mode == config.ModeHosted {
+			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+		}
+		w.Header().Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)
 	})
 }

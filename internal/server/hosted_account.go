@@ -49,7 +49,12 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if _, err := s.identity.ChangePassword(r.Context(), session.User.ID, rawUserSessionToken(r), input.CurrentPassword, input.NewPassword); err != nil {
+	_, authErr := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword)
+	if authErr != nil {
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your password.")
+		return
+	}
+	if _, err := s.identity.ChangePasswordAfterReauthentication(r.Context(), session.User.ID, rawUserSessionToken(r), input.NewPassword); err != nil {
 		switch {
 		case errors.Is(err, identity.ErrWeakPassword), errors.Is(err, identity.ErrPasswordTooLong):
 			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
@@ -78,8 +83,8 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if err := s.identity.VerifyPassword(r.Context(), session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Your password is incorrect.")
+	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your email.")
 		return
 	}
 	if !validEmail(input.NewEmail) {
@@ -161,8 +166,8 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "confirmation_required", "Type your email address to confirm deletion.")
 		return
 	}
-	if err := s.identity.VerifyPassword(r.Context(), session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Your password is incorrect.")
+	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before deleting your account.")
 		return
 	}
 	accountID := session.User.AccountID

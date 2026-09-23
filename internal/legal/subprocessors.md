@@ -47,6 +47,12 @@ Transactional email    | [EMAIL_VENDOR]       | Email address; account event not
 Brevo or self-managed  | or SMTP operator)    |                                             | short-lived                  |                       | (see §3)
 SMTP)                  |                      |                                             |                              |                       |
 -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+Google sign-in         | Google               | OAuth authorization; verified email and     | Transient OAuth response;    | United States and/or  | To be confirmed
+                       |                      | stable Google subject identifier            | Tiller stores subject/email  | Google's regions      | before launch
+-----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+Bot protection        | Cloudflare Turnstile | Challenge token; browser and network signals| Transient challenge and      | Global edge network   | To be confirmed
+(optional)            |                      | used for abuse prevention                   | validation data             |                       | before launch
+-----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
 DNS / TLS / edge       | [EDGE_VENDOR]        | Request metadata at the network edge;       | Transient (metadata only)    | Global edge network   | Adequacy / SCC /
 protection             |                      | connection metadata; TLS termination        |                              | (incl. Australia and  | DPF as applicable
                        |                      |                                             |                              | the United States)    | (see §3)

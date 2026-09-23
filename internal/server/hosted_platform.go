@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -104,25 +105,47 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := s.mailer.Status()
-	writeJSON(w, http.StatusOK, map[string]any{"hosted_signup_enabled": signup, "audit_retention_days": retention, "mail": status})
+	publicURL, _ := url.Parse(s.config.PublicURL)
+	authSettings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "settings_locked", "Authentication settings are unavailable.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"hosted_signup_enabled": signup, "audit_retention_days": retention, "mail": status,
+		"google":    map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
+		"turnstile": map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
+	})
 }
 
 func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		HostedSignupEnabled *bool   `json:"hosted_signup_enabled"`
-		AuditRetentionDays  *int    `json:"audit_retention_days"`
-		MailProvider        *string `json:"mail_provider"`
-		MailFrom            *string `json:"mail_from"`
-		MailResendAPIKey    *string `json:"mail_resend_api_key"`
-		MailBrevoAPIKey     *string `json:"mail_brevo_api_key"`
-		MailSMTPHost        *string `json:"mail_smtp_host"`
-		MailSMTPPort        *int    `json:"mail_smtp_port"`
-		MailSMTPUsername    *string `json:"mail_smtp_username"`
-		MailSMTPPassword    *string `json:"mail_smtp_password"`
-		MailSMTPMode        *string `json:"mail_smtp_mode"`
+		HostedSignupEnabled  *bool   `json:"hosted_signup_enabled"`
+		AuditRetentionDays   *int    `json:"audit_retention_days"`
+		MailProvider         *string `json:"mail_provider"`
+		MailFrom             *string `json:"mail_from"`
+		MailResendAPIKey     *string `json:"mail_resend_api_key"`
+		MailBrevoAPIKey      *string `json:"mail_brevo_api_key"`
+		MailSMTPHost         *string `json:"mail_smtp_host"`
+		MailSMTPPort         *int    `json:"mail_smtp_port"`
+		MailSMTPUsername     *string `json:"mail_smtp_username"`
+		MailSMTPPassword     *string `json:"mail_smtp_password"`
+		MailSMTPMode         *string `json:"mail_smtp_mode"`
+		GoogleEnabled        *bool   `json:"google_signin_enabled"`
+		GoogleClientID       *string `json:"google_client_id"`
+		GoogleClientSecret   *string `json:"google_client_secret"`
+		ClearGoogleSecret    bool    `json:"clear_google_client_secret"`
+		TurnstileEnabled     *bool   `json:"turnstile_enabled"`
+		TurnstileSiteKey     *string `json:"turnstile_site_key"`
+		TurnstileSecret      *string `json:"turnstile_secret"`
+		ClearTurnstileSecret bool    `json:"clear_turnstile_secret"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := decodeJSONLimit(w, r, &input, 64<<10); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if input.GoogleClientID != nil && len(*input.GoogleClientID) > 2048 || input.GoogleClientSecret != nil && len(*input.GoogleClientSecret) > 8192 || input.TurnstileSiteKey != nil && len(*input.TurnstileSiteKey) > 2048 || input.TurnstileSecret != nil && len(*input.TurnstileSecret) > 8192 {
+		adminError(w, http.StatusBadRequest, "invalid_auth_settings", "Authentication settings are too long.")
 		return
 	}
 	s.platformSettingsMu.Lock()
@@ -160,6 +183,58 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if input.MailSMTPMode != nil {
 		currentMail.SMTPMode = strings.ToLower(strings.TrimSpace(*input.MailSMTPMode))
 	}
+	authSettings, err := st.GetPlatformAuthSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "settings_locked", "Authentication settings are unavailable.")
+		return
+	}
+	wasGoogleEnabled := authSettings.GoogleEnabled
+	previousGoogleClientID := authSettings.GoogleClientID
+	if input.GoogleEnabled != nil {
+		authSettings.GoogleEnabled = *input.GoogleEnabled
+	}
+	if input.GoogleClientID != nil {
+		authSettings.GoogleClientID = strings.TrimSpace(*input.GoogleClientID)
+	}
+	if input.GoogleClientSecret != nil && *input.GoogleClientSecret != "" {
+		authSettings.GoogleClientSecret = *input.GoogleClientSecret
+	}
+	if input.ClearGoogleSecret {
+		authSettings.GoogleClientSecret = ""
+	}
+	if input.TurnstileEnabled != nil {
+		authSettings.TurnstileEnabled = *input.TurnstileEnabled
+	}
+	if input.TurnstileSiteKey != nil {
+		authSettings.TurnstileSiteKey = strings.TrimSpace(*input.TurnstileSiteKey)
+	}
+	if input.TurnstileSecret != nil && *input.TurnstileSecret != "" {
+		authSettings.TurnstileSecret = *input.TurnstileSecret
+	}
+	if input.ClearTurnstileSecret {
+		authSettings.TurnstileSecret = ""
+	}
+	googleDisableRequested := input.GoogleEnabled != nil && !*input.GoogleEnabled && wasGoogleEnabled
+	googleClientIDChanged := input.GoogleClientID != nil && authSettings.GoogleClientID != previousGoogleClientID
+	if googleDisableRequested || googleClientIDChanged {
+		linked, countErr := s.identity.GoogleIdentityCount(r.Context())
+		if countErr != nil {
+			adminError(w, http.StatusInternalServerError, "database_error", "Could not check Google sign-in accounts.")
+			return
+		}
+		if linked > 0 {
+			adminError(w, http.StatusConflict, "google_accounts_linked", "Google sign-in cannot be disabled or moved to a different OAuth client while accounts are linked. Have each user add a password and unlink Google first.")
+			return
+		}
+	}
+	if authSettings.GoogleEnabled && (authSettings.GoogleClientID == "" || authSettings.GoogleClientSecret == "") {
+		adminError(w, http.StatusBadRequest, "invalid_google_settings", "Google sign-in needs a client ID and client secret.")
+		return
+	}
+	if authSettings.TurnstileEnabled && (authSettings.TurnstileSiteKey == "" || authSettings.TurnstileSecret == "") {
+		adminError(w, http.StatusBadRequest, "invalid_turnstile_settings", "Turnstile needs a site key and secret key.")
+		return
+	}
 	retention, err := st.AuditRetentionDays(r.Context())
 	if errors.Is(err, sql.ErrNoRows) {
 		retention = 30
@@ -183,7 +258,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
 		return
 	}
-	if err := st.SavePlatformSettings(r.Context(), store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail}); err != nil {
+	if err := st.SavePlatformSettings(r.Context(), store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail, Auth: authSettings}); err != nil {
 		adminError(w, http.StatusServiceUnavailable, "settings_locked", "Platform settings could not be saved.")
 		return
 	}
@@ -199,21 +274,35 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasMailUpdate(input) {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.mail_settings_changed", ActorType: "platform"})
 	}
+	if input.GoogleEnabled != nil || input.GoogleClientID != nil || input.GoogleClientSecret != nil || input.ClearGoogleSecret {
+		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.google_signin_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(authSettings.GoogleEnabled)}})
+	}
+	if input.TurnstileEnabled != nil || input.TurnstileSiteKey != nil || input.TurnstileSecret != nil || input.ClearTurnstileSecret {
+		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.turnstile_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(authSettings.TurnstileEnabled)}})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func hasMailUpdate(input struct {
-	HostedSignupEnabled *bool   `json:"hosted_signup_enabled"`
-	AuditRetentionDays  *int    `json:"audit_retention_days"`
-	MailProvider        *string `json:"mail_provider"`
-	MailFrom            *string `json:"mail_from"`
-	MailResendAPIKey    *string `json:"mail_resend_api_key"`
-	MailBrevoAPIKey     *string `json:"mail_brevo_api_key"`
-	MailSMTPHost        *string `json:"mail_smtp_host"`
-	MailSMTPPort        *int    `json:"mail_smtp_port"`
-	MailSMTPUsername    *string `json:"mail_smtp_username"`
-	MailSMTPPassword    *string `json:"mail_smtp_password"`
-	MailSMTPMode        *string `json:"mail_smtp_mode"`
+	HostedSignupEnabled  *bool   `json:"hosted_signup_enabled"`
+	AuditRetentionDays   *int    `json:"audit_retention_days"`
+	MailProvider         *string `json:"mail_provider"`
+	MailFrom             *string `json:"mail_from"`
+	MailResendAPIKey     *string `json:"mail_resend_api_key"`
+	MailBrevoAPIKey      *string `json:"mail_brevo_api_key"`
+	MailSMTPHost         *string `json:"mail_smtp_host"`
+	MailSMTPPort         *int    `json:"mail_smtp_port"`
+	MailSMTPUsername     *string `json:"mail_smtp_username"`
+	MailSMTPPassword     *string `json:"mail_smtp_password"`
+	MailSMTPMode         *string `json:"mail_smtp_mode"`
+	GoogleEnabled        *bool   `json:"google_signin_enabled"`
+	GoogleClientID       *string `json:"google_client_id"`
+	GoogleClientSecret   *string `json:"google_client_secret"`
+	ClearGoogleSecret    bool    `json:"clear_google_client_secret"`
+	TurnstileEnabled     *bool   `json:"turnstile_enabled"`
+	TurnstileSiteKey     *string `json:"turnstile_site_key"`
+	TurnstileSecret      *string `json:"turnstile_secret"`
+	ClearTurnstileSecret bool    `json:"clear_turnstile_secret"`
 }) bool {
 	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
 }

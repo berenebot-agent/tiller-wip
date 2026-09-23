@@ -475,3 +475,6 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .platform-legal-form label{display:grid;gap:4px;font-size:11px;color:var(--muted)}
 .platform-legal-form textarea,.platform-legal-form input{width:100%;font-family:var(--mono);font-size:12px}
 @media(max-width:720px){.platform-plan-fields{grid-template-columns:1fr}.app-footer{flex-direction:column}}
+.auth-captcha{margin:12px 0;display:grid;justify-items:center;gap:4px}
+.auth-captcha .meta-line{text-align:center}
+#auth-captcha{min-height:0}

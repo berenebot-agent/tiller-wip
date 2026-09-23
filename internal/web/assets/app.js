@@ -3,6 +3,12 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0 };
 let runtimeMode = 'local';
+let hostedAuthOptions = {};
+let captchaWidgetID = null;
+let captchaAction = '';
+let captchaToken = '';
+let captchaGeneration = 0;
+let captchaScriptPromise = null;
 const mobileVirtualDrafts = new Map();
 const mobileVirtualExpanded = new Set();
 // routeActivity derives a virtual route's spinner state from the per
@@ -142,15 +148,80 @@ function deferUsage() {
   loadUsage().then(() => reconcileLive()).catch(() => {});
 }
 function authView(name) {
-  ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form','legal-panel'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form','legal-panel','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
+  $('#show-signup').hidden = !hosted || !hostedAuthOptions.signup_enabled;
+  $('#google-signin').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.google_enabled;
+  $('#google-signin-notice').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.google_enabled;
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
+  const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : name === 'login-form' && hostedAuthOptions.google_enabled ? 'google_signin' : '';
+  showAuthCaptcha(action);
 }
 function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
+
+function loadTurnstileScript() {
+  if (window.turnstile) return Promise.resolve();
+  if (!captchaScriptPromise) {
+    captchaScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true; script.defer = true;
+      script.onload = () => window.turnstile ? resolve() : reject(new Error('Security check failed to load.'));
+      script.onerror = () => reject(new Error('Security check failed to load.'));
+      document.head.appendChild(script);
+    });
+  }
+  return captchaScriptPromise;
+}
+
+async function showAuthCaptcha(action) {
+  const wrap = $('#auth-captcha-wrap');
+  if (!wrap) return;
+  if (!hostedAuthOptions.turnstile_enabled || !action) {
+    captchaGeneration++; captchaToken = ''; captchaAction = '';
+    if (captchaWidgetID !== null && window.turnstile) window.turnstile.remove(captchaWidgetID);
+    captchaWidgetID = null; $('#auth-captcha').replaceChildren(); wrap.hidden = true;
+    return;
+  }
+  if (captchaAction === action && captchaWidgetID !== null) { wrap.hidden = false; return; }
+  const generation = ++captchaGeneration;
+  captchaAction = action; captchaToken = ''; captchaWidgetID = null;
+  if (window.turnstile && $('#auth-captcha').dataset.widget) window.turnstile.remove($('#auth-captcha').dataset.widget);
+  $('#auth-captcha').replaceChildren(); delete $('#auth-captcha').dataset.widget;
+  wrap.hidden = false;
+  try {
+    await loadTurnstileScript();
+    if (generation !== captchaGeneration) return;
+    captchaWidgetID = window.turnstile.render('#auth-captcha', {
+      sitekey: hostedAuthOptions.turnstile_site_key, action,
+      callback: token => { captchaToken = token; captchaAction = action; },
+      'expired-callback': () => { captchaToken = ''; },
+      'error-callback': () => { captchaToken = ''; },
+    });
+    $('#auth-captcha').dataset.widget = captchaWidgetID;
+  } catch (error) {
+    if (generation === captchaGeneration) $('#auth-captcha-wrap').querySelector('.meta-line').textContent = errorMessage(error, 'Security check failed to load.');
+  }
+}
+
+function authCaptchaToken(action) {
+  if (!hostedAuthOptions.turnstile_enabled) return '';
+  if (captchaAction !== action || !captchaToken) {
+    showAuthCaptcha(action);
+    throw new Error('Complete the security check, then try again.');
+  }
+  return captchaToken;
+}
+
+function resetAuthCaptcha(action) {
+  if (!hostedAuthOptions.turnstile_enabled || captchaAction !== action) return;
+  captchaToken = '';
+  if (captchaWidgetID !== null && window.turnstile) window.turnstile.reset(captchaWidgetID);
+}
 
 $('#login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('#login-error').textContent = '';
@@ -163,20 +234,41 @@ $('#logout').addEventListener('click', async () => { try { await api(runtimeMode
 
 function showAuthError(id, error, fallback) { const el = $('#' + id); if (el) el.textContent = errorMessage(error, fallback); }
 async function resendVerification(email, target) {
-  const result = await api('/api/auth/verification/resend', { method: 'POST', body: JSON.stringify({ email }) });
+  const captcha_token = authCaptchaToken('recovery');
+  let result;
+  try { result = await api('/api/auth/verification/resend', { method: 'POST', body: JSON.stringify({ email, captcha_token }) }); }
+  finally { resetAuthCaptcha('recovery'); }
   $(target).textContent = result.message || 'If the address can receive mail, a verification message will arrive shortly.';
   $(target).style.color = 'var(--green)';
 }
 function exposeResend(target, emailInput, messageTarget) {
   const button = $(target); if (!button) return;
-  button.hidden = false; button.onclick = async () => { button.disabled = true; try { await resendVerification($(emailInput).value, messageTarget); } catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+  button.hidden = false; showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : ''); button.onclick = async () => { button.disabled = true; try { await resendVerification($(emailInput).value, messageTarget); } catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
 }
 $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
 $('#show-login-from-signup').onclick = () => authView('login-form');
 $('#show-login-from-forgot').onclick = () => authView('login-form');
-$('#signup-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; } try { const result = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true }) }); $('#signup-error').textContent = result.message || 'Check your email.'; exposeResend('#resend-signup-verification', '#signup-form [name="email"]', '#signup-error'); } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } });
-$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email') }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } });
+$('#signup-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; } try { const captcha_token = authCaptchaToken('signup'); const result = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) }); $('#signup-error').textContent = result.message || 'Check your email.'; exposeResend('#resend-signup-verification', '#signup-form [name="email"]', '#signup-error'); } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); } });
+$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
+$('#google-signin').addEventListener('click', async () => {
+  $('#login-error').textContent = '';
+  try {
+    const captcha_token = authCaptchaToken('google_signin');
+    const result = await api('/api/auth/google/start', { method: 'POST', body: JSON.stringify({ captcha_token }) });
+    location.assign(result.redirect_url);
+  } catch (error) { showAuthError('login-error', error, 'Google sign-in could not be started.'); }
+  finally { resetAuthCaptcha('google_signin'); }
+});
+$('#google-consent-cancel').onclick = () => { history.replaceState(null, '', '/login'); authView('login-form'); };
+$('#google-consent-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget);
+  if (form.get('accept_terms') !== 'on') { showAuthError('google-consent-error', { message: 'Please agree to the Terms of Service and Privacy Policy.' }, 'Account creation failed.'); return; }
+  try {
+    const session = await api('/api/auth/google/signup/complete', { method: 'POST', body: JSON.stringify({ accept_terms: true }) });
+    history.replaceState(null, '', '/#clients'); showApp(session);
+  } catch (error) { showAuthError('google-consent-error', error, 'Account creation failed.'); }
+});
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-login').onclick = () => authView('login-form');
 $('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; $('#reset-login').hidden = false; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
@@ -1833,6 +1925,17 @@ async function loadAccount() {
     $('#account-status').textContent = profile.account_status;
     $('#account-created').textContent = profile.created_at ? new Date(profile.created_at).toLocaleString() : '—';
     $('#account-delete-hint').textContent = profile.email;
+    $('#account-google-status').textContent = profile.google_linked ? 'Google is linked to this account.' : 'Google is not linked to this account.';
+    $('#account-google-link-form').hidden = profile.google_linked || !profile.password_enabled || !hostedAuthOptions.google_enabled;
+    $('#account-google-reauth').hidden = !profile.google_linked || !hostedAuthOptions.google_enabled;
+    $('#account-google-unlink').hidden = !profile.google_linked || !profile.password_enabled;
+    $('#account-google-unlink-form').hidden = true;
+    $('#account-password-auth-hint').textContent = profile.password_enabled ? '' : 'Confirm with Google before setting a password.';
+    $('#account-current-password').required = profile.password_enabled;
+    $('#account-email-password').required = profile.password_enabled;
+    $('#account-delete-password').required = profile.password_enabled;
+    $('#account-delete-password').disabled = false;
+    $('#account-delete-password').placeholder = profile.password_enabled ? '' : 'Use Google confirmation';
     const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
@@ -1952,6 +2055,28 @@ $('#account-password-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-password-error').textContent = '';
   try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); event.currentTarget.reset(); flash('Password updated. Other sessions were signed out.'); }
   catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
+});
+$('#account-google-link-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-google-link-error').textContent = '';
+  try {
+    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password') }) });
+    location.assign(result.redirect_url);
+  } catch (error) { $('#account-google-link-error').textContent = errorMessage(error, 'Could not start Google linking.'); }
+});
+$('#account-google-reauth').addEventListener('click', async () => {
+  $('#account-google-error').textContent = '';
+  try {
+    const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+    location.assign(result.redirect_url);
+  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not start Google confirmation.'); }
+});
+$('#account-google-unlink').addEventListener('click', () => { $('#account-google-unlink-form').hidden = !$('#account-google-unlink-form').hidden; });
+$('#account-google-unlink-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget);
+  try {
+    await api('/api/auth/account/google', { method: 'DELETE', body: JSON.stringify({ password: form.get('password') }) });
+    await loadAccount(); flash('Google was unlinked from your account.');
+  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not unlink Google.'); }
 });
 $('#account-email-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
@@ -2475,9 +2600,12 @@ function liveStop() { live.stop(); }
     if (runtimeMode === 'hosted') {
       $('#login-identity-label').firstChild.textContent = 'Email ';
       $('#login-submit').textContent = 'Sign in';
+      try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      $('#google-signin').hidden = !hostedAuthOptions.google_enabled;
     }
     const path = location.pathname;
-    const token = new URLSearchParams(location.search).get('token');
+    const query = new URLSearchParams(location.search);
+    const token = query.get('token');
     if (runtimeMode === 'hosted' && path.startsWith('/platform')) {
       try {
         const session = await api('/api/platform/session');
@@ -2490,10 +2618,15 @@ function liveStop() { live.stop(); }
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
-      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; $('#resend-verification').hidden = false; $('#resend-verification').onclick = async () => { try { await resendVerification($('#verify-email').value, '#verify-error'); } catch (resendError) { showAuthError('verify-error', resendError, 'Could not resend verification email.'); } }; }
+      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
       return;
     }
     if (runtimeMode === 'hosted' && path === '/reset-password' && token) authView('reset-form');
+    else if (runtimeMode === 'hosted' && query.get('google_signup') === '1') {
+      history.replaceState(null, '', '/login');
+      authView('google-consent-form');
+      return;
+    }
     else if (runtimeMode === 'hosted' && path === '/confirm-email-change' && token) {
       authView('verify-panel');
       try {
@@ -2514,11 +2647,36 @@ function liveStop() { live.stop(); }
     else {
       state.view = viewFromHash();
       const sessionPath = runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session';
-      const session = await api(sessionPath);
-      showApp(session);
+      const authError = runtimeMode === 'hosted' ? query.get('auth_error') : '';
+      const googleLinked = runtimeMode === 'hosted' && query.get('google_linked') === '1';
+      const googleReauth = runtimeMode === 'hosted' && query.get('google_reauth') === '1';
+      if (authError || googleLinked || googleReauth) history.replaceState(null, '', location.pathname + location.hash);
+      try {
+        const session = await api(sessionPath);
+        showApp(session);
+        if (googleLinked) flash('Google is linked to your account.');
+        else if (googleReauth) flash('Google confirmed your identity. Complete the account change within five minutes.');
+        else if (authError) flash(googleAuthErrorMessage(authError), 'error');
+      } catch {
+        showLogin();
+        if (authError) $('#login-error').textContent = googleAuthErrorMessage(authError);
+      }
     }
   } catch { showLogin(); }
 })();
+
+function googleAuthErrorMessage(code) {
+  const messages = {
+    google_failed: 'Google sign-in could not be completed. Try again.',
+    google_expired: 'That Google sign-in link expired. Start again.',
+    google_unavailable: 'Google sign-in is temporarily unavailable.',
+    google_link_required: 'This Google email already has a Tiller account. Sign in to it, then link Google in Account settings.',
+    google_already_linked: 'That Google account is already linked to a Tiller account.',
+    google_session_expired: 'Your Tiller session expired. Sign in and try again.',
+    signup_unavailable: 'Signup is currently unavailable.',
+  };
+  return messages[code] || 'Google sign-in could not be completed. Try again.';
+}
 
 async function loadPlatformDashboard() {
   const token = ++state.platformUsersLoadToken;
@@ -2534,6 +2692,16 @@ async function loadPlatformDashboard() {
    form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
    form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
   form.elements.mail_smtp_mode.value = settings.mail?.smtp_mode || 'starttls';
+  form.elements.google_signin_enabled.checked = !!settings.google?.enabled;
+  form.elements.google_client_id.value = settings.google?.client_id || '';
+  form.elements.google_client_secret.value = '';
+  form.elements.clear_google_client_secret.checked = false;
+  form.elements.turnstile_enabled.checked = !!settings.turnstile?.enabled;
+  form.elements.turnstile_site_key.value = settings.turnstile?.site_key || '';
+  form.elements.turnstile_secret.value = '';
+  form.elements.clear_turnstile_secret.checked = false;
+  $('#google-settings-status').textContent = `Client secret ${settings.google?.secret_configured ? 'stored' : 'missing'}. Redirect URI: ${settings.google?.redirect_uri || ''}`;
+  $('#turnstile-settings-status').textContent = `Secret key ${settings.turnstile?.secret_configured ? 'stored' : 'missing'}. Challenge hostname: ${settings.turnstile?.hostname || ''}`;
   $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
   const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });
   if (state.platformUsersSearch) params.set('search', state.platformUsersSearch);
@@ -2602,7 +2770,7 @@ function applyMailProviderVisibility(provider) {
   });
 }
 document.querySelector('#platform-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
-$('#platform-settings-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on', audit_retention_days: Number(form.get('audit_retention_days')), mail_provider: form.get('mail_provider'), mail_from: form.get('mail_from'), mail_smtp_host: form.get('mail_smtp_host'), mail_smtp_port: Number(form.get('mail_smtp_port')) || 0, mail_smtp_mode: form.get('mail_smtp_mode'), mail_smtp_username: form.get('mail_smtp_username') }; const resendKey = String(form.get('mail_resend_api_key') || ''); const brevoKey = String(form.get('mail_brevo_api_key') || ''); const smtpPassword = String(form.get('mail_smtp_password') || ''); if (resendKey) payload.mail_resend_api_key = resendKey; if (brevoKey) payload.mail_brevo_api_key = brevoKey; if (smtpPassword) payload.mail_smtp_password = smtpPassword; try { await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-settings-error').textContent = 'Saved.'; $('#platform-settings-error').style.color = 'var(--green)'; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-settings-error', error, 'Could not save platform settings.'); } });
+$('#platform-settings-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on', audit_retention_days: Number(form.get('audit_retention_days')), mail_provider: form.get('mail_provider'), mail_from: form.get('mail_from'), mail_smtp_host: form.get('mail_smtp_host'), mail_smtp_port: Number(form.get('mail_smtp_port')) || 0, mail_smtp_mode: form.get('mail_smtp_mode'), mail_smtp_username: form.get('mail_smtp_username'), google_signin_enabled: form.get('google_signin_enabled') === 'on', google_client_id: form.get('google_client_id'), clear_google_client_secret: form.get('clear_google_client_secret') === 'on', turnstile_enabled: form.get('turnstile_enabled') === 'on', turnstile_site_key: form.get('turnstile_site_key'), clear_turnstile_secret: form.get('clear_turnstile_secret') === 'on' }; const resendKey = String(form.get('mail_resend_api_key') || ''); const brevoKey = String(form.get('mail_brevo_api_key') || ''); const smtpPassword = String(form.get('mail_smtp_password') || ''); const googleSecret = String(form.get('google_client_secret') || ''); const turnstileSecret = String(form.get('turnstile_secret') || ''); if (resendKey) payload.mail_resend_api_key = resendKey; if (brevoKey) payload.mail_brevo_api_key = brevoKey; if (smtpPassword) payload.mail_smtp_password = smtpPassword; if (googleSecret) payload.google_client_secret = googleSecret; if (turnstileSecret) payload.turnstile_secret = turnstileSecret; try { await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-settings-error').textContent = 'Saved.'; $('#platform-settings-error').style.color = 'var(--green)'; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-settings-error', error, 'Could not save platform settings.'); } });
 $('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); const planButton = event.target.closest('[data-account-plan]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } if (planButton) { const accountID = planButton.dataset.accountPlan; const plan = window.prompt('Plan name for this account:', planButton.dataset.currentPlan || 'free'); if (plan) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
   $('#platform-users-prev').onclick = () => { state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100); loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
 $('#platform-users-next').onclick = () => { state.platformUsersOffset += 100; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };

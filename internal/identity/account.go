@@ -22,7 +22,8 @@ var (
 	// generic and sends no mail.
 	ErrEmailTaken = errors.New("identity: email is already registered")
 	// ErrInvalidSession is returned when a raw session token cannot be parsed.
-	ErrInvalidSession = errors.New("identity: invalid session token")
+	ErrInvalidSession   = errors.New("identity: invalid session token")
+	ErrPasswordDisabled = errors.New("identity: password authentication is disabled")
 	// ErrMailUnavailable is returned when a queued message cannot be encrypted
 	// because the master key is locked.
 	ErrMailUnavailable = errors.New("identity: mail unavailable while the master key is locked")
@@ -42,14 +43,16 @@ func (s *Store) SetMailQueue(q MailQueue) { s.mailQueue = q }
 
 // AccountProfile is the non-secret account view rendered by the Account page.
 type AccountProfile struct {
-	UserID        string `json:"user_id"`
-	Email         string `json:"email"`
-	AccountID     string `json:"account_id"`
-	Plan          string `json:"plan"`
-	UserStatus    string `json:"user_status"`
-	AccountStatus string `json:"account_status"`
-	Verified      bool   `json:"verified"`
-	CreatedAt     string `json:"created_at"`
+	UserID          string `json:"user_id"`
+	Email           string `json:"email"`
+	AccountID       string `json:"account_id"`
+	Plan            string `json:"plan"`
+	UserStatus      string `json:"user_status"`
+	AccountStatus   string `json:"account_status"`
+	Verified        bool   `json:"verified"`
+	PasswordEnabled bool   `json:"password_enabled"`
+	GoogleLinked    bool   `json:"google_linked"`
+	CreatedAt       string `json:"created_at"`
 }
 
 // sessionSelector extracts the selector from a raw session token. The selector
@@ -66,11 +69,15 @@ func sessionSelector(raw string) (string, error) {
 // before sensitive account changes (password, email, delete).
 func (s *Store) VerifyPassword(ctx context.Context, userID, password string) error {
 	var hash string
-	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=?`, userID).Scan(&hash); err != nil {
+	var enabled bool
+	if err := s.db.QueryRowContext(ctx, `SELECT password_hash,password_auth_enabled FROM users WHERE id=?`, userID).Scan(&hash, &enabled); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
+	}
+	if !enabled {
+		return ErrPasswordDisabled
 	}
 	if !s.passwordHasher.Verify(password, hash) {
 		return ErrNotFound
@@ -82,8 +89,8 @@ func (s *Store) VerifyPassword(ctx context.Context, userID, password string) err
 func (s *Store) AccountProfile(ctx context.Context, userID string) (AccountProfile, error) {
 	var p AccountProfile
 	var verified sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.plan,a.status,u.created_at FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
-		Scan(&p.UserID, &p.Email, &p.UserStatus, &verified, &p.AccountID, &p.Plan, &p.AccountStatus, &p.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.plan,a.status,u.created_at,u.password_auth_enabled,EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=u.id AND i.provider='google') FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
+		Scan(&p.UserID, &p.Email, &p.UserStatus, &verified, &p.AccountID, &p.Plan, &p.AccountStatus, &p.CreatedAt, &p.PasswordEnabled, &p.GoogleLinked)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AccountProfile{}, ErrNotFound
 	}
@@ -98,6 +105,16 @@ func (s *Store) AccountProfile(ctx context.Context, userID string) (AccountProfi
 // every session except the initiating one, and cancels any pending email
 // change. currentSession is the raw session token from the request cookie.
 func (s *Store) ChangePassword(ctx context.Context, userID, currentSession, currentPassword, newPassword string) (User, error) {
+	return s.changePassword(ctx, userID, currentSession, currentPassword, newPassword, false)
+}
+
+// ChangePasswordAfterReauthentication is used after the server has verified
+// either the password or a short-lived, one-use Google proof for this session.
+func (s *Store) ChangePasswordAfterReauthentication(ctx context.Context, userID, currentSession, newPassword string) (User, error) {
+	return s.changePassword(ctx, userID, currentSession, "", newPassword, true)
+}
+
+func (s *Store) changePassword(ctx context.Context, userID, currentSession, currentPassword, newPassword string, identityConfirmed bool) (User, error) {
 	if err := ValidatePassword(newPassword); err != nil {
 		return User{}, err
 	}
@@ -105,8 +122,10 @@ func (s *Store) ChangePassword(ctx context.Context, userID, currentSession, curr
 	if err != nil {
 		return User{}, err
 	}
-	if err := s.VerifyPassword(ctx, userID, currentPassword); err != nil {
-		return User{}, err
+	if !identityConfirmed {
+		if err := s.VerifyPassword(ctx, userID, currentPassword); err != nil {
+			return User{}, err
+		}
 	}
 	newHash, err := s.passwordHasher.Hash(newPassword)
 	if err != nil {
@@ -118,7 +137,7 @@ func (s *Store) ChangePassword(ctx context.Context, userID, currentSession, curr
 		return User{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=? AND id<>?`, userID, keepSelector); err != nil {
