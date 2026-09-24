@@ -12,6 +12,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/mailer"
+	"github.com/tiller-router/tiller-router/internal/mailoutbox"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -327,12 +328,12 @@ func (s *Server) platformAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "limit": limit, "offset": offset})
 }
 
-// platformMailQueue reports queued and recently dead-lettered mail for the
-// operator dashboard. Dead is a recent-window count so an all-time total cannot
-// masquerade as an active incident.
+// platformMailQueue reports queued, sent, and recently dead-lettered mail plus a
+// small recent delivery log for the operator dashboard. Dead is a recent-window
+// count so an all-time total cannot masquerade as an active incident.
 func (s *Server) platformMailQueue(w http.ResponseWriter, r *http.Request) {
 	if s.outbox == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "dead_recent": 0})
+		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "sent_recent": 0, "dead_recent": 0, "log": []mailoutbox.MailLogEntry{}})
 		return
 	}
 	queued, dead, err := s.outbox.DueCounts(r.Context(), 24*time.Hour)
@@ -340,7 +341,17 @@ func (s *Server) platformMailQueue(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not load the mail queue.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"queued": queued, "dead_recent": dead})
+	sent, err := s.outbox.SentCount(r.Context(), 24*time.Hour)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load the mail queue.")
+		return
+	}
+	logRows, err := s.outbox.Recent(r.Context(), 25)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load the mail queue.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queued": queued, "sent_recent": sent, "dead_recent": dead, "log": logRows})
 }
 
 func (s *Server) accountAudit(w http.ResponseWriter, r *http.Request) {

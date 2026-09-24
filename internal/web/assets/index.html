@@ -22,30 +22,35 @@
         <button class="btn btn-primary btn-wide" id="login-submit" type="submit">Sign in</button>
         <button class="btn btn-secondary btn-wide" id="resend-login-verification" type="button" hidden>Send verification email again</button>
         <button class="btn btn-secondary btn-wide" id="google-signin" type="button" hidden>Continue with Google</button>
-        <p class="collection-notice" id="google-signin-notice" hidden>Google provides your verified email and account identifier. If enabled, Cloudflare Turnstile checks browser signals. See the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+        <p class="collection-notice" id="google-signin-notice" hidden>Google provides your verified email and account identifier. If enabled, Cloudflare Turnstile checks browser signals. See the <a href="/legal/privacy">Privacy Policy</a>.</p>
       </form>
       <div id="hosted-auth-links" class="auth-links" hidden>
         <button class="btn-link" id="show-signup" type="button">Create an account</button>
         <button class="btn-link" id="show-forgot-password" type="button">Forgot password?</button>
       </div>
-      <div id="auth-captcha-wrap" class="auth-captcha" hidden><div id="auth-captcha"></div><p class="meta-line">Complete the security check to continue. Cloudflare processes browser signals for abuse prevention; see the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p></div>
+      <div id="auth-captcha-wrap" class="auth-captcha" hidden><div id="auth-captcha"></div><p class="meta-line">Complete the security check to continue. Cloudflare processes browser signals for abuse prevention; see the <a href="/legal/privacy">Privacy Policy</a>.</p></div>
       <form id="signup-form" class="stack-form" hidden>
         <p class="eyebrow">CREATE ACCOUNT</p>
         <label>Email <input name="email" type="email" autocomplete="email" required></label>
         <label>Passphrase <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
-        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a> and acknowledge the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</label>
-        <p class="collection-notice">Tiller stores your account information and request metadata to operate the service. Request content is processed transiently and routed to the providers you configure; Tiller does not persist prompt or response bodies. If you choose Google sign-in, Google provides your verified email and account identifier. If enabled, Cloudflare Turnstile processes security-check and browser data. Our service providers may process data outside your country, including in Australia and the United States.</p>
+        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms">Terms of Service</a> and acknowledge the <a href="/legal/privacy">Privacy Policy</a>.</label>
         <p class="form-error" id="signup-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Create account</button>
-        <button class="btn btn-secondary btn-wide" id="resend-signup-verification" type="button" hidden>Send verification email again</button>
         <button class="btn-link" id="show-login-from-signup" type="button">Back to sign in</button>
       </form>
+      <section id="signup-done" class="stack-form" hidden>
+        <p class="eyebrow">CHECK YOUR INBOX</p>
+        <h2>Verify your email</h2>
+        <p id="signup-done-message">If an account can be created for that address, a verification link is on its way. Click the link to activate your account.</p>
+        <p class="form-error" id="signup-done-error" role="alert"></p>
+        <button class="btn btn-secondary btn-wide" id="resend-signup-verification" type="button">Send verification email again</button>
+        <button class="btn-link" id="signup-done-login" type="button">Back to sign in</button>
+      </section>
       <form id="google-consent-form" class="stack-form" hidden>
         <p class="eyebrow">CREATE ACCOUNT WITH GOOGLE</p>
         <h2>Review and accept</h2>
         <p>Your verified Google email will be used for this Tiller account. Tiller will not connect it to an existing account automatically.</p>
-        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a> and acknowledge the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</label>
-        <p class="collection-notice">Google provides your verified email and account identifier. Tiller stores account and request metadata, but does not persist prompt or response bodies.</p>
+        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms">Terms of Service</a> and acknowledge the <a href="/legal/privacy">Privacy Policy</a>.</label>
         <p class="form-error" id="google-consent-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Accept and create account</button>
         <button class="btn-link" id="google-consent-cancel" type="button">Back to sign in</button>
@@ -79,14 +84,17 @@
         <p class="form-error" id="platform-login-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Open platform dashboard</button>
       </form>
-      <section id="legal-panel" class="stack-form legal-panel" hidden>
-        <p class="eyebrow">LEGAL</p>
-        <h2 id="legal-title">Document</h2>
-        <p class="meta-line" id="legal-updated"></p>
-        <pre class="legal-body" id="legal-body"></pre>
-        <button class="btn btn-secondary btn-wide" id="legal-back" type="button">Back</button>
-      </section>
       
+    </section>
+  </div>
+
+  <div class="legal-shell" id="legal-shell" hidden>
+    <section class="legal-card">
+      <header class="legal-header">
+        <div><p class="eyebrow">LEGAL</p><h1 id="legal-title">Document</h1><p class="meta-line" id="legal-updated"></p></div>
+        <button class="btn btn-secondary" id="legal-back" type="button">Back</button>
+      </header>
+      <pre class="legal-body" id="legal-body"></pre>
     </section>
   </div>
 
@@ -99,7 +107,7 @@
           <article class="system-card"><h2>Platform audit</h2><div class="platform-list" id="platform-audit-list"></div><p class="form-error" id="platform-audit-error" role="alert"></p></article>
           <article class="system-card"><h2>Plans</h2><p>Entitlement caps per plan. -1 means unlimited. Local installs never enforce these.</p><div class="platform-list" id="platform-plans-list"></div><p class="form-error" id="platform-plans-error" role="alert"></p></article>
           <article class="system-card"><h2>Legal documents</h2><p>Published Terms, Privacy, AUP, subprocessor, and security documents. Edits take effect immediately.</p><div class="platform-list" id="platform-legal-list"></div><p class="form-error" id="platform-legal-error" role="alert"></p></article>
-         <article class="system-card"><h2>Mail queue</h2><p>Durable transactional mail. Dead letters are sends that exhausted every retry in the last 24 hours.</p><dl class="platform-mail-metrics"><dt>Queued</dt><dd id="platform-mail-queued">—</dd><dt>Dead (24h)</dt><dd id="platform-mail-dead">—</dd></dl><p class="form-error" id="platform-mail-error" role="alert"></p></article>
+         <article class="system-card"><h2>Mail queue</h2><p>Durable transactional mail. Dead letters are sends that exhausted every retry in the last 24 hours.</p><dl class="platform-mail-metrics"><dt>Queued</dt><dd id="platform-mail-queued">—</dd><dt>Sent (24h)</dt><dd id="platform-mail-sent">—</dd><dt>Dead (24h)</dt><dd id="platform-mail-dead">—</dd></dl><div class="platform-list mail-log" id="platform-mail-log"></div><p class="form-error" id="platform-mail-error" role="alert"></p></article>
       </div>
     </section>
   </div>

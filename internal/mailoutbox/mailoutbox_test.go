@@ -209,3 +209,34 @@ func TestDueCounts(t *testing.T) {
 		t.Fatalf("counts = %d/%d err=%v", queued, dead, err)
 	}
 }
+
+func TestSentCountAndRecent(t *testing.T) {
+	o, _ := newTestOutbox(t)
+	sentID := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "sent@example.com", Token: "tok"})
+	enqueueOnce(t, o, QueuedMessage{Type: TypePasswordReset, Recipient: "queued@example.com", Token: "tok"})
+	deadID := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "dead@example.com", Token: "tok"})
+	if _, err := o.db.Exec(`UPDATE mail_outbox SET sent_at=?,token_ciphertext=NULL WHERE id=?`, formatTime(time.Now()), sentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.db.Exec(`UPDATE mail_outbox SET dead_at=?,token_ciphertext=NULL WHERE id=?`, formatTime(time.Now()), deadID); err != nil {
+		t.Fatal(err)
+	}
+	sent, err := o.SentCount(context.Background(), 24*time.Hour)
+	if err != nil || sent != 1 {
+		t.Fatalf("sent = %d err=%v", sent, err)
+	}
+	log, err := o.Recent(context.Background(), 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 3 {
+		t.Fatalf("log len = %d, want 3", len(log))
+	}
+	statuses := map[string]string{}
+	for _, e := range log {
+		statuses[e.Recipient] = e.Status
+	}
+	if statuses["sent@example.com"] != "sent" || statuses["queued@example.com"] != "queued" || statuses["dead@example.com"] != "dead" {
+		t.Fatalf("statuses = %v", statuses)
+	}
+}

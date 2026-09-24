@@ -371,6 +371,67 @@ func (o *Outbox) DueCounts(ctx context.Context, deadWindow time.Duration) (queue
 	return queued, dead, nil
 }
 
+// MailLogEntry is one recent mail-outbox row for the operator dashboard. It
+// carries delivery metadata only: never the encrypted one-time token and never
+// the message body.
+type MailLogEntry struct {
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Recipient string `json:"recipient"`
+	Attempts  int    `json:"attempts"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+	SentAt    string `json:"sent_at,omitempty"`
+	DeadAt    string `json:"dead_at,omitempty"`
+}
+
+// SentCount reports messages delivered within the window.
+func (o *Outbox) SentCount(ctx context.Context, window time.Duration) (int, error) {
+	if o == nil || o.db == nil {
+		return 0, nil
+	}
+	cutoff := formatTime(time.Now().Add(-window))
+	var sent int
+	if err := o.db.QueryRowContext(ctx, `SELECT count(*) FROM mail_outbox WHERE sent_at IS NOT NULL AND sent_at >= ?`, cutoff).Scan(&sent); err != nil {
+		return 0, err
+	}
+	return sent, nil
+}
+
+// Recent returns the most recently created rows, newest first, for operator
+// triage. Token material is never selected. limit is clamped to a small bound
+// so a hostile caller cannot ask for the whole table.
+func (o *Outbox) Recent(ctx context.Context, limit int) ([]MailLogEntry, error) {
+	if o == nil || o.db == nil {
+		return []MailLogEntry{}, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 25
+	}
+	rows, err := o.db.QueryContext(ctx, `SELECT id,type,recipient,attempts,created_at,coalesce(sent_at,''),coalesce(dead_at,'') FROM mail_outbox ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MailLogEntry{}
+	for rows.Next() {
+		var e MailLogEntry
+		if err := rows.Scan(&e.ID, &e.Type, &e.Recipient, &e.Attempts, &e.CreatedAt, &e.SentAt, &e.DeadAt); err != nil {
+			return nil, err
+		}
+		switch {
+		case e.SentAt != "":
+			e.Status = "sent"
+		case e.DeadAt != "":
+			e.Status = "dead"
+		default:
+			e.Status = "queued"
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 func classify(err error) string {
 	switch {
 	case errors.Is(err, mailer.ErrNotConfigured):

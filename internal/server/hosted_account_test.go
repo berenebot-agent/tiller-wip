@@ -217,4 +217,10 @@ func TestPlatformMailQueueEndpoint(t *testing.T) {
 	if _, ok := queue["queued"]; !ok {
 		t.Fatalf("mail queue payload missing queued: %v", queue)
 	}
+	if _, ok := queue["sent_recent"]; !ok {
+		t.Fatalf("mail queue payload missing sent_recent: %v", queue)
+	}
+	if _, ok := queue["log"]; !ok {
+		t.Fatalf("mail queue payload missing log: %v", queue)
+	}
 }

@@ -1,9 +1,10 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformPlans: [] };
 let runtimeMode = 'local';
 let hostedAuthOptions = {};
+let signupEmail = '';
 let captchaWidgetID = null;
 let captchaAction = '';
 let captchaToken = '';
@@ -148,7 +149,7 @@ function deferUsage() {
   loadUsage().then(() => reconcileLive()).catch(() => {});
 }
 function authView(name) {
-  ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form','legal-panel','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  ['login-form','signup-form','signup-done','forgot-form','verify-panel','reset-form','platform-login-form','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
   $('#show-signup').hidden = !hosted || !hostedAuthOptions.signup_enabled;
@@ -158,8 +159,8 @@ function authView(name) {
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : name === 'login-form' && hostedAuthOptions.google_enabled ? 'google_signin' : '';
   showAuthCaptcha(action);
 }
-function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
-function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
+function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
 
@@ -248,8 +249,30 @@ function exposeResend(target, emailInput, messageTarget) {
 $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
 $('#show-login-from-signup').onclick = () => authView('login-form');
+$('#signup-done-login').onclick = () => authView('login-form');
 $('#show-login-from-forgot').onclick = () => authView('login-form');
-$('#signup-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; } try { const captcha_token = authCaptchaToken('signup'); const result = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) }); $('#signup-error').textContent = result.message || 'Check your email.'; exposeResend('#resend-signup-verification', '#signup-form [name="email"]', '#signup-error'); } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); } });
+// exposeSignupResend wires the resend button on the post-signup inbox screen.
+// The address is captured at submit time (signupEmail) because the done panel
+// has no email input of its own.
+function exposeSignupResend() {
+  const button = $('#resend-signup-verification'); if (!button) return;
+  button.hidden = false;
+  showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : '');
+  button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+}
+$('#signup-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget);
+  if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; }
+  try {
+    const captcha_token = authCaptchaToken('signup');
+    await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) });
+    signupEmail = String(form.get('email') || '');
+    event.currentTarget.reset();
+    $('#signup-done-message').textContent = `If an account can be created for ${signupEmail}, a verification link is on its way. Click the link in the email to activate your account.`;
+    authView('signup-done');
+    exposeSignupResend();
+  } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); }
+});
 $('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
 $('#google-signin').addEventListener('click', async () => {
   $('#login-error').textContent = '';
@@ -1973,12 +1996,13 @@ async function loadFooterVersion() {
   } catch { /* footer is best-effort */ }
 }
 
-// showLegalDocument renders a published legal document. Bodies are plain text
-// (no rich rendering), so they are inserted as textContent with preserved
-// whitespace to avoid any injection path.
+// showLegalDocument renders a published legal document in the full-width legal
+// shell. Bodies are plain text (no rich rendering), so they are inserted as
+// textContent with preserved whitespace to avoid any injection path.
 async function showLegalDocument(slug) {
-  $('#login-shell').hidden = false; $('#app').hidden = true; $('#platform-shell').hidden = true;
-  authView('legal-panel');
+  $('#login-shell').hidden = true; $('#app').hidden = true; $('#platform-shell').hidden = true;
+  $('#legal-shell').hidden = false;
+  $('#legal-shell').scrollTop = 0;
   const body = $('#legal-body');
   body.textContent = 'Loading…';
   try {
@@ -1988,9 +2012,11 @@ async function showLegalDocument(slug) {
     body.textContent = doc.body;
   } catch (error) {
     $('#legal-title').textContent = 'Not found';
+    $('#legal-updated').textContent = '';
     body.textContent = errorMessage(error, 'This document is not available.');
   }
 }
+$('#legal-back').onclick = () => showLogin();
 
 // refreshWizardButton shows/hides the top-bar Get started button based on
 // whether onboarding is still outstanding, and auto-opens the wizard on the
@@ -2703,12 +2729,13 @@ async function loadPlatformDashboard() {
   $('#google-settings-status').textContent = `Client secret ${settings.google?.secret_configured ? 'stored' : 'missing'}. Redirect URI: ${settings.google?.redirect_uri || ''}`;
   $('#turnstile-settings-status').textContent = `Secret key ${settings.turnstile?.secret_configured ? 'stored' : 'missing'}. Challenge hostname: ${settings.turnstile?.hostname || ''}`;
   $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
+  await loadPlatformPlans();
   const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });
   if (state.platformUsersSearch) params.set('search', state.platformUsersSearch);
   const users = await api(`/api/platform/users?${params}`);
   if (token !== state.platformUsersLoadToken) return;
   const userRows = users.data || [];
-  $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<button class="btn btn-small btn-secondary" data-account-plan="${h(user.account_id)}" data-current-plan="${h(user.plan)}">Plan</button><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
+  $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<span class="plan-assign"><select class="plan-select" data-account-plan="${h(user.account_id)}" aria-label="Plan for ${h(user.email)}">${planOptionList(user.plan)}</select><button class="btn btn-small btn-secondary" data-account-plan-save="${h(user.account_id)}">Save plan</button></span><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
   $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
   $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
   $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || userRows.length < 100;
@@ -2717,13 +2744,30 @@ async function loadPlatformDashboard() {
   try {
     const queue = await api('/api/platform/mail/queue');
     $('#platform-mail-queued').textContent = queue.queued;
+    $('#platform-mail-sent').textContent = queue.sent_recent;
     $('#platform-mail-dead').textContent = queue.dead_recent;
+    $('#platform-mail-log').innerHTML = (queue.log || []).map(row => `<div class="platform-list-item"><strong>${h(mailTypeLabel(row.type))}</strong><small>${h(row.recipient)} · ${h(row.status)} · ${h(row.attempts)} attempt(s) · ${h(row.created_at)}</small></div>`).join('') || '<p class="meta-line">No recent mail.</p>';
     $('#platform-mail-error').textContent = '';
   } catch (error) {
     $('#platform-mail-error').textContent = errorMessage(error, 'Could not load the mail queue.');
   }
-  await loadPlatformPlans();
   await loadPlatformLegal();
+}
+
+// mailTypeLabel turns a mail_outbox type into a short human label for the
+// operator log; unknown types fall through to the raw value.
+function mailTypeLabel(type) {
+  const labels = { verify_email: 'Verification', password_reset: 'Password reset', email_change_confirm: 'Email change', email_change_warning: 'Email change warning' };
+  return labels[type] || type;
+}
+
+// planOptionList builds the <option> set for an account's plan dropdown from
+// the loaded plan catalogue, keeping the account's current plan selected even if
+// it is no longer in the catalogue.
+function planOptionList(current) {
+  const names = state.platformPlans.slice();
+  if (current && !names.includes(current)) names.push(current);
+  return names.map(name => `<option value="${h(name)}"${name === current ? ' selected' : ''}>${h(name)}</option>`).join('');
 }
 
 // loadPlatformPlans renders the entitlements catalogue as editable rows.
@@ -2731,6 +2775,7 @@ async function loadPlatformPlans() {
   const list = $('#platform-plans-list'); if (!list) return;
   try {
     const result = await api('/api/platform/plans');
+    state.platformPlans = (result.data || []).map(plan => plan.name);
     const fields = [['max_providers', 'Providers'], ['max_client_keys', 'Client keys'], ['max_virtual_models', 'Virtual models'], ['max_concurrent_streams', 'Streams'], ['activity_retention_days', 'Retention days'], ['monthly_requests', 'Monthly requests']];
     list.innerHTML = (result.data || []).map(plan => `<form class="platform-plan-form" data-plan="${h(plan.name)}"><strong>${h(plan.name)}</strong><div class="platform-plan-fields">${fields.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${h(plan[key])}"></label>`).join('')}</div><button class="btn btn-small btn-secondary" type="submit">Save</button></form>`).join('') || '<p class="meta-line">No plans.</p>';
     $('#platform-plans-error').textContent = '';
@@ -2771,7 +2816,7 @@ function applyMailProviderVisibility(provider) {
 }
 document.querySelector('#platform-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
 $('#platform-settings-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on', audit_retention_days: Number(form.get('audit_retention_days')), mail_provider: form.get('mail_provider'), mail_from: form.get('mail_from'), mail_smtp_host: form.get('mail_smtp_host'), mail_smtp_port: Number(form.get('mail_smtp_port')) || 0, mail_smtp_mode: form.get('mail_smtp_mode'), mail_smtp_username: form.get('mail_smtp_username'), google_signin_enabled: form.get('google_signin_enabled') === 'on', google_client_id: form.get('google_client_id'), clear_google_client_secret: form.get('clear_google_client_secret') === 'on', turnstile_enabled: form.get('turnstile_enabled') === 'on', turnstile_site_key: form.get('turnstile_site_key'), clear_turnstile_secret: form.get('clear_turnstile_secret') === 'on' }; const resendKey = String(form.get('mail_resend_api_key') || ''); const brevoKey = String(form.get('mail_brevo_api_key') || ''); const smtpPassword = String(form.get('mail_smtp_password') || ''); const googleSecret = String(form.get('google_client_secret') || ''); const turnstileSecret = String(form.get('turnstile_secret') || ''); if (resendKey) payload.mail_resend_api_key = resendKey; if (brevoKey) payload.mail_brevo_api_key = brevoKey; if (smtpPassword) payload.mail_smtp_password = smtpPassword; if (googleSecret) payload.google_client_secret = googleSecret; if (turnstileSecret) payload.turnstile_secret = turnstileSecret; try { await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-settings-error').textContent = 'Saved.'; $('#platform-settings-error').style.color = 'var(--green)'; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-settings-error', error, 'Could not save platform settings.'); } });
-$('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); const planButton = event.target.closest('[data-account-plan]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } if (planButton) { const accountID = planButton.dataset.accountPlan; const plan = window.prompt('Plan name for this account:', planButton.dataset.currentPlan || 'free'); if (plan) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
+$('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); const planSave = event.target.closest('[data-account-plan-save]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } if (planSave) { const accountID = planSave.dataset.accountPlanSave; const plan = planSave.closest('.plan-assign')?.querySelector('select')?.value; if (plan) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
   $('#platform-users-prev').onclick = () => { state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100); loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
 $('#platform-users-next').onclick = () => { state.platformUsersOffset += 100; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
 filterInput('#platform-user-search', value => { state.platformUsersSearch = value.trim(); state.platformUsersOffset = 0; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); });
