@@ -56,9 +56,6 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"notifications_event_client_key_deleted": notifications.EventClientKeyDeleted,
 		"notifications_event_admin_login":        notifications.EventAdminLogin,
 		"notifications_auth_header_set":          notifications.AuthHeader != "",
-		"provider_credential_encryption": map[string]any{
-			"state": s.secretEncryptionState(),
-		},
 	})
 }
 

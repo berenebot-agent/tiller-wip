@@ -134,14 +134,6 @@ type Server struct {
 	platformSettingsMu sync.Mutex
 }
 
-// secretEncryptionState reports the credential-encryption state for the admin
-// status API: "enabled", "disabled" (no cipher configured; tests/hash-only),
-// or "locked" (the master key is missing or does not match the stored
-// ciphertext). It never exposes key material, fingerprints, or nonces.
-func (s *Server) secretEncryptionState() string {
-	return store.SecretsState(s.secretCipher)
-}
-
 // secretsLocked reports whether the recoverable-secret cipher is in the locked
 // state.
 func (s *Server) secretsLocked() bool {
