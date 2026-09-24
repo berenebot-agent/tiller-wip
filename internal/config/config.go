@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,33 +12,166 @@ import (
 	"time"
 )
 
+// Mode is the deployment mode. Local is the default and preserves the
+// self-hosted appliance behaviour; hosted enables the multi-tenant user stack.
+type Mode string
+
+const (
+	ModeLocal  Mode = "local"
+	ModeHosted Mode = "hosted"
+)
+
+// MailBootstrap is the optional mail configuration supplied via environment
+// variables. It is used once, as a seed, when the platform has no persisted
+// mail configuration; the database is authoritative after that. Secrets here
+// are never returned by an API.
+type MailBootstrap struct {
+	Provider     string // "smtp"
+	From         string
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPMode     string // "starttls" or "implicit"
+}
+
+// Configured reports whether any mail bootstrap setting was supplied.
+func (m MailBootstrap) Configured() bool {
+	return m.Provider != "" || m.From != "" || m.SMTPHost != ""
+}
+
 type Config struct {
-	AdminUsername     string
-	AdminPassword     string
-	AdminCookieSecure bool
-	AdminSessionTTL   time.Duration
-	DataDir           string
-	ListenAddr        string
-	TrustedProxy      netip.Prefix
-	ModelsDevEnabled  bool
-	LogLevel          string
+	// Mode selects local (default) or hosted. An unset/empty TILLER_MODE is
+	// local, so existing deployments keep their behaviour unchanged.
+	Mode Mode
+	// PublicURL is the public HTTPS origin used to build verification and
+	// password-reset links. It is required in hosted mode and must be an
+	// origin only (no path/query/fragment/credentials/wildcard). It is never
+	// derived from request headers.
+	PublicURL string
+	// UserSessionTTL is the sliding lifetime of a hosted customer session.
+	UserSessionTTL time.Duration
+	// Mail is the optional bootstrap seed for mail delivery.
+	Mail MailBootstrap
+	// TillerUser and TillerUserPassword are the local operator credential
+	// (env TILLER_USERNAME / TILLER_PASSWORD). In hosted mode they are the
+	// optional one-time bootstrap credentials that migrate the existing local
+	// account into the first hosted customer. The legacy TILLER_ADMIN_USERNAME
+	// / TILLER_ADMIN_PASSWORD names are still accepted, with a deprecation
+	// warning, so an existing deployment never breaks on rename.
+	TillerUser         string
+	TillerUserPassword string
+	// TillerPlatformAdminUser and TillerPlatformAdminPassword are the hosted
+	// platform-console credentials (env TILLER_PLATFORM_ADMIN_USERNAME /
+	// TILLER_PLATFORM_ADMIN_PASSWORD). They are environment-only and carry no
+	// account authority.
+	TillerPlatformAdminUser     string
+	TillerPlatformAdminPassword string
+	AdminCookieSecure           bool
+	AdminSessionTTL             time.Duration
+	DataDir                     string
+	ListenAddr                  string
+	TrustedProxy                netip.Prefix
+	ModelsDevEnabled            bool
+	LogLevel                    string
+	// DebugPprof enables the admin-gated memory/pprof debug endpoints. It is
+	// off by default and only turns on when TILLER_DEBUG_PPROF is explicitly
+	// true, so a normal deployment never exposes profiling surfaces.
+	DebugPprof bool
+	// ClientKeyCacheTTL is how long a verified client key is trusted by the
+	// in-memory auth cache. Verification is immediate on a cache miss and
+	// entries renew on use, so this bounds verification cost at scale. Any
+	// client-key mutation invalidates the cache regardless of TTL.
+	ClientKeyCacheTTL time.Duration
+	// SessionCacheTTL is the equivalent in-memory cache window for admin
+	// sessions. Session revocation is immediate regardless of TTL.
+	SessionCacheTTL time.Duration
+	// BackupDir is where scheduled central-database snapshots are written.
+	// Defaults to <DataDir>/backups.
+	BackupDir string
+	// BackupInterval is how often the maintenance pass runs: a core snapshot
+	// (verified and pruned) followed by in-place compaction of both databases.
+	// Zero disables the whole pass, including compaction.
+	BackupInterval time.Duration
+	// BackupRetention is how long snapshots are kept before pruning. Off-host
+	// copies are the operator's responsibility (see docs/backup_restore_runbook.md).
+	BackupRetention time.Duration
+	// MasterKey is the raw TILLER_MASTER_KEY value (base64 of 32 random
+	// bytes). MasterKeyFile is the raw TILLER_MASTER_KEY_FILE path. The file
+	// takes precedence. When both are empty, the key is loaded from
+	// <DataDir>/master.key or generated there (see internal/crypto).
+	MasterKey     string
+	MasterKeyFile string
+	// Deprecations lists configuration notices to surface at startup: a
+	// legacy env var that was honoured, or a legacy var that was ignored
+	// because the new name was also set. Load always succeeds; the caller
+	// decides how loudly to report these.
+	Deprecations []string
 }
 
 func Load() (Config, error) {
 	c := Config{
-		AdminUsername:     os.Getenv("TILLER_ADMIN_USERNAME"),
-		AdminPassword:     os.Getenv("TILLER_ADMIN_PASSWORD"),
-		AdminCookieSecure: false,
-		AdminSessionTTL:   30 * 24 * time.Hour,
+		TillerUser:                  os.Getenv("TILLER_USERNAME"),
+		TillerUserPassword:          os.Getenv("TILLER_PASSWORD"),
+		TillerPlatformAdminUser:     os.Getenv("TILLER_PLATFORM_ADMIN_USERNAME"),
+		TillerPlatformAdminPassword: os.Getenv("TILLER_PLATFORM_ADMIN_PASSWORD"),
+		AdminCookieSecure:           false,
+		AdminSessionTTL:             30 * 24 * time.Hour,
+		UserSessionTTL:              30 * 24 * time.Hour,
+		// Verified keys/sessions are cached in memory and renewed on use, so a
+		// longer window cuts hash-verification CPU with no revocation penalty:
+		// explicit invalidation is independent of the TTL.
+		ClientKeyCacheTTL: 15 * time.Minute,
+		SessionCacheTTL:   5 * time.Minute,
 		DataDir:           envDefault("TILLER_DATA_DIR", "/data"),
 		ListenAddr:        envDefault("TILLER_LISTEN_ADDR", ":8080"),
 		ModelsDevEnabled:  true,
 		LogLevel:          envDefault("TILLER_LOG_LEVEL", "info"),
+		BackupInterval:    6 * time.Hour,
+		BackupRetention:   7 * 24 * time.Hour,
+		MasterKey:         os.Getenv("TILLER_MASTER_KEY"),
+		MasterKeyFile:     os.Getenv("TILLER_MASTER_KEY_FILE"),
 	}
+	c.Deprecations = append(c.Deprecations, resolveLegacyCredentials(&c)...)
 	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
 		return Config{}, fmt.Errorf("TILLER_LOG_LEVEL must be debug, info, warn, or error, got %q", c.LogLevel)
+	}
+	// Mode is opt-in: unset/empty means local, so existing self-hosted
+	// deployments keep their behaviour with no new configuration.
+	switch raw := strings.ToLower(strings.TrimSpace(os.Getenv("TILLER_MODE"))); raw {
+	case "", string(ModeLocal):
+		c.Mode = ModeLocal
+	case string(ModeHosted):
+		c.Mode = ModeHosted
+	default:
+		return Config{}, fmt.Errorf("TILLER_MODE must be local or hosted, got %q", raw)
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_PUBLIC_URL")); raw != "" {
+		origin, err := validatePublicURL(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_PUBLIC_URL: %w", err)
+		}
+		c.PublicURL = origin
+	}
+	if raw := os.Getenv("TILLER_USER_SESSION_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_USER_SESSION_TTL: %w", err)
+		}
+		if v <= 0 {
+			return Config{}, fmt.Errorf("TILLER_USER_SESSION_TTL must be positive, got %q", raw)
+		}
+		c.UserSessionTTL = v
+	}
+	mail, err := loadMailBootstrap()
+	if err != nil {
+		return Config{}, err
+	}
+	c.Mail = mail
+	if c.Mode == ModeHosted && c.PublicURL == "" {
+		return Config{}, errors.New("TILLER_PUBLIC_URL is required in hosted mode")
 	}
 	if raw := os.Getenv("TILLER_ADMIN_COOKIE_SECURE"); raw != "" {
 		v, err := strconv.ParseBool(raw)
@@ -53,10 +187,31 @@ func Load() (Config, error) {
 		}
 		c.AdminSessionTTL = v
 	}
+	if raw := os.Getenv("TILLER_CLIENT_KEY_CACHE_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_CLIENT_KEY_CACHE_TTL: %w", err)
+		}
+		if v <= 0 {
+			return Config{}, fmt.Errorf("TILLER_CLIENT_KEY_CACHE_TTL must be positive, got %q", raw)
+		}
+		c.ClientKeyCacheTTL = clampCacheTTL(v)
+	}
+	if raw := os.Getenv("TILLER_SESSION_CACHE_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_SESSION_CACHE_TTL: %w", err)
+		}
+		if v <= 0 {
+			return Config{}, fmt.Errorf("TILLER_SESSION_CACHE_TTL must be positive, got %q", raw)
+		}
+		c.SessionCacheTTL = clampCacheTTL(v)
+	}
 	// Setting TILLER_TRUSTED_PROXY to a CIDR is the switch that enables
 	// proxy-header trust: forwarded headers are only honoured when the direct
 	// peer is inside that CIDR, so a spoofable header can never be trusted
-	// from an untrusted peer. Leaving it unset disables proxy-header trust.
+	// from an untrusted peer. Hosted mode requires this setting; local mode may
+	// leave it unset to disable proxy-header trust.
 	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
 		var v netip.Prefix
 		if strings.Contains(raw, "/") {
@@ -74,6 +229,9 @@ func Load() (Config, error) {
 		}
 		c.TrustedProxy = v
 	}
+	if c.Mode == ModeHosted && !c.TrustedProxy.IsValid() {
+		return Config{}, errors.New("TILLER_TRUSTED_PROXY is required in hosted mode and must identify the direct reverse proxy")
+	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
 		v, err := strconv.ParseBool(raw)
 		if err != nil {
@@ -81,8 +239,50 @@ func Load() (Config, error) {
 		}
 		c.ModelsDevEnabled = v
 	}
-	if c.AdminUsername == "" || c.AdminPassword == "" {
-		return Config{}, errors.New("TILLER_ADMIN_USERNAME and TILLER_ADMIN_PASSWORD are required")
+	if raw := os.Getenv("TILLER_DEBUG_PPROF"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_DEBUG_PPROF: %w", err)
+		}
+		c.DebugPprof = v
+	}
+	if raw := os.Getenv("TILLER_BACKUP_INTERVAL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_INTERVAL: %w", err)
+		}
+		if v < 0 {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_INTERVAL must not be negative, got %q", raw)
+		}
+		c.BackupInterval = v
+	}
+	if raw := os.Getenv("TILLER_BACKUP_RETENTION"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_RETENTION: %w", err)
+		}
+		if v < 0 {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_RETENTION must not be negative, got %q", raw)
+		}
+		c.BackupRetention = v
+	}
+	if raw := os.Getenv("TILLER_BACKUP_DIR"); raw != "" {
+		c.BackupDir = raw
+	}
+	if c.Mode == ModeLocal {
+		if c.TillerUser == "" || c.TillerUserPassword == "" {
+			return Config{}, errors.New("TILLER_USERNAME and TILLER_PASSWORD are required")
+		}
+	} else {
+		if c.TillerPlatformAdminUser == "" || c.TillerPlatformAdminPassword == "" {
+			return Config{}, errors.New("TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD are required in hosted mode")
+		}
+		if err := validatePlatformUsername(c.TillerPlatformAdminUser); err != nil {
+			return Config{}, fmt.Errorf("TILLER_PLATFORM_ADMIN_USERNAME: %w", err)
+		}
+		if (c.TillerUser == "") != (c.TillerUserPassword == "") {
+			return Config{}, errors.New("TILLER_USERNAME and TILLER_PASSWORD must be provided together for hosted bootstrap")
+		}
 	}
 	if err := os.MkdirAll(c.DataDir, 0o700); err != nil {
 		return Config{}, fmt.Errorf("create data directory: %w", err)
@@ -92,7 +292,162 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("resolve data directory: %w", err)
 	}
 	c.DataDir = abs
+	if c.BackupDir == "" {
+		c.BackupDir = filepath.Join(c.DataDir, "backups")
+	} else {
+		absBackup, err := filepath.Abs(c.BackupDir)
+		if err != nil {
+			return Config{}, fmt.Errorf("resolve backup directory: %w", err)
+		}
+		c.BackupDir = absBackup
+	}
 	return c, nil
+}
+
+func validatePlatformUsername(value string) error {
+	if len(value) < 3 || len(value) > 64 {
+		return errors.New("must be 3 to 64 characters")
+	}
+	for _, r := range value {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '.' && r != '_' && r != '-' {
+			return errors.New("may contain only letters, numbers, dot, underscore, and hyphen")
+		}
+	}
+	return nil
+}
+
+// resolveLegacyCredentials applies the pre-rename TILLER_ADMIN_USERNAME /
+// TILLER_ADMIN_PASSWORD values onto the TILLER_USERNAME / TILLER_PASSWORD
+// fields when the new names are unset, and reports a deprecation for any
+// legacy var that was seen. The new names always win: if both are set the
+// legacy value is ignored and that is reported too, so a half-migrated .env
+// never silently changes which credential the router trusts. It returns the
+// notices to surface at startup and never returns an error, so an existing
+// deployment keeps running through the rename.
+func resolveLegacyCredentials(c *Config) []string {
+	var notices []string
+	type pair struct {
+		name    string
+		value   *string
+		current string
+	}
+	for _, p := range []pair{
+		{"TILLER_ADMIN_USERNAME", &c.TillerUser, c.TillerUser},
+		{"TILLER_ADMIN_PASSWORD", &c.TillerUserPassword, c.TillerUserPassword},
+	} {
+		legacy := os.Getenv(p.name)
+		if legacy == "" {
+			continue
+		}
+		newName := strings.Replace(p.name, "TILLER_ADMIN_", "TILLER_", 1)
+		if p.current == "" {
+			*p.value = legacy
+			notices = append(notices, fmt.Sprintf("%s is deprecated; rename it to %s", p.name, newName))
+		} else {
+			notices = append(notices, fmt.Sprintf("%s is deprecated and was ignored because %s is set; remove %s", p.name, newName, p.name))
+		}
+	}
+	return notices
+}
+
+// validatePublicURL normalizes and validates TILLER_PUBLIC_URL. Only an HTTPS
+// origin is accepted: no path (beyond "/"), query, fragment, credentials, or
+// wildcard host. Auth links are built from this value, so it must never be
+// attacker-controllable.
+func validatePublicURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid URL: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return "", errors.New("must use https")
+	}
+	if u.Host == "" {
+		return "", errors.New("missing host")
+	}
+	if u.User != nil {
+		return "", errors.New("must not contain credentials")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", errors.New("must be an origin only (no path)")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("must be an origin only (no query or fragment)")
+	}
+	if strings.Contains(u.Host, "*") {
+		return "", errors.New("must not contain a wildcard host")
+	}
+	return "https://" + u.Host, nil
+}
+
+// loadMailBootstrap reads the optional mail seed from the environment. When no
+// mail setting is present it returns the zero value. When any is present the
+// configuration must be complete and internally consistent so a half-configured
+// deployment fails at startup rather than at first send.
+func loadMailBootstrap() (MailBootstrap, error) {
+	m := MailBootstrap{
+		Provider:     strings.ToLower(strings.TrimSpace(os.Getenv("TILLER_MAIL_PROVIDER"))),
+		From:         strings.TrimSpace(os.Getenv("TILLER_MAIL_FROM")),
+		SMTPHost:     strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_HOST")),
+		SMTPUsername: strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_USERNAME")),
+		SMTPPassword: os.Getenv("TILLER_MAIL_SMTP_PASSWORD"),
+		SMTPMode:     strings.ToLower(strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_MODE"))),
+	}
+	if !m.Configured() {
+		return MailBootstrap{}, nil
+	}
+	if m.Provider != "smtp" {
+		return MailBootstrap{}, fmt.Errorf("TILLER_MAIL_PROVIDER must be smtp, got %q", m.Provider)
+	}
+	if m.From == "" {
+		return MailBootstrap{}, errors.New("TILLER_MAIL_FROM is required when mail is configured")
+	}
+	if m.SMTPHost == "" {
+		return MailBootstrap{}, errors.New("TILLER_MAIL_SMTP_HOST is required for the smtp provider")
+	}
+	if m.SMTPMode == "" {
+		m.SMTPMode = "starttls"
+	}
+	switch m.SMTPMode {
+	case "starttls", "implicit":
+	default:
+		return MailBootstrap{}, fmt.Errorf("TILLER_MAIL_SMTP_MODE must be starttls or implicit, got %q", m.SMTPMode)
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_PORT")); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil || port < 1 || port > 65535 {
+			return MailBootstrap{}, fmt.Errorf("TILLER_MAIL_SMTP_PORT must be a valid port, got %q", raw)
+		}
+		m.SMTPPort = port
+	}
+	if m.SMTPPort == 0 {
+		if m.SMTPMode == "implicit" {
+			m.SMTPPort = 465
+		} else {
+			m.SMTPPort = 587
+		}
+	}
+	if m.SMTPUsername != "" && m.SMTPPassword == "" {
+		return MailBootstrap{}, errors.New("TILLER_MAIL_SMTP_PASSWORD is required when TILLER_MAIL_SMTP_USERNAME is set")
+	}
+	return m, nil
+}
+
+// clampCacheTTL bounds a configured auth-cache TTL so a typo cannot pin an
+// entry (and the identity it trusts) for an unbounded time. The 24h ceiling is
+// well above any sensible value; 1s is the floor for meaningful caching.
+func clampCacheTTL(v time.Duration) time.Duration {
+	const (
+		minTTL = time.Second
+		maxTTL = 24 * time.Hour
+	)
+	if v < minTTL {
+		return minTTL
+	}
+	if v > maxTTL {
+		return maxTTL
+	}
+	return v
 }
 
 func envDefault(key, fallback string) string {

@@ -68,8 +68,8 @@ docker run --rm -d --name "$name" --network host \
     --security-opt no-new-privileges:true \
     --user 65532:65532 \
     -v "$data_dir:/data" \
-    -e TILLER_ADMIN_USERNAME=admin \
-    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_USERNAME=admin \
+    -e TILLER_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$port" \
     -e TILLER_DATA_DIR=/data \
     -e TILLER_TRUSTED_PROXY=127.0.0.0/8 \
@@ -107,6 +107,18 @@ if [ ! -f "$data_dir/tiller-router.db" ] && ! docker run --rm --user 0:0 \
     exit 1
 fi
 echo "    $data_dir/tiller-router.db present"
+if [ ! -f "$data_dir/activity.db" ] && ! docker run --rm --user 0:0 \
+    -v "$data_dir:/data" alpine:3.20 test -f /data/activity.db; then
+    echo "FAIL: no activity.db under /data" >&2
+    exit 1
+fi
+echo "    $data_dir/activity.db present"
+# Audit is folded into the core database; there must be no separate audit.db.
+if [ -f "$data_dir/audit.db" ]; then
+    echo "FAIL: unexpected separate audit.db under /data" >&2
+    exit 1
+fi
+echo "    no separate audit.db"
 
 echo "==> docker inspect runtime settings"
 ro=$(docker inspect -f '{{.HostConfig.ReadonlyRootfs}}' "$name")
@@ -172,8 +184,8 @@ docker run --rm -d --name "$dc" --network host \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
     --security-opt no-new-privileges:true \
     -v "$default_dir:/data" \
-    -e TILLER_ADMIN_USERNAME=admin \
-    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_USERNAME=admin \
+    -e TILLER_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:18082" \
     -e TILLER_DATA_DIR=/data \
     "$ROUTER_IMAGE" >/dev/null
@@ -212,8 +224,8 @@ docker run --rm -d --name "$pc" --network host \
     --tmpfs /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777 \
     --security-opt no-new-privileges:true \
     -v "$probe_dir:/data" \
-    -e TILLER_ADMIN_USERNAME=admin \
-    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_USERNAME=admin \
+    -e TILLER_PASSWORD="$password" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:18083" \
     -e TILLER_DATA_DIR=/data \
     "$ROUTER_IMAGE" >/dev/null

@@ -162,8 +162,8 @@ for i in $(seq 0 $((workers - 1))); do
         --user 0:0 \
         -v "$run_dir/worker-$i-data:/data" \
         -e TILLER_LISTEN_ADDR="127.0.0.1:$router_port" \
-        -e TILLER_ADMIN_USERNAME=admin \
-        -e TILLER_ADMIN_PASSWORD="$password" \
+        -e TILLER_USERNAME=admin \
+        -e TILLER_PASSWORD="$password" \
         -e TILLER_LOG_LEVEL=warn \
         "$ROUTER_IMAGE" >/dev/null
 done
@@ -182,8 +182,8 @@ docker run --rm -d --name "$run_id-router-activity" --network host \
     --user 0:0 \
     -v "$run_dir/activity-data:/data" \
     -e TILLER_LISTEN_ADDR="127.0.0.1:$activity_router_port" \
-    -e TILLER_ADMIN_USERNAME=admin \
-    -e TILLER_ADMIN_PASSWORD="$password" \
+    -e TILLER_USERNAME=admin \
+    -e TILLER_PASSWORD="$password" \
     -e TILLER_LOG_LEVEL=warn \
     "$ROUTER_IMAGE" >/dev/null
 phase_timing "containers started"

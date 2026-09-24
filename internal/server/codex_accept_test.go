@@ -21,11 +21,10 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
-// TestCodexUpstreamUsesExactSSEAccept guards the Codex streaming contract: the
-// ChatGPT Codex backend only switches to SSE when Accept is exactly
-// text/event-stream (the value codex_cli_rs sends). A combined Accept leaves it
-// on the buffered JSON path, which stalls long generations behind proxy read
-// timeouts.
+// TestCodexUpstreamUsesExactSSEAccept guards request parity with codex_cli_rs:
+// Tiller keeps the exact text/event-stream Accept value after applying auth.
+// Response-side classification, rather than this request header, decides
+// whether the upstream body is relayed as SSE.
 func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 	var mu sync.Mutex
 	var gotAccept, gotSessionID, gotClientRequestID, gotRoutingHint, gotContentType string
@@ -77,7 +76,7 @@ func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
@@ -96,8 +95,7 @@ func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 	providerID := payload["id"].(string)
 
 	future := time.Now().Add(time.Hour)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID:   providerID,
 		AccessToken:  "live-token",
 		RefreshToken: "refresh-token",
@@ -106,9 +104,7 @@ func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 		AuthState:    oauth.AuthConnected,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {

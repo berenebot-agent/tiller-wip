@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // loggingTestHarness wires up a mock upstream, a router, and an admin session.
@@ -27,7 +28,7 @@ func loggingTestHarness(t *testing.T, upstream http.HandlerFunc) (*testAPI, *dat
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
@@ -193,7 +194,7 @@ func TestRequestLoggingMetadataAndClientRequestID(t *testing.T) {
 	}
 	// No prompt/response body may ever land in the log.
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE requested_model LIKE '%hello%' OR requested_model LIKE '%ok%'`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE requested_model LIKE '%hello%' OR requested_model LIKE '%ok%'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("prompt/response body leaked into request_logs: count=%d err=%v", count, err)
 	}
 }
@@ -349,7 +350,7 @@ func TestWriteLogBestEffort(t *testing.T) {
 	// returns without writing.
 	s.writeLog(context.Background(), &logRow{clientKeyID: "does-not-exist", clientRequestID: "req-x", requestedModel: "m", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: "now"})
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("best-effort writeLog wrote rows: count=%d err=%v", count, err)
 	}
 }
@@ -407,6 +408,52 @@ func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
 	second := attempts[1].(map[string]any)
 	if second["attempt_number"] != float64(2) || second["provider"] != "provider-b" || second["result"] != "success" {
 		t.Fatalf("second (succeeding) attempt wrong: %v", second)
+	}
+}
+
+func TestRecordSkippedAttemptPersistsReasonAndFallback(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	row := &logRow{
+		clientKeyID:      clientID,
+		clientRequestID:  "req-skipped-fallback",
+		requestedModel:   "main/daily",
+		routeKind:        strPtr("virtual"),
+		routeModelID:     strPtr("virtual-id"),
+		routeModel:       strPtr("main/daily"),
+		protocol:         "chat",
+		httpStatus:       200,
+		resolvedProvider: strPtr("provider-a"),
+		resolvedModel:    strPtr("model-a"),
+		createdAt:        database.Now(),
+	}
+	api.server.recordSkippedAttempt(row, resolvedRoute{Virtual: true, RoutingMode: "ordered_fallback", RouteModelID: "virtual-id"}, requestAttempt{
+		providerModelID: "pm-skipped",
+		provider:        "provider-a",
+		model:           "model-skipped",
+		failureClass:    "context_limit_exceeded",
+		errorMessage:    strPtr(fixedUpstreamErrorMessage("context_limit_exceeded")),
+	}, true)
+	row.attempts = append(row.attempts, requestAttempt{providerModelID: "pm-success", provider: "provider-a", model: "model-a", result: "success", httpStatus: 200})
+	api.server.writeLog(context.Background(), row)
+
+	var fallbackUsed int
+	if err := db.Activity.QueryRow(`SELECT fallback_used FROM request_logs WHERE id=?`, row.clientRequestID).Scan(&fallbackUsed); err != nil {
+		t.Fatal(err)
+	}
+	if fallbackUsed != 1 {
+		t.Fatalf("fallback_used = %d, want 1", fallbackUsed)
+	}
+	status, payload, _ := api.request("GET", "/api/admin/activity/"+row.clientRequestID+"/attempts", nil)
+	if status != http.StatusOK {
+		t.Fatalf("attempts: %d %v", status, payload)
+	}
+	attempts := payload["data"].([]any)
+	if len(attempts) != 2 {
+		t.Fatalf("expected skipped and successful attempts, got %v", attempts)
+	}
+	first := attempts[0].(map[string]any)
+	if first["result"] != "skipped" || first["failure_class"] != "context_limit_exceeded" || first["error_message"] == "" {
+		t.Fatalf("skipped attempt reason missing: %v", first)
 	}
 }
 
@@ -475,6 +522,43 @@ func TestUpstreamErrorDetailIsRedactedButSurfacedToClient(t *testing.T) {
 	}
 }
 
+func TestContextLimitErrorIsClassifiedAndExplained(t *testing.T) {
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+			"message": "This request exceeds the context window for this model",
+			"code":    "context_length_exceeded",
+		}})
+	})
+	api, _, clientID, secret := loggingTestHarness(t, upstream)
+	resp, payload := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{}})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("context-limit status = %d, want 400", resp.StatusCode)
+	}
+	errObj, ok := payload["error"].(map[string]any)
+	if !ok || errObj["code"] != "context_limit_exceeded" || !strings.Contains(errObj["message"].(string), "context window") {
+		t.Fatalf("context-limit response not actionable: %v", payload)
+	}
+	reqID := resp.Header.Get("X-Tiller-Request-Id")
+	status, attempts, _ := api.request("GET", "/api/admin/activity/"+reqID+"/attempts", nil)
+	if status != http.StatusOK {
+		t.Fatalf("attempts: %d %v", status, attempts)
+	}
+	rows := attempts["data"].([]any)
+	if len(rows) != 1 || rows[0].(map[string]any)["failure_class"] != "context_limit_exceeded" {
+		t.Fatalf("context-limit attempt not classified: %v", attempts)
+	}
+	status, activity, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity", nil)
+	if status != http.StatusOK || activity["data"].([]any)[0].(map[string]any)["error_text"] != "context_limit_exceeded" {
+		t.Fatalf("context-limit activity row not classified: %v", activity)
+	}
+}
+
 func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
 	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
 	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
@@ -495,7 +579,7 @@ func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
 	}
 	var requestBody, errorBody *string
 	var requestTruncated, errorTruncated int
-	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=?`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+	if err := activityDB(t, db).QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=?`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
 		t.Fatal(err)
 	}
 	if requestBody != nil || errorBody != nil || requestTruncated != 0 || errorTruncated != 0 {
@@ -525,7 +609,7 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{"message": errorMarker}})
 	})
 	api, db, clientID, secret := loggingTestHarness(t, upstream)
-	if err := db.SetSetting(context.Background(), database.SettingLogErrorBodies, "1"); err != nil {
+	if err := store.New(db.SQL).For(database.LocalAccountID).SetSetting(context.Background(), store.SettingLogErrorBodies, "1"); err != nil {
 		t.Fatal(err)
 	}
 	// Small-body failure: both bodies persisted verbatim, not truncated.
@@ -537,7 +621,7 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 	}
 	var requestBody, errorBody *string
 	var requestTruncated, errorTruncated int
-	if err := db.SQL.QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
+	if err := activityDB(t, db).QueryRow(`SELECT request_body,error_body,request_body_truncated,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&requestBody, &errorBody, &requestTruncated, &errorTruncated); err != nil {
 		t.Fatal(err)
 	}
 	if requestBody == nil || !strings.Contains(*requestBody, requestMarker) {
@@ -566,7 +650,7 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 	}
 	var bigError *string
 	var bigTruncated int
-	if err := db.SQL.QueryRow(`SELECT error_body,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&bigError, &bigTruncated); err != nil {
+	if err := activityDB(t, db).QueryRow(`SELECT error_body,error_body_truncated FROM request_logs WHERE client_key_id=? ORDER BY created_at DESC LIMIT 1`, clientID).Scan(&bigError, &bigTruncated); err != nil {
 		t.Fatal(err)
 	}
 	if bigTruncated != 1 {
@@ -593,16 +677,16 @@ func mustJSON(t *testing.T, value any) []byte {
 func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
 	_, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := database.Now()
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('dup-req',?,'provider-a/model-a','chat',0,200,1,'dup-req',?)`, clientID, now); err != nil {
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('dup-req',?,'provider-a/model-a','chat',0,200,1,'dup-req',?)`, clientID, now); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{db: db}
 	s.writeLog(context.Background(), &logRow{clientKeyID: clientID, clientRequestID: "dup-req", requestedModel: "provider-a/model-a", protocol: "chat", httpStatus: 200, latencyMs: 1, createdAt: now, attempts: []requestAttempt{{providerModelID: "pm-a", provider: "provider-a", model: "model-a", result: "success", httpStatus: 200, latencyMs: 1}}})
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_attempts WHERE request_log_id='dup-req'`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_attempts WHERE request_log_id='dup-req'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("failed transaction left attempt rows: count=%d err=%v", count, err)
 	}
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='dup-req'`).Scan(&count); err != nil || count != 1 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE id='dup-req'`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("request_logs rows for dup-req = %d, want 1 (no duplicate): err=%v", count, err)
 	}
 }
@@ -613,10 +697,16 @@ func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
 // with a request id. writeLog never fails the request.
 func TestInferenceUnaffectedWhenActivityPersistenceFails(t *testing.T) {
 	api, db, _, secret := loggingTestHarness(t, mockUpstream(t))
-	if _, err := db.SQL.Exec(`DROP TABLE request_attempts`); err != nil {
+	// Warm the store's Activity handle with a first request so it is cached;
+	// otherwise dropping the tables would be undone by the lazy open path
+	// re-running CREATE TABLE IF NOT EXISTS on the next write.
+	warmup, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "warm"}}})
+	_, _ = io.Copy(io.Discard, warmup.Body)
+	warmup.Body.Close()
+	if _, err := activityDB(t, db).Exec(`DROP TABLE request_attempts`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`DROP TABLE request_logs`); err != nil {
+	if _, err := activityDB(t, db).Exec(`DROP TABLE request_logs`); err != nil {
 		t.Fatal(err)
 	}
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "still works"}}})
@@ -711,7 +801,7 @@ func TestPrunerDeletesByRetention(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Insert a log row with an old timestamp directly.
 	old := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339Nano)
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('old1',?,'provider-a/model-a','chat',0,200,1,'req-old',?)`, clientID, old); err != nil {
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('old1',?,'provider-a/model-a','chat',0,200,1,'req-old',?)`, clientID, old); err != nil {
 		t.Fatal(err)
 	}
 	// Set the client's retention to 30 days.
@@ -722,7 +812,60 @@ func TestPrunerDeletesByRetention(t *testing.T) {
 	app := &Server{db: db}
 	app.pruneRequestLogs(context.Background())
 	var count int
-	if err := db.SQL.QueryRow(`SELECT count(*) FROM request_logs WHERE id='old1'`).Scan(&count); err != nil || count != 0 {
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE id='old1'`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("old log not pruned: count=%d err=%v", count, err)
+	}
+}
+
+// TestOutputObserverRecordsFirstOutputOnce verifies the first-output observer
+// records exactly one measurement (the first visible frame), and stores it on
+// the most recent attempt.
+func TestOutputObserverRecordsFirstOutputOnce(t *testing.T) {
+	row := &logRow{clientRequestID: "req-1", attempts: []requestAttempt{{result: "success"}}}
+	var got []int64
+	obs := &outputObserver{
+		started: time.Now().Add(-25 * time.Millisecond),
+		record: func(d time.Duration) {
+			got = append(got, d.Milliseconds())
+			row.attempts[len(row.attempts)-1].firstOutputLatencyMs = d.Milliseconds()
+		},
+	}
+	obs.observe()
+	obs.observe()
+	if len(got) != 1 {
+		t.Fatalf("observer recorded %d times, want 1", len(got))
+	}
+	if row.attempts[0].firstOutputLatencyMs < 20 {
+		t.Fatalf("first output latency not recorded on attempt: %d", row.attempts[0].firstOutputLatencyMs)
+	}
+}
+
+// TestOutputObserverNilSafe confirms a nil observer is a no-op, so streaming
+// call sites can pass nil without guards.
+func TestOutputObserverNilSafe(t *testing.T) {
+	var obs *outputObserver
+	obs.observe()
+}
+
+// TestResponsesEventHasOutput pins which Responses events count as the first
+// client-visible frame. Reasoning-summary deltas count, so a Codex prefill
+// driven by summary:auto is not mistaken for silence.
+func TestResponsesEventHasOutput(t *testing.T) {
+	yes := []string{
+		"response.output_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_text.delta",
+		"response.function_call_arguments.delta",
+	}
+	for _, typ := range yes {
+		if !responsesEventHasOutput(map[string]any{"type": typ}) {
+			t.Fatalf("%s should count as output", typ)
+		}
+	}
+	no := []string{"response.created", "response.completed", "response.output_item.added"}
+	for _, typ := range no {
+		if responsesEventHasOutput(map[string]any{"type": typ}) {
+			t.Fatalf("%s should not count as first output", typ)
+		}
 	}
 }

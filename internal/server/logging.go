@@ -9,12 +9,14 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // logRow is the metadata captured for a single routed request. It is built up
 // as the request progresses and written once, synchronously, before the
 // handler returns.
 type logRow struct {
+	accountID                string
 	clientKeyID              string
 	clientName               string
 	requestedModel           string
@@ -59,6 +61,10 @@ type requestAttempt struct {
 	attemptTimedOut                                        bool
 	upstreamStreaming                                      bool
 	headerLatencyMs                                        int64
+	// firstOutputLatencyMs is the delay from attempt start to the first
+	// client-visible assistant frame (text, reasoning, or tool). It is distinct
+	// from headerLatencyMs, which only measures receipt of upstream headers.
+	firstOutputLatencyMs int64
 	// clientError is the sanitized, client-facing detail for a failed attempt
 	// (provider error message/code/param). It is never persisted or exposed via
 	// Activity; it exists only to build a client error response.
@@ -87,9 +93,14 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if routeStatus == "" {
 		routeStatus = "legacy"
 	}
+	// Phase 1 local mode has exactly one account; a row built without an
+	// explicit account (e.g. an older code path) belongs to it.
+	if row.accountID == "" {
+		row.accountID = database.LocalAccountID
+	}
 	s.recordLastOutcome(row)
-	var enabled int
-	if err := s.db.SQL.QueryRowContext(ctx, `SELECT logging_enabled FROM client_keys WHERE id=?`, row.clientKeyID).Scan(&enabled); err != nil || enabled == 0 {
+	enabled, err := s.scopeFor(row.accountID).ClientKeyLoggingEnabled(ctx, row.clientKeyID)
+	if err != nil || !enabled {
 		return
 	}
 	// Write-time invariant: a 2xx "success" row must always carry a resolved
@@ -101,28 +112,63 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 			s.logger.Warn("request logged as success without a resolved target", "client_request_id", row.clientRequestID, "requested_model", row.requestedModel, "http_status", row.httpStatus)
 		}
 	}
-	// One transaction per logical request: the request_logs row and all of its
-	// attempt rows commit together or not at all, so a single SQLite fsync (the
-	// implicit-transaction commit) covers the whole write instead of 1+N.
-	tx, err := s.db.SQL.BeginTx(ctx, nil)
-	if err != nil {
+	attempts := make([]store.RequestAttemptInsert, 0, len(row.attempts))
+	for _, attempt := range row.attempts {
+		attempts = append(attempts, store.RequestAttemptInsert{
+			Provider:           attempt.provider,
+			Model:              attempt.model,
+			Result:             attempt.result,
+			HTTPStatus:         attempt.httpStatus,
+			FailureClass:       attempt.failureClass,
+			ErrorMessage:       attempt.errorMessage,
+			ErrorBody:          attempt.errorBody,
+			ErrorBodyTruncated: attempt.errorBodyTruncated,
+			LatencyMs:          attempt.latencyMs,
+		})
+	}
+	// One transaction per account batch: the request_logs row and all of its
+	// attempt rows commit together or not at all. When the asynchronous writer
+	// is running the row is queued and the request path never waits on the
+	// commit; tests and direct Server construction fall back to a synchronous
+	// best-effort insert.
+	insert := store.RequestLogInsert{
+		ID:                       row.clientRequestID,
+		ClientKeyID:              row.clientKeyID,
+		ClientName:               row.clientName,
+		RequestedModel:           row.requestedModel,
+		ExposedModel:             row.exposedModel,
+		RouteKind:                row.routeKind,
+		RouteModelID:             row.routeModelID,
+		RouteModel:               row.routeModel,
+		RouteStatus:              routeStatus,
+		ResolvedProvider:         row.resolvedProvider,
+		ResolvedModel:            row.resolvedModel,
+		Protocol:                 row.protocol,
+		Streaming:                row.streaming,
+		HTTPStatus:               row.httpStatus,
+		LatencyMs:                row.latencyMs,
+		InputTokens:              row.inputTokens,
+		OutputTokens:             row.outputTokens,
+		CacheReadInputTokens:     row.cacheReadInputTokens,
+		CacheCreationInputTokens: row.cacheCreationInputTokens,
+		ProviderRequestID:        row.providerRequestID,
+		ClientRequestID:          row.clientRequestID,
+		ErrorText:                row.errorText,
+		ErrorMessage:             row.errorMessage,
+		RequestBody:              row.requestBody,
+		RequestBodyTruncated:     row.requestBodyTruncated,
+		ErrorBody:                row.errorBody,
+		ErrorBodyTruncated:       row.errorBodyTruncated,
+		FallbackUsed:             row.fallbackUsed,
+		FallbackReason:           row.fallbackReason,
+		CreatedAt:                row.createdAt,
+		Attempts:                 attempts,
+	}
+	if s.logWriter != nil {
+		s.logWriter.enqueue(logWrite{accountID: row.accountID, row: insert})
 		return
 	}
-	defer tx.Rollback() // no-op after a successful Commit
-	if _, err := tx.ExecContext(ctx, `INSERT INTO request_logs(id,client_key_id,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		row.clientRequestID, row.clientKeyID, row.requestedModel, row.exposedModel, row.routeKind, row.routeModelID, row.routeModel, routeStatus, row.resolvedProvider, row.resolvedModel, row.protocol, boolInt(row.streaming), row.httpStatus, row.latencyMs, row.inputTokens, row.outputTokens, row.cacheReadInputTokens, row.cacheCreationInputTokens, row.providerRequestID, row.clientRequestID, row.errorText, row.errorMessage, row.requestBody, boolInt(row.requestBodyTruncated), row.errorBody, boolInt(row.errorBodyTruncated), attemptCount(row.attempts), boolInt(row.fallbackUsed), row.fallbackReason, row.createdAt); err != nil {
-		return
-	}
-	for i, attempt := range row.attempts {
-		attemptID, err := id.New()
-		if err != nil {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO request_attempts(id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, attemptID, row.clientRequestID, i+1, attempt.provider, attempt.model, attempt.result, nullInt(attempt.httpStatus), nullString(attempt.failureClass), attempt.errorMessage, attempt.errorBody, boolInt(attempt.errorBodyTruncated), attempt.latencyMs, row.createdAt); err != nil {
-			return
-		}
-	}
-	_ = tx.Commit()
+	_ = s.scopeFor(row.accountID).InsertRequestLog(ctx, insert)
 }
 
 // recordLastOutcome updates operational target status from actual attempts.
@@ -137,6 +183,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	if len(row.attempts) == 0 {
 		return
 	}
+	accountID := rowAccountID(row)
 	s.lastOutcomeMu.Lock()
 	if s.lastOutcome == nil {
 		s.lastOutcome = map[string]lastOutcome{}
@@ -176,7 +223,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		}
 		delta[attempt.providerModelID] = out
 		if out.Degrading {
-			s.lastOutcome[attempt.providerModelID] = out
+			s.lastOutcome[tenantKey(accountID, attempt.providerModelID)] = out
 		}
 	}
 	s.lastOutcomeMu.Unlock()
@@ -184,7 +231,7 @@ func (s *Server) recordLastOutcome(row *logRow) {
 	// buffer drops the delta, which the next snapshot self-heals. Never blocks
 	// the inference path.
 	if len(delta) > 0 && s.liveHub != nil {
-		s.liveHub.emitOutcome(delta)
+		s.liveHub.emitOutcome(accountID, delta)
 	}
 }
 
@@ -198,39 +245,61 @@ func clientCausedFailure(attempt requestAttempt) bool {
 	return attempt.clientCtxErr != ""
 }
 
-func nullInt(v int) any {
-	if v == 0 {
-		return nil
-	}
-	return v
-}
-func nullString(v string) any {
-	if v == "" {
-		return nil
-	}
-	return v
-}
-
 // pruneRequestLogs deletes request logs older than each client's retention
 // window. Runs at startup and hourly.
 func (s *Server) pruneRequestLogs(ctx context.Context) {
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT DISTINCT retention_days FROM client_keys`)
-	if err != nil {
+	_ = s.storeHandle().PruneRequestLogs(ctx, time.Now())
+	s.invalidateAllUsageAggregates()
+}
+
+// outputObserver records the delay from an attempt's start to its first
+// client-visible assistant frame. It records only a duration; it never sees or
+// retains any response content. A nil observer is a valid no-op.
+type outputObserver struct {
+	started time.Time
+	done    bool
+	record  func(time.Duration)
+}
+
+// observe records the first-output latency exactly once. Safe on a nil receiver
+// and safe to call from the streaming goroutine.
+func (o *outputObserver) observe() {
+	if o == nil || o.done {
 		return
 	}
-	var days []int
-	for rows.Next() {
-		var d int
-		if rows.Scan(&d) == nil {
-			days = append(days, d)
-		}
+	o.done = true
+	if o.record != nil {
+		o.record(time.Since(o.started))
 	}
-	rows.Close()
-	for _, d := range days {
-		cutoff := time.Now().UTC().Add(-time.Duration(d) * 24 * time.Hour).Format(time.RFC3339Nano)
-		_, _ = s.db.SQL.ExecContext(ctx, `DELETE FROM request_logs WHERE client_key_id IN (SELECT id FROM client_keys WHERE retention_days=?) AND created_at < ?`, d, cutoff)
+}
+
+// newOutputObserver builds the first-output observer for the committed attempt.
+// It stores the latency on that attempt for the Activity record and, for Codex
+// targets, emits a dedicated log line so a silent reasoning prefill is
+// distinguishable from a genuinely slow header response. Returns nil when there
+// is no committed attempt to attribute the measurement to.
+func (s *Server) newOutputObserver(start time.Time, row *logRow, candidate resolvedRoute, headerLatencyMs int64) *outputObserver {
+	if start.IsZero() || row == nil {
+		return nil
 	}
-	s.invalidateUsageAggregates()
+	return &outputObserver{
+		started: start,
+		record: func(d time.Duration) {
+			ms := d.Milliseconds()
+			if len(row.attempts) > 0 {
+				row.attempts[len(row.attempts)-1].firstOutputLatencyMs = ms
+			}
+			if s.logger != nil && candidate.Provider.Type == "codex-subscription" {
+				s.logger.Info("codex first output",
+					"client_request_id", row.clientRequestID,
+					"provider", candidate.Provider.Name,
+					"model", candidate.UpstreamModelID,
+					"header_latency_ms", headerLatencyMs,
+					"first_output_latency_ms", ms,
+				)
+			}
+		},
+	}
 }
 
 // usageCapture accumulates token counts extracted from a response body in

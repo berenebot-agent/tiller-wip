@@ -16,6 +16,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // routingTransport redirects OAuth token requests (to auth.openai.com) to a
@@ -87,7 +88,7 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,8 +112,7 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 	providerID := payload["id"].(string)
 
 	expired := time.Now().Add(-time.Minute)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID:   providerID,
 		AccessToken:  "stale-token",
 		RefreshToken: "refresh-token",
@@ -121,9 +121,7 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 		AuthState:    oauth.AuthConnected,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {
@@ -200,8 +198,7 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 	}
 
 	expired := time.Now().Add(-time.Minute)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID:   "provider-dead",
 		AccessToken:  "stale",
 		RefreshToken: "dead-refresh",
@@ -210,9 +207,7 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 		AuthState:    oauth.AuthConnected,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	// Mock OAuth server that rejects all refresh attempts.
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -223,17 +218,14 @@ func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 
 	registry := providers.NewRegistry()
 	registry.SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: oauthServer}})
-	mgr := providers.NewManager(db.SQL, registry)
+	mgr := providers.NewManager(store.New(db.SQL), registry)
 
-	err = mgr.ForceOAuthRefresh(context.Background(), &providers.Instance{ID: "provider-dead", Type: "codex-subscription"})
+	err = mgr.ForceOAuthRefresh(context.Background(), database.LocalAccountID, &providers.Instance{ID: "provider-dead", Type: "codex-subscription"})
 	if err == nil {
 		t.Fatal("expected error from dead refresh token")
 	}
 
-	record, err := store.Get(context.Background(), "provider-dead")
-	if err != nil {
-		t.Fatal(err)
-	}
+	record := getOAuthToken(t, db, "provider-dead")
 	if record.AuthState != oauth.AuthReconnectRequired {
 		t.Fatalf("auth_state = %q, want reconnect_required", record.AuthState)
 	}

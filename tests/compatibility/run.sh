@@ -81,8 +81,8 @@ start_router() {
     docker run --rm -d --name "$name" --network host \
         -v "$data_dir:/data" \
         -e TILLER_LISTEN_ADDR="127.0.0.1:$port" \
-        -e TILLER_ADMIN_USERNAME=admin \
-        -e TILLER_ADMIN_PASSWORD="$password" \
+        -e TILLER_USERNAME=admin \
+        -e TILLER_PASSWORD="$password" \
         -e TILLER_LOG_LEVEL=warn \
         "$ROUTER_IMAGE" >/dev/null
     for _ in $(seq 1 10); do

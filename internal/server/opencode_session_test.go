@@ -128,7 +128,7 @@ func TestCodexSessionAffinityHeaderStable(t *testing.T) {
 	}
 	t.Cleanup(func() { db.Close() })
 
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
@@ -147,13 +147,10 @@ func TestCodexSessionAffinityHeaderStable(t *testing.T) {
 	providerID := payload["id"].(string)
 
 	future := time.Now().Add(time.Hour)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID: providerID, AccessToken: "live-token", RefreshToken: "refresh-token", TokenType: "Bearer",
 		ExpiresAt: &future, AuthState: oauth.AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {
@@ -233,7 +230,7 @@ func opencodeSessionHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)

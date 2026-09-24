@@ -2,12 +2,12 @@ package database
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestOpenRestrictsFileAndDirPermissions(t *testing.T) {
@@ -38,6 +38,45 @@ func TestOpenRestrictsFileAndDirPermissions(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Fatalf("db file mode = %o, want 600", perm)
+	}
+}
+
+func TestFreshHostedOpenPersistsBootstrapState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "router.db")
+	db, err := Open(context.Background(), path, WithHostedMode(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !db.FreshInstall {
+		db.Close()
+		t.Fatal("fresh hosted database was not classified as fresh")
+	}
+	var marker string
+	if err := db.SQL.QueryRow(`SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&marker); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if marker != "1" {
+		db.Close()
+		t.Fatalf("fresh hosted bootstrap marker = %q, want 1", marker)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if reopened.FreshInstall {
+		t.Fatal("reopened hosted database was classified as fresh")
+	}
+	if err := reopened.SQL.QueryRow(`SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&marker); err != nil {
+		t.Fatal(err)
+	}
+	if marker != "1" {
+		t.Fatalf("reopened hosted bootstrap marker = %q, want 1", marker)
 	}
 }
 
@@ -83,77 +122,101 @@ func TestBackupIsConsistentAndReadable(t *testing.T) {
 	}
 }
 
-// TestBackfillMigration verifies migration 014 derives route_kind/route_model_id/
-// route_model for legacy rows (route_kind NULL) where derivable, and leaves
-// unmappable rows NULL.
-func TestBackfillMigration(t *testing.T) {
-	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+// Migration 014 (backfill of legacy route attribution) is exercised end to end
+// by TestMigrateFromEveryCheckpointPreservesData, which seeds a legacy-shaped
+// request row and upgrades from each historical checkpoint. The standalone
+// test that re-ran the 014 body against the central request_logs table is gone
+// because Activity now lives in per-account files.
+
+// TestBackupExcludesActivityAndRestoresCore proves a snapshot is a usable
+// restore point for the control plane (including audit history) and
+// deliberately carries no Activity: the central request_logs table is gone
+// from the snapshot and the separate activity.db is not part of it.
+func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
+	dir := t.TempDir()
+	db, err := Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
 	now := Now()
-	for _, ns := range []struct{ name, kind, entity string }{
-		{"prov", "real", "p1"},
-		{"vg", "virtual", "g1"},
-	} {
-		if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES(?,?,?)`, ns.name, ns.kind, ns.entity); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('p1','prov','generic-openai','http://example.test/v1',1,'["chat"]',?,?)`, now, now); err != nil {
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('backup-prov','real','bp1')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO provider_models(id,provider_id,upstream_model_id,first_seen_at,last_seen_at,created_at,updated_at) VALUES('m1','p1','model-a',?,?,?,?)`, now, now, now, now); err != nil {
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('bp1','backup-prov','generic-openai','http://example.test/v1',1,'["chat"]',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO virtual_provider_groups(id,name,created_at,updated_at) VALUES('g1','vg',?,?)`, now, now); err != nil {
+	if _, err := db.Activity.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('act-1','ck','m','chat',0,200,1,'r1',?)`, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO virtual_models(id,virtual_group_id,name,target_provider_id,target_provider_model_id,created_at,updated_at) VALUES('vm1','g1','coding','p1','m1',?,?)`, now, now); err != nil {
+	// Audit history is durable control-plane state and must be captured by the
+	// core snapshot.
+	if _, err := db.SQL.Exec(`INSERT INTO account_audit_events(id,account_id,event,actor_type,outcome,metadata,created_at) VALUES('ae1',?,'user.login','user','success','{}',?)`, LocalAccountID, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(`INSERT INTO client_keys(id,name,selector,secret_hash,secret_fingerprint,created_at,updated_at) VALUES('ck1','client','sel','h','f',?,?)`, now, now); err != nil {
-		t.Fatal(err)
-	}
-	insert := func(id, requested, rp, rm string) {
-		if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, "ck1", requested, rp, rm, "chat", 0, 200, 1, "req-"+id, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	insert("row-virtual", "vg/coding", "prov", "model-a") // matches virtual canonical
-	insert("row-real", "prov/model-a", "prov", "model-a") // matches real model
-	insert("row-unmappable", "unknown/x", "other", "y")   // matches neither
 
-	// Run the backfill migration body (already applied on empty tables at Open,
-	// so re-run it now that legacy rows exist).
-	body, err := migrations.ReadFile("migrations/014_backfill_route_attribution.sql")
+	backup, err := db.Backup(context.Background(), filepath.Join(dir, "backups"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.Exec(string(body)); err != nil {
-		t.Fatalf("backfill migration failed: %v", err)
-	}
+	db.Close()
 
-	var kind, modelID, routeModel sql.NullString
-	if err := db.SQL.QueryRow(`SELECT route_kind,route_model_id,route_model FROM request_logs WHERE id='row-virtual'`).Scan(&kind, &modelID, &routeModel); err != nil {
+	if err := Verify(context.Background(), backup); err != nil {
+		t.Fatalf("backup failed verification: %v", err)
+	}
+	restored, err := Open(context.Background(), backup)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if kind.String != "virtual" || modelID.String != "vm1" || routeModel.String != "vg/coding" {
-		t.Fatalf("virtual backfill wrong: kind=%q id=%q model=%q", kind.String, modelID.String, routeModel.String)
+	defer restored.Close()
+	var name string
+	if err := restored.SQL.QueryRow(`SELECT name FROM providers WHERE id='bp1'`).Scan(&name); err != nil {
+		t.Fatalf("backup lost control-plane row: %v", err)
 	}
-	if err := db.SQL.QueryRow(`SELECT route_kind,route_model_id,route_model FROM request_logs WHERE id='row-real'`).Scan(&kind, &modelID, &routeModel); err != nil {
+	if name != "backup-prov" {
+		t.Fatalf("provider name = %q", name)
+	}
+	var tables int
+	if err := restored.SQL.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('request_logs','request_attempts')`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if kind.String != "real" || modelID.String != "m1" || routeModel.String != "prov/model-a" {
-		t.Fatalf("real backfill wrong: kind=%q id=%q model=%q", kind.String, modelID.String, routeModel.String)
+	if tables != 0 {
+		t.Fatalf("central backup must not contain Activity tables, found %d", tables)
 	}
-	// Unmappable row stays NULL.
-	if err := db.SQL.QueryRow(`SELECT route_kind,route_model_id,route_model FROM request_logs WHERE id='row-unmappable'`).Scan(&kind, &modelID, &routeModel); err != nil {
+	var auditRows int
+	if err := restored.SQL.QueryRow(`SELECT count(*) FROM account_audit_events`).Scan(&auditRows); err != nil {
+		t.Fatalf("backup lost audit table: %v", err)
+	}
+	if auditRows != 1 {
+		t.Fatalf("backup audit rows = %d, want 1", auditRows)
+	}
+}
+
+func TestPruneBackupsRemovesOnlyOldSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	for _, name := range []string{"tiller-router-old.db", "tiller-router-new.db", "keepme.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := now.Add(-8 * 24 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dir, "tiller-router-old.db"), old, old); err != nil {
 		t.Fatal(err)
 	}
-	if kind.Valid || modelID.Valid || routeModel.Valid {
-		t.Fatalf("unmappable row should stay NULL: kind=%q id=%q model=%q", kind.String, modelID.String, routeModel.String)
+	removed, err := PruneBackups(dir, 7*24*time.Hour, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "tiller-router-old.db")); !os.IsNotExist(err) {
+		t.Fatalf("old snapshot was not pruned: %v", err)
+	}
+	for _, name := range []string{"tiller-router-new.db", "keepme.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s should be kept: %v", name, err)
+		}
 	}
 }
 

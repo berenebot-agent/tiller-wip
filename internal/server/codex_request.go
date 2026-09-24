@@ -34,6 +34,21 @@ func normalizeCodexRequest(body []byte, caps *providers.ReasoningCapabilities) (
 			}
 		}
 	}
+	// Provider-scoped Codex compatibility (matches codex_cli_rs / 9router):
+	// the ChatGPT Codex backend streams response.reasoning_summary_text.delta
+	// only when reasoning.summary is requested. Without it a high-effort prefill
+	// is minutes of silence before the first visible token, even though the
+	// content_type is SSE. Ask for the summary whenever reasoning is active, and
+	// request encrypted reasoning so multi-turn reasoning state can round-trip
+	// with store=false. An explicit client summary is preserved.
+	if reasoning, ok := request["reasoning"].(map[string]any); ok {
+		if effort, _ := reasoning["effort"].(string); effort != "" && effort != "none" {
+			if _, exists := reasoning["summary"]; !exists {
+				reasoning["summary"] = "auto"
+			}
+			request["include"] = ensureReasoningEncryptedContent(request["include"])
+		}
+	}
 	switch input := request["input"].(type) {
 	case string:
 		request["input"] = []any{map[string]any{"type": "message", "role": "user", "content": []any{map[string]any{"type": "input_text", "text": input}}}}
@@ -79,6 +94,20 @@ func normalizeCodexRequest(body []byte, caps *providers.ReasoningCapabilities) (
 		delete(request, key)
 	}
 	return json.Marshal(request)
+}
+
+// ensureReasoningEncryptedContent returns the Responses `include` list with
+// "reasoning.encrypted_content" present, preserving any existing entries and
+// tolerating a non-list value by starting a fresh list.
+func ensureReasoningEncryptedContent(value any) []any {
+	const encrypted = "reasoning.encrypted_content"
+	list, _ := value.([]any)
+	for _, item := range list {
+		if entry, ok := item.(string); ok && entry == encrypted {
+			return list
+		}
+	}
+	return append(list, encrypted)
 }
 
 // codexRequestEffort returns the already-normalized wire effort without

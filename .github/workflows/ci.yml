@@ -38,6 +38,45 @@ jobs:
       - name: Build
         run: go build ./cmd/tiller-router
 
+  compose:
+    name: Compose config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      # Fail if the Compose files have invalid YAML, bad interpolation, or a
+      # required variable without a safe dummy value. No container is started.
+      - name: Validate docker-compose.yml
+        env:
+          TILLER_USERNAME: ci
+          TILLER_PASSWORD: ci
+        run: docker compose -f docker-compose.yml config >/dev/null
+      - name: Validate docker-compose.yml with legacy names
+        env:
+          TILLER_ADMIN_USERNAME: ci
+          TILLER_ADMIN_PASSWORD: ci
+        run: docker compose -f docker-compose.yml config >/dev/null
+      - name: Validate hosted override with managed ingress network
+        env:
+          TILLER_USERNAME: ci
+          TILLER_PASSWORD: ci
+          TILLER_PLATFORM_ADMIN_USERNAME: ci-platform
+          TILLER_PLATFORM_ADMIN_PASSWORD: ci-platform-password
+          TILLER_PUBLIC_URL: https://app.example.com
+          TILLER_TRUSTED_PROXY: 172.20.0.2/32
+        run: docker compose -f docker-compose.yml -f docker-compose.hosted.yml config >/dev/null
+      - name: Validate external proxy network override
+        env:
+          TILLER_USERNAME: ci
+          TILLER_PASSWORD: ci
+          TILLER_PLATFORM_ADMIN_USERNAME: ci-platform
+          TILLER_PLATFORM_ADMIN_PASSWORD: ci-platform-password
+          TILLER_INGRESS_NETWORK: ci-proxy-network
+          TILLER_INGRESS_NETWORK_EXTERNAL: "true"
+          TILLER_PUBLIC_URL: https://app.example.com
+          TILLER_TRUSTED_PROXY: 172.20.0.2/32
+        run: docker compose -f docker-compose.yml -f docker-compose.hosted.yml config >/dev/null
+
   container-regressions:
     name: Browser and runtime checks
     runs-on: ubuntu-latest

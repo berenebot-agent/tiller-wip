@@ -14,5 +14,7 @@ docs/
 tests/hermes_test/
 docs/todo_enc_keys.md
 tests/logs/
-# Local build artifact — never commit.
-tiller-router.zip
+# Local build artifacts and data backups — never commit. Zip archives here are
+# release bundles or ./data backups (large, and backups contain database
+# contents), so all of them stay out of git.
+*.zip

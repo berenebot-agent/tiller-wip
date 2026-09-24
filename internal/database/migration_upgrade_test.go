@@ -28,6 +28,13 @@ func openMigrationFixture(t *testing.T, path string, checkpoint int) {
 
 	raw := openRawMigrationDB(t, path)
 	defer raw.Close()
+	// Mirror the production migration contract: Migrate() disables foreign-key
+	// enforcement on the connection before applying migrations, because table
+	// rebuilds drop parent tables while child tables exist. Seeding re-enables
+	// enforcement afterwards, and Open() ends with foreign_key_check.
+	if _, err := raw.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := raw.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL) STRICT`); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +58,10 @@ func openMigrationFixture(t *testing.T, path string, checkpoint int) {
 	if checkpoint == 0 {
 		return
 	}
+	// Seed with enforcement back on so a bad fixture row is caught here.
+	if _, err := raw.Exec(`PRAGMA foreign_keys=ON`); err != nil {
+		t.Fatal(err)
+	}
 	seedMigrationFixture(t, raw, checkpoint)
 }
 
@@ -67,6 +78,16 @@ func openRawMigrationDB(t *testing.T, path string) *sql.DB {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// openFixtureActivity returns the migrated fixture's Activity database. The
+// one-time move from the central tables runs during Open.
+func openFixtureActivity(t *testing.T, db *DB) *sql.DB {
+	t.Helper()
+	if db.Activity == nil {
+		t.Fatal("fixture database has no Activity handle")
+	}
+	return db.Activity
 }
 
 type migrationEntry struct {
@@ -199,6 +220,9 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				t.Fatalf("fixture data changed: provider=%q model=%q virtual=%q permission=%q", providerName, model, virtualName, permission)
 			}
 			if checkpoint >= 3 {
+				// Activity rows now live in the per-account Activity database; the
+				// move happens during Open, so query the local account's file.
+				activity := openFixtureActivity(t, db)
 				var routeKind, routeModel, routeStatus sql.NullString
 				query := `SELECT route_kind,route_model FROM request_logs WHERE id='log1'`
 				if checkpoint >= 24 {
@@ -206,9 +230,9 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				}
 				var err error
 				if checkpoint >= 24 {
-					err = db.SQL.QueryRow(query).Scan(&routeKind, &routeModel, &routeStatus)
+					err = activity.QueryRow(query).Scan(&routeKind, &routeModel, &routeStatus)
 				} else {
-					err = db.SQL.QueryRow(query).Scan(&routeKind, &routeModel)
+					err = activity.QueryRow(query).Scan(&routeKind, &routeModel)
 				}
 				if err != nil {
 					t.Fatal(err)
@@ -226,21 +250,21 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 				if checkpoint == 18 {
 					var errorText string
 					var errorMessage sql.NullString
-					if err := db.SQL.QueryRow(`SELECT error_text,error_message FROM request_logs WHERE id='log1'`).Scan(&errorText, &errorMessage); err != nil {
+					if err := activity.QueryRow(`SELECT error_text,error_message FROM request_logs WHERE id='log1'`).Scan(&errorText, &errorMessage); err != nil {
 						t.Fatal(err)
 					}
 					if errorText != "upstream_error" || errorMessage.Valid {
 						t.Fatalf("request failure metadata changed: error_text=%q error_message=%q", errorText, errorMessage.String)
 					}
 					var failureClass string
-					if err := db.SQL.QueryRow(`SELECT failure_class FROM request_attempts WHERE id='attempt1'`).Scan(&failureClass); err != nil {
+					if err := activity.QueryRow(`SELECT failure_class FROM request_attempts WHERE id='attempt1'`).Scan(&failureClass); err != nil {
 						t.Fatal(err)
 					}
 					if failureClass != "http_502" {
 						t.Fatalf("attempt failure class = %q, want http_502", failureClass)
 					}
 					var attemptMessage sql.NullString
-					if err := db.SQL.QueryRow(`SELECT error_message FROM request_attempts WHERE id='attempt1'`).Scan(&attemptMessage); err != nil {
+					if err := activity.QueryRow(`SELECT error_message FROM request_attempts WHERE id='attempt1'`).Scan(&attemptMessage); err != nil {
 						t.Fatal(err)
 					}
 					if attemptMessage.Valid {

@@ -5,12 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/hostednet"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 // Notification event identifiers. These are stable, machine-readable values
@@ -30,6 +34,8 @@ const (
 // notificationTimeout bounds a single best-effort webhook delivery. Delivery
 // is fire-and-forget and never blocks or delays the inference request.
 const notificationTimeout = 5 * time.Second
+
+const maxNotificationResponseBytes int64 = 64 << 10
 
 // notificationPayload is the metadata captured for a single routing event. It
 // is rendered as a human-readable plain-text message for the webhook. It shares
@@ -75,7 +81,7 @@ func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Respon
 	default:
 		return
 	}
-	cfg, err := s.db.GetNotificationSettingsBatch(context.Background())
+	cfg, err := s.scopeFor(row.accountID).GetNotificationSettingsBatch(context.Background())
 	if err != nil || !cfg.Enabled || cfg.WebhookURL == "" {
 		return
 	}
@@ -86,7 +92,7 @@ func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Respon
 		return
 	}
 	payload := s.buildNotificationPayload(event, row, route)
-	go s.deliverNotification(event, payload, cfg)
+	go s.deliverNotification(row.accountID, event, payload, cfg)
 }
 
 // subjectToCooldown reports whether an event is throttled by the notification
@@ -99,18 +105,18 @@ func subjectToCooldown(event string) bool {
 // notifyAdminEvent emits a best-effort notification for a discrete admin action
 // (e.g. client key created/deleted, admin login). It is fire-and-forget and never
 // blocks the admin request. The message is the full human-readable body.
-func (s *Server) notifyAdminEvent(event, message string) {
+func (s *Server) notifyAdminEvent(accountID, event, message string) {
 	payload := notificationPayload{
 		Event:     event,
 		Severity:  severityInfo,
 		Timestamp: database.Now(),
 		Message:   message,
 	}
-	cfg, err := s.db.GetNotificationSettingsBatch(context.Background())
+	cfg, err := s.scopeFor(accountID).GetNotificationSettingsBatch(context.Background())
 	if err != nil || !cfg.Enabled || cfg.WebhookURL == "" || !notificationEventEnabled(event, cfg) {
 		return
 	}
-	go s.deliverNotification(event, payload, cfg)
+	go s.deliverNotification(accountID, event, payload, cfg)
 }
 
 // hasFailedAttempt reports whether any target was actually attempted upstream
@@ -143,7 +149,7 @@ func attemptCount(attempts []requestAttempt) int {
 // is enabled, sends one best-effort webhook POST. Any failure is logged in
 // normal admin diagnostics and never affects the inference request. The payload
 // must already be built (it is a value, so it is immune to further row mutation).
-func (s *Server) deliverNotification(event string, payload notificationPayload, cfg database.NotificationSettings) {
+func (s *Server) deliverNotification(accountID, event string, payload notificationPayload, cfg store.NotificationSettings) {
 	ctx := context.Background()
 	if !cfg.Enabled || cfg.WebhookURL == "" {
 		return
@@ -155,7 +161,7 @@ func (s *Server) deliverNotification(event string, payload notificationPayload, 
 	// cooldown window. Reserve the key before starting delivery so concurrent
 	// requests cannot fan out duplicate notifications. Only routing events are
 	// throttled; the manual test and discrete admin events are not.
-	key := event + "|" + payload.VirtualModel
+	key := accountID + "|" + event + "|" + payload.VirtualModel
 	reserved := false
 	if subjectToCooldown(event) {
 		s.notifyCooldownMu.Lock()
@@ -206,6 +212,11 @@ func (s *Server) deliverNotification(event string, payload notificationPayload, 
 		s.logger.Warn("notification delivery failed", "event", event, "error_class", notificationErrorClass(err))
 		return
 	}
+	if err := drainNotificationResponse(resp.Body); err != nil {
+		_ = resp.Body.Close()
+		s.logger.Warn("notification delivery failed", "event", event, "error_class", notificationErrorClass(err))
+		return
+	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		s.logger.Warn("notification delivery failed", "event", event, "status", resp.StatusCode)
@@ -218,7 +229,7 @@ func (s *Server) deliverNotification(event string, payload notificationPayload, 
 	}
 }
 
-func notificationEventEnabled(event string, cfg database.NotificationSettings) bool {
+func notificationEventEnabled(event string, cfg store.NotificationSettings) bool {
 	switch event {
 	case eventFallback:
 		return cfg.EventFallback
@@ -365,6 +376,8 @@ func failureMessage(class string, httpStatus int) string {
 		return "protocol not supported"
 	case "free_model_requires_keyless":
 		return "requires keyless provider"
+	case "free_tier_rejected":
+		return "free-tier policy rejection"
 	case "invalid_upstream":
 		return "invalid upstream"
 	case "upstream_unreachable":
@@ -373,6 +386,8 @@ func failureMessage(class string, httpStatus int) string {
 		return "timeout"
 	case "upstream_read_error":
 		return "read error"
+	case "provider_credentials_locked":
+		return "credentials locked"
 	case "cooldown":
 		return "cooldown"
 	case "client_timeout":
@@ -389,13 +404,17 @@ func failureMessage(class string, httpStatus int) string {
 // the saved configuration (URL + optional auth header) regardless of the
 // enabled flag so an admin can verify delivery before enabling events.
 func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.db.GetNotificationSettings(r.Context())
+	cfg, err := s.scope(r).GetNotificationSettings(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load notification settings.")
 		return
 	}
 	if cfg.WebhookURL == "" {
 		adminError(w, 400, "no_webhook_url", "Configure a webhook URL before sending a test notification.")
+		return
+	}
+	if s.config.Mode == config.ModeHosted && hostednet.Validate(cfg.WebhookURL) != nil {
+		adminError(w, 400, "invalid_webhook_url", "Hosted webhook URLs must use validated public HTTPS on port 443.")
 		return
 	}
 	payload := notificationPayload{
@@ -422,6 +441,11 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 502, "delivery_failed", "The test notification could not be delivered ("+notificationErrorClass(err)+").")
 		return
 	}
+	if err := drainNotificationResponse(resp.Body); err != nil {
+		_ = resp.Body.Close()
+		adminError(w, 502, "delivery_failed", "The test notification response was too large or could not be read.")
+		return
+	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg := fmt.Sprintf("The webhook returned HTTP %d.", resp.StatusCode)
@@ -432,4 +456,15 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"delivered": true})
+}
+
+func drainNotificationResponse(body io.Reader) error {
+	read, err := io.CopyN(io.Discard, body, maxNotificationResponseBytes+1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if read > maxNotificationResponseBytes {
+		return errors.New("notification response body too large")
+	}
+	return nil
 }

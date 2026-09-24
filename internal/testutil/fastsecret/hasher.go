@@ -45,5 +45,9 @@ func (Hasher) Verify(secret, encoded string) bool {
 	return subtle.ConstantTimeCompare(want, h[:]) == 1
 }
 
+// NeedsRehash is always false: the test hasher has one format and never
+// upgrades, so tests exercise the verify path without write-on-auth.
+func (Hasher) NeedsRehash(string) bool { return false }
+
 // Compile-time guard: Hasher must satisfy the interface.
 var _ auth.SecretHasher = Hasher{}

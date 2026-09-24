@@ -28,17 +28,111 @@ interface private, use HTTPS at the edge, protect `./data`, and never commit
 `.env` or provider credentials. Proxy-header trust must remain disabled unless
 the direct proxy peer is restricted with `TILLER_TRUSTED_PROXY`.
 
-**Provider credentials are not encrypted at rest.** They are stored in
-recoverable form in the SQLite database (`./data`) so Tiller can authenticate
-upstream requests, and credential encryption at rest is a future-roadmap
-consideration. Take care with where you store the persistent database and any
-backups of it — treat `./data` and its backups as secrets, since anyone who can
-read the database file can recover your provider keys.
+The main Compose deployment remains the simple self-hosted appliance. The
+separate `docker-compose.hosted.yml` override removes direct host-port
+publishing and uses explicit networks rather than the implicit Compose default
+network. Tiller is attached to a managed `tiller-router-egress` network
+containing only Tiller and to an ingress network used by the reverse proxy. A
+proxy in another Compose project can use an existing network with
+`TILLER_INGRESS_NETWORK` and `TILLER_INGRESS_NETWORK_EXTERNAL=true`. This
+network layout requires no host firewall configuration and does not alter
+local/LAN provider support. Hosted mode requires `TILLER_TRUSTED_PROXY` to
+identify the direct reverse proxy peer so client IP limits and audit records
+use the forwarded client address. It is defense in depth only: hosted outbound
+requests remain subject to the application `SafeTransport`, and operators may
+add provider-specific VPS firewall rules separately.
+
+**Recoverable provider credentials are encrypted at rest (always on).**
+Provider API credentials, OAuth access/refresh/id tokens and `provider_data`, the
+notification auth header, and hosted mail credentials are sealed with AES-256-GCM (versioned `enc:v1:`
+format, unique nonce per value, associated data binding the account/record/field)
+at the `internal/store` boundary. The master key is kept **outside the database**:
+set `TILLER_MASTER_KEY` (base64 of 32 random bytes) or `TILLER_MASTER_KEY_FILE`
+(takes precedence), or let Tiller generate one at `<data dir>/master.key` (0600)
+on first start. **Back the master key up separately from `./data`** — without it,
+existing encrypted credentials cannot be recovered. A database dump therefore
+does not reveal provider credentials; a full `./data` archive does include the
+generated key and must be protected as a secret. Rotate the key with
+`tiller-router rotate-master-key` (service stopped; new key via
+`TILLER_MASTER_KEY_NEW` or `TILLER_MASTER_KEY_NEW_FILE`). If encrypted values
+exist but the key is missing or wrong, Tiller starts in a **locked** state:
+credential-bearing providers are unavailable and no plaintext credential can be
+written until the correct key is restored.
 
 Migration 024 clears request and provider response body columns from the live
 database; it is not secure erasure. SQLite pages, WAL files, snapshots, and old
 backups may still contain historic sensitive data, so they must continue to be
 protected as sensitive material.
+
+**Secret hashing is entropy-tiered.** Non-recoverable secrets (client API keys,
+admin session tokens, the admin credential fingerprint) are hash-only at rest;
+plaintext is never stored. The admin credential fingerprint is human-chosen and
+low-entropy, so it is protected with a memory-hard KDF (**argon2id, 64 MiB**).
+Client API keys and admin session tokens are 256-bit uniformly random, where
+offline brute force is infeasible regardless of hash speed; those use
+**bcrypt (cost ≥ 10)**, whose fixed ~4 KiB working set avoids the ~64 MiB
+per-verify memory cost that dominated the process footprint under concurrent
+authentication. Existing argon2id values keep verifying (algorithm is
+dispatched from the encoding) and are upgraded to bcrypt lazily on the next
+successful authentication, so the tiering change needs no forced migration or
+downtime.
+
+**Auth caches and revocation.** Verified client keys and admin sessions are
+cached in memory and the cache entry renews on use; the TTLs are configurable
+(client key 15m, session 5m by default, clamped to ≤24h). Revocation does not
+wait for the TTL: any client-key or session mutation invalidates the affected
+cache entries immediately, and credential changes revoke all sessions. The TTL
+is therefore a *cross-instance* revocation bound — with a single process it has
+no security effect, and the sliding cache exists to keep hash-verification cost
+proportional to the rate of distinct/expired keys rather than request volume.
+Both caches are periodically swept and capped so they cannot grow unbounded.
+
+**Hosted identity.** `TILLER_MODE=hosted` enables email/password accounts. Human
+passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
+single-use, short-lived, and hash-only at rest. Customer sessions and platform
+operator sessions use separate host-only Secure/HttpOnly/SameSite cookies and
+CSRF tokens. Account suspension immediately revokes customer sessions and
+blocks client-key traffic. Hosted detailed body logging is unavailable even if
+the account settings request attempts to enable it. Customer login and recovery
+requests have in-memory per-IP budgets; login and recovery also use normalized-
+email keyed throttles. The per-email login failure lockout can temporarily block
+an account after repeated failed attempts regardless of source IP; this targeted
+denial-of-service tradeoff is accepted for beta and can be revisited if observed.
+
+**Account self-service.** Hosted customers manage their identity from the
+Account tab. Changing the password or email, signing out everywhere, and
+deleting the account all require the current password. Email changes are
+verify-new-first: the current address remains the login identity until a link
+sent to the **new** address is confirmed, a warning is mailed to the **current**
+address at request time, and confirmation revokes every other session. A pending
+email change is cancelled by a password reset or an authenticated password
+change. Requesting a change to an address already owned by another account
+returns the same generic response but sends no mail, so the endpoint cannot be
+used to mail another customer. Self-service deletion is synchronous and
+terminal, sharing one purge path with operator deletion; account audit history
+is retained.
+
+**Durable transactional mail.** Signup, verification, password-reset, and
+email-change messages are queued in a `mail_outbox` row inside the same
+transaction that creates the one-time token, then delivered by a background
+worker with bounded retries. The raw one-time token stored in the payload is
+encrypted at rest with the same always-on master key (`enc:v1:`, AAD-bound to
+the row) and is scrubbed on successful send, so a leaked database or backup does
+not yield an account takeover. Rows that exhaust their retries are dead-lettered
+and surface on the platform dashboard; queued and recently dead counts are shown
+to the operator.
+
+Platform administration uses the environment-only
+`TILLER_PLATFORM_ADMIN_USERNAME` and `TILLER_PLATFORM_ADMIN_PASSWORD`
+credentials at `/platform`. Customers use separate email/password identities at
+`/login`; neither session type elevates into the other. Existing local
+deployments can provide `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated
+`TILLER_ADMIN_*` aliases) once during hosted startup to migrate
+`LocalAccountID` into a verified customer account. The database migration state
+distinguishes a fresh hosted install from an existing local database; hosted
+startup fails closed if an existing local account has no valid migration
+credentials. Fresh hosted deployments do not create a customer from the
+platform credential.
 
 **Detailed error logging (opt-in).** Activity is metadata-only by default. If the
 administrator enables the Detailed Error Logging setting, failed request bodies
@@ -47,6 +141,23 @@ containing those records must be treated as sensitive. The setting defaults to
 disabled and is presented with a warning in the admin UI. This is the documented
 exception to the AGENTS.md no-content guardrail, which is scoped to default
 logging.
+
+**Hosted quota and onboarding controls.** Hosted accounts are subject to plan
+entitlements (provider/client-key/virtual-model creation, concurrent streams,
+monthly routed requests, and Activity retention). Quota rejections are `429`
+with `Retry-After` and occur after authentication and model resolution but
+before any upstream request. Local/self-hosted mode is exempt.
+
+**Account data export.** Hosted customers can export their own account as a ZIP
+(configuration JSON, Activity CSV, audit CSV). The export is account-scoped from
+the verified session and never contains provider credentials, OAuth tokens, or
+client-key secrets or hashes. It is distinct from the administrator-only
+whole-database backup export, which remains restricted to local mode.
+
+**Published legal documents.** Terms, Privacy, AUP, Subprocessor List, and the
+Security/Data Handling page are operator-editable and served publicly so signup
+can link them before authentication. Signup records the accepted document
+timestamps in `legal_acceptances`.
 
 For questions that are not security reports, please use the project's normal
 public issue and discussion channels.

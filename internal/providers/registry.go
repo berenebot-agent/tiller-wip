@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/hostednet"
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
 )
 
@@ -77,6 +78,7 @@ var descriptors = []Descriptor{
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, MinOutputTokens: 16, Discovery: "opencode"},
+	{Type: "commandcode", Label: "Command Code", DefaultBaseURL: "https://api.commandcode.ai/provider/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "commandcode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "lm-studio", Label: "LM Studio", DefaultBaseURL: "http://host.docker.internal:1234/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -338,10 +340,20 @@ func nativeProtocol(providerType, modelID string) Protocol {
 
 type Registry struct {
 	client           *http.Client
+	clients          map[time.Duration]*http.Client
 	mu               sync.Mutex
 	modelsDev        modelsDevDataset
 	modelsDevEnabled bool
+	// codexVersion caches the last successfully resolved Codex client version
+	// and when it was fetched, so discovery does not hit the release channel on
+	// every refresh.
+	codexVersion   string
+	codexVersionAt time.Time
 }
+
+// codexVersionTTL bounds how long a resolved Codex client version is reused
+// before discovery re-resolves it from the release channel.
+const codexVersionTTL = time.Hour
 
 func NewRegistry() *Registry {
 	transport := &http.Transport{
@@ -357,7 +369,41 @@ func NewRegistry() *Registry {
 		ResponseHeaderTimeout: 60 * time.Second,
 		ExpectContinueTimeout: time.Second, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second,
 	}
-	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, modelsDevEnabled: true}
+	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, clients: map[time.Duration]*http.Client{}, modelsDevEnabled: true}
+}
+
+// NewHostedRegistry uses the shared public-HTTPS outbound policy for provider,
+// discovery, models.dev, and OAuth requests. Local mode deliberately uses
+// NewRegistry so private/LAN provider URLs continue to work.
+func NewHostedRegistry() *Registry {
+	transport := hostednet.NewTransport()
+	return &Registry{client: &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}, clients: map[time.Duration]*http.Client{}, modelsDevEnabled: true}
+}
+
+// ClientFor returns an immutable HTTP client whose per-attempt
+// time-to-first-header bound is timeout. Clients are cached by duration so
+// concurrent requests for the same account setting share one transport. A
+// non-positive timeout falls back to the default client.
+func (r *Registry) ClientFor(timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		return r.HTTPClient()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if c, ok := r.clients[timeout]; ok {
+		return c
+	}
+	replacement := *r.client
+	switch t := r.client.Transport.(type) {
+	case *http.Transport:
+		clone := t.Clone()
+		clone.ResponseHeaderTimeout = timeout
+		replacement.Transport = clone
+	case *hostednet.Transport:
+		replacement.Transport = t.CloneWithResponseHeaderTimeout(timeout)
+	}
+	r.clients[timeout] = &replacement
+	return &replacement
 }
 
 // SetResponseHeaderTimeout updates the per-attempt time-to-first-header bound by
@@ -366,11 +412,17 @@ func NewRegistry() *Registry {
 func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if t, ok := r.client.Transport.(*http.Transport); ok {
+	switch t := r.client.Transport.(type) {
+	case *http.Transport:
 		clone := t.Clone()
 		clone.ResponseHeaderTimeout = d
 		replacement := *r.client
 		replacement.Transport = clone
+		r.client = &replacement
+		t.CloseIdleConnections()
+	case *hostednet.Transport:
+		replacement := *r.client
+		replacement.Transport = t.CloneWithResponseHeaderTimeout(d)
 		r.client = &replacement
 		t.CloseIdleConnections()
 	}
@@ -383,8 +435,11 @@ func (r *Registry) SetResponseHeaderTimeout(d time.Duration) {
 func (r *Registry) ResponseHeaderTimeout() time.Duration {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if t, ok := r.client.Transport.(*http.Transport); ok {
+	switch t := r.client.Transport.(type) {
+	case *http.Transport:
 		return t.ResponseHeaderTimeout
+	case *hostednet.Transport:
+		return t.ResponseHeaderTimeout()
 	}
 	return 0
 }
@@ -423,6 +478,8 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 		models, err = r.discoverHuggingFace(ctx, provider)
 	case "cloudflare":
 		models, err = r.discoverCloudflare(ctx, provider)
+	case "commandcode":
+		models, err = r.discoverCommandCode(ctx, provider)
 	default:
 		models, err = r.discoverPaged(ctx, provider, d.Discovery == "anthropic")
 	}
@@ -449,6 +506,99 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	return r.enrich(models, provider.Type), nil
 }
 
+// discoverCommandCode discovers the live Command Code Provider API catalogue.
+// Command Code exposes OpenAI and Anthropic-compatible endpoints from one
+// catalogue, so each model's supported_endpoints determines its native wire
+// protocol rather than a model-name heuristic.
+func (r *Registry) discoverCommandCode(ctx context.Context, provider Instance) ([]Model, error) {
+	endpoint, err := appendEndpoint(provider.BaseURL, "models")
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	ApplyRequestAuth(req, provider)
+	var payload struct {
+		Data []struct {
+			ID                  string   `json:"id"`
+			Name                string   `json:"name"`
+			Object              string   `json:"object"`
+			ContextLength       int      `json:"context_length"`
+			MaxOutputTokens     int      `json:"max_output_tokens"`
+			SupportedEndpoints  []string `json:"supported_endpoints"`
+			SupportedParameters []string `json:"supported_parameters"`
+			Architecture        struct {
+				InputModalities  []string `json:"input_modalities"`
+				OutputModalities []string `json:"output_modalities"`
+			} `json:"architecture"`
+		} `json:"data"`
+	}
+	if err := r.doJSON(req, &payload); err != nil {
+		return nil, err
+	}
+	models := make([]Model, 0, len(payload.Data))
+	seen := make(map[string]bool, len(payload.Data))
+	for _, item := range payload.Data {
+		modelID := item.ID
+		if modelID == "" {
+			modelID = item.Name
+		}
+		if modelID == "" || seen[modelID] || (item.Object != "" && item.Object != "model") {
+			continue
+		}
+		seen[modelID] = true
+		display := item.Name
+		if display == "" {
+			display = modelID
+		}
+		sp := item.SupportedParameters
+		models = append(models, Model{
+			ID: modelID, DisplayName: display,
+			ContextLength: item.ContextLength, MaxOutputTokens: item.MaxOutputTokens,
+			NativeProtocol:           copilotNativeProtocol(item.SupportedEndpoints),
+			SupportsTools:            triBool(len(sp) > 0, slices.Contains(sp, "tools")),
+			SupportsVision:           triBool(len(item.Architecture.InputModalities) > 0, slices.Contains(item.Architecture.InputModalities, "image")),
+			SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")),
+			InputModalities:          item.Architecture.InputModalities,
+			OutputModalities:         item.Architecture.OutputModalities,
+		})
+	}
+	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
+	return models, nil
+}
+
+// codexClientVersion resolves the Codex client version to advertise during
+// model discovery. The Codex backend gates each model on its
+// minimal_client_version, so a hardcoded value silently hides newer models
+// (e.g. gpt-6-luna, gated at 0.155.0). The live release channel is the primary
+// source; a resolved value is cached for codexVersionTTL, and any failure
+// degrades to the pinned codex.ClientVersion floor so a channel outage never
+// fails a refresh.
+func (r *Registry) codexClientVersion(ctx context.Context) string {
+	r.mu.Lock()
+	cached := r.codexVersion
+	cachedAt := r.codexVersionAt
+	r.mu.Unlock()
+	if cached != "" && time.Since(cachedAt) < codexVersionTTL {
+		return cached
+	}
+	version, err := codex.ResolveLatestVersion(ctx, r.HTTPClient())
+	if err != nil || version == "" {
+		// Serve a still-recent cached value over the floor if we have one.
+		if cached != "" {
+			return cached
+		}
+		return codex.ClientVersion
+	}
+	r.mu.Lock()
+	r.codexVersion = version
+	r.codexVersionAt = time.Now()
+	r.mu.Unlock()
+	return version
+}
+
 func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Model, error) {
 	endpoint, err := appendEndpoint(provider.BaseURL, "models")
 	if err != nil {
@@ -459,7 +609,7 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		return nil, err
 	}
 	q := u.Query()
-	q.Set("client_version", codex.ClientVersion)
+	q.Set("client_version", r.codexClientVersion(ctx))
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
@@ -1020,54 +1170,179 @@ func (r *Registry) discoverOllama(ctx context.Context, provider Instance) ([]Mod
 		if modelID == "" {
 			modelID = item.Model
 		}
-		if modelID != "" {
-			out = append(out, Model{ID: modelID, DisplayName: modelID, ContextLength: r.ollamaContextLength(ctx, provider, modelID)})
+		if modelID == "" {
+			continue
 		}
+		show := r.ollamaShow(ctx, provider, modelID)
+		model := Model{ID: modelID, DisplayName: modelID, ContextLength: show.ContextLength}
+		applyOllamaShowCapabilities(&model, show)
+		out = append(out, model)
 	}
 	return out, nil
 }
 
-func (r *Registry) ollamaContextLength(ctx context.Context, provider Instance, modelID string) int {
+// ollamaShow is the subset of Ollama's /api/show response tiller-router uses.
+// Ollama reports its own capabilities (vision/tools/thinking/audio) here, so
+// they are provider-reported source-of-truth metadata that must not be
+// discarded in favour of a models.dev guess.
+type ollamaShow struct {
+	ContextLength int
+	Capabilities  []string
+	Thinking      *ollamaThinking
+}
+
+// ollamaThinking mirrors Ollama's model.Thinking descriptor: the set of accepted
+// controls and the default applied when the caller omits one. Values and Default
+// are booleans or named effort strings.
+type ollamaThinking struct {
+	Values  []any `json:"values"`
+	Default any   `json:"default"`
+}
+
+// ollamaShow fetches /api/show for a single model. Any failure degrades to the
+// zero value so discovery never fails because one model's metadata is
+// unavailable (context length then falls back to models.dev, capabilities stay
+// unknown).
+func (r *Registry) ollamaShow(ctx context.Context, provider Instance, modelID string) ollamaShow {
 	showEndpoint, err := appendEndpoint(provider.BaseURL, "api/show")
 	if err != nil {
-		return 0
+		return ollamaShow{}
 	}
 	body, _ := json.Marshal(map[string]string{"model": modelID})
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, showEndpoint, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	ApplyRequestAuth(req, provider)
 	var payload struct {
-		ModelInfo  map[string]any `json:"model_info"`
-		Parameters map[string]any `json:"parameters"`
+		ModelInfo    map[string]any  `json:"model_info"`
+		Parameters   map[string]any  `json:"parameters"`
+		Capabilities []string        `json:"capabilities"`
+		Thinking     *ollamaThinking `json:"thinking"`
 	}
 	if err := r.doJSON(req, &payload); err != nil {
-		return 0
+		return ollamaShow{}
 	}
+	return ollamaShow{
+		ContextLength: ollamaContextLength(payload.ModelInfo, payload.Parameters),
+		Capabilities:  payload.Capabilities,
+		Thinking:      payload.Thinking,
+	}
+}
+
+// ollamaContextLength resolves the trained context window, preferring it over
+// the runtime num_ctx setting.
+func ollamaContextLength(modelInfo, parameters map[string]any) int {
 	// llama.context_length is the model's trained context window.
-	if n, ok := coerceInt(payload.ModelInfo["llama.context_length"]); ok {
+	if n, ok := coerceInt(modelInfo["llama.context_length"]); ok {
 		return n
 	}
 	// Ollama prefixes architecture-specific metadata keys. DeepSeek and newer
 	// architectures therefore expose e.g. deepseek.context_length rather than
 	// llama.context_length. Accept any architecture context key after the
 	// canonical llama key has been checked.
-	keys := make([]string, 0, len(payload.ModelInfo))
-	for key := range payload.ModelInfo {
+	keys := make([]string, 0, len(modelInfo))
+	for key := range modelInfo {
 		if strings.HasSuffix(key, ".context_length") {
 			keys = append(keys, key)
 		}
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		if n, ok := coerceInt(payload.ModelInfo[key]); ok {
+		if n, ok := coerceInt(modelInfo[key]); ok {
 			return n
 		}
 	}
 	// Fall back to the runtime num_ctx from the Modelfile.
-	if n, ok := coerceInt(payload.Parameters["num_ctx"]); ok {
+	if n, ok := coerceInt(parameters["num_ctx"]); ok {
 		return n
 	}
 	return 0
+}
+
+// applyOllamaShowCapabilities fills provider-reported capability metadata from
+// /api/show. Only positive flags are asserted: a capability Ollama does not list
+// stays unknown (nil) rather than being forced false, preserving tri-state
+// semantics and letting models.dev fill genuine gaps.
+func applyOllamaShowCapabilities(model *Model, show ollamaShow) {
+	if len(show.Capabilities) == 0 {
+		return
+	}
+	caps := make(map[string]bool, len(show.Capabilities))
+	for _, c := range show.Capabilities {
+		caps[c] = true
+	}
+	if caps["vision"] {
+		model.SupportsVision = boolTrue()
+	}
+	if caps["tools"] {
+		model.SupportsTools = boolTrue()
+	}
+	if caps["thinking"] {
+		model.SupportsReasoning = boolTrue()
+		model.ReasoningCapabilities = ollamaReasoningCapabilities(show.Thinking)
+	}
+	// Modalities are derived from the capability names Ollama reports so the
+	// catalogue's modality view is populated without a models.dev lookup.
+	var modalities []string
+	if caps["completion"] {
+		modalities = append(modalities, "text")
+	}
+	if caps["vision"] {
+		modalities = append(modalities, "image")
+	}
+	if caps["audio"] {
+		modalities = append(modalities, "audio")
+	}
+	model.InputModalities = modalities
+}
+
+// ollamaReasoningCapabilities normalizes Ollama's thinking descriptor into the
+// router's provider-neutral reasoning metadata.
+//
+// Ollama's OpenAI-compatible endpoint accepts reasoning_effort only, mapping it
+// to its think control; it does not read reasoning.enabled. Named string values
+// are therefore exposed as an effort selector, and a boolean false value is
+// surfaced as the "none" effort (the disable path applyChatReasoning emits).
+// Returns nil when Ollama advertises no controls.
+func ollamaReasoningCapabilities(thinking *ollamaThinking) *ReasoningCapabilities {
+	if thinking == nil || len(thinking.Values) == 0 {
+		return nil
+	}
+	var names []string
+	hasFalse := false
+	hasTrue := false
+	for _, v := range thinking.Values {
+		switch t := v.(type) {
+		case string:
+			if t != "" {
+				names = append(names, t)
+			}
+		case bool:
+			if t {
+				hasTrue = true
+			} else {
+				hasFalse = true
+			}
+		}
+	}
+	if hasFalse {
+		names = append(names, "none")
+	}
+	// A pure boolean descriptor has no named levels. A true-only descriptor
+	// means thinking is the sole accepted control; expose it as an empty-values
+	// effort selector (unrestricted) rather than inventing a name.
+	if len(names) == 0 && !hasTrue {
+		return nil
+	}
+	caps := &ReasoningCapabilities{
+		Options: []ReasoningOption{{Type: ReasoningOptionEffort, Values: SortEfforts(names)}},
+	}
+	switch t := thinking.Default.(type) {
+	case string:
+		caps.DefaultEffort = t
+	case bool:
+		caps.DefaultEnabled = &t
+	}
+	return caps
 }
 
 func (r *Registry) discoverHuggingFace(ctx context.Context, provider Instance) ([]Model, error) {
@@ -1298,6 +1573,13 @@ func triBool(present, val bool) *bool {
 		return nil
 	}
 	b := val
+	return &b
+}
+
+// boolTrue returns a pointer to true, for asserting a provider-reported
+// capability without the presence/absence dance of triBool.
+func boolTrue() *bool {
+	b := true
 	return &b
 }
 

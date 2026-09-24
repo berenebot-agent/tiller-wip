@@ -40,8 +40,8 @@ docker run --rm -v "$data_dir:/d" --user root alpine chown 65532:65532 /d
 
 docker run --rm -d --name "$router_name" --network "$network_name" --network-alias router \
 	-v "$data_dir:/data" \
-	-e TILLER_ADMIN_USERNAME=admin \
-	-e TILLER_ADMIN_PASSWORD="$password" \
+	-e TILLER_USERNAME=admin \
+	-e TILLER_PASSWORD="$password" \
 	-e TILLER_DATA_DIR=/data \
 	-e TILLER_LISTEN_ADDR=:8080 \
 	-e TILLER_TRUST_PROXY_HEADERS=true \

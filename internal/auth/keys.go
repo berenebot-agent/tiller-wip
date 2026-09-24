@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/store"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -60,9 +61,10 @@ func GenerateKeyWithHasher(hasher SecretHasher) (GeneratedKey, error) {
 	}, nil
 }
 
-// GenerateKey generates a client key using the production Argon2id hasher.
+// GenerateKey generates a client key using the production token hasher
+// (bcrypt; client keys are high-entropy machine tokens).
 func GenerateKey() (GeneratedKey, error) {
-	return GenerateKeyWithHasher(Argon2Hasher{})
+	return GenerateKeyWithHasher(BcryptHasher{})
 }
 
 func HashSecret(secret string) (string, error) {
@@ -126,9 +128,11 @@ func ParseKey(key string) (selector, secret string, ok bool) {
 }
 
 type ClientIdentity struct {
-	ID      string
-	Name    string
-	Enabled bool
+	ID            string
+	AccountID     string
+	AccountStatus string
+	Name          string
+	Enabled       bool
 }
 
 type cacheEntry struct {
@@ -136,15 +140,28 @@ type cacheEntry struct {
 	expires  time.Time
 }
 
+// Auth cache defaults and bounds. Entries renew on use, so a longer TTL mainly
+// reduces hash-verification work; a mutation-driven Invalidate is independent
+// of the TTL. maxAuthCacheEntries is a safety valve against unbounded growth
+// under heavy key churn (evicted keys simply re-verify on their next request).
+const (
+	defaultClientKeyCacheTTL = 15 * time.Minute
+	defaultSessionCacheTTL   = 5 * time.Minute
+	authCacheSweepInterval   = time.Minute
+	maxAuthCacheEntries      = 100000
+)
+
 type ClientAuthenticator struct {
-	db      *sql.DB
+	store   *store.Store
 	key     []byte
 	ttl     time.Duration
 	hasher  SecretHasher
 	mu      sync.Mutex
 	entries map[[32]byte]cacheEntry
-	sem     chan struct{}
-	rev     uint64
+	// maxEntries caps the cache; a test may lower it.
+	maxEntries int
+	sem        chan struct{}
+	rev        uint64
 }
 
 // NewClientAuthenticatorWithHasher constructs a ClientAuthenticator with the
@@ -155,15 +172,27 @@ func NewClientAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) (*ClientA
 		return nil, err
 	}
 	if hasher == nil {
-		hasher = Argon2Hasher{}
+		hasher = BcryptHasher{}
 	}
-	return &ClientAuthenticator{db: db, key: key, ttl: 30 * time.Second, hasher: hasher, entries: make(map[[32]byte]cacheEntry), sem: make(chan struct{}, 4)}, nil
+	return &ClientAuthenticator{store: store.New(db), key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]cacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4)}, nil
+}
+
+// SetCacheTTL overrides the verified-key cache TTL. It is called once at
+// construction time, before the authenticator serves requests.
+func (a *ClientAuthenticator) SetCacheTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	a.mu.Lock()
+	a.ttl = d
+	a.mu.Unlock()
 }
 
 // NewClientAuthenticator constructs a ClientAuthenticator using the production
-// Argon2id hasher. It is the production wrapper.
+// token hasher (bcrypt; client keys are high-entropy machine tokens). It is the
+// production wrapper.
 func NewClientAuthenticator(db *sql.DB) (*ClientAuthenticator, error) {
-	return NewClientAuthenticatorWithHasher(db, Argon2Hasher{})
+	return NewClientAuthenticatorWithHasher(db, BcryptHasher{})
 }
 
 func (a *ClientAuthenticator) Authenticate(raw string) (ClientIdentity, bool) {
@@ -181,8 +210,12 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	a.mu.Lock()
 	entry, found := a.entries[cacheKey]
 	if found && now.Before(entry.expires) {
+		// Sliding expiry: an actively-used key stays warm and verifies once
+		// rather than once per TTL window.
+		entry.expires = now.Add(a.ttl)
+		a.entries[cacheKey] = entry
 		a.mu.Unlock()
-		return entry.identity, entry.identity.Enabled, true
+		return entry.identity, entry.identity.Enabled && entry.identity.AccountStatus == "active", true
 	}
 	if found {
 		delete(a.entries, cacheKey)
@@ -201,24 +234,89 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	generation := atomic.LoadUint64(&a.rev)
 	var identity ClientIdentity
 	var hash string
-	err := a.db.QueryRowContext(ctx, `SELECT id,name,enabled,secret_hash FROM client_keys WHERE selector=?`, selector).
-		Scan(&identity.ID, &identity.Name, &identity.Enabled, &hash)
-	if err != nil || !identity.Enabled || !a.hasher.Verify(secret, hash) {
+	row, err := a.store.ClientKeyBySelector(ctx, selector)
+	identity.ID, identity.AccountID, identity.AccountStatus, identity.Name, identity.Enabled, hash = row.ID, row.AccountID, row.AccountStatus, row.Name, row.Enabled, row.SecretHash
+	if err != nil || !identity.Enabled || identity.AccountStatus != "active" || !a.hasher.Verify(secret, hash) {
 		return ClientIdentity{}, false, true
+	}
+	// Lazy migration: a successful verify of a legacy argon2id key upgrades the
+	// stored hash to the current algorithm, best-effort and outside the cache
+	// lock. The compare-and-swap on oldHash makes this safe against a concurrent
+	// rotation (the update becomes a no-op if secret_hash already changed).
+	if a.hasher.NeedsRehash(hash) {
+		if upgraded, herr := a.hasher.Hash(secret); herr == nil {
+			_ = a.store.UpdateClientKeySecretHash(ctx, identity.ID, hash, upgraded, formatUTC(time.Now()))
+		}
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if atomic.LoadUint64(&a.rev) != generation {
 		return ClientIdentity{}, false, true
 	}
+	a.ensureCacheRoomLocked(now)
 	a.entries[cacheKey] = cacheEntry{identity: identity, expires: now.Add(a.ttl)}
 	return identity, true, true
+}
+
+// ensureCacheRoomLocked makes room for a new cache entry: it first drops
+// expired entries, then — only if still at the cap — evicts arbitrary entries.
+// Called with a.mu held.
+func (a *ClientAuthenticator) ensureCacheRoomLocked(now time.Time) {
+	if len(a.entries) < a.maxEntries {
+		return
+	}
+	a.sweepExpiredLocked(now)
+	for len(a.entries) >= a.maxEntries {
+		for key := range a.entries {
+			delete(a.entries, key)
+			break
+		}
+	}
+}
+
+// SweepExpired removes expired entries from the verified-key cache.
+func (a *ClientAuthenticator) SweepExpired() {
+	a.mu.Lock()
+	a.sweepExpiredLocked(time.Now())
+	a.mu.Unlock()
+}
+
+func (a *ClientAuthenticator) sweepExpiredLocked(now time.Time) {
+	for key, entry := range a.entries {
+		if !now.Before(entry.expires) {
+			delete(a.entries, key)
+		}
+	}
+}
+
+// StartSweeper periodically evicts expired cache entries until ctx is done.
+func (a *ClientAuthenticator) StartSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(authCacheSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				a.SweepExpired()
+			}
+		}
+	}()
 }
 
 func (a *ClientAuthenticator) Invalidate(clientID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.invalidateLocked(clientID)
+}
+
+// InvalidateAccount immediately drops every cached key for an account. Account
+// suspension/deletion uses this so containment does not wait for cache expiry.
+func (a *ClientAuthenticator) InvalidateAccount(accountID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.invalidateAccountLocked(accountID)
 }
 
 // InvalidateWith publishes a client mutation while cache publication is
@@ -238,6 +336,15 @@ func (a *ClientAuthenticator) invalidateLocked(clientID string) {
 	atomic.AddUint64(&a.rev, 1)
 	for key, entry := range a.entries {
 		if entry.identity.ID == clientID {
+			delete(a.entries, key)
+		}
+	}
+}
+
+func (a *ClientAuthenticator) invalidateAccountLocked(accountID string) {
+	atomic.AddUint64(&a.rev, 1)
+	for key, entry := range a.entries {
+		if entry.identity.AccountID == accountID {
 			delete(a.entries, key)
 		}
 	}
@@ -266,7 +373,6 @@ type Session struct {
 const (
 	sessionSelectorBytes = 16
 	sessionSecretBytes   = 32
-	sessionCacheTTL      = 5 * time.Minute
 	credentialHashKey    = "admin_credential_hash"
 )
 
@@ -282,36 +388,70 @@ type sessionCacheEntry struct {
 // SessionStore persists admin sessions in the database so they survive process
 // and container restarts. The raw session secret is never stored; only a hash
 // of it is persisted. A short-lived in-memory cache avoids recomputing the hash
-// on every request. The hasher is injected so tests can use a fast
-// implementation; production code uses Argon2Hasher.
+// on every request. The hashers are injected so tests can use a fast
+// implementation; production uses bcrypt for session tokens and argon2id for
+// the admin credential fingerprint.
 type SessionStore struct {
-	db     *sql.DB
-	ttl    time.Duration
-	hasher SecretHasher
-	mu     sync.Mutex
-	cache  map[string]sessionCacheEntry
-	rev    uint64
+	db  *sql.DB
+	ttl time.Duration
+	// tokenHasher hashes session tokens (high-entropy, per-login).
+	tokenHasher SecretHasher
+	// credentialHasher hashes the admin credential fingerprint (low-entropy,
+	// human-chosen), which keeps the memory-hard KDF.
+	credentialHasher SecretHasher
+	// cacheTTL bounds how long a validated session token is cached in memory.
+	cacheTTL time.Duration
+	// maxEntries caps the cache; a test may lower it.
+	maxEntries int
+	mu         sync.Mutex
+	cache      map[string]sessionCacheEntry
+	rev        uint64
+	renewHook  func()
 }
 
-// NewSessionStoreWithHasher constructs a SessionStore with the given hasher.
+// NewSessionStoreWithHasher constructs a SessionStore that uses the same hasher
+// for session tokens and the admin credential fingerprint. It exists for tests,
+// which inject a fast hasher; production uses NewSessionStore.
 func NewSessionStoreWithHasher(db *sql.DB, username, password string, ttl time.Duration, hasher SecretHasher) (*SessionStore, error) {
+	return NewSessionStoreTiered(db, username, password, ttl, hasher, hasher)
+}
+
+// NewSessionStoreTiered constructs a SessionStore with separate hashers for
+// session tokens and the admin credential fingerprint. Either nil falls back to
+// the production default for its role (bcrypt tokens, argon2id credential).
+func NewSessionStoreTiered(db *sql.DB, username, password string, ttl time.Duration, tokenHasher, credentialHasher SecretHasher) (*SessionStore, error) {
 	if ttl <= 0 {
 		ttl = 30 * 24 * time.Hour
 	}
-	if hasher == nil {
-		hasher = Argon2Hasher{}
+	if tokenHasher == nil {
+		tokenHasher = BcryptHasher{}
 	}
-	s := &SessionStore{db: db, ttl: ttl, hasher: hasher, cache: make(map[string]sessionCacheEntry)}
+	if credentialHasher == nil {
+		credentialHasher = Argon2Hasher{}
+	}
+	s := &SessionStore{db: db, ttl: ttl, tokenHasher: tokenHasher, credentialHasher: credentialHasher, cacheTTL: defaultSessionCacheTTL, maxEntries: maxAuthCacheEntries, cache: make(map[string]sessionCacheEntry)}
 	if err := s.syncCredential(username, password); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-// NewSessionStore constructs a SessionStore using the production Argon2id
-// hasher. It is the production wrapper around NewSessionStoreWithHasher.
+// SetCacheTTL overrides the validated-session cache TTL. It is called once at
+// construction time, before the store serves requests.
+func (s *SessionStore) SetCacheTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.cacheTTL = d
+	s.mu.Unlock()
+}
+
+// NewSessionStore constructs a SessionStore using the production tiered hashers:
+// bcrypt for high-entropy session tokens and argon2id for the low-entropy admin
+// credential fingerprint.
 func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (*SessionStore, error) {
-	return NewSessionStoreWithHasher(db, username, password, ttl, Argon2Hasher{})
+	return NewSessionStoreTiered(db, username, password, ttl, BcryptHasher{}, Argon2Hasher{})
 }
 
 // syncCredential stores a fingerprint of the admin credentials and invalidates
@@ -320,29 +460,29 @@ func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (
 func (s *SessionStore) syncCredential(username, password string) error {
 	material := username + "\x00" + password
 	var stored string
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, credentialHashKey).Scan(&stored)
+	err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
-		hash, err := s.hasher.Hash(material)
+		hash, err := s.credentialHasher.Hash(material)
 		if err != nil {
 			return err
 		}
-		_, err = s.db.Exec(`INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)`, credentialHashKey, hash, formatUTC(time.Now()))
+		_, err = s.db.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?)`, credentialHashKey, hash, formatUTC(time.Now()))
 		return err
 	}
 	if err != nil {
 		return err
 	}
-	if s.hasher.Verify(material, stored) {
+	if s.credentialHasher.Verify(material, stored) {
 		return nil
 	}
 	if err := s.InvalidateAll(); err != nil {
 		return err
 	}
-	hash, err := s.hasher.Hash(material)
+	hash, err := s.credentialHasher.Hash(material)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE settings SET value=?, updated_at=? WHERE key=?`, hash, formatUTC(time.Now()), credentialHashKey)
+	_, err = s.db.Exec(`UPDATE platform_settings SET value=?, updated_at=? WHERE key=?`, hash, formatUTC(time.Now()), credentialHashKey)
 	return err
 }
 
@@ -361,7 +501,7 @@ func (s *SessionStore) Create() (Session, error) {
 	}
 	sel := base64.RawURLEncoding.EncodeToString(selector)
 	sec := base64.RawURLEncoding.EncodeToString(secret)
-	hash, err := s.hasher.Hash(sec)
+	hash, err := s.tokenHasher.Hash(sec)
 	if err != nil {
 		return Session{}, err
 	}
@@ -387,8 +527,37 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) {
 			want := sha256.Sum256([]byte(secret))
 			if subtle.ConstantTimeCompare(want[:], entry.secretHash[:]) == 1 {
+				generation := atomic.LoadUint64(&s.rev)
 				s.mu.Unlock()
-				return entry.session, true
+				if now.Add(s.ttl / 2).After(entry.session.ExpiresAt) {
+					expires := now.Add(s.ttl)
+					if s.renewHook != nil {
+						s.renewHook()
+					}
+					result, err := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(expires), formatUTC(now), selector, formatUTC(entry.session.ExpiresAt))
+					if err == nil {
+						affected, rowsErr := result.RowsAffected()
+						if rowsErr != nil {
+							return Session{}, false
+						}
+						if affected == 1 {
+							entry.session.ExpiresAt, entry.expires = expires, now.Add(s.cacheTTL)
+						} else {
+							current, ok := s.loadSession(selector, secret, now)
+							if !ok {
+								return Session{}, false
+							}
+							entry.session = current
+						}
+					}
+				}
+				if atomic.LoadUint64(&s.rev) != generation {
+					return Session{}, false
+				}
+				if !now.Before(entry.session.ExpiresAt) {
+					return Session{}, false
+				}
+				return s.publishSession(selector, entry.session, secret, now, generation)
 			}
 		}
 		delete(s.cache, selector)
@@ -396,32 +565,117 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 	s.mu.Unlock()
 	generation := atomic.LoadUint64(&s.rev)
 
-	var csrfToken, tokenHash, expiresAt string
-	err := s.db.QueryRow(`SELECT csrf_token, token_hash, expires_at FROM admin_sessions WHERE id=?`, selector).Scan(&csrfToken, &tokenHash, &expiresAt)
-	if err != nil {
+	session, ok := s.loadSession(selector, secret, now)
+	if !ok {
 		return Session{}, false
 	}
-	exp, perr := time.Parse(time.RFC3339Nano, expiresAt)
-	if perr != nil || now.After(exp) {
+	exp := session.ExpiresAt
+	// Sliding expiry: extend when more than half the lifetime has elapsed.
+	if now.Add(s.ttl / 2).After(exp) {
+		next := now.Add(s.ttl)
+		if s.renewHook != nil {
+			s.renewHook()
+		}
+		result, updateErr := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(next), formatUTC(now), selector, formatUTC(exp))
+		if updateErr != nil {
+			return Session{}, false
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			if err != nil {
+				return Session{}, false
+			}
+			session, ok = s.loadSession(selector, secret, now)
+			if !ok {
+				return Session{}, false
+			}
+		} else {
+			session.ExpiresAt = next
+		}
+	}
+	return s.publishSession(selector, session, secret, now, generation)
+}
+
+func (s *SessionStore) loadSession(selector, secret string, now time.Time) (Session, bool) {
+	var session Session
+	var tokenHash, expiresAt string
+	if err := s.db.QueryRow(`SELECT csrf_token, token_hash, expires_at FROM admin_sessions WHERE id=?`, selector).Scan(&session.CSRFToken, &tokenHash, &expiresAt); err != nil {
+		return Session{}, false
+	}
+	exp, err := time.Parse(time.RFC3339Nano, expiresAt)
+	if err != nil || !now.Before(exp) {
 		s.revoke(selector)
 		return Session{}, false
 	}
-	if !s.hasher.Verify(secret, tokenHash) {
+	if !s.tokenHasher.Verify(secret, tokenHash) {
 		return Session{}, false
 	}
-	// Sliding expiry: extend when more than half the lifetime has elapsed.
-	if now.Add(s.ttl / 2).After(exp) {
-		exp = now.Add(s.ttl)
-		_, _ = s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=?`, formatUTC(exp), formatUTC(now), selector)
-	}
-	session := Session{CSRFToken: csrfToken, ExpiresAt: exp}
+	// Lazy migration: upgrade a legacy argon2id session token hash after a
+	// successful verify. Best-effort; sessions also upgrade on next login.
+	s.rehashSessionToken(selector, secret, tokenHash)
+	session.ExpiresAt = exp
+	return session, true
+}
+
+func (s *SessionStore) publishSession(selector string, session Session, secret string, now time.Time, generation uint64) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if atomic.LoadUint64(&s.rev) != generation {
 		return Session{}, false
 	}
-	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(sessionCacheTTL), secretHash: sha256.Sum256([]byte(secret))}
+	if current, ok := s.cache[selector]; ok && current.session.ExpiresAt.After(session.ExpiresAt) {
+		session.ExpiresAt = current.session.ExpiresAt
+	}
+	s.ensureCacheRoomLocked(now)
+	s.cache[selector] = sessionCacheEntry{session: session, expires: now.Add(s.cacheTTL), secretHash: sha256.Sum256([]byte(secret))}
 	return session, true
+}
+
+// ensureCacheRoomLocked makes room for a new session cache entry: drop expired
+// entries first, then evict arbitrary entries only if still at the cap. Called
+// with s.mu held.
+func (s *SessionStore) ensureCacheRoomLocked(now time.Time) {
+	if len(s.cache) < s.maxEntries {
+		return
+	}
+	s.sweepExpiredLocked(now)
+	for len(s.cache) >= s.maxEntries {
+		for key := range s.cache {
+			delete(s.cache, key)
+			break
+		}
+	}
+}
+
+// SweepExpired removes expired entries from the session cache.
+func (s *SessionStore) SweepExpired() {
+	s.mu.Lock()
+	s.sweepExpiredLocked(time.Now())
+	s.mu.Unlock()
+}
+
+func (s *SessionStore) sweepExpiredLocked(now time.Time) {
+	for key, entry := range s.cache {
+		if !now.Before(entry.expires) {
+			delete(s.cache, key)
+		}
+	}
+}
+
+// StartSweeper periodically evicts expired session cache entries until ctx is
+// done.
+func (s *SessionStore) StartSweeper(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(authCacheSweepInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.SweepExpired()
+			}
+		}
+	}()
 }
 
 // Validate checks the persisted session without extending its sliding expiry.
@@ -437,10 +691,26 @@ func (s *SessionStore) Validate(token string) (Session, bool) {
 		return Session{}, false
 	}
 	exp, err := time.Parse(time.RFC3339Nano, expiresAt)
-	if err != nil || !time.Now().Before(exp) || !s.hasher.Verify(secret, tokenHash) {
+	if err != nil || !time.Now().Before(exp) || !s.tokenHasher.Verify(secret, tokenHash) {
 		return Session{}, false
 	}
+	s.rehashSessionToken(selector, secret, tokenHash)
 	return Session{CSRFToken: csrfToken, ExpiresAt: exp}, true
+}
+
+// rehashSessionToken upgrades a session's stored token hash to the store's
+// current token algorithm after a successful verify. The compare-and-swap on
+// oldHash makes it a no-op if the row already changed. Best-effort: a failure
+// only means the token is upgraded on a later verify (or on next login).
+func (s *SessionStore) rehashSessionToken(selector, secret, oldHash string) {
+	if !s.tokenHasher.NeedsRehash(oldHash) {
+		return
+	}
+	upgraded, err := s.tokenHasher.Hash(secret)
+	if err != nil {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE admin_sessions SET token_hash=? WHERE id=? AND token_hash=?`, upgraded, selector, oldHash)
 }
 
 func (s *SessionStore) Delete(token string) {

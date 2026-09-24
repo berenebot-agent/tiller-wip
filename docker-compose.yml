@@ -1,3 +1,10 @@
+# Project name pinned explicitly. Without this, Compose derives it from the
+# directory basename — and since the gatehouse layout puts the checkout in
+# repo/, both this project and gatehouse-mail resolve to the project name
+# "repo". That makes each project see the other's containers as orphans, and
+# `--remove-orphans` in one would tear down the other's live stack.
+name: tiller-router
+
 services:
   tiller-router:
     container_name: tiller-router
@@ -10,8 +17,19 @@ services:
     restart: unless-stopped
 
     environment:
-      TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:?set TILLER_ADMIN_USERNAME}
-      TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:?set TILLER_ADMIN_PASSWORD}
+      # Local operator credential. TILLER_USERNAME / TILLER_PASSWORD are the
+      # current names. The legacy TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD
+      # are still honoured with a startup deprecation warning; the new names
+      # win if both are set. See .env.example.
+      TILLER_USERNAME: ${TILLER_USERNAME:-}
+      TILLER_PASSWORD: ${TILLER_PASSWORD:-}
+      TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:-}
+      TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:-}
+
+      # Hosted mode is opt-in. Leave unset for the existing local appliance.
+      TILLER_MODE: ${TILLER_MODE:-local}
+      TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:-}
+      TILLER_USER_SESSION_TTL: ${TILLER_USER_SESSION_TTL:-720h}
 
       # Force the admin session cookie's Secure attribute. Set to "true" when
       # serving the admin UI over HTTPS (behind a reverse proxy or with TLS at
@@ -32,6 +50,38 @@ services:
       # proxy's IP/CIDR so the router trusts the proxy-supplied client IP.
       # Leave unset to disable proxy-header trust.
       TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:-}
+
+      # Admin-only memory/pprof debug endpoints (GET /api/admin/debug/memory and
+      # /api/admin/debug/pprof/*). Off by default; enable only while diagnosing.
+      # Never leave enabled on an exposed deployment.
+      TILLER_DEBUG_PPROF: ${TILLER_DEBUG_PPROF:-false}
+
+      # In-memory auth-cache TTLs. Verified client keys/sessions are cached and
+      # renewed on use; any key/session mutation invalidates immediately, so a
+      # longer window only reduces hash-verification work. Defaults: client key
+      # 15m, session 5m. Bounded to <=24h.
+      TILLER_CLIENT_KEY_CACHE_TTL: ${TILLER_CLIENT_KEY_CACHE_TTL:-15m}
+      TILLER_SESSION_CACHE_TTL: ${TILLER_SESSION_CACHE_TTL:-5m}
+
+      # Optional one-time SMTP bootstrap. Hosted operators can change these
+      # from the platform dashboard after startup; dashboard values win. API
+      # providers (Resend, Brevo) are configured in the dashboard only.
+      TILLER_MAIL_PROVIDER: ${TILLER_MAIL_PROVIDER:-}
+      TILLER_MAIL_FROM: ${TILLER_MAIL_FROM:-}
+      TILLER_MAIL_SMTP_HOST: ${TILLER_MAIL_SMTP_HOST:-}
+      TILLER_MAIL_SMTP_PORT: ${TILLER_MAIL_SMTP_PORT:-}
+      TILLER_MAIL_SMTP_MODE: ${TILLER_MAIL_SMTP_MODE:-}
+      TILLER_MAIL_SMTP_USERNAME: ${TILLER_MAIL_SMTP_USERNAME:-}
+      TILLER_MAIL_SMTP_PASSWORD: ${TILLER_MAIL_SMTP_PASSWORD:-}
+
+      # Provider credentials, OAuth tokens, and webhook auth headers are encrypted
+      # at rest (AES-256-GCM). Leave both unset and the app generates a key once at
+      # ./data/master.key. Set TILLER_MASTER_KEY (base64 of 32 random bytes) or, for
+      # stricter custody, TILLER_MASTER_KEY_FILE to a Docker secret path (takes
+      # precedence). Back the key up separately from ./data.
+      TILLER_MASTER_KEY: ${TILLER_MASTER_KEY:-}
+      TILLER_MASTER_KEY_FILE: ${TILLER_MASTER_KEY_FILE:-}
+
     volumes:
       - ./data:/data
     # Default hardening (adoption-first posture). The image starts as root so
@@ -61,5 +111,5 @@ services:
   # fail with ErrDataDirUnwritable, and `cap_drop: [ALL]` removes the
   # setuid/setgid/chown capabilities the drop requires.
   #
-  #   cap_drop: [ALL]
-  #   user: "${TILLER_RUN_UID:-65532}:${TILLER_RUN_GID:-65532}"
+  # cap_drop: [ALL]
+  # user: "${TILLER_RUN_UID:-65532}:${TILLER_RUN_GID:-65532}"

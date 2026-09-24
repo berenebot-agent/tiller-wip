@@ -13,7 +13,22 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
+
+func newTestStore(t *testing.T, db *database.DB) *store.Scope {
+	t.Helper()
+	return store.New(db.SQL).For(database.LocalAccountID)
+}
+
+func testToken(t *testing.T, st *store.Scope, id string) TokenRecord {
+	t.Helper()
+	row, err := st.GetOAuthToken(context.Background(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return TokenFromStore(row)
+}
 
 func TestNewPKCEAndParseCallback(t *testing.T) {
 	pkce, err := NewPKCE()
@@ -42,36 +57,36 @@ func TestNewPKCEAndParseCallback(t *testing.T) {
 func TestFlowStoreOneActiveAndSingleUse(t *testing.T) {
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	store := NewFlowStore(func() time.Time { return now })
-	flow, err := store.Begin("provider-1", "https://tiller.example.com/auth/callback")
+	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Begin("provider-1", "https://tiller.example.com/auth/callback"); !errors.Is(err, ErrFlowActive) {
+	if _, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback"); !errors.Is(err, ErrFlowActive) {
 		t.Fatalf("second Begin error = %v, want ErrFlowActive", err)
 	}
-	if _, err := store.Consume("provider-1", "wrong-state"); !errors.Is(err, ErrFlowInvalid) {
+	if _, err := store.Consume("acct-1", "provider-1", "wrong-state"); !errors.Is(err, ErrFlowInvalid) {
 		t.Fatalf("wrong state error = %v, want ErrFlowInvalid", err)
 	}
-	if _, err := store.Consume("provider-1", flow.PKCE.State); !errors.Is(err, ErrFlowInvalid) {
+	if _, err := store.Consume("acct-1", "provider-1", flow.PKCE.State); !errors.Is(err, ErrFlowInvalid) {
 		t.Fatalf("reused flow error = %v, want ErrFlowInvalid", err)
 	}
-	flow, err = store.Begin("provider-1", "https://tiller.example.com/auth/callback")
+	flow, err = store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(flowLifetime)
-	if _, err := store.Consume("provider-1", flow.PKCE.State); !errors.Is(err, ErrFlowExpired) {
+	if _, err := store.Consume("acct-1", "provider-1", flow.PKCE.State); !errors.Is(err, ErrFlowExpired) {
 		t.Fatalf("expired flow error = %v, want ErrFlowExpired", err)
 	}
 }
 
 func TestFlowStorePreservesRedirectURI(t *testing.T) {
 	store := NewFlowStore(nil)
-	flow, err := store.Begin("provider-1", "https://tiller.example.com/auth/callback")
+	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
 	if err != nil {
 		t.Fatal(err)
 	}
-	consumed, err := store.Consume("provider-1", flow.PKCE.State)
+	consumed, err := store.Consume("acct-1", "provider-1", flow.PKCE.State)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,24 +142,21 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	store := NewStore(db.SQL)
+	st := newTestStore(t, db)
 	expired := time.Now().Add(-time.Minute)
-	if err := store.Put(context.Background(), TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store, time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute)
 
 	refreshReconnect := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{}, ErrReconnectRequired
 	}
-	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshReconnect)
+	_, err = manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", refreshReconnect)
 	if !errors.Is(err, ErrReconnectRequired) {
 		t.Fatalf("ForceRefresh error = %v, want ErrReconnectRequired", err)
 	}
-	record, err := store.Get(context.Background(), "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	record := testToken(t, st, "provider-1")
 	if record.AuthState != AuthReconnectRequired {
 		t.Fatalf("auth_state = %q, want reconnect_required", record.AuthState)
 	}
@@ -152,14 +164,11 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	refreshUnavailable := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{}, ErrAuthUnavailable
 	}
-	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshUnavailable)
+	_, err = manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", refreshUnavailable)
 	if !errors.Is(err, ErrAuthUnavailable) {
 		t.Fatalf("ForceRefresh error = %v, want ErrAuthUnavailable", err)
 	}
-	record, err = store.Get(context.Background(), "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	record = testToken(t, st, "provider-1")
 	if record.AuthState != AuthUnavailable {
 		t.Fatalf("auth_state = %q, want unavailable", record.AuthState)
 	}
@@ -167,14 +176,11 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	refreshTransient := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{}, errors.New("network blip")
 	}
-	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshTransient)
+	_, err = manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", refreshTransient)
 	if err == nil {
 		t.Fatal("ForceRefresh expected error, got nil")
 	}
-	record, err = store.Get(context.Background(), "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	record = testToken(t, st, "provider-1")
 	if record.AuthState != AuthUnavailable {
 		t.Fatalf("auth_state = %q, want unavailable (transient)", record.AuthState)
 	}
@@ -182,14 +188,11 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	refreshOK := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{AccessToken: "new", RefreshToken: "rotated", ExpiresIn: 3600}, nil
 	}
-	_, err = manager.ForceRefresh(context.Background(), "provider-1", refreshOK)
+	_, err = manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", refreshOK)
 	if err != nil {
 		t.Fatalf("ForceRefresh success error = %v", err)
 	}
-	record, err = store.Get(context.Background(), "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	record = testToken(t, st, "provider-1")
 	if record.AuthState != AuthConnected {
 		t.Fatalf("auth_state = %q, want connected", record.AuthState)
 	}
@@ -211,12 +214,12 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	store := NewStore(db.SQL)
+	st := newTestStore(t, db)
 	expired := time.Now().Add(-time.Minute)
-	if err := store.Put(context.Background(), TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store, time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute)
 	var calls atomic.Int32
 	refresh := func(context.Context, TokenRecord) (TokenResponse, error) {
 		calls.Add(1)
@@ -229,7 +232,7 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			record, err := manager.Current(context.Background(), "provider-1", refresh)
+			record, err := manager.Current(context.Background(), database.LocalAccountID, "provider-1", refresh)
 			if err != nil {
 				errs <- err
 			} else if record.AccessToken != "new" {
@@ -247,10 +250,7 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("refresh calls = %d, want 1", calls.Load())
 	}
-	record, err := store.Get(context.Background(), "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	record := testToken(t, st, "provider-1")
 	if record.RefreshToken != "rotated" {
 		t.Fatalf("stored refresh token = %q", record.RefreshToken)
 	}
@@ -272,12 +272,12 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
 		t.Fatal(err)
 	}
-	store := NewStore(db.SQL)
+	st := newTestStore(t, db)
 	expired := time.Now().Add(-time.Minute)
-	if err := store.Put(context.Background(), TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()}); err != nil {
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManager(store, time.Minute)
+	manager := NewManager(store.New(db.SQL), time.Minute)
 
 	// Refresh that fails with context cancellation.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -285,16 +285,73 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 	refreshCanceled := func(context.Context, TokenRecord) (TokenResponse, error) {
 		return TokenResponse{}, ctx.Err()
 	}
-	_, err = manager.ForceRefresh(ctx, "provider-1", refreshCanceled)
+	_, err = manager.ForceRefresh(ctx, database.LocalAccountID, "provider-1", refreshCanceled)
 	if err == nil {
 		t.Fatal("expected error from canceled context")
 	}
-	record, err := store.Get(context.Background(), "provider-1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	record := testToken(t, st, "provider-1")
 	// Auth state must remain connected — cancellation is transient.
 	if record.AuthState != AuthConnected {
 		t.Fatalf("auth_state = %q after cancellation, want connected", record.AuthState)
+	}
+}
+
+func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t, db)
+	expired := time.Now().Add(-time.Minute)
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", ExpiresAt: &expired, AuthState: AuthConnected})); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store.New(db.SQL), time.Minute)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, refreshErr := manager.ForceRefresh(context.Background(), database.LocalAccountID, "provider-1", func(context.Context, TokenRecord) (TokenResponse, error) {
+			close(started)
+			<-release
+			return TokenResponse{AccessToken: "late", RefreshToken: "late-refresh", ExpiresIn: 3600}, nil
+		})
+		refreshDone <- refreshErr
+	}()
+	<-started
+	generation, err := st.AdvanceOAuthGeneration(context.Background(), "provider-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteOAuthToken(context.Background(), "provider-1"); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-refreshDone; !errors.Is(err, store.ErrOAuthGenerationChanged) {
+		t.Fatalf("refresh error = %v, want generation changed", err)
+	}
+	if _, err := st.GetOAuthToken(context.Background(), "provider-1"); !errors.Is(err, store.ErrNoOAuthToken) {
+		t.Fatalf("late refresh token error = %v, want no token", err)
+	}
+	late := TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "callback", RefreshToken: "callback-refresh", AuthState: AuthConnected})
+	if err := st.PutOAuthTokenIfGeneration(context.Background(), late, generation-1); !errors.Is(err, store.ErrOAuthGenerationChanged) {
+		t.Fatalf("callback write error = %v, want generation changed", err)
+	}
+	if err := st.PutOAuthTokenIfGeneration(context.Background(), late, generation-1); !errors.Is(err, store.ErrOAuthGenerationChanged) {
+		t.Fatalf("device write error = %v, want generation changed", err)
+	}
+	if err := st.PutOAuthTokenIfGeneration(context.Background(), late, generation); err != nil {
+		t.Fatalf("new connection error = %v", err)
+	}
+	if got := testToken(t, st, "provider-1"); got.AccessToken != "callback" {
+		t.Fatalf("new connection access token = %q, want callback", got.AccessToken)
 	}
 }

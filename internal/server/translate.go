@@ -1044,6 +1044,13 @@ func responsesInstructionText(value any) string {
 }
 
 func translateResponse(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
+	return translateResponseObserved(w, keepalive, r, incoming, target, route, usage, nil)
+}
+
+// translateResponseObserved is translateResponse with an optional observer that
+// is notified once, on the first client-visible assistant frame. The observer
+// only records a timestamp; it never sees or retains content.
+func translateResponseObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture, obs *outputObserver) error {
 	reader := bufio.NewReader(r)
 	prefix, err := reader.Peek(1)
 	if err != nil {
@@ -1062,7 +1069,7 @@ func translateResponse(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r i
 		_, err = w.Write(translated)
 		return err
 	}
-	return translateSSE(w, keepalive, reader, incoming, target, route.RequestedModel, usage)
+	return translateSSEObserved(w, keepalive, reader, incoming, target, route.RequestedModel, usage, obs)
 }
 
 func translateNonstreamResponse(body []byte, incoming, target providers.Protocol, model string) ([]byte, error) {
@@ -1243,6 +1250,10 @@ func chatResponseToResponses(chat map[string]any, model string) map[string]any {
 }
 
 func translateSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
+	return translateSSEObserved(w, keepalive, reader, incoming, target, model, usage, nil)
+}
+
+func translateSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, reader *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture, obs *outputObserver) error {
 	if keepalive == nil {
 		keepalive = newSSEKeepaliveWriter(w, sseKeepaliveInterval)
 		defer keepalive.Close()
@@ -1268,6 +1279,9 @@ func translateSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, reader *
 					}
 					if err := writeTranslatedEvent(keepalive, incoming, state, delta); err != nil {
 						return err
+					}
+					if probeDeltaHasOutput(delta) {
+						obs.observe()
 					}
 					keepalive.Flush()
 				}

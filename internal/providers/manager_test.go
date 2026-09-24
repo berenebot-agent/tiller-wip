@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 func TestSafeRefreshErrorDoesNotExposeRequestDetails(t *testing.T) {
@@ -75,7 +76,7 @@ func TestRefreshDueRefreshesOverdueProviders(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewManager(db.SQL, NewRegistry())
+	m := NewManager(store.New(db.SQL), NewRegistry())
 	m.refreshDue(context.Background())
 
 	deadline := time.Now().Add(30 * time.Second)

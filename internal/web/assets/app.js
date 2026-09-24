@@ -1,7 +1,14 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0 };
+let runtimeMode = 'local';
+let hostedAuthOptions = {};
+let captchaWidgetID = null;
+let captchaAction = '';
+let captchaToken = '';
+let captchaGeneration = 0;
+let captchaScriptPromise = null;
 const mobileVirtualDrafts = new Map();
 const mobileVirtualExpanded = new Set();
 // routeActivity derives a virtual route's spinner state from the per
@@ -84,7 +91,8 @@ const rowCache = (row) => {
   return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
 };
 const VIEWS = ['providers', 'models', 'virtual', 'clients', 'activity', 'settings'];
-const viewFromHash = () => { const v = (location.hash.replace(/^#\/?/, '') || 'clients'); return VIEWS.includes(v) ? v : 'clients'; };
+const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return VIEWS.includes(v) ? v : 'clients'; };
+const settingsTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'settings' && parts[1] ? parts[1] : ''; };
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -94,7 +102,7 @@ async function api(path, options = {}) {
   const type = response.headers.get('content-type') || '';
   const payload = type.includes('json') ? await response.json().catch(() => ({})) : null;
   if (!response.ok) {
-    if (response.status === 401 && path !== '/api/admin/session') showLogin();
+    if (response.status === 401 && !path.endsWith('/session')) showLogin();
     const error = new Error(payload?.error?.message || `Request failed (${response.status})`);
     error.code = payload?.error?.code;
     error.status = response.status;
@@ -139,23 +147,141 @@ async function loadUsage() {
 function deferUsage() {
   loadUsage().then(() => reconcileLive()).catch(() => {});
 }
-function showLogin() { $('#app').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; history.replaceState(null, '', '#/clients'); liveStop(); }
-function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username; $('#login-shell').hidden = true; $('#app').hidden = false; liveStart(); navigate(state.view); }
+function authView(name) {
+  ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form','legal-panel','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  const hosted = runtimeMode === 'hosted';
+  $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
+  $('#show-signup').hidden = !hosted || !hostedAuthOptions.signup_enabled;
+  $('#google-signin').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.google_enabled;
+  $('#google-signin-notice').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.google_enabled;
+  ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
+  const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : name === 'login-form' && hostedAuthOptions.google_enabled ? 'google_signin' : '';
+  showAuthCaptcha(action);
+}
+function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
+
+function loadTurnstileScript() {
+  if (window.turnstile) return Promise.resolve();
+  if (!captchaScriptPromise) {
+    captchaScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true; script.defer = true;
+      script.onload = () => window.turnstile ? resolve() : reject(new Error('Security check failed to load.'));
+      script.onerror = () => reject(new Error('Security check failed to load.'));
+      document.head.appendChild(script);
+    });
+  }
+  return captchaScriptPromise;
+}
+
+async function showAuthCaptcha(action) {
+  const wrap = $('#auth-captcha-wrap');
+  if (!wrap) return;
+  if (!hostedAuthOptions.turnstile_enabled || !action) {
+    captchaGeneration++; captchaToken = ''; captchaAction = '';
+    if (captchaWidgetID !== null && window.turnstile) window.turnstile.remove(captchaWidgetID);
+    captchaWidgetID = null; $('#auth-captcha').replaceChildren(); wrap.hidden = true;
+    return;
+  }
+  if (captchaAction === action && captchaWidgetID !== null) { wrap.hidden = false; return; }
+  const generation = ++captchaGeneration;
+  captchaAction = action; captchaToken = ''; captchaWidgetID = null;
+  if (window.turnstile && $('#auth-captcha').dataset.widget) window.turnstile.remove($('#auth-captcha').dataset.widget);
+  $('#auth-captcha').replaceChildren(); delete $('#auth-captcha').dataset.widget;
+  wrap.hidden = false;
+  try {
+    await loadTurnstileScript();
+    if (generation !== captchaGeneration) return;
+    captchaWidgetID = window.turnstile.render('#auth-captcha', {
+      sitekey: hostedAuthOptions.turnstile_site_key, action,
+      callback: token => { captchaToken = token; captchaAction = action; },
+      'expired-callback': () => { captchaToken = ''; },
+      'error-callback': () => { captchaToken = ''; },
+    });
+    $('#auth-captcha').dataset.widget = captchaWidgetID;
+  } catch (error) {
+    if (generation === captchaGeneration) $('#auth-captcha-wrap').querySelector('.meta-line').textContent = errorMessage(error, 'Security check failed to load.');
+  }
+}
+
+function authCaptchaToken(action) {
+  if (!hostedAuthOptions.turnstile_enabled) return '';
+  if (captchaAction !== action || !captchaToken) {
+    showAuthCaptcha(action);
+    throw new Error('Complete the security check, then try again.');
+  }
+  return captchaToken;
+}
+
+function resetAuthCaptcha(action) {
+  if (!hostedAuthOptions.turnstile_enabled || captchaAction !== action) return;
+  captchaToken = '';
+  if (captchaWidgetID !== null && window.turnstile) window.turnstile.reset(captchaWidgetID);
+}
 
 $('#login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('#login-error').textContent = '';
   const formElement = event.currentTarget; const form = new FormData(formElement); const button = $('button[type="submit"]', formElement); button.disabled = true;
-  try { const session = await api('/api/admin/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); formElement.reset(); showApp(session); }
-  catch (error) { $('#login-error').textContent = errorMessage(error, 'Login failed.'); }
+  try { const path = runtimeMode === 'hosted' ? '/api/auth/login' : '/api/admin/session'; const body = runtimeMode === 'hosted' ? { email: form.get('username'), password: form.get('password') } : { username: form.get('username'), password: form.get('password') }; const session = await api(path, { method: 'POST', body: JSON.stringify(body) }); formElement.reset(); showApp(session); }
+  catch (error) { $('#login-error').textContent = errorMessage(error, 'Login failed.'); if (error.code === 'email_not_verified') exposeResend('#resend-login-verification', '#login-form [name="username"]', '#login-error'); }
   finally { button.disabled = false; }
 });
-$('#logout').addEventListener('click', async () => { try { await api('/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
+$('#logout').addEventListener('click', async () => { try { await api(runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
+
+function showAuthError(id, error, fallback) { const el = $('#' + id); if (el) el.textContent = errorMessage(error, fallback); }
+async function resendVerification(email, target) {
+  const captcha_token = authCaptchaToken('recovery');
+  let result;
+  try { result = await api('/api/auth/verification/resend', { method: 'POST', body: JSON.stringify({ email, captcha_token }) }); }
+  finally { resetAuthCaptcha('recovery'); }
+  $(target).textContent = result.message || 'If the address can receive mail, a verification message will arrive shortly.';
+  $(target).style.color = 'var(--green)';
+}
+function exposeResend(target, emailInput, messageTarget) {
+  const button = $(target); if (!button) return;
+  button.hidden = false; showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : ''); button.onclick = async () => { button.disabled = true; try { await resendVerification($(emailInput).value, messageTarget); } catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+}
+$('#show-signup').onclick = () => authView('signup-form');
+$('#show-forgot-password').onclick = () => authView('forgot-form');
+$('#show-login-from-signup').onclick = () => authView('login-form');
+$('#show-login-from-forgot').onclick = () => authView('login-form');
+$('#signup-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; } try { const captcha_token = authCaptchaToken('signup'); const result = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) }); $('#signup-error').textContent = result.message || 'Check your email.'; exposeResend('#resend-signup-verification', '#signup-form [name="email"]', '#signup-error'); } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); } });
+$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
+$('#google-signin').addEventListener('click', async () => {
+  $('#login-error').textContent = '';
+  try {
+    const captcha_token = authCaptchaToken('google_signin');
+    const result = await api('/api/auth/google/start', { method: 'POST', body: JSON.stringify({ captcha_token }) });
+    location.assign(result.redirect_url);
+  } catch (error) { showAuthError('login-error', error, 'Google sign-in could not be started.'); }
+  finally { resetAuthCaptcha('google_signin'); }
+});
+$('#google-consent-cancel').onclick = () => { history.replaceState(null, '', '/login'); authView('login-form'); };
+$('#google-consent-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget);
+  if (form.get('accept_terms') !== 'on') { showAuthError('google-consent-error', { message: 'Please agree to the Terms of Service and Privacy Policy.' }, 'Account creation failed.'); return; }
+  try {
+    const session = await api('/api/auth/google/signup/complete', { method: 'POST', body: JSON.stringify({ accept_terms: true }) });
+    history.replaceState(null, '', '/#clients'); showApp(session);
+  } catch (error) { showAuthError('google-consent-error', error, 'Account creation failed.'); }
+});
+$('#verify-login').onclick = () => authView('login-form');
+$('#reset-login').onclick = () => authView('login-form');
+$('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; $('#reset-login').hidden = false; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
+$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
+$('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
 
 async function navigate(view) {
-  state.view = view; if (location.hash !== '#' + view) history.pushState(null, '', '#' + view); $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') await loadSettings(); }
+  state.view = view;
+  // Preserve the settings sub-tab in the hash; only the base view is rewritten.
+  const desiredHash = view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : '#' + view;
+  if (location.hash !== desiredHash) history.pushState(null, '', desiredHash);
+  $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
+  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); } }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
@@ -430,14 +556,14 @@ function reorderModelRows() {
   });
   body.appendChild(fragment);
 }
-function renderModels() {
-  const shown = shownModels();
-  $('#models-empty').hidden = shown.length > 0;
-  $('#models-empty-mobile').hidden = shown.length > 0;
-  const rows = applyModelSort(shown);
-  const html = rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
-   $('#models-body').innerHTML = html;
-   $('#models-cards').innerHTML = rows.map(modelCard).join('');
+ function renderModels() {
+   const shown = shownModels();
+   $('#models-empty').hidden = shown.length > 0;
+   $('#models-empty-mobile').hidden = shown.length > 0;
+   const rows = applyModelSort(shown);
+   const mobile = window.matchMedia('(max-width: 720px)').matches;
+   $('#models-body').innerHTML = mobile ? '' : rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
+   $('#models-cards').innerHTML = mobile ? rows.map(modelCard).join('') : '';
   const head = $('#models-body').parentElement.querySelector('thead');
   if (head) {
     $$('th', head).forEach(th => {
@@ -447,14 +573,17 @@ function renderModels() {
       }
     });
   }
-  $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'));
-  $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); });
-   $$('[data-model-delete]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); deleteManualModel(button.dataset.modelDelete); });
-   $$('[data-mobile-model-toggle]').forEach(button => button.onclick = () => toggleMobileCard(button));
-   $$('[data-mobile-model-activity]').forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.id === button.dataset.mobileModelActivity), 'real'));
-   $$('[data-mobile-model-capabilities]').forEach(button => button.onclick = () => openRealModelCapabilities(state.models.find(item => item.id === button.dataset.mobileModelCapabilities)));
-   $$('[data-mobile-model-delete]').forEach(button => button.onclick = () => deleteManualModel(button.dataset.mobileModelDelete));
-}
+   if (!mobile) {
+     $$('[data-model-activity]', $('#models-body')).forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.canonical_model_id === button.dataset.modelActivity), 'real'));
+     $$('[data-model-capabilities]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openRealModelCapabilities(state.models.find(item => item.id === button.dataset.modelCapabilities)); });
+     $$('[data-model-delete]', $('#models-body')).forEach(button => button.onclick = event => { event.stopPropagation(); deleteManualModel(button.dataset.modelDelete); });
+   } else {
+     $$('[data-mobile-model-toggle]').forEach(button => button.onclick = () => toggleMobileCard(button));
+     $$('[data-mobile-model-activity]').forEach(button => button.onclick = () => openModelActivity(state.models.find(item => item.id === button.dataset.mobileModelActivity), 'real'));
+     $$('[data-mobile-model-capabilities]').forEach(button => button.onclick = () => openRealModelCapabilities(state.models.find(item => item.id === button.dataset.mobileModelCapabilities)));
+     $$('[data-mobile-model-delete]').forEach(button => button.onclick = () => deleteManualModel(button.dataset.mobileModelDelete));
+   }
+ }
 function mobileUsage(model, kind = 'real') {
   const key = model.canonical_model_id;
   const usage = kind === 'virtual' ? state.usage?.virtual_models?.[key] : state.usage?.real_models?.[key];
@@ -1393,8 +1522,181 @@ $('#save-permissions').onclick = async () => {
   finally { button.disabled = false; }
 };
 
-const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: 50, search: '', hasMore: true };
+const ACTIVITY_PAGE_SIZE = 20;
+const ATTEMPT_HYDRATE_CONCURRENCY = 4;
+
+function activityNeedsAttempts(row) { return !row.attempts && !row.attemptsError && (row.attempt_rows > 1 || row.error_text || row.fallback_used); }
+
+// activityDetailHTML is the shared "Resolved" cell / card-detail body. The full
+// attempt list is rendered here once row.attempts has been backfilled, so both
+// the table and the mobile card surface stay identical.
+function activityDetailHTML(row, kind) {
+  const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', failure_class: row.error_text, latency_ms: row.latency_ms, http_status: row.http_status, error_message: row.error_message, error_body: row.error_body, error_body_truncated: row.error_body_truncated, request_body: row.request_body, request_body_truncated: row.request_body_truncated, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null;
+  const resolved = row.fallback_used ? '' : fixedAttempt ? (row.attempt_rows > 1 ? '' : `<div class="attempt-sequence">${activityAttemptDetails(fixedAttempt, 0)}</div>`) : '';
+  const sequence = (row.fallback_used || !fixedAttempt || row.attempt_rows > 1) ? attemptSequence(row) : '';
+  const errorHover = [row.error_message, row.latency_ms ? `Latency: ${row.latency_ms} ms` : ''].filter(Boolean).join(' · ');
+  const error = sequence ? '' : (row.error_text ? `<span class="error-text"${errorHover ? ` title="${h(errorHover)}"` : ''}>${h(row.error_text)}</span>` : '');
+  const loadError = row.attemptsError ? `<span class="error-text activity-attempts-error">${h(row.attemptsError)}</span><button type="button" class="activity-retry" data-activity-retry="${h(row.id)}">Retry</button>` : '';
+  const pending = activityNeedsAttempts(row) ? '<span class="activity-detail-pending" aria-hidden="true">…</span>' : '';
+  // The mobile card already shows error_text in its footer, so its detail body
+  // only carries the hydrated attempt sequence (plus load errors / retry).
+  const parts = kind === 'card' ? [sequence] : [resolved, sequence, error];
+  return `${parts.join('')}${loadError}${pending}`;
+}
+function resolvedActivity(row) { return activityDetailHTML(row, 'table'); }
+function activityCardDetail(row) { return activityDetailHTML(row, 'card'); }
+
+// createActivityFeed renders a window of rows immediately, backfills each row's
+// attempt details as it scrolls into view (bounded concurrency), and loads
+// older pages when the scroll container nears its end. No detail fetch blocks
+// the render.
+function createActivityFeed(options) {
+  const state = options.state;
+  state.rows = state.rows || [];
+  state.offset = state.offset || 0;
+  state.limit = state.limit || ACTIVITY_PAGE_SIZE;
+  state.search = state.search || '';
+  if (state.hasMore === undefined) state.hasMore = true;
+  state.loading = false;
+  state.appending = false;
+  state.controller = null;
+  state.hydrating = new Set();
+  state.queued = new Set();
+  state.queue = [];
+  state.active = 0;
+  let rowsIO = null;
+  const scrollHosts = new Set();
+  const feed = { state, reload: () => load(true), setSearch(value) { state.search = value; state.offset = 0; return load(true); }, loadMore, hydrate };
+  const containers = () => (options.containers ? options.containers() : []);
+  function observeRows() {
+    if (rowsIO) rowsIO.disconnect();
+    rowsIO = new IntersectionObserver(entries => {
+      entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        rowsIO.unobserve(entry.target);
+        const row = state.rows.find(item => item.id === entry.target.dataset.activityRow);
+        if (row) hydrate(row);
+      });
+    }, { rootMargin: '120px' });
+    containers().forEach(container => { if (container) $$('[data-activity-row]', container).forEach(el => rowsIO.observe(el)); });
+  }
+  function onScroll(event) {
+    const el = event.currentTarget === window ? document.scrollingElement : event.currentTarget;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight > 160) return;
+    if (options.scrollGuard && !options.scrollGuard(event.currentTarget)) return;
+    loadMore();
+  }
+  function attachScrollLoading() {
+    (options.scrollHosts ? options.scrollHosts() : []).forEach(host => {
+      if (!host || scrollHosts.has(host)) return;
+      scrollHosts.add(host);
+      host.addEventListener('scroll', onScroll, { passive: true });
+    });
+  }
+  function patch(row) {
+    containers().forEach(container => {
+      if (!container) return;
+      $$('[data-activity-resolved]', container).forEach(el => {
+        if (el.dataset.activityResolved !== row.id) return;
+        el.innerHTML = el.dataset.activityDetailKind === 'card' ? activityCardDetail(row) : resolvedActivity(row);
+      });
+    });
+  }
+  function hydrate(row) {
+    if (!activityNeedsAttempts(row) || state.queued.has(row.id) || state.hydrating.has(row.id)) return;
+    state.queued.add(row.id);
+    state.queue.push(row);
+    pump();
+  }
+  function pump() {
+    while (state.active < ATTEMPT_HYDRATE_CONCURRENCY && state.queue.length) {
+      const row = state.queue.shift();
+      state.queued.delete(row.id);
+      if (row.attempts || state.hydrating.has(row.id)) continue;
+      state.hydrating.add(row.id);
+      state.active += 1;
+      const controller = state.controller;
+      api(`/api/admin/activity/${encodeURIComponent(row.id)}/attempts`, { signal: controller?.signal })
+        .then(result => { row.attempts = result.data || []; delete row.attemptsError; })
+        .catch(error => { if (error.name !== 'AbortError') row.attemptsError = errorMessage(error, 'Could not load attempt details.'); })
+        .finally(() => { state.hydrating.delete(row.id); state.active -= 1; if (controller === state.controller) patch(row); pump(); });
+    }
+  }
+  function loadMore() { if (state.loading || state.appending || !state.hasMore) return; state.appending = true; load(false); }
+  async function load(reset) {
+    if (reset) {
+      state.controller?.abort();
+      state.controller = new AbortController();
+      state.queue.length = 0;
+      state.queued.clear();
+      state.loading = true;
+      state.appending = false;
+      state.offset = 0;
+      state.rows = [];
+      options.render(state);
+      observeRows();
+      options.resetScroll();
+    }
+    const signal = state.controller?.signal;
+    try {
+      const result = await options.fetch(state.offset, state.limit, state.search, signal);
+      const fetched = result.data || [];
+      state.hasMore = fetched.length > state.limit;
+      const page = fetched.slice(0, state.limit);
+      state.rows = reset ? page : state.rows.concat(page);
+      state.offset = state.rows.length;
+      state.loading = false;
+      state.appending = false;
+      options.showError('');
+      if (reset) options.render(state); else options.append(state, page);
+      observeRows();
+      attachScrollLoading();
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      state.loading = false;
+      state.appending = false;
+      if (reset) { state.rows = []; options.render(state); observeRows(); }
+      options.showError(errorMessage(error));
+    }
+  }
+  containers().forEach(container => {
+    if (!container) return;
+    container.addEventListener('click', event => {
+      const button = event.target.closest('[data-activity-retry]');
+      if (!button) return;
+      const row = state.rows.find(item => item.id === button.dataset.activityRetry);
+      if (!row) return;
+      delete row.attemptsError;
+      patch(row);
+      hydrate(row);
+    });
+  });
+  return feed;
+}
+
+function updateActivityCount(state, selector) { $(selector).textContent = state.loading ? 'Loading…' : (state.rows.length ? `1–${state.rows.length}` : '0 results'); }
+function activityTableRow(row, showClient) { return `<tr data-activity-row="${h(row.id)}"><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td data-activity-resolved="${h(row.id)}" data-activity-detail-kind="table">${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`; }
+
+const activityState = { kind: '', client: null, modelID: '', modelName: '', rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
 function resetActivityScroll() { $('.activity-table-shell', $('#activity-dialog')).scrollTop = 0; }
+function activityFeedURL(kind, client, modelID, offset, limit, search) {
+  const base = kind === 'client' ? `/api/admin/client-keys/${client.id}/activity` : kind === 'real' ? `/api/admin/models/${modelID}/activity` : `/api/admin/virtual-models/${modelID}/activity`;
+  return `${base}?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`;
+}
+function renderActivity(state) { errorDetails.clear(); errorDetailSeq = 0; const showClient = !state.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = state.loading || state.rows.length > 0; $('#activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, showClient)).join(''); $('#activity-mobile-body').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, showClient)).join(''); updateActivityCount(state, '#activity-count'); }
+function appendActivity(state, page) { const showClient = !state.client; const table = $('#activity-body'); const cards = $('#activity-mobile-body'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, showClient)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, showClient)); }); $('#activity-empty').hidden = state.rows.length > 0; updateActivityCount(state, '#activity-count'); }
+const activityFeed = createActivityFeed({
+  state: activityState,
+  containers: () => [$('#activity-body'), $('#activity-mobile-body')],
+  scrollHosts: () => [$('#activity-dialog .activity-table-shell'), $('#activity-mobile-body')],
+  resetScroll: resetActivityScroll,
+  showError: message => { $('#activity-error').textContent = message; },
+  fetch: (offset, limit, search, signal) => api(activityFeedURL(activityState.kind, activityState.client, activityState.modelID, offset, limit, search), { signal }),
+  render: renderActivity,
+  append: appendActivity,
+});
+function loadActivity() { if (!activityState.kind) return Promise.resolve(); return activityFeed.reload(); }
 async function openActivity(client) {
   activityState.kind = 'client'; activityState.client = client; activityState.modelID = ''; activityState.modelName = ''; activityState.offset = 0; activityState.search = '';
   $('#activity-search').value = '';
@@ -1409,13 +1711,53 @@ async function openActivity(client) {
     toolbar.before(info);
   }
   info.innerHTML = `<span class="activity-client-fingerprint">sk-tr-••••••••.${h(client.fingerprint)}</span>  <span>Created ${date(client.created_at)}</span>${client.rotated_at ? `  <span>Rotated ${date(client.rotated_at)}</span>` : ''}`;
-  await loadActivity();
   $('#activity-dialog').showModal();
   resetActivityScroll();
+  await loadActivity();
 }
-async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; document.getElementById('activity-client-info')?.remove(); await loadActivity(); $('#activity-dialog').showModal(); resetActivityScroll(); }
-async function loadActivity() { if (!activityState.kind) return; activityState.controller?.abort(); activityState.controller = new AbortController(); const { signal } = activityState.controller; try { const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity` : `/api/admin/virtual-models/${activityState.modelID}/activity`; const result = await api(`${base}?limit=${activityState.limit + 1}&offset=${activityState.offset}&search=${encodeURIComponent(activityState.search || '')}`, { signal }); const fetched = result.data; activityState.hasMore = fetched.length > activityState.limit; activityState.rows = fetched.slice(0, activityState.limit); await Promise.all(activityState.rows.filter(row => row.attempt_rows > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#activity-error').textContent = ''; renderActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#activity-error').textContent = errorMessage(error); } }
-function activityAttempt(attempt, index) { const route = `${attempt.provider}/${attempt.model}`; const isCooldown = attempt.failure_class === 'cooldown'; const status = attempt.http_status ? `HTTP ${attempt.http_status}` : (isCooldown ? 'cooldown' : h(attempt.result)); let cls; if (attempt.result === 'success') cls = 'attempt-success'; else if (attempt.result === 'failed') cls = 'attempt-failed'; else if (isCooldown) cls = 'attempt-cooldown'; else cls = 'attempt-neutral'; let clickAttr = ''; let hoverAttr = ''; if (attempt.result === 'failed') { const key = ++errorDetailSeq; const parts = []; if (attempt.error_message) parts.push(attempt.error_message); if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`); if (attempt.error_body) parts.push(`Provider error body:\n${attempt.error_body}${attempt.error_body_truncated ? '\n\n[truncated]' : ''}`); if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`); if (attempt.request_body) parts.push(`Client request body:\n${attempt.request_body}${attempt.request_body_truncated ? '\n\n[truncated]' : ''}`); errorDetails.set(key, { title: `${route} · ${status}`, body: parts.join('\n\n') || '(no error details)' }); clickAttr = ` data-error-key="${key}"`; const hover = [attempt.error_message, attempt.latency_ms ? `Latency: ${attempt.latency_ms} ms` : ''].filter(Boolean).join(' · '); if (hover) hoverAttr = ` title="${h(hover)}"`; } else if (isCooldown) { const key = ++errorDetailSeq; errorDetails.set(key, { cooldown: { provider: attempt.provider, model: attempt.model, created_at: attempt.created_at }, title: `${route} · cooldown` }); clickAttr = ` data-error-key="${key}"`; hoverAttr = ` title="${h('Cooldown — click for details')}"`; } return `<div class="activity-attempt ${cls}"${clickAttr}${hoverAttr}><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code title="${h(route)}">${h(route)}</code></span><span class="attempt-status">${status}</span></div>`; }
+async function openModelActivity(model, kind) { activityState.kind = kind; activityState.client = null; activityState.modelID = model.id; activityState.modelName = model.canonical_model_id; activityState.offset = 0; activityState.search = ''; $('#activity-search').value = ''; $('#activity-title').textContent = `${model.canonical_model_id} activity`; $('#clear-activity').hidden = true; document.getElementById('activity-client-info')?.remove(); $('#activity-dialog').showModal(); resetActivityScroll(); await loadActivity(); }
+function activityAttemptDetails(attempt, index) {
+  const route = `${attempt.provider}/${attempt.model}`;
+  const isCooldown = attempt.failure_class === 'cooldown';
+  const isSkipped = attempt.result === 'skipped';
+  const status = attempt.http_status ? `HTTP ${attempt.http_status}` : (isCooldown ? 'cooldown' : h(attempt.result));
+  let cls;
+  if (attempt.result === 'success') cls = 'attempt-success';
+  else if (attempt.result === 'failed') cls = 'attempt-failed';
+  else if (isCooldown) cls = 'attempt-cooldown';
+  else cls = 'attempt-neutral';
+  let clickAttr = '';
+  let hoverAttr = '';
+  if (attempt.result === 'failed') {
+    const key = ++errorDetailSeq;
+    const parts = [];
+    if (attempt.error_message) parts.push(attempt.error_message);
+    if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`);
+    if (attempt.error_body) parts.push(`Provider error body:\n${attempt.error_body}${attempt.error_body_truncated ? '\n\n[truncated]' : ''}`);
+    if (attempt.request_body) parts.push(`Client request body:\n${attempt.request_body}${attempt.request_body_truncated ? '\n\n[truncated]' : ''}`);
+    if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`);
+    errorDetails.set(key, { title: `${route} · ${status}`, body: parts.join('\n\n') || '(no error details)' });
+    clickAttr = ` data-error-key="${key}"`;
+    const hover = [attempt.error_message, attempt.latency_ms ? `Latency: ${attempt.latency_ms} ms` : ''].filter(Boolean).join(' · ');
+    if (hover) hoverAttr = ` title="${h(hover)}"`;
+  } else if (isCooldown) {
+    const key = ++errorDetailSeq;
+    errorDetails.set(key, { cooldown: { provider: attempt.provider, model: attempt.model, created_at: attempt.created_at }, title: `${route} · cooldown` });
+    clickAttr = ` data-error-key="${key}"`;
+    hoverAttr = ` title="${h('Cooldown — click for details')}"`;
+  } else if (isSkipped) {
+    const key = ++errorDetailSeq;
+    const parts = [];
+    if (attempt.error_message) parts.push(attempt.error_message);
+    if (attempt.failure_class) parts.push(`Resolver: ${attempt.failure_class}`);
+    if (attempt.latency_ms) parts.push(`Latency: ${attempt.latency_ms} ms`);
+    errorDetails.set(key, { title: `${route} · skipped`, body: parts.join('\n\n') || 'The target was skipped before an upstream request was made.' });
+    clickAttr = ` data-error-key="${key}"`;
+    hoverAttr = ` title="${h('Skipped — click for details')}"`;
+  }
+  return `<div class="activity-attempt ${cls}"${clickAttr}${hoverAttr}><span class="attempt-number">${String(index + 1).padStart(2, '0')}</span><span class="attempt-route"><code title="${h(route)}">${h(route)}</code></span><span class="attempt-status">${status}</span></div>`;
+}
+
 // Full error text for failed attempts. The complete string lives here keyed by
 // the data-error-key rendered above, and is shown in #error-dialog on click. The
 // store is rebuilt on every activity render so keys never go stale.
@@ -1455,24 +1797,19 @@ function openErrorDetail(key) { const detail = errorDetails.get(Number(key)); if
 document.addEventListener('click', event => { const target = event.target.closest('[data-error-key]'); if (target) openErrorDetail(target.dataset.errorKey); });
 $('#copy-error').onclick = async () => { const text = $('#error-body').textContent; const state = $('#error-copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { state.textContent = 'Clipboard copy was denied — select the text and press Ctrl/Cmd+C.'; } };
 $('#close-error').onclick = $('#done-error').onclick = () => { clearCooldownTick(); $('#error-dialog').close(); };
-function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map((attempt, index) => activityAttempt(index === 0 ? { ...attempt, request_body: row.request_body, request_body_truncated: row.request_body_truncated } : attempt, index)).join('')}</div>`; }
-function resolvedActivity(row) { const fixedAttempt = row.resolved_provider ? { provider: row.resolved_provider, model: row.resolved_model || '', failure_class: row.error_text, latency_ms: row.latency_ms, http_status: row.http_status, error_message: row.error_message, error_body: row.error_body, error_body_truncated: row.error_body_truncated, request_body: row.request_body, request_body_truncated: row.request_body_truncated, result: row.http_status >= 200 && row.http_status < 300 ? 'success' : 'failed' } : null;   const resolved = row.fallback_used ? '' : fixedAttempt ? (row.attempt_rows > 1 ? '' : `<div class="attempt-sequence">${activityAttempt(fixedAttempt, 0)}</div>`) : '';
-   const sequence = (row.fallback_used || !fixedAttempt || row.attempt_rows > 1) ? attemptSequence(row) : ''; const errorHover = [row.error_message, row.latency_ms ? `Latency: ${row.latency_ms} ms` : ''].filter(Boolean).join(' · '); const error = sequence ? '' : (row.error_text ? `<span class="error-text"${errorHover ? ` title="${h(errorHover)}"` : ''}>${h(row.error_text)}</span>` : ''); return `${resolved}${sequence}${error}`; }
-function requestIdentity(row) { const requestedModel = h(row.requested_model); const requestedTitle = h(row.requested_model); if (row.exposed_model && row.exposed_model !== row.requested_model) { return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code><br><span class="meta-line activity-exposed-model" title="${h(row.exposed_model)}">map &gt; ${h(row.exposed_model)}</span>`; } return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code>`; }
+  function attemptSequence(row) { if (!row.attempts?.length) return ''; return `<div class="attempt-sequence">${row.attempts.map((attempt, index) => activityAttemptDetails(index === 0 ? { ...attempt, request_body: row.request_body, request_body_truncated: row.request_body_truncated } : attempt, index)).join('')}</div>`; }
+ function requestIdentity(row) { const requestedModel = h(row.requested_model); const requestedTitle = h(row.requested_model); if (row.exposed_model && row.exposed_model !== row.requested_model) { return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code><br><span class="meta-line activity-exposed-model" title="${h(row.exposed_model)}">map &gt; ${h(row.exposed_model)}</span>`; } return `<code class="model-id activity-requested-model" title="${requestedTitle}">${requestedModel}</code>`; }
 function activityRequestID(row) { const id = row.client_request_id || ''; const short = id.length > 8 ? `${id.slice(0, 8)}…` : id; const copyable = id && (window.isSecureContext && navigator.clipboard?.writeText); const attrs = copyable ? ` data-copy-request-id="${h(id)}" role="button" tabindex="0" aria-label="Copy request ID ${h(id)}"` : ''; return `<code class="model-id activity-request-id"${attrs} title="${h(id)}">${h(short)}</code>`; }
 async function copyRequestID(button) { const id = button.dataset.copyRequestId; if (!id) return; if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(id); const original = button.textContent; button.classList.add('copied'); button.textContent = 'Copied'; setTimeout(() => { button.classList.remove('copied'); button.textContent = original; }, 1200); } catch { const range = document.createRange(); range.selectNodeContents(button); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); button.title = 'Press Ctrl/Cmd+C to copy'; } }
 document.addEventListener('click', event => { const target = event.target.closest('[data-copy-request-id]'); if (target) copyRequestID(target); });
 document.addEventListener('keydown', event => { if (event.key !== 'Enter' && event.key !== ' ') return; const target = event.target.closest('[data-copy-request-id]'); if (!target) return; event.preventDefault(); copyRequestID(target); });
-function activityHistoryCard(row, showClient = true) {
+ function activityHistoryCard(row, showClient = true) {
   const status = row.http_status >= 200 && row.http_status < 300 ? 'Succeeded' : `HTTP ${row.http_status || 'error'}`;
   const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
   const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
-  return `<article class="history-card"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
+   return `<article class="history-card" data-activity-row="${h(row.id)}"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div data-activity-resolved="${h(row.id)}" data-activity-detail-kind="card">${activityCardDetail(row)}</div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
 }
-function renderActivity() { errorDetails.clear(); errorDetailSeq = 0; const showClient = !activityState.client; $('#activity-client-head').hidden = !showClient; $('#activity-empty').hidden = activityState.rows.length > 0; $('#activity-body').innerHTML = activityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td>${showClient ? `<td><strong class="client-name">${h(row.client_name || '')}</strong></td>` : ''}<td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#activity-mobile-body').innerHTML = activityState.rows.map(row => activityHistoryCard(row, showClient)).join(''); $('#activity-count').textContent = activityState.rows.length ? `${activityState.offset + 1}–${activityState.offset + activityState.rows.length}` : '0 results'; $('#activity-prev').disabled = activityState.offset === 0; $('#activity-next').disabled = !activityState.hasMore; resetActivityScroll(); }
-filterInput('#activity-search', value => { activityState.search = value; activityState.offset = 0; loadActivity(); });
-$('#activity-prev').onclick = () => { activityState.offset = Math.max(0, activityState.offset - activityState.limit); loadActivity(); };
-$('#activity-next').onclick = () => { activityState.offset += activityState.limit; loadActivity(); };
+ filterInput('#activity-search', value => { activityFeed.setSearch(value); });
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
 $('#export-activity').onclick = () => $('#export-dialog').showModal();
 $('#clear-activity').onclick = async () => {
@@ -1492,49 +1829,66 @@ $$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick
 
 // Global activity is a read-only section in the Settings view, distinct from
 // the per-client Activity dialog. It shows metadata across all client keys and
-// renders rows through the same helpers as the dialog (resolvedActivity(),
-// requestIdentity(), rowCache(), lazy attempt fetches) so fallbacks appear
-// identically — the extra Client column is the only difference.
-const globalActivityState = { rows: [], offset: 0, limit: 50, search: '', hasMore: true };
-async function loadGlobalActivity() { globalActivityState.controller?.abort(); globalActivityState.controller = new AbortController(); const { signal } = globalActivityState.controller; try { const result = await api(`/api/admin/activity?limit=${globalActivityState.limit + 1}&offset=${globalActivityState.offset}&search=${encodeURIComponent(globalActivityState.search || '')}`, { signal }); const fetched = result.data; globalActivityState.hasMore = fetched.length > globalActivityState.limit; globalActivityState.rows = fetched.slice(0, globalActivityState.limit); await Promise.all(globalActivityState.rows.filter(row => row.attempt_rows > 1 || row.error_text).map(async row => { const attempts = await api(`/api/admin/activity/${row.id}/attempts`, { signal }); row.attempts = attempts.data || []; })); $('#global-activity-error').textContent = ''; renderGlobalActivity(); } catch (error) { if (error.name === 'AbortError') return; $('#global-activity-error').textContent = errorMessage(error); } }
-function renderGlobalActivity() { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = globalActivityState.rows.length > 0; $('#global-activity-empty-mobile').hidden = globalActivityState.rows.length > 0; $('#global-activity-body').innerHTML = globalActivityState.rows.map(row => `<tr><td><span class="meta-line">${date(row.created_at)}</span></td><td><strong class="client-name">${h(row.client_name)}</strong></td><td>${requestIdentity(row)}</td><td>${resolvedActivity(row)}</td><td><span class="protocol">${h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td><span class="meta-line">${row.latency_ms} ms</span></td><td>${rowCache(row)}</td><td>${activityRequestID(row)}</td></tr>`).join(''); $('#global-activity-cards').innerHTML = globalActivityState.rows.map(row => activityHistoryCard(row, true)).join(''); $('#global-activity-count').textContent = globalActivityState.rows.length ? `${globalActivityState.offset + 1}–${globalActivityState.offset + globalActivityState.rows.length}` : '0 results'; $('#global-activity-prev').disabled = globalActivityState.offset === 0; $('#global-activity-next').disabled = !globalActivityState.hasMore; }
-filterInput('#global-activity-search', value => { globalActivityState.search = value; globalActivityState.offset = 0; loadGlobalActivity(); });
-$('#global-activity-prev').onclick = () => { globalActivityState.offset = Math.max(0, globalActivityState.offset - globalActivityState.limit); loadGlobalActivity(); };
-$('#global-activity-next').onclick = () => { globalActivityState.offset += globalActivityState.limit; loadGlobalActivity(); };
+// renders rows through the same helpers as the dialog (activityTableRow(),
+// resolvedActivity(), requestIdentity(), rowCache(), background attempt
+// hydration) so fallbacks appear identically — the extra Client column is the
+// only difference.
+const globalActivityState = { rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
+function renderGlobalActivity(state) { errorDetails.clear(); errorDetailSeq = 0; $('#global-activity-empty').hidden = state.loading || state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.loading || state.rows.length > 0; $('#global-activity-body').innerHTML = state.loading ? '<tr><td colspan="8"><span class="meta-line">Loading activity…</span></td></tr>' : state.rows.map(row => activityTableRow(row, true)).join(''); $('#global-activity-cards').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, true)).join(''); updateActivityCount(state, '#global-activity-count'); }
+function appendGlobalActivity(state, page) { const table = $('#global-activity-body'); const cards = $('#global-activity-cards'); page.forEach(row => { table.insertAdjacentHTML('beforeend', activityTableRow(row, true)); cards.insertAdjacentHTML('beforeend', activityHistoryCard(row, true)); }); $('#global-activity-empty').hidden = state.rows.length > 0; $('#global-activity-empty-mobile').hidden = state.rows.length > 0; updateActivityCount(state, '#global-activity-count'); }
+const globalActivityFeed = createActivityFeed({
+  state: globalActivityState,
+  containers: () => [$('#global-activity-body'), $('#global-activity-cards')],
+  scrollHosts: () => [$('#global-activity-body').closest('.activity-table-shell'), window],
+  scrollGuard: host => {
+    const shell = $('#global-activity-body').closest('.activity-table-shell');
+    const shellVisible = !!shell && shell.clientHeight > 0;
+    return host === window ? !shellVisible : shellVisible;
+  },
+  resetScroll: () => { const shell = $('#global-activity-body').closest('.activity-table-shell'); if (shell) shell.scrollTop = 0; },
+  showError: message => { $('#global-activity-error').textContent = message; },
+  fetch: (offset, limit, search, signal) => api(`/api/admin/activity?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`, { signal }),
+  render: renderGlobalActivity,
+  append: appendGlobalActivity,
+});
+function loadGlobalActivity() { return globalActivityFeed.reload(); }
+filterInput('#global-activity-search', value => { globalActivityFeed.setSearch(value); });
 
-const mobileHistoryState = { rows: [], offset: 0, limit: 25, search: '', hasMore: true };
-async function loadMobileHistory() {
-  mobileHistoryState.controller?.abort();
-  mobileHistoryState.controller = new AbortController();
-  const { signal } = mobileHistoryState.controller;
-  try {
-    const result = await api(`/api/admin/activity?limit=${mobileHistoryState.limit + 1}&offset=${mobileHistoryState.offset}&search=${encodeURIComponent(mobileHistoryState.search || '')}`, { signal });
-    const fetched = result.data || [];
-    mobileHistoryState.hasMore = fetched.length > mobileHistoryState.limit;
-    mobileHistoryState.rows = fetched.slice(0, mobileHistoryState.limit);
-    $('#mobile-history-body').innerHTML = mobileHistoryState.rows.map(row => activityHistoryCard(row, true)).join('');
-    $('#mobile-history-empty').hidden = mobileHistoryState.rows.length > 0;
-    $('#mobile-history-count').textContent = mobileHistoryState.rows.length ? `${mobileHistoryState.offset + 1}–${mobileHistoryState.offset + mobileHistoryState.rows.length}` : '0 results';
-    $('#mobile-history-prev').disabled = mobileHistoryState.offset === 0;
-    $('#mobile-history-next').disabled = !mobileHistoryState.hasMore;
-    $('#mobile-history-error').textContent = '';
-  } catch (error) {
-    if (error.name !== 'AbortError') $('#mobile-history-error').textContent = errorMessage(error);
-  }
+const mobileHistoryState = { rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
+function renderMobileHistory(state) {
+  $('#mobile-history-body').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, true)).join('');
+  $('#mobile-history-empty').hidden = state.loading || state.rows.length > 0;
+  updateActivityCount(state, '#mobile-history-count');
 }
-$('#open-mobile-history').onclick = () => { mobileHistoryState.offset = 0; mobileHistoryState.search = ''; $('#mobile-history-search').value = ''; loadMobileHistory(); $('#mobile-history-dialog').showModal(); };
+function appendMobileHistory(state, page) {
+  const list = $('#mobile-history-body');
+  page.forEach(row => list.insertAdjacentHTML('beforeend', activityHistoryCard(row, true)));
+  $('#mobile-history-empty').hidden = state.rows.length > 0;
+  updateActivityCount(state, '#mobile-history-count');
+}
+const mobileHistoryFeed = createActivityFeed({
+  state: mobileHistoryState,
+  containers: () => [$('#mobile-history-body')],
+  scrollHosts: () => [$('#mobile-history-body')],
+  resetScroll: () => { $('#mobile-history-body').scrollTop = 0; },
+  showError: message => { $('#mobile-history-error').textContent = message; },
+  fetch: (offset, limit, search, signal) => api(`/api/admin/activity?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`, { signal }),
+  render: renderMobileHistory,
+  append: appendMobileHistory,
+});
+function loadMobileHistory() { return mobileHistoryFeed.reload(); }
+$('#open-mobile-history').onclick = () => { mobileHistoryState.search = ''; $('#mobile-history-search').value = ''; loadMobileHistory(); $('#mobile-history-dialog').showModal(); };
 $('#close-mobile-history').onclick = $('#done-mobile-history').onclick = () => $('#mobile-history-dialog').close();
-filterInput('#mobile-history-search', value => { mobileHistoryState.search = value; mobileHistoryState.offset = 0; loadMobileHistory(); });
-$('#mobile-history-prev').onclick = () => { mobileHistoryState.offset = Math.max(0, mobileHistoryState.offset - mobileHistoryState.limit); loadMobileHistory(); };
-$('#mobile-history-next').onclick = () => { mobileHistoryState.offset += mobileHistoryState.limit; loadMobileHistory(); };
+filterInput('#mobile-history-search', value => { mobileHistoryFeed.setSearch(value); });
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
 async function loadSettings() {
+  $('#backup-card').hidden = runtimeMode === 'hosted';
   const token = ++state.loadToken;
   const [health, settings] = await Promise.all([api('/api/admin/health'), api('/api/admin/settings')]);
   if (token !== state.loadToken) return;
-  $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; $('[name="notifications_cooldown_seconds"]', nf).value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; await loadGlobalActivity();
+  $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; $('[name="notifications_cooldown_seconds"]', nf).value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; updateEncryptionState(settings.provider_credential_encryption); await loadGlobalActivity();
 }
 async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_event_admin_login: notificationsValues.get('notifications_event_admin_login') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
 $('#save-settings-top').addEventListener('click', saveSettings);
@@ -1543,6 +1897,215 @@ $('[name="log_error_bodies"]', $('#settings-form')).addEventListener('change', a
 $('[name="notifications_auth_header"]', $('#notifications-form')).addEventListener('input', () => { authHeaderDirty = true; authHeaderClear = false; });
 $('#clear-notifications-auth').addEventListener('click', async () => { const button = $('#clear-notifications-auth'); button.disabled = true; $('#notifications-error').textContent = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ notifications_auth_header: '' }) }); authHeaderClear = false; authHeaderDirty = false; $('[name="notifications_auth_header"]', $('#notifications-form')).value = ''; $('#notifications-auth-note').textContent = 'Authorization header cleared.'; $('#clear-notifications-auth').hidden = true; } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
 $('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
+
+// Settings tabs. Account is hosted-only; the others carry the existing config
+// cards. The hash reflects the sub-tab (#settings/<tab>) so deep links work.
+const SETTINGS_TABS = ['account', 'routing', 'logging', 'security', 'notifications', 'data'];
+let settingsTab = 'routing';
+function showSettingsTab(tab) {
+  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && runtimeMode !== 'hosted')) tab = 'routing';
+  settingsTab = tab;
+  $$('.settings-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.settingsTab === tab));
+  $$('.settings-panel').forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.classList.toggle('active', active); panel.hidden = !active; });
+  $('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+  // Account actions save themselves; the shared save bar only applies to config.
+  $('#save-settings-top').hidden = tab === 'account';
+  $('#save-settings-bottom').hidden = tab === 'account';
+}
+$$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSettingsTab(btn.dataset.settingsTab); const hash = btn.dataset.settingsTab === 'routing' ? '#settings' : `#settings/${btn.dataset.settingsTab}`; if (location.hash !== hash) history.pushState(null, '', hash); if (btn.dataset.settingsTab === 'account') loadAccount(); }));
+$('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+
+async function loadAccount() {
+  if (runtimeMode !== 'hosted') return;
+  try {
+    const [profile, usage, plan] = await Promise.all([api('/api/auth/account'), api('/api/admin/usage'), api('/api/auth/account/plan')]);
+    $('#account-email').textContent = profile.email;
+    $('#account-id').textContent = profile.account_id;
+    $('#account-plan').textContent = profile.plan;
+    $('#account-status').textContent = profile.account_status;
+    $('#account-created').textContent = profile.created_at ? new Date(profile.created_at).toLocaleString() : '—';
+    $('#account-delete-hint').textContent = profile.email;
+    $('#account-google-status').textContent = profile.google_linked ? 'Google is linked to this account.' : 'Google is not linked to this account.';
+    $('#account-google-link-form').hidden = profile.google_linked || !profile.password_enabled || !hostedAuthOptions.google_enabled;
+    $('#account-google-reauth').hidden = !profile.google_linked || !hostedAuthOptions.google_enabled;
+    $('#account-google-unlink').hidden = !profile.google_linked || !profile.password_enabled;
+    $('#account-google-unlink-form').hidden = true;
+    $('#account-password-auth-hint').textContent = profile.password_enabled ? '' : 'Confirm with Google before setting a password.';
+    $('#account-current-password').required = profile.password_enabled;
+    $('#account-email-password').required = profile.password_enabled;
+    $('#account-delete-password').required = profile.password_enabled;
+    $('#account-delete-password').disabled = false;
+    $('#account-delete-password').placeholder = profile.password_enabled ? '' : 'Use Google confirmation';
+    const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
+    const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
+    $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
+    renderPlanCard(plan);
+  } catch (error) {
+    flash(errorMessage(error, 'Could not load account details.'), 'error');
+  }
+}
+
+// renderPlanCard shows the plan caps and current consumption. A cap of -1 is
+// rendered as "Unlimited" rather than a number.
+function renderPlanCard(plan) {
+  const el = $('#account-plan-card'); if (!el) return;
+  const fmt = value => (value === -1 ? 'Unlimited' : String(value));
+  const usage = plan.usage || {}; const limits = plan.limits || {};
+  const row = (label, used, cap) => `<div class="plan-row"><span class="plan-label">${h(label)}</span><span class="plan-value${cap !== -1 && used >= cap ? ' plan-full' : ''}">${h(used)} / ${h(fmt(cap))}</span></div>`;
+  el.innerHTML = [
+    row('Providers', usage.providers ?? 0, limits.max_providers ?? -1),
+    row('Client keys', usage.client_keys ?? 0, limits.max_client_keys ?? -1),
+    row('Virtual models', usage.virtual_models ?? 0, limits.max_virtual_models ?? -1),
+    row('Concurrent streams', '—', limits.max_concurrent_streams ?? -1),
+    row('Monthly requests', usage.monthly_requests ?? 0, limits.monthly_requests ?? -1),
+    `<div class="plan-row"><span class="plan-label">Activity retention</span><span class="plan-value">${h(fmt(limits.activity_retention_days ?? -1))} days</span></div>`,
+  ].join('');
+}
+
+// loadFooterVersion shows the deployed version/commit with an AGPL source link.
+async function loadFooterVersion() {
+  try {
+    const info = await fetch('/health/version').then(res => res.json());
+    const commit = info.commit || ''; const version = info.version || '';
+    const label = [version, commit].filter(Boolean).join(' · ') || 'development build';
+    const url = commit ? `https://github.com/dellarb/tiller-router/commit/${encodeURIComponent(commit)}` : 'https://github.com/dellarb/tiller-router';
+    $('#footer-source').innerHTML = `${h(label)} — <a href="${h(url)}" target="_blank" rel="noopener">source</a>`;
+  } catch { /* footer is best-effort */ }
+}
+
+// showLegalDocument renders a published legal document. Bodies are plain text
+// (no rich rendering), so they are inserted as textContent with preserved
+// whitespace to avoid any injection path.
+async function showLegalDocument(slug) {
+  $('#login-shell').hidden = false; $('#app').hidden = true; $('#platform-shell').hidden = true;
+  authView('legal-panel');
+  const body = $('#legal-body');
+  body.textContent = 'Loading…';
+  try {
+    const doc = await api(`/api/legal/${encodeURIComponent(slug)}`);
+    $('#legal-title').textContent = doc.title;
+    $('#legal-updated').textContent = doc.updated_at ? `Last updated ${date(doc.updated_at)}` : '';
+    body.textContent = doc.body;
+  } catch (error) {
+    $('#legal-title').textContent = 'Not found';
+    body.textContent = errorMessage(error, 'This document is not available.');
+  }
+}
+
+// refreshWizardButton shows/hides the top-bar Get started button based on
+// whether onboarding is still outstanding, and auto-opens the wizard on the
+// first hosted login when setup is incomplete.
+async function refreshWizardButton(autoOpen = false) {
+  if (runtimeMode !== 'hosted') { $('#open-wizard').hidden = true; return; }
+  try {
+    const status = await api('/api/auth/onboarding');
+    const show = Boolean(status.needs_onboarding);
+    $('#open-wizard').hidden = !show;
+    if (show && autoOpen) openWizard();
+  } catch { $('#open-wizard').hidden = true; }
+}
+
+const WIZARD_STEPS = ['Provider', 'Target', 'Client key', 'Connect'];
+let wizardStep = 0;
+const wizardState = { clientKey: '', modelName: '' };
+
+function openWizard() {
+  wizardStep = 0;
+  renderWizard();
+  const dialog = $('#wizard-dialog'); if (dialog && !dialog.open) dialog.showModal();
+}
+
+function renderWizard() {
+  const steps = $('#wizard-steps');
+  if (steps) steps.innerHTML = WIZARD_STEPS.map((label, index) => `<span class="wizard-step${index === wizardStep ? ' active' : ''}${index < wizardStep ? ' done' : ''}">${h(label)}</span>`).join('');
+  const body = $('#wizard-body'); if (!body) return;
+  $('#wizard-prev').disabled = wizardStep === 0;
+  $('#wizard-next').textContent = wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Continue';
+  if (wizardStep === 0) {
+    body.innerHTML = `<h3>Connect a provider</h3><p>Add the AI provider you want Tiller to route to. Your credential is encrypted at rest and never shown again.</p><button class="btn btn-primary" id="wizard-add-provider" type="button">Add provider</button><p class="meta-line">${state.providers.length ? h(state.providers.length + ' provider(s) configured.') : 'No providers configured yet.'}</p>`;
+    const button = $('#wizard-add-provider'); if (button) button.onclick = () => openProvider();
+  } else if (wizardStep === 1) {
+    body.innerHTML = `<h3>Choose a target</h3><p>Point the client at a real model, or create a virtual route to map a stable name and add fallbacks.</p><div class="wizard-actions"><button class="btn btn-secondary" id="wizard-add-virtual" type="button">Create virtual route (optional)</button></div><p class="meta-line">You can skip this and use a real model directly.</p>`;
+    const button = $('#wizard-add-virtual'); if (button) button.onclick = () => openVirtualModel();
+  } else if (wizardStep === 2) {
+    body.innerHTML = `<h3>Create a client key</h3><p>A client key is the API key your tools use. Tiller shows the secret once.</p><button class="btn btn-primary" id="wizard-add-client" type="button">Create client key</button>`;
+    const button = $('#wizard-add-client'); if (button) button.onclick = () => openClient();
+  } else {
+    const base = location.origin + '/v1';
+    const snippet = `curl ${base}/chat/completions -H "Authorization: Bearer $TILLER_API_KEY" -H "Content-Type: application/json" -d '{"model":"${wizardState.modelName || 'main'}","messages":[{"role":"user","content":"Hello"}]}'`;
+    body.innerHTML = `<h3>Point your tool at Tiller</h3><p>Use this endpoint and your client key (model name: <code>${h(wizardState.modelName || 'main')}</code>).</p><div class="secret-box"><code>${h(snippet)}</code><button class="btn btn-secondary" id="wizard-copy" type="button">Copy</button></div><p class="meta-line">Setup completes automatically when your first request routes successfully.</p>`;
+    const button = $('#wizard-copy'); if (button) button.onclick = () => navigator.clipboard?.writeText(snippet);
+  }
+}
+$('#wizard-prev').addEventListener('click', () => { if (wizardStep > 0) { wizardStep--; renderWizard(); } });
+$('#wizard-next').addEventListener('click', async () => {
+  if (wizardStep < WIZARD_STEPS.length - 1) { wizardStep++; renderWizard(); return; }
+  $('#wizard-dialog').close();
+  await refreshWizardButton(false);
+});
+$('#wizard-dismiss').addEventListener('click', async () => {
+  try { await api('/api/auth/onboarding/dismiss', { method: 'POST', body: '{}' }); } catch { /* best-effort */ }
+  $('#wizard-dialog').close(); $('#open-wizard').hidden = true;
+});
+$('#close-wizard').addEventListener('click', () => $('#wizard-dialog').close());
+$('#open-wizard').addEventListener('click', openWizard);
+$('#legal-back').addEventListener('click', () => { history.replaceState(null, '', '/login'); showLogin(); });
+
+$('#account-password-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-password-error').textContent = '';
+  try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); event.currentTarget.reset(); flash('Password updated. Other sessions were signed out.'); }
+  catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
+});
+$('#account-google-link-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-google-link-error').textContent = '';
+  try {
+    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password') }) });
+    location.assign(result.redirect_url);
+  } catch (error) { $('#account-google-link-error').textContent = errorMessage(error, 'Could not start Google linking.'); }
+});
+$('#account-google-reauth').addEventListener('click', async () => {
+  $('#account-google-error').textContent = '';
+  try {
+    const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+    location.assign(result.redirect_url);
+  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not start Google confirmation.'); }
+});
+$('#account-google-unlink').addEventListener('click', () => { $('#account-google-unlink-form').hidden = !$('#account-google-unlink-form').hidden; });
+$('#account-google-unlink-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget);
+  try {
+    await api('/api/auth/account/google', { method: 'DELETE', body: JSON.stringify({ password: form.get('password') }) });
+    await loadAccount(); flash('Google was unlinked from your account.');
+  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not unlink Google.'); }
+});
+$('#account-email-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
+  try { const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); event.currentTarget.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.'; }
+  catch (error) { note.textContent = errorMessage(error, 'Could not start the email change.'); }
+});
+$('#account-revoke-sessions').addEventListener('click', async () => {
+  const button = $('#account-revoke-sessions'); button.disabled = true; $('#account-sessions-error').textContent = '';
+  try { await api('/api/auth/account/sessions/revoke-all', { method: 'POST', body: '{}' }); showLogin(); }
+  catch (error) { $('#account-sessions-error').textContent = errorMessage(error, 'Could not sign out sessions.'); button.disabled = false; }
+});
+$('#account-export').addEventListener('click', async event => {
+  event.preventDefault(); $('#account-export-error').textContent = '';
+  try {
+    const response = await fetch('/api/auth/account/export', { credentials: 'same-origin' });
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(payload?.error?.message || `Export failed (${response.status})`); }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob); const link = document.createElement('a');
+    link.href = url; link.download = `tiller-account-export-${new Date().toISOString().slice(0, 10)}.zip`;
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+  } catch (error) { $('#account-export-error').textContent = errorMessage(error, 'Could not export your data.'); }
+});
+$('#account-delete-form').addEventListener('submit', async event => {
+  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-delete-error').textContent = '';
+  if (!window.confirm('Delete your account now? This is immediate and irreversible.')) return;
+  const button = $('#account-delete-form button[type="submit"]'); button.disabled = true;
+  try { const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: form.get('confirm'), password: form.get('password') }) }); flash(result.message || 'Account deleted.'); showLogin(); }
+  catch (error) { $('#account-delete-error').textContent = errorMessage(error, 'Could not delete the account.'); button.disabled = false; }
+});
 
 let entitySubmit = null;
 // Monotonic id for the currently-open entity dialog. A submit captures it and
@@ -2030,4 +2593,187 @@ navigate = function (view) {
 function liveStart() { live.start(); }
 function liveStop() { live.stop(); }
 
-(async function initialise() { state.view = viewFromHash(); try { const session = await api('/api/admin/session'); showApp(session); } catch { showLogin(); } })();
+(async function initialise() {
+  try {
+    const runtime = await fetch('/api/runtime', { credentials: 'same-origin' }).then(res => res.json());
+    runtimeMode = runtime.mode === 'hosted' ? 'hosted' : 'local';
+    if (runtimeMode === 'hosted') {
+      $('#login-identity-label').firstChild.textContent = 'Email ';
+      $('#login-submit').textContent = 'Sign in';
+      try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      $('#google-signin').hidden = !hostedAuthOptions.google_enabled;
+    }
+    const path = location.pathname;
+    const query = new URLSearchParams(location.search);
+    const token = query.get('token');
+    if (runtimeMode === 'hosted' && path.startsWith('/platform')) {
+      try {
+        const session = await api('/api/platform/session');
+        state.csrf = session.csrf_token;
+        $('#login-shell').hidden = true;
+        $('#platform-shell').hidden = false;
+        await loadPlatformDashboard();
+      } catch { showLogin(); }
+      return;
+    }
+    if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
+      authView('verify-panel');
+      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
+      return;
+    }
+    if (runtimeMode === 'hosted' && path === '/reset-password' && token) authView('reset-form');
+    else if (runtimeMode === 'hosted' && query.get('google_signup') === '1') {
+      history.replaceState(null, '', '/login');
+      authView('google-consent-form');
+      return;
+    }
+    else if (runtimeMode === 'hosted' && path === '/confirm-email-change' && token) {
+      authView('verify-panel');
+      try {
+        const result = await api('/api/auth/email-change/confirm', { method: 'POST', body: JSON.stringify({ token }) });
+        $('#verify-message').textContent = `Your email address is now ${result.email}.`;
+        $('#verify-login').hidden = false;
+        history.replaceState(null, '', '/login');
+      } catch (error) {
+        $('#verify-message').textContent = '';
+        showAuthError('verify-error', error, 'This email-change link is invalid or expired.');
+      }
+      return;
+    }
+    else if (runtimeMode === 'hosted' && path.startsWith('/legal/')) {
+      await showLegalDocument(path.slice('/legal/'.length));
+      return;
+    }
+    else {
+      state.view = viewFromHash();
+      const sessionPath = runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session';
+      const authError = runtimeMode === 'hosted' ? query.get('auth_error') : '';
+      const googleLinked = runtimeMode === 'hosted' && query.get('google_linked') === '1';
+      const googleReauth = runtimeMode === 'hosted' && query.get('google_reauth') === '1';
+      if (authError || googleLinked || googleReauth) history.replaceState(null, '', location.pathname + location.hash);
+      try {
+        const session = await api(sessionPath);
+        showApp(session);
+        if (googleLinked) flash('Google is linked to your account.');
+        else if (googleReauth) flash('Google confirmed your identity. Complete the account change within five minutes.');
+        else if (authError) flash(googleAuthErrorMessage(authError), 'error');
+      } catch {
+        showLogin();
+        if (authError) $('#login-error').textContent = googleAuthErrorMessage(authError);
+      }
+    }
+  } catch { showLogin(); }
+})();
+
+function googleAuthErrorMessage(code) {
+  const messages = {
+    google_failed: 'Google sign-in could not be completed. Try again.',
+    google_expired: 'That Google sign-in link expired. Start again.',
+    google_unavailable: 'Google sign-in is temporarily unavailable.',
+    google_link_required: 'This Google email already has a Tiller account. Sign in to it, then link Google in Account settings.',
+    google_already_linked: 'That Google account is already linked to a Tiller account.',
+    google_session_expired: 'Your Tiller session expired. Sign in and try again.',
+    signup_unavailable: 'Signup is currently unavailable.',
+  };
+  return messages[code] || 'Google sign-in could not be completed. Try again.';
+}
+
+async function loadPlatformDashboard() {
+  const token = ++state.platformUsersLoadToken;
+  const settings = await api('/api/platform/settings');
+  $('#backup-card').hidden = true;
+  const form = $('#platform-settings-form');
+  form.elements.hosted_signup_enabled.checked = !!settings.hosted_signup_enabled;
+  form.elements.audit_retention_days.value = settings.audit_retention_days;
+  form.elements.mail_provider.value = settings.mail?.provider || '';
+  applyMailProviderVisibility(settings.mail?.provider || '');
+  form.elements.mail_from.value = settings.mail?.from || '';
+   form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
+   form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
+   form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
+  form.elements.mail_smtp_mode.value = settings.mail?.smtp_mode || 'starttls';
+  form.elements.google_signin_enabled.checked = !!settings.google?.enabled;
+  form.elements.google_client_id.value = settings.google?.client_id || '';
+  form.elements.google_client_secret.value = '';
+  form.elements.clear_google_client_secret.checked = false;
+  form.elements.turnstile_enabled.checked = !!settings.turnstile?.enabled;
+  form.elements.turnstile_site_key.value = settings.turnstile?.site_key || '';
+  form.elements.turnstile_secret.value = '';
+  form.elements.clear_turnstile_secret.checked = false;
+  $('#google-settings-status').textContent = `Client secret ${settings.google?.secret_configured ? 'stored' : 'missing'}. Redirect URI: ${settings.google?.redirect_uri || ''}`;
+  $('#turnstile-settings-status').textContent = `Secret key ${settings.turnstile?.secret_configured ? 'stored' : 'missing'}. Challenge hostname: ${settings.turnstile?.hostname || ''}`;
+  $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
+  const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });
+  if (state.platformUsersSearch) params.set('search', state.platformUsersSearch);
+  const users = await api(`/api/platform/users?${params}`);
+  if (token !== state.platformUsersLoadToken) return;
+  const userRows = users.data || [];
+  $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<button class="btn btn-small btn-secondary" data-account-plan="${h(user.account_id)}" data-current-plan="${h(user.plan)}">Plan</button><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
+  $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
+  $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
+  $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || userRows.length < 100;
+  const audit = await api('/api/platform/audit?limit=100');
+  $('#platform-audit-list').innerHTML = (audit.data || []).map(row => `<div class="platform-list-item"><strong>${h(row.event)}</strong><small>${h(row.created_at)} · ${h(row.target_id || '')}</small></div>`).join('') || '<p class="meta-line">No platform events.</p>';
+  try {
+    const queue = await api('/api/platform/mail/queue');
+    $('#platform-mail-queued').textContent = queue.queued;
+    $('#platform-mail-dead').textContent = queue.dead_recent;
+    $('#platform-mail-error').textContent = '';
+  } catch (error) {
+    $('#platform-mail-error').textContent = errorMessage(error, 'Could not load the mail queue.');
+  }
+  await loadPlatformPlans();
+  await loadPlatformLegal();
+}
+
+// loadPlatformPlans renders the entitlements catalogue as editable rows.
+async function loadPlatformPlans() {
+  const list = $('#platform-plans-list'); if (!list) return;
+  try {
+    const result = await api('/api/platform/plans');
+    const fields = [['max_providers', 'Providers'], ['max_client_keys', 'Client keys'], ['max_virtual_models', 'Virtual models'], ['max_concurrent_streams', 'Streams'], ['activity_retention_days', 'Retention days'], ['monthly_requests', 'Monthly requests']];
+    list.innerHTML = (result.data || []).map(plan => `<form class="platform-plan-form" data-plan="${h(plan.name)}"><strong>${h(plan.name)}</strong><div class="platform-plan-fields">${fields.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${h(plan[key])}"></label>`).join('')}</div><button class="btn btn-small btn-secondary" type="submit">Save</button></form>`).join('') || '<p class="meta-line">No plans.</p>';
+    $('#platform-plans-error').textContent = '';
+  } catch (error) {
+    $('#platform-plans-error').textContent = errorMessage(error, 'Could not load plans.');
+  }
+}
+
+// loadPlatformLegal renders the editable legal documents.
+async function loadPlatformLegal() {
+  const list = $('#platform-legal-list'); if (!list) return;
+  try {
+    const result = await api('/api/platform/legal');
+    list.innerHTML = (result.data || []).map(doc => `<form class="platform-legal-form" data-slug="${h(doc.slug)}"><strong>${h(doc.title)}</strong><label>Title<input type="text" name="title" value="${h(doc.title)}"></label><label>Body<textarea name="body" rows="8">${h(doc.body)}</textarea></label><button class="btn btn-small btn-secondary" type="submit">Publish</button></form>`).join('') || '<p class="meta-line">No documents.</p>';
+    $('#platform-legal-error').textContent = '';
+  } catch (error) {
+    $('#platform-legal-error').textContent = errorMessage(error, 'Could not load legal documents.');
+  }
+}
+
+$('#platform-plans-list').addEventListener('submit', async event => {
+  const form = event.target.closest('.platform-plan-form'); if (!form) return;
+  event.preventDefault(); const data = new FormData(form);
+  const payload = { max_providers: Number(data.get('max_providers')), max_client_keys: Number(data.get('max_client_keys')), max_virtual_models: Number(data.get('max_virtual_models')), max_concurrent_streams: Number(data.get('max_concurrent_streams')), activity_retention_days: Number(data.get('activity_retention_days')), monthly_requests: Number(data.get('monthly_requests')) };
+  try { await api(`/api/platform/plans/${encodeURIComponent(form.dataset.plan)}`, { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-plans-error').textContent = 'Saved.'; $('#platform-plans-error').style.color = 'var(--green)'; }
+  catch (error) { $('#platform-plans-error').style.color = ''; $('#platform-plans-error').textContent = errorMessage(error, 'Could not save the plan.'); }
+});
+$('#platform-legal-list').addEventListener('submit', async event => {
+  const form = event.target.closest('.platform-legal-form'); if (!form) return;
+  event.preventDefault(); const data = new FormData(form);
+  try { await api(`/api/platform/legal/${encodeURIComponent(form.dataset.slug)}`, { method: 'PUT', body: JSON.stringify({ title: data.get('title'), body: data.get('body') }) }); $('#platform-legal-error').textContent = 'Published.'; $('#platform-legal-error').style.color = 'var(--green)'; }
+  catch (error) { $('#platform-legal-error').style.color = ''; $('#platform-legal-error').textContent = errorMessage(error, 'Could not publish the document.'); }
+});
+function applyMailProviderVisibility(provider) {
+  document.querySelectorAll('#platform-settings-form [data-mail-when]').forEach(el => {
+    el.hidden = provider === '' || (el.dataset.mailWhen !== 'any' && el.dataset.mailWhen !== provider);
+  });
+}
+document.querySelector('#platform-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
+$('#platform-settings-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on', audit_retention_days: Number(form.get('audit_retention_days')), mail_provider: form.get('mail_provider'), mail_from: form.get('mail_from'), mail_smtp_host: form.get('mail_smtp_host'), mail_smtp_port: Number(form.get('mail_smtp_port')) || 0, mail_smtp_mode: form.get('mail_smtp_mode'), mail_smtp_username: form.get('mail_smtp_username'), google_signin_enabled: form.get('google_signin_enabled') === 'on', google_client_id: form.get('google_client_id'), clear_google_client_secret: form.get('clear_google_client_secret') === 'on', turnstile_enabled: form.get('turnstile_enabled') === 'on', turnstile_site_key: form.get('turnstile_site_key'), clear_turnstile_secret: form.get('clear_turnstile_secret') === 'on' }; const resendKey = String(form.get('mail_resend_api_key') || ''); const brevoKey = String(form.get('mail_brevo_api_key') || ''); const smtpPassword = String(form.get('mail_smtp_password') || ''); const googleSecret = String(form.get('google_client_secret') || ''); const turnstileSecret = String(form.get('turnstile_secret') || ''); if (resendKey) payload.mail_resend_api_key = resendKey; if (brevoKey) payload.mail_brevo_api_key = brevoKey; if (smtpPassword) payload.mail_smtp_password = smtpPassword; if (googleSecret) payload.google_client_secret = googleSecret; if (turnstileSecret) payload.turnstile_secret = turnstileSecret; try { await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-settings-error').textContent = 'Saved.'; $('#platform-settings-error').style.color = 'var(--green)'; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-settings-error', error, 'Could not save platform settings.'); } });
+$('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); const planButton = event.target.closest('[data-account-plan]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } if (planButton) { const accountID = planButton.dataset.accountPlan; const plan = window.prompt('Plan name for this account:', planButton.dataset.currentPlan || 'free'); if (plan) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
+  $('#platform-users-prev').onclick = () => { state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100); loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
+$('#platform-users-next').onclick = () => { state.platformUsersOffset += 100; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
+filterInput('#platform-user-search', value => { state.platformUsersSearch = value.trim(); state.platformUsersOffset = 0; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); });
+
+function updateEncryptionState(enc) { const el = $('#encryption-state'); if (!el) return; const st = (enc && enc.state) || 'disabled'; el.dataset.state = st; if (st === 'enabled') { el.textContent = 'Enabled — provider credentials are encrypted at rest.'; } else if (st === 'locked') { el.textContent = 'LOCKED — the master key is missing or does not match. Credential-bearing providers are unavailable until it is restored.'; } else { el.textContent = 'Disabled.'; } }

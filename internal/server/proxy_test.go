@@ -590,6 +590,150 @@ func TestOpenCodeFreeMinOutputTokensRejectsExplicitLowLimit(t *testing.T) {
 	}
 }
 
+// TestOpenCodeFreeShadowWireShape verifies the approved opencode-free
+// special case: anonymous free-tier requests mirror the genuine OpenCode
+// client's wire shape (captured against opencode/1.18.26) — "Bearer public"
+// auth, first-party UA, Accept */*, opaque ses_ affinity headers, no
+// X-Opencode-Client relay tell — and a Console-wrapped FreeTierError fails
+// loud with the router-owned free_tier_rejected code.
+func TestOpenCodeFreeShadowWireShape(t *testing.T) {
+	var mu sync.Mutex
+	var gotAuth, gotUA, gotAccept, gotClient, gotSession, gotAffinity, gotSessionID string
+	reject := false
+	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"object": "list",
+				"data":   []any{map[string]any{"id": "mimo-v2.5-free", "object": "model"}},
+			})
+			return
+		}
+		mu.Lock()
+		gotAuth, gotUA, gotAccept = r.Header.Get("Authorization"), r.Header.Get("User-Agent"), r.Header.Get("Accept")
+		gotClient, gotSession = r.Header.Get("X-Opencode-Client"), r.Header.Get("X-Opencode-Session")
+		gotAffinity, gotSessionID = r.Header.Get("x-session-affinity"), r.Header.Get("x-session-id")
+		shouldReject := reject
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if shouldReject {
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": map[string]any{"type": "FreeTierError", "message": "Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "resp", "object": "chat.completion", "model": "test",
+			"choices": []any{map[string]any{"message": map[string]any{"content": "ok"}}},
+			"usage":   map[string]any{"prompt_tokens": 1, "completion_tokens": 1},
+		})
+	}))
+	t.Cleanup(dedicated.Close)
+
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	status, payload, _ := api.request("POST", "/api/admin/providers", map[string]any{
+		"name": "opencode-free-shadow", "type": "opencode-free",
+		"base_url": dedicated.URL + "/v1", "protocols": []string{"chat", "responses"},
+	})
+	if status != 201 {
+		t.Fatalf("create provider: %d %v", status, payload)
+	}
+	providerID := payload["id"].(string)
+	status, payload, _ = api.request("POST", "/api/admin/providers/"+providerID+"/refresh", nil)
+	if status != 200 && status != 204 {
+		t.Fatalf("refresh: %d %v", status, payload)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
+	if status != 200 {
+		t.Fatalf("list models: %d %v", status, payload)
+	}
+	var modelID string
+	for _, raw := range payload["data"].([]any) {
+		m := raw.(map[string]any)
+		if m["upstream_model_id"] == "mimo-v2.5-free" {
+			modelID = m["id"].(string)
+		}
+	}
+	if modelID == "" {
+		t.Fatal("free discovery did not surface mimo-v2.5-free")
+	}
+	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "shadow test", "type": "catalogue"})
+	if status != 201 {
+		t.Fatalf("create key: %d %v", status, payload)
+	}
+	clientID := payload["id"].(string)
+	clientSecret := payload["secret"].(string)
+	status, _, _ = api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{
+		"defaults": []any{}, "permissions": []any{map[string]any{"kind": "real", "model_id": modelID, "enabled": true}},
+	})
+	if status != 204 {
+		t.Fatalf("permissions: %d", status)
+	}
+
+	call := func() (int, map[string]any) {
+		t.Helper()
+		raw, _ := json.Marshal(map[string]any{
+			"model":      "opencode-free-shadow/mimo-v2.5-free",
+			"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
+			"max_tokens": 32,
+		})
+		req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(raw))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+clientSecret)
+		resp, err := api.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	// Happy path: assert the shadow wire shape. The call must land first —
+	// values are only populated by the mock handler — then copied under lock
+	// because the handler needs the same mutex on the next call.
+	if status, out := call(); status != 200 {
+		t.Fatalf("shadow request: expected 200, got %d (%v)", status, out)
+	}
+	mu.Lock()
+	auth, ua, accept := gotAuth, gotUA, gotAccept
+	client, session, affinity, sessionID := gotClient, gotSession, gotAffinity, gotSessionID
+	mu.Unlock()
+	if auth != "Bearer public" {
+		t.Errorf("shadow Authorization = %q, want Bearer public", auth)
+	}
+	if ua != openCodeFreeUserAgent {
+		t.Errorf("shadow User-Agent = %q, want %q", ua, openCodeFreeUserAgent)
+	}
+	if accept != "*/*" {
+		t.Errorf("shadow Accept = %q, want */*", accept)
+	}
+	if client != "" {
+		t.Errorf("shadow X-Opencode-Client = %q, want absent", client)
+	}
+	if session != "" {
+		t.Errorf("shadow X-Opencode-Session = %q, want absent (genuine client sends affinity headers only)", session)
+	}
+	if affinity == "" || sessionID == "" {
+		t.Errorf("shadow affinity headers missing: affinity=%q session-id=%q", affinity, sessionID)
+	}
+	if strings.Contains(affinity, "tiller") || strings.Contains(sessionID, "tiller") {
+		t.Errorf("shadow session must not carry the tiller tell: %q %q", affinity, sessionID)
+	}
+	if !strings.HasPrefix(affinity, "ses_") || !strings.HasPrefix(sessionID, "ses_") {
+		t.Errorf("shadow session must mirror the ses_ shape: %q %q", affinity, sessionID)
+	}
+
+	// Rejection path: Console-wrapped FreeTierError maps to free_tier_rejected.
+	mu.Lock()
+	reject = true
+	mu.Unlock()
+	if status, out := call(); status != 400 {
+		t.Fatalf("rejection: expected 400, got %d (%v)", status, out)
+	} else if errObj, ok := out["error"].(map[string]any); !ok || errObj["code"] != "free_tier_rejected" {
+		t.Fatalf("rejection: expected free_tier_rejected, got %v", out)
+	}
+}
+
 // TestVirtualAllTargetsBelowMinOutputReturns400 verifies that when every
 // target of a virtual model is skipped because the client's explicit
 // max_tokens is below each provider minimum, the router returns 400

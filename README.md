@@ -120,6 +120,7 @@ Tiller includes adapters for a broad set of native and OpenAI-compatible provide
 - MiniMax
 - OpenCode Zen
 - OpenCode Go
+- Command Code
 - Ollama Local
 - Ollama Cloud
 - Generic OpenAI-compatible
@@ -153,8 +154,8 @@ Provider support varies because upstream APIs vary. The beta should be treated a
        ports:
          - "8080:8080"
        environment:
-         TILLER_ADMIN_USERNAME: admin
-         TILLER_ADMIN_PASSWORD: replace-this-with-a-long-random-password
+         TILLER_USERNAME: admin
+         TILLER_PASSWORD: replace-this-with-a-long-random-password
        volumes:
          - ./data:/data
        restart: unless-stopped
@@ -168,7 +169,9 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY
+   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
+
+> **Renamed credential vars:** `TILLER_ADMIN_USERNAME` / `TILLER_ADMIN_PASSWORD` are now `TILLER_USERNAME` / `TILLER_PASSWORD`, to deconflict with the hosted platform console's `TILLER_PLATFORM_ADMIN_*`. The old names still work and log a startup deprecation warning; the new names win if both are set.
 
 > **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall.
 
@@ -177,7 +180,7 @@ Provider support varies because upstream APIs vary. The beta should be treated a
 ```bash
 git clone https://github.com/dellarb/tiller-router.git
 cd tiller-router
-cp .env.example .env   # set TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD
+cp .env.example .env   # set TILLER_USERNAME / TILLER_PASSWORD
 docker compose up -d --build
 ```
 
@@ -185,22 +188,97 @@ The repository's `docker-compose.yml` builds locally instead of pulling an image
 
 The service starts as root to self-fix `./data` ownership, then drops to a non-root user before serving.
 
-### Other compose / env options
+### Hosted Compose networking
 
-The repo's `docker-compose.yml` plus `.env` cover the most common customisations without editing any Go code. The full list of recognised variables is in `.env.example`.
+The main `docker-compose.yml` remains the simple self-hosted appliance: it
+keeps direct `TILLER_PORT` publishing and does not require a reverse proxy.
+Hosted deployments use the separate `docker-compose.hosted.yml` override:
 
 ```bash
-TILLER_ADMIN_USERNAME=admin                          # admin login for the web UI
-TILLER_ADMIN_PASSWORD=replace-with-a-long-random-password   # admin password
+TILLER_PUBLIC_URL=https://app.example.com TILLER_TRUSTED_PROXY=172.20.0.2/32 \
+docker compose -f docker-compose.yml -f docker-compose.hosted.yml up -d --build
+```
+
+Set the required platform admin credentials in `.env` as well. Choose the
+trusted proxy IP/CIDR from the router's ingress network; don't trust the entire
+network unless every host on it is a controlled reverse proxy.
+
+The hosted override removes direct host-port publishing and attaches Tiller to
+a managed `tiller-router-egress` network containing only Tiller, plus an
+ingress network for the reverse proxy. It does not use the implicit Compose
+default network.
+
+If the reverse proxy runs in a different Compose project, point the hosted
+override at its existing Docker network:
+
+```dotenv
+TILLER_INGRESS_NETWORK=proxy_network
+TILLER_INGRESS_NETWORK_EXTERNAL=true
+```
+
+The hosted deployment requires `TILLER_PUBLIC_URL` and
+`TILLER_TRUSTED_PROXY`, set to the direct reverse proxy's IP/CIDR so client IP
+rate limits and audit records use the real client address. It still uses the
+application-level `SafeTransport` for public HTTPS
+destination validation and SSRF protection. Docker network isolation is only
+defense in depth; it is not a substitute for the application policy or an
+optional VPS firewall hardening rule.
+
+### Hosted Google sign-in and Turnstile
+
+Configure customer sign-in from **`/platform` → Signup and mail** after the
+hosted service is running. These integrations are off until enabled there, and
+their secrets are encrypted at rest with the platform settings.
+
+For Google sign-in, create an OAuth client for a web application in Google
+Cloud. Add the redirect URI displayed beside the client ID field in the
+platform dashboard; it is the exact URL
+`https://<your-hostname>/api/auth/google/callback`. Enter the OAuth client ID
+and secret, then enable Google sign-in. Google supplies the verified email and
+stable subject identifier. A Google email that already belongs to a Tiller
+account is never linked automatically: sign in to that account and link Google
+from **Settings → Account**.
+
+For bot protection, create a Cloudflare Turnstile widget and allow your hosted
+hostname in its widget settings. Enter its site key and secret key in the
+platform dashboard, then enable Turnstile. The site key is public; the secret
+is kept server-side. Turnstile protects signup, verification resend, password
+reset requests, and the start of Google sign-in. Password login keeps its
+existing rate limits. Turnstile works without routing the site through
+Cloudflare. See the [Google web-server OAuth guide](https://developers.google.com/identity/protocols/oauth2/web-server)
+and [Cloudflare Turnstile setup guide](https://developers.cloudflare.com/turnstile/get-started/).
+
+The Google OAuth client secret and Turnstile secret key are encrypted at rest.
+The browser receives neither secret. If you rotate a secret, enter the new
+value and save; leave it blank to keep the stored value. Use the explicit
+“Clear saved … secret” checkbox to remove one.
+
+### Other compose / env options
+
+The repo's `docker-compose.yml` plus `.env` cover the most common local
+customisations without editing any Go code. The full list of local variables is
+in `.env.example`. The hosted override additionally requires the platform
+credentials below. `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated
+`TILLER_ADMIN_*` aliases) are only needed there when converting an existing
+local installation:
+
+```bash
+TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
+TILLER_PLATFORM_ADMIN_PASSWORD=replace-with-a-long-random-password
+TILLER_TRUSTED_PROXY=172.20.0.2/32                   # required hosted: direct reverse proxy IP/CIDR
+TILLER_USERNAME=owner@example.com                     # optional one-time migration input
+TILLER_PASSWORD=existing-local-password               # optional one-time migration input
 TILLER_PORT=8080                                     # host port (default 8080)
 TILLER_RUN_UID=1000                                  # runtime uid (default 65532)
 TILLER_RUN_GID=1000                                  # runtime gid (default 65532)
 TILLER_UID=1000                                      # build-time uid for baked-in files (default 65532)
 TILLER_GID=1000                                      # build-time gid for baked-in files (default 65532)
-TILLER_TRUSTED_PROXY=10.1.1.12                       # IP/CIDR of reverse proxy if using one
 TILLER_MODELS_DEV_ENABLED=true                       # models.dev metadata (default true)
 TILLER_ADMIN_SESSION_TTL=720h                        # admin session lifetime (default 720h)
 TILLER_ADMIN_COOKIE_SECURE=true                     # force Secure on the admin cookie (auto set to true if https used)
+TILLER_PUBLIC_URL=https://app.example.com             # required by hosted override
+TILLER_INGRESS_NETWORK=proxy_network                 # optional external proxy network
+TILLER_INGRESS_NETWORK_EXTERNAL=true                 # set only for a pre-existing network
 ```
 
 ### First steps
@@ -255,9 +333,9 @@ With a Single key, `main` can be redirected from the control panel without chang
 
 ## Data and security
 
-Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material.
+Tiller stores its state under the configured data directory, normally `./data`. This includes sensitive provider credential material. Core configuration lives in `tiller-router.db` (self-hosted SQLite); high-churn Activity telemetry lives separately in `activity.db` and is disposable — losing it does not affect routing or configuration. Back up `tiller-router.db` (and the master key); `activity.db` can be backed up separately only if Activity history matters. Hosted Tiller is intended to move to PostgreSQL; ordinary self-hosting never requires an external database.
 
-**Provider credentials are not encrypted at rest.** They are stored in recoverable form in the SQLite database so Tiller can authenticate requests to your upstream providers; encryption at rest is a future-roadmap consideration. Take care with **where you store the persistent database** (`./data`) and any backups of it — keep them on storage you trust and treat them as secrets.
+**Recoverable provider credentials are encrypted at rest, always on.** Provider API credentials, OAuth tokens, and the notification auth header are sealed with AES-256-GCM; the master key lives outside the database (`TILLER_MASTER_KEY` / `TILLER_MASTER_KEY_FILE`, or a generated `./data/master.key`). **Back the master key up separately** — without it, existing encrypted credentials cannot be recovered. A database backup does not contain the key; a full `./data` archive does, and must be treated as secret. If encrypted values exist but the key is missing or wrong, Tiller starts in a locked state and credential-bearing providers stay unavailable until the key is restored. Rotate with `tiller-router rotate-master-key` (service stopped). Take care with **where you store `./data`** and any backups of it — keep them on storage you trust.
 
 Client API-key secrets are shown once and stored in hashed form for authentication. Activity is metadata-only by default. If you explicitly enable Detailed Error Logging, failed request bodies and provider error bodies may be stored, bounded to 1 MiB, and Activity exports containing those records must be treated as sensitive.
 
