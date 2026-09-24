@@ -3,11 +3,13 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,10 +17,44 @@ import (
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
-	for _, providerType := range []string{"openai", "codex-subscription", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
+	for _, providerType := range []string{"openai", "codex-subscription", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "commandcode", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
 		if _, ok := Lookup(providerType); !ok {
 			t.Errorf("missing provider type %s", providerType)
 		}
+	}
+}
+
+func TestDiscoverCommandCodeUsesSupportedEndpoints(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/provider/v1/models" {
+			t.Errorf("discovery path = %q, want /provider/v1/models", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("authorization = %q, want bearer credential", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
+			map[string]any{"id": "deepseek/deepseek-v4-flash", "name": "DeepSeek V4 Flash", "object": "model", "context_length": 1000000, "supported_endpoints": []string{"/v1/chat/completions", "/v1/responses"}, "supported_parameters": []string{"tools"}},
+			map[string]any{"id": "claude-sonnet-5", "name": "Claude Sonnet 5", "object": "model", "supported_endpoints": []string{"/v1/messages"}},
+			map[string]any{"id": "embedding-only", "object": "embedding"},
+		}})
+	}))
+	defer upstream.Close()
+
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "commandcode", BaseURL: upstream.URL + "/provider/v1", Credential: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	if models[0].ID != "claude-sonnet-5" || models[0].NativeProtocol != ProtocolMessages {
+		t.Fatalf("Claude model = %+v, want Messages-native", models[0])
+	}
+	if models[1].ID != "deepseek/deepseek-v4-flash" || models[1].NativeProtocol != ProtocolResponses {
+		t.Fatalf("DeepSeek model = %+v, want Responses-native", models[1])
+	}
+	if models[1].ContextLength != 1000000 || models[1].SupportsTools == nil || !*models[1].SupportsTools {
+		t.Fatalf("DeepSeek metadata = %+v, want live metadata", models[1])
 	}
 }
 
@@ -54,6 +90,17 @@ func TestSetResponseHeaderTimeout(t *testing.T) {
 	}
 	if updated.ResponseHeaderTimeout != 120*time.Second {
 		t.Fatalf("ResponseHeaderTimeout after set = %v, want 120s", updated.ResponseHeaderTimeout)
+	}
+}
+
+func TestHostedRegistryDoesNotFollowRedirects(t *testing.T) {
+	client := NewHostedRegistry().HTTPClient()
+	request, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.CheckRedirect(request, nil); !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("hosted redirect policy = %v, want http.ErrUseLastResponse", err)
 	}
 }
 
@@ -414,12 +461,21 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 			_ = json.NewDecoder(r.Body).Decode(&input)
 			switch input["model"] {
 			case "qwen3.5:397b":
-				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{"llama.context_length": 262144}, "parameters": map[string]any{"num_ctx": 4096}})
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"model_info":   map[string]any{"llama.context_length": 262144},
+					"parameters":   map[string]any{"num_ctx": 4096},
+					"capabilities": []string{"completion", "thinking", "tools", "vision"},
+					"thinking":     map[string]any{"values": []any{"low", "high", "max"}, "default": "max"},
+				})
 			case "llama3:8b":
 				// No trained context reported; fall back to runtime num_ctx.
 				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{}, "parameters": map[string]any{"num_ctx": 8192}})
 			case "deepseek-v4-flash:0731":
-				_ = json.NewEncoder(w).Encode(map[string]any{"model_info": map[string]any{"deepseek.context_length": 1048576}, "parameters": map[string]any{}})
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"model_info":   map[string]any{"deepseek.context_length": 1048576},
+					"parameters":   map[string]any{},
+					"capabilities": []string{"completion", "tools"},
+				})
 			default:
 				http.Error(w, "unknown model", 404)
 			}
@@ -443,6 +499,105 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 	}
 	if models[2].ID != "deepseek-v4-flash:0731" || models[2].ContextLength != 1048576 {
 		t.Fatalf("deepseek-v4-flash:0731 architecture context not captured: %+v", models[2])
+	}
+	// Provider-reported capabilities land on the model and are not left to
+	// models.dev.
+	qwen := models[0]
+	if qwen.SupportsVision == nil || !*qwen.SupportsVision {
+		t.Errorf("qwen3.5 vision = %v, want true", qwen.SupportsVision)
+	}
+	if qwen.SupportsTools == nil || !*qwen.SupportsTools {
+		t.Errorf("qwen3.5 tools = %v, want true", qwen.SupportsTools)
+	}
+	if qwen.SupportsReasoning == nil || !*qwen.SupportsReasoning {
+		t.Errorf("qwen3.5 reasoning = %v, want true", qwen.SupportsReasoning)
+	}
+	if len(qwen.InputModalities) != 2 || qwen.InputModalities[0] != "text" || qwen.InputModalities[1] != "image" {
+		t.Errorf("qwen3.5 input modalities = %v, want [text image]", qwen.InputModalities)
+	}
+	if qwen.ReasoningCapabilities == nil || len(qwen.ReasoningCapabilities.Options) != 1 {
+		t.Fatalf("qwen3.5 reasoning capabilities = %+v", qwen.ReasoningCapabilities)
+	}
+	if got := qwen.ReasoningCapabilities.Options[0]; got.Type != ReasoningOptionEffort || !reflect.DeepEqual(got.Values, []string{"low", "high", "max"}) {
+		t.Errorf("qwen3.5 reasoning option = %+v", got)
+	}
+	if qwen.ReasoningCapabilities.DefaultEffort != "max" {
+		t.Errorf("qwen3.5 default effort = %q, want max", qwen.ReasoningCapabilities.DefaultEffort)
+	}
+	// A capabilities array without vision leaves vision unknown (nil), not
+	// false: Ollama's absence is not an explicit denial.
+	ds := models[2]
+	if ds.SupportsVision != nil {
+		t.Errorf("deepseek vision = %v, want nil (unknown)", ds.SupportsVision)
+	}
+	if ds.SupportsTools == nil || !*ds.SupportsTools {
+		t.Errorf("deepseek tools = %v, want true", ds.SupportsTools)
+	}
+	// A model whose /api/show omits capabilities entirely keeps every flag
+	// unknown.
+	llama := models[1]
+	if llama.SupportsTools != nil || llama.SupportsVision != nil || llama.SupportsReasoning != nil {
+		t.Errorf("llama3 flags should be unknown, got tools=%v vision=%v reasoning=%v", llama.SupportsTools, llama.SupportsVision, llama.SupportsReasoning)
+	}
+	if llama.InputModalities != nil {
+		t.Errorf("llama3 input modalities = %v, want nil", llama.InputModalities)
+	}
+}
+
+func TestOllamaThinkingDescriptorNormalization(t *testing.T) {
+	cases := []struct {
+		name        string
+		values      []any
+		def         any
+		wantValues  []string
+		wantDefault string
+		wantNil     bool
+	}{
+		{
+			name:        "named effort levels",
+			values:      []any{"low", "high", "max"},
+			def:         "max",
+			wantValues:  []string{"low", "high", "max"},
+			wantDefault: "max",
+		},
+		{
+			name:        "boolean false becomes the none effort",
+			values:      []any{false, "low", "high"},
+			def:         "high",
+			wantValues:  []string{"none", "low", "high"},
+			wantDefault: "high",
+		},
+		{
+			name:       "boolean-only descriptor is an unrestricted selector",
+			values:     []any{false, true},
+			def:        true,
+			wantValues: []string{"none"},
+		},
+		{
+			name:    "no values is unknown",
+			values:  nil,
+			wantNil: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ollamaReasoningCapabilities(&ollamaThinking{Values: tc.values, Default: tc.def})
+			if tc.wantNil {
+				if got != nil {
+					t.Fatalf("want nil, got %+v", got)
+				}
+				return
+			}
+			if got == nil || len(got.Options) != 1 {
+				t.Fatalf("unexpected capabilities: %+v", got)
+			}
+			if opt := got.Options[0]; opt.Type != ReasoningOptionEffort || !reflect.DeepEqual(opt.Values, tc.wantValues) {
+				t.Errorf("option = %+v, want effort %v", opt, tc.wantValues)
+			}
+			if got.DefaultEffort != tc.wantDefault {
+				t.Errorf("default effort = %q, want %q", got.DefaultEffort, tc.wantDefault)
+			}
+		})
 	}
 }
 
@@ -730,14 +885,22 @@ func TestValidateBaseURL(t *testing.T) {
 }
 
 func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
+	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.156.1"})
+	}))
+	defer release.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = release.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/models" {
 			t.Errorf("discovery path = %q, want /models", r.URL.Path)
 			http.Error(w, "wrong path", http.StatusNotFound)
 			return
 		}
-		if got := r.URL.Query().Get("client_version"); got != codex.ClientVersion {
-			t.Errorf("client_version = %q, want %q", got, codex.ClientVersion)
+		if got := r.URL.Query().Get("client_version"); got != "0.156.1" {
+			t.Errorf("client_version = %q, want resolved 0.156.1", got)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{
 			map[string]any{
@@ -821,5 +984,98 @@ func TestCodexEffortAliases(t *testing.T) {
 				t.Fatalf("codexEffortAliases = %v, want ultra->%s", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestResolveLatestVersionParsesTag(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Accept"); got != "application/json" {
+			t.Errorf("accept = %q, want application/json", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.156.1", "assets": []any{}})
+	}))
+	defer upstream.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = upstream.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
+	got, err := codex.ResolveLatestVersion(context.Background(), upstream.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "0.156.1" {
+		t.Fatalf("version = %q, want 0.156.1", got)
+	}
+}
+
+func TestResolveLatestVersionRejectsBadPayloads(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		body   map[string]any
+	}{
+		{name: "http error", status: http.StatusBadGateway},
+		{name: "missing tag", status: http.StatusOK, body: map[string]any{}},
+		{name: "non-rust tag", status: http.StatusOK, body: map[string]any{"tag_name": "v1.2.3"}},
+		{name: "unparseable version", status: http.StatusOK, body: map[string]any{"tag_name": "rust-vgarbage"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				if tc.body != nil {
+					_ = json.NewEncoder(w).Encode(tc.body)
+				}
+			}))
+			defer upstream.Close()
+			original := codex.ReleaseChannelURL
+			codex.ReleaseChannelURL = upstream.URL
+			defer func() { codex.ReleaseChannelURL = original }()
+
+			if _, err := codex.ResolveLatestVersion(context.Background(), upstream.Client()); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
+// TestCodexClientVersionFallsBackToFloor verifies discovery degrades to the
+// pinned floor when the release channel is unreachable, rather than failing.
+func TestCodexClientVersionFallsBackToFloor(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "down", http.StatusServiceUnavailable)
+	}))
+	defer upstream.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = upstream.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
+	r := NewRegistry()
+	if got := r.codexClientVersion(context.Background()); got != codex.ClientVersion {
+		t.Fatalf("version = %q, want floor %q", got, codex.ClientVersion)
+	}
+}
+
+// TestCodexClientVersionCachesResolution verifies a successful resolution is
+// reused without contacting the release channel again within the TTL.
+func TestCodexClientVersionCachesResolution(t *testing.T) {
+	var hits int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.160.0"})
+	}))
+	defer upstream.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = upstream.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
+	r := NewRegistry()
+	for i := 0; i < 3; i++ {
+		if got := r.codexClientVersion(context.Background()); got != "0.160.0" {
+			t.Fatalf("version = %q, want 0.160.0", got)
+		}
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("release channel hits = %d, want 1", got)
 	}
 }

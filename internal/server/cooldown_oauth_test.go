@@ -72,7 +72,7 @@ func oauthVirtualHarness(t *testing.T, failures int) (*testAPI, string, string, 
 	}
 	t.Cleanup(func() { db.Close() })
 
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	app.providers.Registry().SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: oauthServer}})
 
 	router := httptest.NewServer(app.Handler())
@@ -93,8 +93,7 @@ func oauthVirtualHarness(t *testing.T, failures int) (*testAPI, string, string, 
 	providerID := payload["id"].(string)
 
 	expired := time.Now().Add(-time.Minute)
-	store := oauth.NewStore(db.SQL)
-	if err := store.Put(context.Background(), oauth.TokenRecord{
+	putOAuthToken(t, db, oauth.TokenRecord{
 		ProviderID:   providerID,
 		AccessToken:  "stale-token",
 		RefreshToken: "refresh-token",
@@ -103,9 +102,7 @@ func oauthVirtualHarness(t *testing.T, failures int) (*testAPI, string, string, 
 		AuthState:    oauth.AuthConnected,
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {
@@ -207,7 +204,7 @@ func TestOAuthRefreshFailsFallsThroughNoCooldownForOthers(t *testing.T) {
 	api.server.providers.Registry().SetHTTPClient(&http.Client{Transport: &routingTransport{oauthServer: rejecting}})
 
 	// Force a refresh; it must fail and transition auth_state.
-	_ = api.server.providers.ForceOAuthRefresh(context.Background(), &providers.Instance{ID: providerID, Type: "codex-subscription"})
+	_ = api.server.providers.ForceOAuthRefresh(context.Background(), database.LocalAccountID, &providers.Instance{ID: providerID, Type: "codex-subscription"})
 
 	// The target is now unavailable (reconnect_required), so a request through
 	// the ordered-fallback virtual model must fail fast (503). Per the spec, a

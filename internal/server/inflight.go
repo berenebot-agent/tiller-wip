@@ -33,74 +33,105 @@ type inflightDelta struct {
 }
 
 // Single-ticket liveness: each in-flight request hangs one ticket, tracked in
-// clientStates keyed by client key id + route id. Parallel requests from one
-// client key are normal, so a ticket must be per (client, route): keying by
-// client alone would let a second route overwrite the first route identity
-// even though both remain active. Target legs keep their own map for
-// per-attempt fallback granularity.
+// clientStates keyed by account + client key id + route id. Parallel requests
+// from one client key are normal, so a ticket must be per (client, route):
+// keying by client alone would let a second route overwrite the first route
+// identity even though both remain active. Target legs keep their own map for
+// per-attempt fallback granularity. All keys are account-scoped so a snapshot
+// for one tenant can never include another's activity.
 type inflightTracker struct {
 	mu           sync.Mutex
-	clientStates map[string]inflightState // keyed by client key id + NUL + route id
-	targetStates map[string]inflightState // keyed by route id/provider model pair
-	emit         func(inflightDelta)
+	clientStates map[string]inflightState // keyed by account + NUL + client key id + NUL + route id
+	targetStates map[string]inflightState // keyed by account + NUL + route id + NUL + provider model
+	emit         func(accountID string, delta inflightDelta)
 }
 
-// inflightClientKey joins the two identities a client ticket carries. An empty routeID
-// collapses to the client-only key, matching the pre-resolution case.
-func inflightClientKey(id, routeID string) string {
-	return id + "\x00" + routeID
+// inflightClientKey joins the identities a client ticket carries. An empty
+// routeID collapses to the account+client key, matching the pre-resolution
+// case.
+func inflightClientKey(accountID, id, routeID string) string {
+	return accountID + "\x00" + id + "\x00" + routeID
+}
+
+func inflightTargetKey(accountID, routeID, targetID string) string {
+	return accountID + "\x00" + routeID + "\x00" + targetID
 }
 
 // clientStart begins client+route level tracking. routeID is the resolved route
 // (virtual or real-model ID); it is echoed as the delta ID so live consumers
 // see client and route identity together. Empty when resolution has not
 // happened yet (delta keeps today's client-only shape).
-func (t *inflightTracker) clientStart(id, routeID, requestedModel string) {
+func (t *inflightTracker) clientStart(accountID, id, routeID, requestedModel string) {
 	t.mu.Lock()
-	key := inflightClientKey(id, routeID)
+	t.clientStartLocked(accountID, id, routeID, requestedModel)
+	t.mu.Unlock()
+	t.emit(accountID, inflightDelta{ID: routeID, ClientID: id, Active: 1, RequestedModel: requestedModel})
+}
+
+// clientStartLocked reserves one client+route ticket. The caller must hold t.mu.
+func (t *inflightTracker) clientStartLocked(accountID, id, routeID, requestedModel string) {
+	key := inflightClientKey(accountID, id, routeID)
 	state := t.clientStates[key]
 	state.Active++
 	state.RequestedModel = requestedModel
 	state.ClientID = id
 	state.RouteID = routeID
 	t.clientStates[key] = state
-	t.mu.Unlock()
-	t.emit(inflightDelta{ID: routeID, ClientID: id, Active: 1, RequestedModel: requestedModel})
 }
 
-func (t *inflightTracker) clientStreaming(id, routeID string) {
+// tryAcquire atomically reserves one concurrency slot for the account and starts
+// its client+route ticket. It returns false without reserving when the account
+// is already at limit. The count and the increment happen under one lock, so
+// concurrent same-route requests cannot all observe the same pre-burst count the
+// way a separate count-then-start would; live requests are counted by their
+// Active value rather than by map entries, so N parallel requests on one route
+// count as N. A limit of store.Unlimited (< 0) always acquires; a limit of zero
+// rejects everything. Callers invoke it before any upstream work.
+func (t *inflightTracker) tryAcquire(accountID string, limit int, id, routeID, requestedModel string) bool {
 	t.mu.Lock()
-	key := inflightClientKey(id, routeID)
+	if limit >= 0 && t.activeClientRequestsLocked(accountID) >= limit {
+		t.mu.Unlock()
+		return false
+	}
+	t.clientStartLocked(accountID, id, routeID, requestedModel)
+	t.mu.Unlock()
+	t.emit(accountID, inflightDelta{ID: routeID, ClientID: id, Active: 1, RequestedModel: requestedModel})
+	return true
+}
+
+func (t *inflightTracker) clientStreaming(accountID, id, routeID string) {
+	t.mu.Lock()
+	key := inflightClientKey(accountID, id, routeID)
 	state := t.clientStates[key]
 	state.Streaming++
 	state.ClientID = id
 	state.RouteID = routeID
 	t.clientStates[key] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{ID: routeID, ClientID: id, Streaming: 1})
+	t.emit(accountID, inflightDelta{ID: routeID, ClientID: id, Streaming: 1})
 }
 
-func (t *inflightTracker) clientResolved(id, routeID, resolvedModel string) {
+func (t *inflightTracker) clientResolved(accountID, id, routeID, resolvedModel string) {
 	if resolvedModel == "" {
 		return
 	}
 	t.mu.Lock()
-	key := inflightClientKey(id, routeID)
+	key := inflightClientKey(accountID, id, routeID)
 	state := t.clientStates[key]
 	state.ResolvedModel = resolvedModel
 	state.ClientID = id
 	state.RouteID = routeID
 	t.clientStates[key] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{ID: routeID, ClientID: id, ResolvedModel: resolvedModel})
+	t.emit(accountID, inflightDelta{ID: routeID, ClientID: id, ResolvedModel: resolvedModel})
 }
 
 // clientEnd releases one client+route request. routeID mirrors clientStart so
 // the closing delta carries the same client+route identity and only that
 // ticket is decremented; a concurrent request on another route stays lit.
-func (t *inflightTracker) clientEnd(id, routeID string, streamed bool) {
+func (t *inflightTracker) clientEnd(accountID, id, routeID string, streamed bool) {
 	t.mu.Lock()
-	key := inflightClientKey(id, routeID)
+	key := inflightClientKey(accountID, id, routeID)
 	state := t.clientStates[key]
 	if state.Active > 0 {
 		state.Active--
@@ -118,31 +149,36 @@ func (t *inflightTracker) clientEnd(id, routeID string, streamed bool) {
 	if streamed {
 		delta.Streaming = -1
 	}
-	t.emit(delta)
+	t.emit(accountID, delta)
 }
 
-// clientRouteSnapshot returns the per (client, route) tickets, keyed by the
-// same client + NUL + route composite the tracker uses. Each state carries its
-// ClientID and RouteID so consumers need not parse the key.
-func (t *inflightTracker) clientRouteSnapshot() map[string]inflightState {
+// clientRouteSnapshot returns the per (client, route) tickets for one account,
+// keyed by the same composite the tracker uses. Each state carries its ClientID
+// and RouteID so consumers need not parse the key.
+func (t *inflightTracker) clientRouteSnapshot(accountID string) map[string]inflightState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make(map[string]inflightState, len(t.clientStates))
+	out := make(map[string]inflightState)
+	prefix := accountID + "\x00"
 	for key, state := range t.clientStates {
-		out[key] = state
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			out[key[len(prefix):]] = state
+		}
 	}
 	return out
 }
 
-// clientSnapshot returns the per-client aggregate (all routes folded), keyed by
-// client key id. The client status roundel only needs to know whether any
-// request is active and whether any stream is in flight, so it consumes this
-// rather than the composite tickets.
-func (t *inflightTracker) clientSnapshot() map[string]inflightState {
+// clientSnapshot returns the per-client aggregate (all routes folded) for one
+// account, keyed by client key id.
+func (t *inflightTracker) clientSnapshot(accountID string) map[string]inflightState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	out := make(map[string]inflightState)
-	for _, state := range t.clientStates {
+	prefix := accountID + "\x00"
+	for key, state := range t.clientStates {
+		if len(key) < len(prefix) || key[:len(prefix)] != prefix {
+			continue
+		}
 		if state.ClientID == "" {
 			continue
 		}
@@ -154,18 +190,33 @@ func (t *inflightTracker) clientSnapshot() map[string]inflightState {
 	return out
 }
 
-func (t *inflightTracker) targetStart(routeID, targetID string) {
-	key := routeID + "\x00" + targetID
+// activeClientRequestsLocked returns the number of live client tickets for one
+// account, counting each ticket's Active value so concurrent requests that share
+// a (client, route) entry are all counted. The returned count feeds the plan's
+// max_concurrent_streams reservation. The caller must hold t.mu.
+func (t *inflightTracker) activeClientRequestsLocked(accountID string) int {
+	prefix := accountID + "\x00"
+	count := 0
+	for key, state := range t.clientStates {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			count += state.Active
+		}
+	}
+	return count
+}
+
+func (t *inflightTracker) targetStart(accountID, routeID, targetID string) {
+	key := inflightTargetKey(accountID, routeID, targetID)
 	t.mu.Lock()
 	state := t.targetStates[key]
 	state.Active++
 	t.targetStates[key] = state
 	t.mu.Unlock()
-	t.emit(inflightDelta{ID: routeID, TargetID: targetID, Active: 1})
+	t.emit(accountID, inflightDelta{ID: routeID, TargetID: targetID, Active: 1})
 }
 
-func (t *inflightTracker) targetEnd(routeID, targetID string) {
-	key := routeID + "\x00" + targetID
+func (t *inflightTracker) targetEnd(accountID, routeID, targetID string) {
+	key := inflightTargetKey(accountID, routeID, targetID)
 	t.mu.Lock()
 	state := t.targetStates[key]
 	if state.Active > 0 {
@@ -177,26 +228,29 @@ func (t *inflightTracker) targetEnd(routeID, targetID string) {
 		t.targetStates[key] = state
 	}
 	t.mu.Unlock()
-	t.emit(inflightDelta{ID: routeID, TargetID: targetID, Active: -1})
+	t.emit(accountID, inflightDelta{ID: routeID, TargetID: targetID, Active: -1})
 }
 
 // targetSkipped emits one explicit terminal delta for a target the router
 // declined to call. Unlike targetStart/targetEnd it does not touch the active
 // counters (the target was never in flight); it exists so live consumers can
 // render a distinct skipped leg with full client + route + target context.
-func (t *inflightTracker) targetSkipped(routeID, clientID, targetID, failureClass string) {
+func (t *inflightTracker) targetSkipped(accountID, routeID, clientID, targetID, failureClass string) {
 	if routeID == "" || targetID == "" {
 		return
 	}
-	t.emit(inflightDelta{ID: routeID, ClientID: clientID, TargetID: targetID, Result: "skipped", FailureClass: failureClass})
+	t.emit(accountID, inflightDelta{ID: routeID, ClientID: clientID, TargetID: targetID, Result: "skipped", FailureClass: failureClass})
 }
 
-func (t *inflightTracker) targetSnapshot() map[string]inflightState {
+func (t *inflightTracker) targetSnapshot(accountID string) map[string]inflightState {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	out := make(map[string]inflightState, len(t.targetStates))
+	out := make(map[string]inflightState)
+	prefix := accountID + "\x00"
 	for key, state := range t.targetStates {
-		out[key] = state
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			out[key[len(prefix):]] = state
+		}
 	}
 	return out
 }

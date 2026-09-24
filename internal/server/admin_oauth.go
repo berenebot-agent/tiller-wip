@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"net/url"
@@ -13,6 +12,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
 	"github.com/tiller-router/tiller-router/internal/providers/github"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 const oauthRedirectPath = "/auth/callback"
@@ -39,10 +39,12 @@ func (s *Server) recordOAuthFailure(r *http.Request, limiter *loginLimiter) bool
 }
 
 type oauthDeviceState struct {
-	Status string
-	Device github.DeviceCode
-	Token  oauth.TokenRecord
-	Err    string
+	Status     string
+	Generation int64
+	Device     github.DeviceCode
+	Token      oauth.TokenRecord
+	Err        string
+	Cancel     context.CancelFunc
 }
 
 func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
@@ -50,8 +52,8 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	providerType, err := s.oauthProviderType(r.Context(), id)
-	if err == sql.ErrNoRows {
+	providerType, err := s.scope(r).ProviderType(r.Context(), id)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
@@ -60,7 +62,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if providerType == "github-copilot" {
-		device, startErr := s.startGitHubDeviceFlow(r.Context(), id)
+		device, startErr := s.startGitHubDeviceFlow(r.Context(), s.scope(r).AccountID(), id)
 		if startErr != nil {
 			adminError(w, 502, "oauth_start_failed", "Could not start GitHub OAuth.")
 			return
@@ -73,13 +75,30 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redirectURI := s.oauthRedirectURI(r)
-	flow, err := s.oauthFlows.Begin(id, redirectURI)
+	scope := s.scope(r)
+	generation, err := scope.OAuthGeneration(r.Context(), id)
+	if err != nil {
+		adminError(w, 500, "database_error", "Could not start OAuth connection.")
+		return
+	}
+	flow, err := s.oauthFlows.BeginWithGeneration(scope.AccountID(), id, redirectURI, generation)
 	if errors.Is(err, oauth.ErrFlowActive) {
 		adminError(w, 409, "oauth_flow_active", "An OAuth connection is already in progress.")
 		return
 	}
 	if err != nil {
 		adminError(w, 500, "oauth_start_failed", "Could not start OAuth connection.")
+		return
+	}
+	currentGeneration, err := scope.OAuthGeneration(r.Context(), id)
+	if err != nil {
+		s.oauthFlows.Cancel(scope.AccountID(), id)
+		adminError(w, 500, "database_error", "Could not start OAuth connection.")
+		return
+	}
+	if currentGeneration != generation {
+		s.oauthFlows.Cancel(scope.AccountID(), id)
+		adminError(w, 409, "oauth_disconnected", "OAuth connection was disconnected while it was starting.")
 		return
 	}
 	authURL := ""
@@ -100,8 +119,8 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	providerType, err := s.oauthProviderType(r.Context(), id)
-	if err == sql.ErrNoRows {
+	providerType, err := s.scope(r).ProviderType(r.Context(), id)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
@@ -136,7 +155,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_oauth_callback", "Paste the complete redirected callback URL.")
 		return
 	}
-	flow, err := s.oauthFlows.Consume(id, callback.State)
+	flow, err := s.oauthFlows.Consume(s.scope(r).AccountID(), id, callback.State)
 	if err != nil {
 		if s.recordOAuthFailure(r, s.oauthCallbackLimiter) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
@@ -167,7 +186,13 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 502, "oauth_exchange_failed", "OAuth token exchange returned an invalid token.")
 		return
 	}
-	if err := oauth.NewStore(s.db.SQL).Put(context.Background(), record); err != nil {
+	scope := s.scope(r)
+	record.Generation = flow.Generation
+	if err := scope.PutOAuthTokenIfGeneration(r.Context(), oauth.TokenToStore(record), flow.Generation); err != nil {
+		if errors.Is(err, store.ErrOAuthGenerationChanged) {
+			adminError(w, 409, "oauth_disconnected", "OAuth connection was disconnected while it was completing.")
+			return
+		}
 		adminError(w, 500, "database_error", "Could not save OAuth connection.")
 		return
 	}
@@ -175,38 +200,58 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"status": "connected", "account_email": record.AccountEmail, "account_plan": record.AccountPlan})
 }
 
-func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.DeviceCode, error) {
+func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (github.DeviceCode, error) {
+	generation, err := s.scopeFor(accountID).OAuthGeneration(ctx, id)
+	if err != nil {
+		return github.DeviceCode{}, err
+	}
 	s.oauthDeviceMu.Lock()
-	if existing := s.oauthDevices[id]; existing != nil && existing.Status == "pending" {
+	if existing := s.oauthDevices[tenantKey(accountID, id)]; existing != nil && existing.Status == "pending" {
 		device := existing.Device
 		s.oauthDeviceMu.Unlock()
 		return device, nil
 	}
-	s.oauthDevices[id] = &oauthDeviceState{Status: "pending"}
+	flowCtx, cancel := context.WithCancel(s.backgroundCtx)
+	s.oauthDevices[tenantKey(accountID, id)] = &oauthDeviceState{Status: "pending", Generation: generation, Cancel: cancel}
 	s.oauthDeviceMu.Unlock()
-	device, err := github.RequestDeviceCode(ctx, s.providers.Registry().HTTPClient())
+	currentGeneration, err := s.scopeFor(accountID).OAuthGeneration(ctx, id)
 	if err != nil {
-		s.finishDevice(id, "failed", err)
+		cancel()
+		s.oauthDeviceMu.Lock()
+		delete(s.oauthDevices, tenantKey(accountID, id))
+		s.oauthDeviceMu.Unlock()
+		return github.DeviceCode{}, err
+	}
+	if currentGeneration != generation {
+		cancel()
+		s.oauthDeviceMu.Lock()
+		delete(s.oauthDevices, tenantKey(accountID, id))
+		s.oauthDeviceMu.Unlock()
+		return github.DeviceCode{}, store.ErrOAuthGenerationChanged
+	}
+	device, err := github.RequestDeviceCode(flowCtx, s.providers.Registry().HTTPClient())
+	if err != nil {
+		s.finishDevice(accountID, id, generation, "failed", err)
 		return github.DeviceCode{}, err
 	}
 	s.oauthDeviceMu.Lock()
-	if state := s.oauthDevices[id]; state != nil {
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
 		state.Device = device
 	}
 	s.oauthDeviceMu.Unlock()
-	pollCtx := s.backgroundCtx
+	pollCtx := flowCtx
 	go func() {
 		tokens, err := github.PollToken(pollCtx, s.providers.Registry().HTTPClient(), device)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
-				s.finishDevice(id, "failed", err)
+				s.finishDevice(accountID, id, generation, "failed", err)
 			}
 			return
 		}
 		user, _ := github.FetchUser(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		copilot, _, err := github.FetchCopilotToken(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		if err != nil {
-			s.finishDevice(id, "failed", err)
+			s.finishDevice(accountID, id, generation, "failed", err)
 			return
 		}
 		for key, value := range copilot.ProviderData {
@@ -219,15 +264,16 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.D
 		tokens.AccountEmail, tokens.AccountPlan = user.Email, user.Login
 		record, err := oauth.MergeToken(oauth.TokenRecord{ProviderID: id}, tokens, time.Now().UTC())
 		if err != nil {
-			s.finishDevice(id, "failed", err)
+			s.finishDevice(accountID, id, generation, "failed", err)
 			return
 		}
-		if err := oauth.NewStore(s.db.SQL).Put(pollCtx, record); err != nil {
-			s.finishDevice(id, "failed", err)
+		record.Generation = generation
+		if err := s.scopeFor(accountID).PutOAuthTokenIfGeneration(pollCtx, oauth.TokenToStore(record), generation); err != nil {
+			s.finishDevice(accountID, id, generation, "failed", err)
 			return
 		}
 		s.oauthDeviceMu.Lock()
-		if state := s.oauthDevices[id]; state != nil {
+		if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
 			state.Status, state.Token = "connected", record
 		}
 		s.oauthDeviceMu.Unlock()
@@ -235,10 +281,10 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, id string) (github.D
 	return device, nil
 }
 
-func (s *Server) finishDevice(id, status string, err error) {
+func (s *Server) finishDevice(accountID, id string, generation int64, status string, err error) {
 	s.oauthDeviceMu.Lock()
 	defer s.oauthDeviceMu.Unlock()
-	if state := s.oauthDevices[id]; state != nil {
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
 		state.Status = status
 		if err != nil {
 			state.Err = "GitHub OAuth connection failed."
@@ -249,7 +295,7 @@ func (s *Server) finishDevice(id, status string, err error) {
 func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	s.oauthDeviceMu.Lock()
-	state := s.oauthDevices[id]
+	state := s.oauthDevices[tenantKey(s.scope(r).AccountID(), id)]
 	s.oauthDeviceMu.Unlock()
 	if state != nil {
 		result := map[string]any{"status": state.Status}
@@ -265,8 +311,8 @@ func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, result)
 		return
 	}
-	record, err := oauth.NewStore(s.db.SQL).Get(r.Context(), id)
-	if err == oauth.ErrNoToken {
+	row, err := s.scope(r).GetOAuthToken(r.Context(), id)
+	if errors.Is(err, store.ErrNoOAuthToken) {
 		writeJSON(w, 200, map[string]any{"status": "none"})
 		return
 	}
@@ -274,6 +320,7 @@ func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load OAuth status.")
 		return
 	}
+	record := oauth.TokenFromStore(row)
 	result := map[string]any{"status": string(oauth.Classify(record, time.Now().UTC()))}
 	if record.AccountEmail != "" {
 		result["account_email"] = record.AccountEmail
@@ -284,19 +331,13 @@ func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
-func (s *Server) oauthProviderType(ctx context.Context, id string) (string, error) {
-	var providerType string
-	err := s.db.SQL.QueryRowContext(ctx, `SELECT type FROM providers WHERE id=?`, id).Scan(&providerType)
-	return providerType, err
-}
-
 // disconnectProviderOAuth removes the OAuth token and in-memory state for a
 // provider while preserving the provider configuration, models, and routing.
 // It is idempotent: disconnecting an already-disconnected provider succeeds.
 func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	providerType, err := s.oauthProviderType(r.Context(), id)
-	if err == sql.ErrNoRows {
+	providerType, err := s.scope(r).ProviderType(r.Context(), id)
+	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
@@ -308,13 +349,21 @@ func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request)
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
-	if err := oauth.NewStore(s.db.SQL).Delete(r.Context(), id); err != nil {
+	scope := s.scope(r)
+	if _, err := scope.AdvanceOAuthGeneration(r.Context(), id); err != nil {
+		adminError(w, 500, "database_error", "Could not remove OAuth connection.")
+		return
+	}
+	if err := scope.DeleteOAuthToken(r.Context(), id); err != nil {
 		adminError(w, 500, "database_error", "Could not remove OAuth connection.")
 		return
 	}
 	s.oauthDeviceMu.Lock()
-	delete(s.oauthDevices, id)
+	if state := s.oauthDevices[tenantKey(scope.AccountID(), id)]; state != nil && state.Cancel != nil {
+		state.Cancel()
+	}
+	delete(s.oauthDevices, tenantKey(scope.AccountID(), id))
 	s.oauthDeviceMu.Unlock()
-	s.oauthFlows.Cancel(id)
+	s.oauthFlows.Cancel(s.scope(r).AccountID(), id)
 	writeJSON(w, 200, map[string]any{"status": "disconnected"})
 }

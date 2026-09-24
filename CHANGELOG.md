@@ -8,6 +8,34 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Hosted product shell (private alpha).** The hosted product now has plan
+  entitlements (creation limits, concurrent-stream and monthly-request limits,
+  Activity retention clamp), all enforced only in hosted mode and operator-
+  tunable from the platform dashboard. A first-run setup wizard (provider →
+  target → client key → curl snippet) opens on first hosted login and completion
+  is derived from Activity. Email verification now signs the user straight in.
+- **Published legal pack.** First-draft Terms, Privacy Policy, Acceptable Use,
+  Subprocessor List, Security/Data Handling, and a signup collection notice are
+  embedded in the binary, seeded at startup, editable from the platform
+  dashboard, and served publicly (e.g. `/legal/terms`). Signup requires an
+  explicit Terms acceptance recorded with a timestamp.
+- **Account data export.** Hosted customers can download an account-scoped ZIP
+  containing their configuration, Activity metadata, and audit history. Provider
+  credentials and client secrets are never included.
+- **`security.txt`** served at `/security.txt` and `/.well-known/security.txt`,
+  and an AGPL source/version link in the hosted footer.
+- **Load-test harness** (`tests/load/loadtest.py`) that measures sustained
+  request rate, failure count, and router latency percentiles against a mock
+  upstream without spending provider credits.
+- **Hosted Account page.** A hosted-only Account tab in Settings lets customers
+  view their identity, change password, change email (verify-new-first with a
+  warning to the current address), sign out everywhere, and delete their account
+  instantly. All sensitive actions re-authenticate with the current password.
+- **Durable transactional mail outbox.** Signup, verification, password-reset,
+  and email-change messages are queued in the same transaction that creates the
+  one-time token and delivered by a retrying background worker. The one-time
+  token is encrypted at rest and scrubbed on send, and dead letters surface on
+  the platform dashboard.
 - **Activity living-pane graph.** The Activity view now renders live request
   legs as a graph (self-hosted D3, no CDN) with an active-only pane, per-client
   legs, and click-through from graph nodes into the request dialog. Cooldown
@@ -17,6 +45,14 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Hosted release-readiness paths.** Hosted SPA entry URLs now retain their
+  requested flow without redirects or initialization errors; verification
+  resend/reset recovery, hosted account search/paging, deletion retry, and
+  local-only backup boundaries are complete. Platform settings now validate and
+  persist atomically, OAuth disconnects cannot be undone by stale work, Activity
+  cleanup and shutdown are durable, audit retention runs independently, trusted
+  proxy login limits are consistent, bootstrap/signup email validation is strict,
+  and active cached sessions renew their persisted expiry.
 - **Ordered fallback now survives empty or errored 2xx streams.** A target that
   returns HTTP 200 but delivers an explicit upstream stream error, or ends
   without any assistant output before client-visible bytes, is treated as a

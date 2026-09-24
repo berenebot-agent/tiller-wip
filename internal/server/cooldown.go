@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,10 +31,10 @@ func newCooldownStore() *cooldownStore {
 	return &cooldownStore{until: map[string]cooldownEntry{}}
 }
 
-func (c *cooldownStore) cooled(id string, now time.Time) bool {
+func (c *cooldownStore) cooled(accountID, id string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	e, ok := c.until[id]
+	e, ok := c.until[tenantKey(accountID, id)]
 	if !ok {
 		return false
 	}
@@ -43,10 +44,10 @@ func (c *cooldownStore) cooled(id string, now time.Time) bool {
 // set records a cooldown window for the given provider_model_id. startedAt is
 // the failure moment, until when the target becomes eligible again. The origin
 // fields describe the failure that opened the cooldown.
-func (c *cooldownStore) set(id string, startedAt, until time.Time, provider, model, originRequestLogID, originErrorClass, originErrorMessage string) {
+func (c *cooldownStore) set(accountID, id string, startedAt, until time.Time, provider, model, originRequestLogID, originErrorClass, originErrorMessage string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.until[id] = cooldownEntry{
+	c.until[tenantKey(accountID, id)] = cooldownEntry{
 		providerModelID:    id,
 		startedAt:          startedAt,
 		until:              until,
@@ -62,10 +63,14 @@ func (c *cooldownStore) set(id string, startedAt, until time.Time, provider, mod
 // pair if it is still cooling at now, and false otherwise. The store is keyed
 // by provider_model_id but the UI addresses targets by names, so this does a
 // linear match.
-func (c *cooldownStore) statusByName(provider, model string, now time.Time) (cooldownEntry, bool) {
+func (c *cooldownStore) statusByName(accountID, provider, model string, now time.Time) (cooldownEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, e := range c.until {
+	prefix := accountID + "\x00"
+	for key, e := range c.until {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
 		if e.provider == provider && e.model == model {
 			if now.Before(e.until) {
 				return e, true
@@ -76,29 +81,38 @@ func (c *cooldownStore) statusByName(provider, model string, now time.Time) (coo
 	return cooldownEntry{}, false
 }
 
-func (c *cooldownStore) clear() {
+func (c *cooldownStore) clearFor(accountID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.until = map[string]cooldownEntry{}
+	prefix := accountID + "\x00"
+	for key := range c.until {
+		if strings.HasPrefix(key, prefix) {
+			delete(c.until, key)
+		}
+	}
 }
 
-func (c *cooldownStore) remove(id string) {
+func (c *cooldownStore) remove(accountID, id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.until, id)
+	delete(c.until, tenantKey(accountID, id))
 }
 
 // removeByName deletes any cooldown entry matching the given provider/model
 // names. The store is keyed by provider_model_id but the admin UI addresses
 // targets by names, so this does a linear match like statusByName. It reports
 // whether an entry was actually removed.
-func (c *cooldownStore) removeByName(provider, model string) bool {
+func (c *cooldownStore) removeByName(accountID, provider, model string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	removed := false
-	for id, e := range c.until {
+	prefix := accountID + "\x00"
+	for key, e := range c.until {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
 		if e.provider == provider && e.model == model {
-			delete(c.until, id)
+			delete(c.until, key)
 			removed = true
 		}
 	}
@@ -117,11 +131,15 @@ type cooldownView struct {
 
 // snapshot returns a copy of all currently-cooling cooldown windows keyed by
 // provider_model_id. Expired windows are omitted.
-func (c *cooldownStore) snapshot(now time.Time) map[string]cooldownView {
+func (c *cooldownStore) snapshot(accountID string, now time.Time) map[string]cooldownView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	out := make(map[string]cooldownView, len(c.until))
-	for _, e := range c.until {
+	prefix := accountID + "\x00"
+	for key, e := range c.until {
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
 		if !now.Before(e.until) {
 			continue
 		}
@@ -150,7 +168,7 @@ func (s *Server) cooldownStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
-	entry, ok := s.cooldown.statusByName(provider, model, now)
+	entry, ok := s.cooldown.statusByName(s.scope(r).AccountID(), provider, model, now)
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"cooling":              false,
@@ -191,6 +209,6 @@ func (s *Server) clearCooldown(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", "provider and model query parameters are required.")
 		return
 	}
-	s.cooldown.removeByName(provider, model)
+	s.cooldown.removeByName(s.scope(r).AccountID(), provider, model)
 	w.WriteHeader(http.StatusNoContent)
 }

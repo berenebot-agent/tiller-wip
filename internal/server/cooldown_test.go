@@ -16,6 +16,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 func cooldownTestHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc) (*testAPI, string, string, *Server) {
@@ -30,7 +31,7 @@ func cooldownTestHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc) (*
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	app := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, db)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	jar, _ := cookiejar.New(nil)
@@ -178,7 +179,7 @@ func TestCooldownExpiryRetriesTarget(t *testing.T) {
 	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
 		t.Fatalf("lookup model-a: %v", err)
 	}
-	app.cooldown.set(modelA, time.Now().Add(-time.Millisecond), time.Now().Add(-time.Millisecond), "", "", "", "", "")
+	app.cooldown.set(database.LocalAccountID, modelA, time.Now().Add(-time.Millisecond), time.Now().Add(-time.Millisecond), "", "", "", "", "")
 
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{}})
 	if resp.StatusCode != 200 {
@@ -542,11 +543,13 @@ func TestCooldownTimeoutOpensCooldown(t *testing.T) {
 	})
 	api, secret, canonical, app := cooldownTestHarness(t, hangA, okB)
 	t.Cleanup(func() { close(releaseA) })
-	// Shorten the router's per-attempt time-to-first-header bound so the hang
-	// is classified as upstream_timeout quickly instead of waiting 60s.
-	app.providers.Registry().SetResponseHeaderTimeout(100 * time.Millisecond)
+	// Shorten the account's per-attempt time-to-first-header bound so the hang
+	// is classified as upstream_timeout instead of waiting the default 60s.
+	if err := app.store.For(database.LocalAccountID).SetSetting(context.Background(), store.SettingFallbackTimeoutSeconds, "1"); err != nil {
+		t.Fatal(err)
+	}
 
-	apiClient := &http.Client{Timeout: 3 * time.Second}
+	apiClient := &http.Client{Timeout: 5 * time.Second}
 	body, _ := json.Marshal(map[string]any{"model": canonical, "messages": []any{}})
 	req, _ := http.NewRequest("POST", api.base+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+secret)
@@ -661,7 +664,7 @@ func TestCooldownRestartClearsState(t *testing.T) {
 		t.Fatalf("second request should skip A, got %v", got)
 	}
 
-	newApp := newTestServer(t, config.Config{AdminUsername: "admin", AdminPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8082"}, app.db)
+	newApp := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8082"}, app.db)
 	newRouter := httptest.NewServer(newApp.Handler())
 	t.Cleanup(newRouter.Close)
 

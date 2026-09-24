@@ -49,8 +49,8 @@ start_router() {
 		-v "$data_dir:/data" \
 		-e TILLER_LISTEN_ADDR="127.0.0.1:$router_port" \
 		-e TILLER_DATA_DIR=/data \
-		-e TILLER_ADMIN_USERNAME=admin \
-		-e TILLER_ADMIN_PASSWORD="$password" \
+		-e TILLER_USERNAME=admin \
+		-e TILLER_PASSWORD="$password" \
 		-e TILLER_TRUST_PROXY_HEADERS=false \
 		-e TILLER_MODELS_DEV_ENABLED=false \
 		"$image" >/dev/null

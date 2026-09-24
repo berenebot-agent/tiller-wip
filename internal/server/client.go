@@ -12,13 +12,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 const maxUpstreamNonStreamBytes int64 = 64 << 20
@@ -36,98 +39,73 @@ var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	var keyType string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT key_type FROM client_keys WHERE id=?`, identity.ID).Scan(&keyType); err != nil {
+	sc := s.scope(r)
+	keyType, err := sc.ClientKeyType(r.Context(), identity.ID)
+	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
 	anthropic := isAnthropicRequest(r)
 	if keyType == "single" {
-		var modelName, realID, virtualID string
-		var real, virtual sql.NullString
-		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				inferenceError(w, 500, "server_error", "invalid_single_binding", "No binding configured for this API key.", false)
-			} else {
-				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-			}
+		binding, found, err := sc.GetSingleBinding(r.Context(), identity.ID)
+		if err != nil {
+			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 			return
 		}
-		realID, virtualID = real.String, virtual.String
+		if !found {
+			inferenceError(w, 500, "server_error", "invalid_single_binding", "No binding configured for this API key.", false)
+			return
+		}
 		var contextLength, maxOutputTokens sql.NullInt64
 		var caps modelCapabilities
 		var reasoningCaps *providers.ReasoningCapabilities
-		if real.Valid {
-			var reasoningRaw sql.NullString
-			if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw); err != nil {
-				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-				return
-			}
-			reasoningCaps = decodeReasoningCapabilities(reasoningRaw)
-		} else {
-			aggregated, err := s.loadVirtualCapabilities(r.Context(), []string{virtualID})
+		if binding.RealModelID.Valid {
+			pc, err := sc.ProviderModelCapsByID(r.Context(), binding.RealModelID.String)
 			if err != nil {
 				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 				return
 			}
-			contextLength, maxOutputTokens, caps, reasoningCaps = catalogueCapabilityFields(aggregated[virtualID])
+			contextLength, maxOutputTokens = pc.ContextLength, pc.MaxOutputTokens
+			caps = modelCapabilities{Tools: pc.SupportsTools, Vision: pc.SupportsVision, Reasoning: pc.SupportsReasoning, StructuredOutput: pc.SupportsStructuredOutput}
+			reasoningCaps = decodeReasoningCapabilities(pc.ReasoningCapabilities)
+		} else {
+			aggregated, err := s.loadVirtualCapabilities(r.Context(), identity.AccountID, []string{binding.VirtualModelID.String})
+			if err != nil {
+				inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
+				return
+			}
+			contextLength, maxOutputTokens, caps, reasoningCaps = catalogueCapabilityFields(aggregated[binding.VirtualModelID.String])
 		}
-		entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic)
+		entry := buildCatalogueEntry(binding.ModelName, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic)
 		writeJSON(w, 200, map[string]any{"object": "list", "data": []map[string]any{entry}})
 		return
 	}
-	rows, err := s.db.SQL.QueryContext(r.Context(), `SELECT canonical, context_length, max_output_tokens, supports_tools, supports_vision, supports_reasoning, supports_structured_output, reasoning_capabilities, virtual_model_id FROM (
-	SELECT p.name||'/'||m.upstream_model_id canonical, m.context_length, m.max_output_tokens, m.supports_tools, m.supports_vision, m.supports_reasoning, m.supports_structured_output, m.reasoning_capabilities, NULL virtual_model_id FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND m.available=1 AND p.enabled=1
-	UNION ALL
-	SELECT g.name||'/'||v.name canonical, NULL, NULL, NULL, NULL, NULL, NULL, NULL, v.id virtual_model_id FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1)
-	) ORDER BY canonical`, identity.ID, identity.ID)
+	entries, err := sc.ListCatalogueEntries(r.Context(), identity.ID)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
-	type catalogueRow struct {
-		modelID                        string
-		contextLength, maxOutputTokens sql.NullInt64
-		caps                           modelCapabilities
-		reasoningRaw, virtualID        sql.NullString
-	}
-	catalogueRows := []catalogueRow{}
-	for rows.Next() {
-		var row catalogueRow
-		if err := rows.Scan(&row.modelID, &row.contextLength, &row.maxOutputTokens, &row.caps.Tools, &row.caps.Vision, &row.caps.Reasoning, &row.caps.StructuredOutput, &row.reasoningRaw, &row.virtualID); err != nil {
-			rows.Close()
-			inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-			return
-		}
-		catalogueRows = append(catalogueRows, row)
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-		return
-	}
-	if err := rows.Close(); err != nil {
-		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
-		return
-	}
 	virtualIDs := make([]string, 0)
-	for _, row := range catalogueRows {
-		if row.virtualID.Valid {
-			virtualIDs = append(virtualIDs, row.virtualID.String)
+	for i := range entries {
+		if entries[i].VirtualModelID.Valid {
+			virtualIDs = append(virtualIDs, entries[i].VirtualModelID.String)
 		}
 	}
-	aggregated, err := s.loadVirtualCapabilities(r.Context(), virtualIDs)
+	aggregated, err := s.loadVirtualCapabilities(r.Context(), identity.AccountID, virtualIDs)
 	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model catalogue.", false)
 		return
 	}
 	data := []map[string]any{}
-	for _, row := range catalogueRows {
-		reasoningCaps := decodeReasoningCapabilities(row.reasoningRaw)
-		if row.virtualID.Valid {
-			row.contextLength, row.maxOutputTokens, row.caps, reasoningCaps = catalogueCapabilityFields(aggregated[row.virtualID.String])
+	for i := range entries {
+		row := &entries[i]
+		contextLength, maxOutputTokens := row.ContextLength, row.MaxOutputTokens
+		caps := modelCapabilities{Tools: row.SupportsTools, Vision: row.SupportsVision, Reasoning: row.SupportsReasoning, StructuredOutput: row.SupportsStructuredOutput}
+		reasoningCaps := decodeReasoningCapabilities(row.ReasoningCapabilities)
+		if row.VirtualModelID.Valid {
+			contextLength, maxOutputTokens, caps, reasoningCaps = catalogueCapabilityFields(aggregated[row.VirtualModelID.String])
 		}
-		data = append(data, buildCatalogueEntry(row.modelID, row.contextLength, row.maxOutputTokens, row.caps, reasoningCaps, anthropic))
+		data = append(data, buildCatalogueEntry(row.Canonical, contextLength, maxOutputTokens, caps, reasoningCaps, anthropic))
 	}
 	writeJSON(w, 200, map[string]any{"object": "list", "data": data})
 }
@@ -137,8 +115,9 @@ func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
 // inference requests.
 func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	var keyType string
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT key_type FROM client_keys WHERE id=?`, identity.ID).Scan(&keyType); err != nil {
+	sc := s.scope(r)
+	keyType, err := sc.ClientKeyType(r.Context(), identity.ID)
+	if err != nil {
 		inferenceError(w, 500, "server_error", "database_error", "Could not load the model metadata.", false)
 		return
 	}
@@ -146,32 +125,32 @@ func (s *Server) clientModel(w http.ResponseWriter, r *http.Request) {
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", false)
 		return
 	}
-	var modelName, realID, virtualID string
-	var real, virtual sql.NullString
-	if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, identity.ID).Scan(&modelName, &real, &virtual); err != nil {
+	binding, found, err := sc.GetSingleBinding(r.Context(), identity.ID)
+	if err != nil || !found {
 		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model binding.", false)
 		return
 	}
-	realID, virtualID = real.String, virtual.String
 	var contextLength, maxOutputTokens sql.NullInt64
 	var caps modelCapabilities
-	if real.Valid {
-		var reasoningRaw sql.NullString
-		if err := s.db.SQL.QueryRowContext(r.Context(), `SELECT context_length,max_output_tokens,supports_tools,supports_vision,supports_reasoning,supports_structured_output,reasoning_capabilities FROM provider_models WHERE id=?`, realID).Scan(&contextLength, &maxOutputTokens, &caps.Tools, &caps.Vision, &caps.Reasoning, &caps.StructuredOutput, &reasoningRaw); err != nil {
+	if binding.RealModelID.Valid {
+		pc, err := sc.ProviderModelCapsByID(r.Context(), binding.RealModelID.String)
+		if err != nil {
 			inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 			return
 		}
-		entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, decodeReasoningCapabilities(reasoningRaw), isAnthropicRequest(r))
+		contextLength, maxOutputTokens = pc.ContextLength, pc.MaxOutputTokens
+		caps = modelCapabilities{Tools: pc.SupportsTools, Vision: pc.SupportsVision, Reasoning: pc.SupportsReasoning, StructuredOutput: pc.SupportsStructuredOutput}
+		entry := buildCatalogueEntry(binding.ModelName, contextLength, maxOutputTokens, caps, decodeReasoningCapabilities(pc.ReasoningCapabilities), isAnthropicRequest(r))
 		writeJSON(w, 200, entry)
 		return
 	}
-	aggregated, err := s.loadVirtualCapabilities(r.Context(), []string{virtualID})
+	aggregated, err := s.loadVirtualCapabilities(r.Context(), identity.AccountID, []string{binding.VirtualModelID.String})
 	if err != nil {
 		inferenceError(w, 500, "server_error", "invalid_single_binding", "Could not load the Single model metadata.", false)
 		return
 	}
-	contextLength, maxOutputTokens, caps, reasoningCaps := catalogueCapabilityFields(aggregated[virtualID])
-	entry := buildCatalogueEntry(modelName, contextLength, maxOutputTokens, caps, reasoningCaps, isAnthropicRequest(r))
+	contextLength, maxOutputTokens, caps, reasoningCaps := catalogueCapabilityFields(aggregated[binding.VirtualModelID.String])
+	entry := buildCatalogueEntry(binding.ModelName, contextLength, maxOutputTokens, caps, reasoningCaps, isAnthropicRequest(r))
 	writeJSON(w, 200, entry)
 }
 
@@ -262,34 +241,24 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	}
 }
 
-func (s *Server) loadVirtualCapabilities(ctx context.Context, virtualModelIDs []string) (map[string]aggregatedVirtualCapabilities, error) {
+func (s *Server) loadVirtualCapabilities(ctx context.Context, accountID string, virtualModelIDs []string) (map[string]aggregatedVirtualCapabilities, error) {
 	result := make(map[string]aggregatedVirtualCapabilities, len(virtualModelIDs))
 	if len(virtualModelIDs) == 0 {
 		return result, nil
 	}
-	placeholders := strings.TrimRight(strings.Repeat("?,", len(virtualModelIDs)), ",")
-	rows, err := s.db.SQL.QueryContext(ctx, `SELECT t.virtual_model_id,m.context_length,m.max_output_tokens,m.supports_tools,m.supports_vision,m.supports_reasoning,m.supports_structured_output,m.reasoning_capabilities FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id IN (`+placeholders+`) AND t.enabled=1 AND m.available=1 AND p.enabled=1`, stringSliceToAny(virtualModelIDs)...)
+	rows, err := s.scopeFor(accountID).VirtualTargetCapabilities(ctx, virtualModelIDs)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	targets := make(map[string][]virtualTargetCapabilities, len(virtualModelIDs))
-	for rows.Next() {
-		var virtualID string
-		var contextLength, maxOutputTokens, tools, vision, reasoning, structured sql.NullInt64
-		var reasoningRaw sql.NullString
-		if err := rows.Scan(&virtualID, &contextLength, &maxOutputTokens, &tools, &vision, &reasoning, &structured, &reasoningRaw); err != nil {
-			return nil, err
-		}
-		targets[virtualID] = append(targets[virtualID], virtualTargetCapabilities{
-			ContextLength: nullInt64Ptr(contextLength), MaxOutputTokens: nullInt64Ptr(maxOutputTokens),
-			SupportsTools: triBoolFromInt(tools), SupportsVision: triBoolFromInt(vision),
-			SupportsReasoning: triBoolFromInt(reasoning), SupportsStructuredOutput: triBoolFromInt(structured),
-			ReasoningCapabilities: decodeReasoningCapabilities(reasoningRaw),
+	for i := range rows {
+		row := &rows[i]
+		targets[row.VirtualModelID] = append(targets[row.VirtualModelID], virtualTargetCapabilities{
+			ContextLength: nullInt64Ptr(row.ContextLength), MaxOutputTokens: nullInt64Ptr(row.MaxOutputTokens),
+			SupportsTools: triBoolFromInt(row.SupportsTools), SupportsVision: triBoolFromInt(row.SupportsVision),
+			SupportsReasoning: triBoolFromInt(row.SupportsReasoning), SupportsStructuredOutput: triBoolFromInt(row.SupportsStructuredOutput),
+			ReasoningCapabilities: decodeReasoningCapabilities(row.ReasoningCapabilities),
 		})
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	for _, virtualID := range virtualModelIDs {
 		result[virtualID] = aggregateVirtualCapabilities(targets[virtualID])
@@ -324,14 +293,6 @@ func catalogueCapabilityFields(aggregated aggregatedVirtualCapabilities) (sql.Nu
 		Tools: toCapability(aggregated.SupportsTools), Vision: toCapability(aggregated.SupportsVision),
 		Reasoning: toCapability(aggregated.SupportsReasoning), StructuredOutput: toCapability(aggregated.SupportsStructuredOutput),
 	}, aggregated.ReasoningCapabilities
-}
-
-func stringSliceToAny(values []string) []any {
-	args := make([]any, len(values))
-	for i, value := range values {
-		args[i] = value
-	}
-	return args
 }
 
 func buildCatalogueEntry(modelID string, contextLength, maxOutputTokens sql.NullInt64, caps modelCapabilities, reasoningCaps *providers.ReasoningCapabilities, anthropic bool) map[string]any {
@@ -378,141 +339,162 @@ type resolvedRoute struct {
 	RoutingMode                         string
 	Targets                             []resolvedRoute
 	RouteKind, RouteModelID, RouteModel string
+	// CredentialsLocked reports that this target's credential could not be
+	// decrypted because the master key is missing or wrong.
+	CredentialsLocked bool
 	// ReasoningCapabilities holds the normalized selector metadata for this
 	// real target. nil when unknown.
 	ReasoningCapabilities *providers.ReasoningCapabilities
 	MaxOutputTokens       sql.NullInt64
 }
 
-func (s *Server) resolveRoute(ctx context.Context, clientID, requested string) (resolvedRoute, error) {
-	tx, err := s.db.SQL.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requested string) (resolvedRoute, error) {
+	sc := s.scopeFor(accountID)
+	var route resolvedRoute
+	var clientModel string
+	err := sc.RunTx(ctx, &sql.TxOptions{ReadOnly: true}, func(tx *store.Scope) error {
+		keyType, err := tx.ClientKeyType(ctx, clientID)
+		if err != nil {
+			return err
+		}
+		clientModel = requested
+		if keyType == "single" {
+			binding, found, err := tx.GetSingleBinding(ctx, clientID)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return sql.ErrNoRows
+			}
+			clientModel = binding.ModelName
+			if binding.RealModelID.Valid {
+				route.RouteKind, route.RouteModelID = "real", binding.RealModelID.String
+				route.ProviderModelID = binding.RealModelID.String
+				info, err := tx.RealModelForID(ctx, binding.RealModelID.String)
+				if err != nil {
+					return err
+				}
+				route.RouteModel = info.Canonical
+				route.MaxOutputTokens = info.MaxOutputTokens
+				route.ReasoningCapabilities = decodeReasoningCapabilities(info.ReasoningCapabilities)
+			} else {
+				route.RouteKind, route.RouteModelID = "virtual", binding.VirtualModelID.String
+				canonical, err := tx.VirtualModelCanonical(ctx, binding.VirtualModelID.String)
+				if err != nil {
+					return err
+				}
+				route.RouteModel = canonical
+			}
+		} else {
+			info, err := tx.PermittedRealModel(ctx, clientID, requested)
+			if err == nil {
+				route.RouteKind, route.RouteModelID, route.RouteModel = "real", info.ModelID, info.Canonical
+				route.MaxOutputTokens = info.MaxOutputTokens
+				route.ReasoningCapabilities = decodeReasoningCapabilities(info.ReasoningCapabilities)
+			} else if errors.Is(err, sql.ErrNoRows) {
+				virtualID, canonical, verr := tx.PermittedVirtualModel(ctx, clientID, requested)
+				if verr != nil {
+					return verr
+				}
+				route.RouteKind, route.RouteModelID, route.RouteModel = "virtual", virtualID, canonical
+			} else {
+				return err
+			}
+		}
+		if route.RouteKind == "virtual" {
+			mode, err := tx.VirtualRoutingMode(ctx, route.RouteModelID)
+			if err != nil {
+				return err
+			}
+			route.RoutingMode = mode
+			targets, err := tx.VirtualRouteTargets(ctx, route.RouteModelID)
+			if err != nil {
+				return err
+			}
+			locked := 0
+			for i := range targets {
+				target := routeTargetToResolved(targets[i])
+				target.Virtual, target.RequestedModel = true, clientModel
+				target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
+				if target.CredentialsLocked {
+					locked++
+				}
+				route.Targets = append(route.Targets, target)
+			}
+			route.Virtual, route.RequestedModel = true, clientModel
+			if len(route.Targets) > 0 {
+				route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
+			}
+			// Every target is locked, so no fallback can serve the request.
+			// Surface the explicit credentials-locked condition.
+			if len(route.Targets) > 0 && locked == len(route.Targets) {
+				return store.ErrSecretsLocked
+			}
+			return nil
+		}
+		route.ProviderModelID = route.RouteModelID
+		target, err := tx.RealRouteTarget(ctx, route.RouteModelID)
+		if err != nil {
+			return err
+		}
+		resolved := routeTargetToResolved(target)
+		if resolved.CredentialsLocked {
+			return store.ErrSecretsLocked
+		}
+		route.Provider = resolved.Provider
+		route.UpstreamModelID = resolved.UpstreamModelID
+		route.NativeProtocol = resolved.NativeProtocol
+		route.ReasoningCapabilities = resolved.ReasoningCapabilities
+		route.RequestedModel = clientModel
+		route.Virtual = false
+		route.Available = resolved.Available
+		return nil
+	})
 	if err != nil {
 		return resolvedRoute{}, err
 	}
-	defer tx.Rollback()
-	var keyType string
-	if err = tx.QueryRowContext(ctx, `SELECT key_type FROM client_keys WHERE id=?`, clientID).Scan(&keyType); err != nil {
-		return resolvedRoute{}, err
-	}
-	var route resolvedRoute
-	clientModel := requested
-	if keyType == "single" {
-		var realID, virtualID sql.NullString
-		if err = tx.QueryRowContext(ctx, `SELECT exposed_model_name,real_model_id,virtual_model_id FROM client_single_bindings WHERE client_key_id=?`, clientID).Scan(&clientModel, &realID, &virtualID); err != nil {
-			return resolvedRoute{}, err
-		}
-		if realID.Valid {
-			route.RouteKind, route.RouteModelID = "real", realID.String
-			route.ProviderModelID = realID.String
-			var reasoningRaw sql.NullString
-			if err = tx.QueryRowContext(ctx, `SELECT p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, realID.String).Scan(&route.RouteModel, &reasoningRaw, &route.MaxOutputTokens); err != nil {
-				return resolvedRoute{}, err
-			}
-			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-		} else {
-			route.RouteKind, route.RouteModelID = "virtual", virtualID.String
-			if err = tx.QueryRowContext(ctx, `SELECT g.name||'/'||v.name FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE v.id=?`, virtualID.String).Scan(&route.RouteModel); err != nil {
-				return resolvedRoute{}, err
-			}
+	// OAuth hydration happens outside the transaction: Current() can trigger a
+	// network token refresh, and holding a SQLite read tx across that
+	// serializes all other DB access.
+	if route.RouteKind == "virtual" {
+		for i := range route.Targets {
+			s.providers.HydrateOAuth(ctx, accountID, &route.Targets[i].Provider)
 		}
 	} else {
-		var reasoningRaw sql.NullString
-		err = tx.QueryRowContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id, m.reasoning_capabilities, m.max_output_tokens FROM client_model_permissions x JOIN provider_models m ON x.model_kind='real' AND x.model_id=m.id JOIN providers p ON p.id=m.provider_id WHERE x.client_key_id=? AND x.enabled=1 AND p.name||'/'||m.upstream_model_id=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel, &reasoningRaw, &route.MaxOutputTokens)
-		if err == nil {
-			route.RouteKind = "real"
-			route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-		} else if err == sql.ErrNoRows {
-			err = tx.QueryRowContext(ctx, `SELECT v.id,g.name||'/'||v.name FROM client_model_permissions x JOIN virtual_models v ON x.model_kind='virtual' AND x.model_id=v.id JOIN virtual_provider_groups g ON g.id=v.virtual_group_id WHERE x.client_key_id=? AND x.enabled=1 AND g.name||'/'||v.name=?`, clientID, requested).Scan(&route.RouteModelID, &route.RouteModel)
-			if err != nil {
-				return resolvedRoute{}, err
-			}
-			route.RouteKind = "virtual"
-		} else {
-			return resolvedRoute{}, err
-		}
+		s.providers.HydrateOAuth(ctx, accountID, &route.Provider)
 	}
-	if route.RouteKind == "virtual" {
-		// Capture the routing mode so cooldown applies only to ordered
-		// fallback virtual models (fixed virtual routes and direct real-model
-		// routes must never populate or consult the shared cooldown state).
-		if err := tx.QueryRowContext(ctx, `SELECT routing_mode FROM virtual_models WHERE id=?`, route.RouteModelID).Scan(&route.RoutingMode); err != nil {
-			return resolvedRoute{}, err
-		}
-		rows, e := tx.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.enabled=1 ORDER BY t.position`, route.RouteModelID)
-		if e != nil {
-			return resolvedRoute{}, e
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var target resolvedRoute
-			var protocols string
-			var enabled, available int
-			var nativeProtocol sql.NullString
-			var reasoningRaw sql.NullString
-			if e = rows.Scan(&target.ProviderModelID, &target.Provider.ID, &target.Provider.Name, &target.Provider.Type, &target.Provider.BaseURL, &target.Provider.Credential, &enabled, &protocols, &nativeProtocol, &target.UpstreamModelID, &available, &reasoningRaw, &target.MaxOutputTokens); e != nil {
-				return resolvedRoute{}, e
-			}
-			target.Provider.Enabled = scanBool(enabled)
-			target.Provider.Protocols = providers.DecodeProtocols(protocols)
-			if d, ok := providers.Lookup(target.Provider.Type); ok {
-				target.Provider.MinOutputTokens = d.MinOutputTokens
-			}
-			// OAuth hydration happens after commit (see below) so the
-			// SQLite read tx is never held across network refresh calls.
-			if nativeProtocol.Valid {
-				target.NativeProtocol = providers.Protocol(nativeProtocol.String)
-			}
-			target.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-			target.Available = target.Provider.Enabled && scanBool(available)
-			target.Virtual, target.RequestedModel = true, clientModel
-			target.RouteKind, target.RouteModelID, target.RouteModel = route.RouteKind, route.RouteModelID, route.RouteModel
-			route.Targets = append(route.Targets, target)
-		}
-		if e = rows.Err(); e != nil {
-			return resolvedRoute{}, e
-		}
-		if err := tx.Commit(); err != nil {
-			return resolvedRoute{}, err
-		}
-		// Hydrate OAuth credentials outside the transaction: Current() can
-		// trigger a network token refresh, and holding a SQLite read tx
-		// across that serializes all other DB access.
-		for i := range route.Targets {
-			s.providers.HydrateOAuth(ctx, &route.Targets[i].Provider)
-		}
-		route.Virtual, route.RequestedModel = true, clientModel
-		if len(route.Targets) > 0 {
-			route.Provider, route.UpstreamModelID, route.Available = route.Targets[0].Provider, route.Targets[0].UpstreamModelID, route.Targets[0].Available
-		}
-		return route, nil
-	}
-	var protocols string
-	var enabled, modelAvailable int
-	var nativeProtocol sql.NullString
-	var reasoningRaw sql.NullString
-	route.ProviderModelID = route.RouteModelID
-	err = tx.QueryRowContext(ctx, `SELECT p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=?`, route.RouteModelID).Scan(&route.Provider.ID, &route.Provider.Name, &route.Provider.Type, &route.Provider.BaseURL, &route.Provider.Credential, &enabled, &protocols, &nativeProtocol, &route.UpstreamModelID, &modelAvailable, &reasoningRaw)
-	if err != nil {
-		return resolvedRoute{}, err
-	}
-	route.ReasoningCapabilities = decodeReasoningCapabilities(reasoningRaw)
-	route.Provider.Enabled = scanBool(enabled)
-	route.Provider.Protocols = providers.DecodeProtocols(protocols)
-	if d, ok := providers.Lookup(route.Provider.Type); ok {
-		route.Provider.MinOutputTokens = d.MinOutputTokens
-	}
-	if nativeProtocol.Valid {
-		route.NativeProtocol = providers.Protocol(nativeProtocol.String)
-	}
-	route.RequestedModel = clientModel
-	route.Virtual = false
-	route.Available = route.Provider.Enabled && scanBool(modelAvailable)
-	if err := tx.Commit(); err != nil {
-		return resolvedRoute{}, err
-	}
-	// OAuth hydration outside the transaction (see virtual branch above).
-	s.providers.HydrateOAuth(ctx, &route.Provider)
 	return route, nil
+}
+
+// upstreamHTTPClient returns the HTTP client carrying the account's configured
+// time-to-first-header bound. An account with no explicit setting uses the
+// registry's default client.
+func (s *Server) upstreamHTTPClient(r *http.Request) *http.Client {
+	if raw, err := s.scope(r).GetSetting(r.Context(), store.SettingFallbackTimeoutSeconds); err == nil {
+		if seconds, perr := strconv.Atoi(raw); perr == nil && seconds > 0 {
+			return s.providers.Registry().ClientFor(time.Duration(seconds) * time.Second)
+		}
+	}
+	return s.providers.Registry().HTTPClient()
+}
+
+func routeTargetToResolved(t store.RouteTarget) resolvedRoute {
+	var target resolvedRoute
+	target.ProviderModelID = t.ProviderModelID
+	target.Provider = providers.Instance{ID: t.ProviderID, Name: t.ProviderName, Type: t.ProviderType, BaseURL: t.BaseURL, Credential: t.Credential, Enabled: t.ProviderEnabled}
+	target.Provider.Protocols = providers.DecodeProtocols(t.Protocols)
+	if d, ok := providers.Lookup(t.ProviderType); ok {
+		target.Provider.MinOutputTokens = d.MinOutputTokens
+	}
+	if t.NativeProtocol.Valid {
+		target.NativeProtocol = providers.Protocol(t.NativeProtocol.String)
+	}
+	target.ReasoningCapabilities = decodeReasoningCapabilities(t.ReasoningCapabilities)
+	target.Available = t.Available
+	target.CredentialsLocked = t.Locked
+	target.MaxOutputTokens = t.MaxOutputTokens
+	target.UpstreamModelID = t.UpstreamModelID
+	return target
 }
 
 // idleTimeout is how long a successful upstream response may sit silent
@@ -571,6 +553,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// built up as the request progresses and written once, synchronously, in a
 	// deferred best-effort insert that never fails the request.
 	row := &logRow{
+		accountID:       identity.AccountID,
 		clientKeyID:     identity.ID,
 		clientName:      identity.Name,
 		requestedModel:  requested,
@@ -579,7 +562,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
-	logErrorBodies, _ := s.db.GetLogErrorBodies(r.Context())
+	logErrorBodies := false
+	if s.config.Mode != config.ModeHosted {
+		logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
+	}
 	originalBody := append([]byte(nil), body...)
 	// Extract the canonical reasoning selector once from the original request.
 	// It is recomputed for each candidate against that target's capabilities.
@@ -588,6 +574,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	streamed := false
 	clientTracked := false
 	activeTargetID := ""
+	quotaRejected := false
+	// selectedAttemptStart / selectedHeaderLatencyMs describe the attempt that
+	// was ultimately committed to the client; both are zero until a target is
+	// selected. They let the first-output observer attribute its measurement to
+	// the serving attempt.
+	selectedAttemptStart := time.Time{}
+	selectedHeaderLatencyMs := int64(0)
 	var route resolvedRoute
 	defer func() {
 		row.latencyMs = time.Since(start).Milliseconds()
@@ -599,21 +592,33 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		// clientEnd carries the route ID, so an empty RouteModelID here
 		// (resolution failed before tracking started) emits nothing.
 		if clientTracked {
-			s.inflight.clientEnd(row.clientKeyID, route.RouteModelID, streamed)
+			s.inflight.clientEnd(row.accountID, row.clientKeyID, route.RouteModelID, streamed)
 		}
 		if activeTargetID != "" {
-			s.inflight.targetEnd(route.RouteModelID, activeTargetID)
+			s.inflight.targetEnd(row.accountID, route.RouteModelID, activeTargetID)
 		}
-		s.writeLog(context.Background(), row)
+		// beginClientRequest reserves (or, in local mode, only starts) the
+		// client ticket. A concurrency rejection never acquired a ticket and a
+		// monthly rejection releases its ticket before returning, so a rejected
+		// request writes no Activity row and consumes no monthly slot.
+		if !quotaRejected {
+			s.writeLog(context.Background(), row)
+		}
 	}()
 	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
 
-	route, err = s.resolveRoute(r.Context(), identity.ID, requested)
+	route, err = s.resolveRoute(r.Context(), identity.AccountID, identity.ID, requested)
 	if err == sql.ErrNoRows {
 		row.httpStatus = 404
 		row.errorText = strPtr("model_not_found")
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("model_not_found"))
 		inferenceError(w, 404, "invalid_request_error", "model_not_found", "Model not found.", incoming == providers.ProtocolMessages)
+		return
+	} else if errors.Is(err, store.ErrSecretsLocked) {
+		row.httpStatus = 503
+		row.errorText = strPtr("provider_credentials_locked")
+		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("provider_credentials_locked"))
+		inferenceError(w, 503, "api_error", "provider_credentials_locked", "Provider credentials are unavailable: the encryption key is missing or does not match. An administrator must restore the master key.", incoming == providers.ProtocolMessages)
 		return
 	} else if err != nil {
 		if s.logger != nil {
@@ -630,7 +635,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	row.routeKind = &route.RouteKind
 	row.routeModelID = &route.RouteModelID
 	row.routeModel = &route.RouteModel
-	s.inflight.clientStart(row.clientKeyID, route.RouteModelID, requested)
+	if s.beginClientRequest(w, r, identity, route.RouteModelID, requested, incoming == providers.ProtocolMessages) {
+		quotaRejected = true
+		return
+	}
 	clientTracked = true
 	candidates := []resolvedRoute{route}
 	if route.Virtual {
@@ -650,7 +658,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	oauthRefreshed := make(map[string]bool)
 	cooldownSeconds := 0
 	if route.RoutingMode == "ordered_fallback" {
-		cooldownSeconds, _ = s.db.GetFallbackCooldownSeconds(r.Context())
+		cooldownSeconds, _ = s.scope(r).GetFallbackCooldownSeconds(r.Context())
 	}
 	skippedCooled := false
 	allAttemptedFailed := true
@@ -688,16 +696,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			attemptStart := time.Now()
 			if !candidate.Available {
 				nonTranslationFailure = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unavailable"})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unavailable")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unavailable"}, i < len(candidates)-1)
 				continue
 			}
-			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(candidate.ProviderModelID, attemptStart) {
+			if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && !bypass && s.cooldown.cooled(row.accountID, candidate.ProviderModelID, attemptStart) {
 				skippedCooled = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "cooldown")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "cooldown", latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 				continue
 			}
 			if candidate.Provider.Credential != "" && (candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go") && providers.IsOpenCodeFreeModel(candidate.UpstreamModelID) {
@@ -714,18 +718,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					return
 				}
 				nonTranslationFailure = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "free_model_requires_keyless")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "free_model_requires_keyless", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_model_requires_keyless")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 				continue
 			}
 			target = compatibleProtocol(candidate.Provider.Protocols, candidate.NativeProtocol, incoming)
 			if target == "" {
 				protocolUnavailable = true
 				nonTranslationFailure = true
-				row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "protocol_unavailable"})
-				s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "protocol_unavailable")
-				s.logAttempt(row, row.attempts[len(row.attempts)-1])
+				s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "protocol_unavailable"}, i < len(candidates)-1)
 				continue
 			}
 			translated = target != incoming
@@ -748,8 +748,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						return
 					}
 					translationFailureClass = code
-					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()})
-					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, code)
+					s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 					continue
 				}
 				// After translation, re-apply the canonical selector for the target.
@@ -774,8 +773,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 							inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires reasoning and cannot serve a plain non-reasoning request.", incoming == providers.ProtocolMessages)
 							return
 						}
-						row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
-						s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
+						s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 						continue
 					}
 					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
@@ -828,8 +826,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires a higher minimum output length than requested.", incoming == providers.ProtocolMessages)
 						return
 					}
-					row.attempts = append(row.attempts, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "skipped", failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()})
-					s.inflight.targetSkipped(route.RouteModelID, row.clientKeyID, candidate.ProviderModelID, "unsupported_feature")
+					s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 					continue
 				}
 			}
@@ -848,23 +845,44 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Accept", "application/json, text/event-stream")
 			req.Header.Set("User-Agent", "Tiller-Router/1")
-			if candidate.Provider.Type == "opencode-free" {
+			freeShadow := candidate.Provider.Type == "opencode-free"
+			if freeShadow {
+				// Anonymous free-tier requests mirror the genuine OpenCode
+				// client's wire shape (captured against opencode/1.18.26):
+				// "Bearer public" auth, first-party UA, Accept */*, affinity
+				// session headers, no relay tells. Zen/go keep the
+				// router-identifying headers — only the keyless path needs the
+				// shadow, and only there is it approved.
+				req.Header.Set("Accept", "*/*")
+				req.Header.Set("User-Agent", openCodeFreeUserAgent)
 				if clientIP := s.requestClientIP(r); clientIP != "" {
 					req.Header.Set("X-Real-IP", clientIP)
 				}
 			}
 			if candidate.Provider.Type == "opencode-zen" || candidate.Provider.Type == "opencode-go" || candidate.Provider.Type == "opencode-free" {
-				// OpenCode requires a stable per-conversation session ID for
-				// routing/prompt-caching (MissingSessionID 400 otherwise).
-				// Forward a native client header when present so OpenCode,
-				// Hermes, etc. keep conversation affinity; otherwise
-				// synthesize one from the router request ID (stable across
-				// fallback attempts of the same client request).
+				// OpenCode requires a stable per-conversation identity for
+				// routing/prompt-caching. Zen/go send the router's synthesized
+				// X-Opencode-Session; the anonymous free shadow mirrors the
+				// genuine client, which sends only the affinity
+				// headers (captured against opencode/1.18.26) — no
+				// X-Opencode-Session at all.
 				session := openCodeSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID, row.clientKeyID)
-				req.Header.Set("X-Opencode-Session", session)
-				req.Header.Set("X-Opencode-Client", "tiller-router")
+				if freeShadow {
+					affinity := freeShadowSession(session)
+					req.Header.Set("x-session-affinity", affinity)
+					req.Header.Set("x-session-id", affinity)
+				} else {
+					req.Header.Set("X-Opencode-Session", session)
+					req.Header.Set("X-Opencode-Client", "tiller-router")
+				}
 			}
-			providers.ApplyRequestAuth(req, candidate.Provider)
+			if freeShadow {
+				// Anonymous free tier authenticates as the public key, exactly
+				// as the genuine client does — never with a stored credential.
+				req.Header.Set("Authorization", "Bearer public")
+			} else {
+				providers.ApplyRequestAuth(req, candidate.Provider)
+			}
 			copySafeFeatureHeaders(req.Header, r.Header, target)
 			if candidate.Provider.Type == "codex-subscription" {
 				sessionID, source := codexSessionID(clientSessionHeader(r.Header), row.clientRequestID, row.clientKeyID)
@@ -872,12 +890,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				req.Header.Set("session-id", sessionID)
 				req.Header.Set("x-client-request-id", row.clientRequestID)
 				req.Header.Set("x-codex-routing-hint", "model="+candidate.UpstreamModelID)
-				// The ChatGPT Codex backend switches to SSE only when Accept is
-				// exactly text/event-stream (the official codex_cli_rs sends this
-				// exact value). A combined Accept leaves it on the buffered JSON
-				// path, which stalls long reasoning generations until a reverse
-				// proxy read timeout kills the connection. Set it after
-				// ApplyRequestAuth so the Codex-specific contract wins.
+				// Keep the exact value sent by codex_cli_rs for wire parity. The
+				// backend currently returns SSE for any Accept value; response-side
+				// classification, not this request header, decides streaming. Set it
+				// after ApplyRequestAuth so the Codex-specific request shape wins.
 				req.Header.Set("Accept", "text/event-stream")
 			}
 			targetID := candidate.ProviderModelID
@@ -887,10 +903,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// Target-level tracking covers direct real-model routes too: for a
 			// real route this is the single 1:1 leg, so the Activity graph can
 			// light it (and dim it on failure) while the request is in flight.
-			s.inflight.targetStart(route.RouteModelID, targetID)
-			response, e := s.providers.Registry().HTTPClient().Do(req)
+			s.inflight.targetStart(row.accountID, route.RouteModelID, targetID)
+			response, e := s.upstreamHTTPClient(r).Do(req)
 			if e != nil {
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				attemptCancel()
 				class := "upstream_unreachable"
 				if errors.Is(e, context.DeadlineExceeded) || isTimeout(e) {
@@ -930,7 +946,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				continue
 			}
 			headerLatencyMs := time.Since(attemptStart).Milliseconds()
-			streaming := isStreamingResponse(response)
+			streaming := false
 			logCodexResponse := func(firstByteLatencyMs int64) {
 				if candidate.Provider.Type != "codex-subscription" || s.logger == nil {
 					return
@@ -956,8 +972,19 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			})
 			idleBody := response.Body
 			response.Body = bufferedReadCloser{Reader: &idleReader{reader: idleBody, timer: idle}, closer: idleBody}
+			if response.StatusCode >= 200 && response.StatusCode < 300 {
+				if candidate.Provider.Type == "codex-subscription" {
+					// Codex streams successful Responses replies but currently omits
+					// Content-Type. Keep this provider contract explicit so a future
+					// header change cannot put the response back on the buffered path.
+					response.Header.Set("Content-Type", "text/event-stream")
+				} else {
+					sniffAndClassify(response)
+				}
+				streaming = isStreamingResponse(response)
+			}
 			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				class := fmt.Sprintf("http_%d", response.StatusCode)
 				// Always read a bounded copy: it is persisted only under opt-in
 				// detailed error logging, but a sanitized summary is always used
@@ -972,12 +999,28 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				if attemptTimedOut.Load() {
 					class = "upstream_timeout"
 				}
+				var detail upstreamErrorDetail
+				if class != "upstream_timeout" && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
+					detail = parseUpstreamErrorDetail(upstreamErrorBody, response.Header.Get("Content-Type"))
+					if isContextLimitError(detail) {
+						class = "context_limit_exceeded"
+					}
+				}
 				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
+				freeTierRejection := upstreamErrorReadErr == nil && isOpenCodeFreeTierRejection(upstreamErrorBody)
+				if freeTierRejection {
+					// OpenCode's free-tier policy gate fired: reclassify to the
+					// router-owned failure class so the client gets a
+					// diagnosable remediation instead of relayed Console text.
+					// The sanitized upstream detail is still attached below.
+					class = "free_tier_rejected"
+					attempt.failureClass = class
+					attempt.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+				}
 				if upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 					if logErrorBodies {
 						attempt.errorBody, attempt.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
-					detail := parseUpstreamErrorDetail(upstreamErrorBody, response.Header.Get("Content-Type"))
 					attempt.clientError = redactProviderSecrets(detail.clientMessage(), candidate.Provider)
 				}
 				idle.Stop()
@@ -998,7 +1041,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// failure.
 				if !oauthRefreshed[candidate.Provider.ID] && (response.StatusCode == 401 || response.StatusCode == 403) {
 					if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
-						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), &candidate.Provider); refreshErr == nil {
+						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), identity.AccountID, &candidate.Provider); refreshErr == nil {
 							oauthRefreshed[candidate.Provider.ID] = true
 							// Propagate the fresh credential to every candidate
 							// sharing this provider so later targets don't retry
@@ -1017,7 +1060,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// virtual routes and direct real-model routes never populate the
 				// shared cooldown state.
 				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
-					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage("upstream_error"))
+					cooldownMessage := fixedUpstreamErrorMessage("upstream_error")
+					if class == "free_tier_rejected" {
+						cooldownMessage = fixedUpstreamErrorMessage(class)
+					}
+					s.openCooldown(candidate, class, row, cooldownSeconds, cooldownMessage)
 				}
 				// An upstream HTTP response is an upstream failure regardless of
 				// status. Ordered virtual routes try their next target by default;
@@ -1025,20 +1072,46 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// before this point and must not be hidden by fallback.
 				if !route.Virtual || !fallbackStatus(response.StatusCode) {
 					row.httpStatus = response.StatusCode
-					row.errorText = strPtr("upstream_error")
-					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
+					errorCode := "upstream_error"
+					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
+					if class == "context_limit_exceeded" {
+						row.errorText = strPtr(class)
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+						errorCode = class
+						message = fixedUpstreamErrorMessage(class)
+						if attempt.clientError != "" {
+							message += " " + attempt.clientError
+						}
+					} else if freeTierRejection {
+						// Fail loud with the router-owned remediation on direct
+						// routes: the raw Console text names no fix.
+						row.httpStatus = 400
+						row.errorText = strPtr("free_tier_rejected")
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("free_tier_rejected"))
+						errorCode = "free_tier_rejected"
+						message = "OpenCode declined the free-tier request: it can only be served from within OpenCode. Use a keyed opencode-zen or opencode-go provider for this model."
+						if attempt.clientError != "" {
+							message = fmt.Sprintf("%s Upstream detail: %s", message, attempt.clientError)
+						}
+					} else {
+						row.errorText = strPtr("upstream_error")
+						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("upstream_error"))
+						if attempt.clientError != "" {
+							message = fmt.Sprintf("%s (HTTP %d)", attempt.clientError, response.StatusCode)
+						}
+					}
 					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
-					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
-					if attempt.clientError != "" {
-						message = fmt.Sprintf("%s (HTTP %d)", attempt.clientError, response.StatusCode)
-					}
-					inferenceError(w, response.StatusCode, "api_error", "upstream_error", message, incoming == providers.ProtocolMessages)
+					inferenceError(w, row.httpStatus, "api_error", errorCode, message, incoming == providers.ProtocolMessages)
 					return
 				}
 				row.fallbackUsed = true
-				row.fallbackReason = strPtr(class)
+				if freeTierRejection {
+					row.fallbackReason = strPtr("free_tier_rejected")
+				} else {
+					row.fallbackReason = strPtr(class)
+				}
 				continue
 			}
 			// Ordered-fallback streaming targets are probed for usable output before
@@ -1062,7 +1135,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				} else {
 					logCodexResponse(0)
 				}
-				s.inflight.targetEnd(route.RouteModelID, targetID)
+				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				response.Body.Close()
 				idle.Stop()
 				attemptCancel()
@@ -1126,7 +1199,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					}
 				}
 				if class != "" {
-					s.inflight.targetEnd(route.RouteModelID, targetID)
+					s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 					response.Body.Close()
 					idle.Stop()
 					attemptCancel()
@@ -1148,6 +1221,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 			}
 			selected, resp, cancel = candidate, response, attemptCancel
+			selectedAttemptStart = attemptStart
+			selectedHeaderLatencyMs = headerLatencyMs
 			// Track the hot leg for the deferred targetEnd, for virtual and
 			// direct real-model routes alike (the 1:1 real leg included).
 			activeTargetID = targetID
@@ -1184,6 +1259,13 @@ routeDone:
 			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
 			return
 		}
+		if route.Virtual && allAttemptsFailureClass(row.attempts, "context_limit_exceeded") {
+			row.httpStatus = 400
+			row.errorText = strPtr("context_limit_exceeded")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("context_limit_exceeded"))
+			inferenceError(w, 400, "invalid_request_error", "context_limit_exceeded", fixedUpstreamErrorMessage("context_limit_exceeded"), incoming == providers.ProtocolMessages)
+			return
+		}
 		if route.Virtual && allSkippedUnsupportedFeature(row.attempts) {
 			row.httpStatus = 400
 			row.errorText = strPtr("unsupported_feature")
@@ -1218,12 +1300,12 @@ routeDone:
 	defer cancel()
 	clearSelectedCooldown := func() {
 		if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && selected.ProviderModelID != "" {
-			s.cooldown.remove(selected.ProviderModelID)
+			s.cooldown.remove(row.accountID, selected.ProviderModelID)
 		}
 	}
 	row.resolvedProvider = &selected.Provider.Name
 	row.resolvedModel = &selected.UpstreamModelID
-	s.inflight.clientResolved(row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
+	s.inflight.clientResolved(row.accountID, row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
 	if v := resp.Header.Get("Request-Id"); v != "" {
@@ -1265,14 +1347,15 @@ routeDone:
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
-			s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
+			s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 			ensureStreamKeepalive()
 		}
 		if streamKeepalive == nil {
 			w.WriteHeader(resp.StatusCode)
 		}
 		row.httpStatus = resp.StatusCode
-		if err := translateResponse(w, streamKeepalive, reader, incoming, target, selected, usage); err != nil {
+		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
+		if err := translateResponseObserved(w, streamKeepalive, reader, incoming, target, selected, usage, outputObs); err != nil {
 			idle.Stop()
 			class := "translation_error"
 			if attemptTimedOut.Load() {
@@ -1300,10 +1383,11 @@ routeDone:
 	if isStreamingResponse(resp) {
 		streamed = true
 		row.streaming = true
-		s.inflight.clientStreaming(row.clientKeyID, route.RouteModelID)
+		s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 		ensureStreamKeepalive()
 		row.httpStatus = resp.StatusCode
-		if err := rewriteSSE(w, streamKeepalive, reader, selected.UpstreamModelID, selected.RequestedModel, usage); err != nil {
+		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
+		if err := rewriteSSEObserved(w, streamKeepalive, reader, selected.UpstreamModelID, selected.RequestedModel, usage, outputObs); err != nil {
 			class := "upstream_read_error"
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
@@ -1345,6 +1429,68 @@ routeDone:
 	row.httpStatus = resp.StatusCode
 	_, _ = w.Write(rewriteModelBytes(body, selected.UpstreamModelID, selected.RequestedModel))
 	clearSelectedCooldown()
+}
+
+// beginClientRequest starts the client ticket and, when hosted limit
+// enforcement is on, atomically reserves the plan's concurrency and monthly
+// slots before any upstream work. It returns true when it has written a 429 and
+// the caller must stop.
+//
+// Concurrency is reserved first: a request rejected on concurrency never
+// acquires a ticket and never consumes a monthly slot. A request rejected on the
+// monthly cap has already acquired its concurrency ticket, so this releases it
+// before returning. The caller starts the ticket unconditionally on admission
+// and the request's deferred clientEnd releases it; on rejection the tracker is
+// left exactly as it was. Plan lookup failure is logged and allowed through: a
+// quota read must never fail-open into a 500 for the request. Local mode and an
+// off enforcement flag only start the ticket (unlimited).
+func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, identity auth.ClientIdentity, routeID, requested string, anthropic bool) bool {
+	if s.config.Mode != config.ModeHosted || !s.scope(r).EnforcingLimits() {
+		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
+		return false
+	}
+	plan, err := s.storeHandle().EntitlementsForAccount(r.Context(), identity.AccountID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("plan lookup failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+		}
+		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
+		return false
+	}
+	now := time.Now()
+	// A limit of store.Unlimited always acquires, so a rejection here is only
+	// possible when the plan sets a finite concurrency cap.
+	if !s.inflight.tryAcquire(identity.AccountID, plan.MaxConcurrentStreams, identity.ID, routeID, requested) {
+		w.Header().Set("Retry-After", "1")
+		inferenceError(w, http.StatusTooManyRequests, "rate_limited", "stream_limit_exceeded", "Too many concurrent requests for your plan. Retry shortly.", anthropic)
+		return true
+	}
+	if plan.MonthlyRequests != store.Unlimited {
+		reserved, err := s.scopeFor(identity.AccountID).ReserveUsageCounter(r.Context(), store.UsagePeriod(now), plan.MonthlyRequests)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("usage reservation failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+			}
+			return false
+		}
+		if !reserved {
+			s.inflight.clientEnd(identity.AccountID, identity.ID, routeID, false)
+			seconds := int(time.Until(store.NextPeriodStart(now)).Seconds())
+			if seconds < 1 {
+				seconds = 1
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			inferenceError(w, http.StatusTooManyRequests, "rate_limited", "monthly_limit_exceeded", "Monthly request limit reached. Your allowance resets at the start of next month (UTC).", anthropic)
+			return true
+		}
+	} else {
+		// Unlimited: no reservation is needed, but still record usage for the
+		// plan card. Best-effort and independent of Activity logging.
+		if err := s.scopeFor(identity.AccountID).IncrementUsageCounter(r.Context(), store.UsagePeriod(now)); err != nil && s.logger != nil {
+			s.logger.Warn("usage counter increment failed", "error_class", fmt.Sprintf("%T", err))
+		}
+	}
+	return false
 }
 
 func markLastAttemptFailed(row *logRow, class string) {
@@ -1391,6 +1537,49 @@ type bufferedReadCloser struct {
 
 func isStreamingResponse(resp *http.Response) bool {
 	return strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+}
+
+const maxSSEDetectionPrefix = 64
+
+// sniffAndClassify peeks at a small prefix of a successful headerless response
+// and marks it as SSE when the first complete field line has SSE's shape. The
+// consumed bytes are always restored so the normal preflight and relay paths
+// receive the original body unchanged.
+func sniffAndClassify(resp *http.Response) {
+	if resp == nil || resp.Body == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || resp.ContentLength == 0 || resp.Header.Get("Content-Type") != "" {
+		return
+	}
+	prefix := make([]byte, maxSSEDetectionPrefix)
+	body := resp.Body
+	n, _ := body.Read(prefix)
+	resp.Body = bufferedReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(prefix[:n]), body),
+		closer: body,
+	}
+	if looksLikeSSE(prefix[:n]) {
+		resp.Header.Set("Content-Type", "text/event-stream")
+	}
+}
+
+func looksLikeSSE(prefix []byte) bool {
+	if len(prefix) >= 3 && bytes.Equal(prefix[:3], []byte{0xef, 0xbb, 0xbf}) {
+		prefix = prefix[3:]
+	}
+	for len(prefix) > 0 {
+		lineEnd := bytes.IndexByte(prefix, '\n')
+		if lineEnd < 0 {
+			return false
+		}
+		line := bytes.TrimSuffix(prefix[:lineEnd], []byte{'\r'})
+		if bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("data:")) {
+			return true
+		}
+		if len(line) == 0 || line[0] != ':' {
+			return false
+		}
+		prefix = prefix[lineEnd+1:]
+	}
+	return false
 }
 
 func (r bufferedReadCloser) Close() error { return r.closer.Close() }
@@ -1453,6 +1642,25 @@ func copySafeResponseHeaders(dst, src http.Header) {
 			}
 		}
 	}
+}
+
+// openCodeFreeUserAgent mirrors the genuine OpenCode CLI's User-Agent on
+// anonymous free-tier requests (captured against opencode/1.18.26 via local
+// echo: "opencode/1.18.26 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14").
+// Keyed zen/go traffic keeps Tiller-Router/1 — the shadow applies to the
+// approved opencode-free path only.
+const openCodeFreeUserAgent = "opencode/1.18.26 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+
+// freeShadowSession derives the opaque affinity value sent on the shadow
+// path from the router-stable session: same stability guarantees as
+// openCodeSessionID (stable across fallback attempts, isolated across
+// clients) with no "tiller-" tell.
+func freeShadowSession(session string) string {
+	if v := strings.TrimSpace(session); v != "" {
+		h := sha256.Sum256([]byte("opencode-free-shadow\x00" + v))
+		return "ses_" + hex.EncodeToString(h[:])[:23]
+	}
+	return "ses_AAAAAAAAAAAAAAAAAAAAAAA"
 }
 
 // openCodeSessionID resolves the x-opencode-session value for OpenCode
@@ -1695,13 +1903,16 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 // before any upstream attempt, so an upstream 400 that survives to this point
 // is overwhelmingly a target-side signal.
 //
-// Only request-specific signals stay excluded: 409, 422, 405, 413 and 415
-// commonly reflect the individual request (conflict, validation, wrong
-// method, oversized payload, unsupported media) rather than the health or
-// availability of the upstream model, and must not hide a working model
-// chain-wide for other clients. upstream_response_too_large is a
+// Only request-specific signals stay excluded: context_limit_exceeded, 409,
+// 422, 405, 413 and 415 commonly reflect the individual request (context,
+// conflict, validation, wrong method, oversized payload, unsupported media)
+// rather than the health or availability of the upstream model, and must not
+// hide a working model chain-wide for other clients. upstream_response_too_large is a
 // router-side guard and never reaches this helper as a status.
 func cooldownTrigger(class string, httpStatus int) bool {
+	if class == "context_limit_exceeded" {
+		return false
+	}
 	switch class {
 	case "upstream_unreachable", "upstream_timeout", "upstream_read_error",
 		"empty_response", "upstream_stream_error":
@@ -1733,7 +1944,25 @@ func allSkippedUnsupportedFeature(attempts []requestAttempt) bool {
 	return true
 }
 
+func allAttemptsFailureClass(attempts []requestAttempt, class string) bool {
+	if len(attempts) == 0 {
+		return false
+	}
+	for _, attempt := range attempts {
+		if attempt.result != "failed" || attempt.failureClass != class {
+			return false
+		}
+	}
+	return true
+}
+
 func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, upstream, requested string, usage *usageCapture) error {
+	return rewriteSSEObserved(w, keepalive, r, upstream, requested, usage, nil)
+}
+
+// rewriteSSEObserved is rewriteSSE with an optional first-output observer. The
+// observer records a timestamp only; it never sees or retains response content.
+func rewriteSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, upstream, requested string, usage *usageCapture, obs *outputObserver) error {
 	reader := bufio.NewReader(r)
 	if keepalive == nil {
 		keepalive = newSSEKeepaliveWriter(w, sseKeepaliveInterval)
@@ -1768,6 +1997,9 @@ func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reade
 								setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
 								setCacheFromUsage(u, usage)
 							}
+							if responsesEventHasOutput(m) {
+								obs.observe()
+							}
 						}
 						rewriteModel(value, upstream, requested)
 						if encoded, e := json.Marshal(value); e == nil {
@@ -1790,6 +2022,20 @@ func rewriteSSE(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reade
 			return err
 		}
 	}
+}
+
+// responsesEventHasOutput reports whether a Responses SSE event type carries
+// client-visible assistant output (text, reasoning summary/content, or a tool
+// call). Used only to time the first visible frame.
+func responsesEventHasOutput(m map[string]any) bool {
+	switch m["type"] {
+	case "response.output_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_text.delta",
+		"response.function_call_arguments.delta":
+		return true
+	}
+	return false
 }
 
 func rewriteModel(value any, upstream, requested string) {
@@ -1816,7 +2062,7 @@ func rewriteModel(value any, upstream, requested string) {
 func (s *Server) openCooldown(candidate resolvedRoute, class string, row *logRow, cooldownSeconds int, message string) {
 	failedAt := time.Now()
 	until := failedAt.Add(time.Duration(cooldownSeconds) * time.Second)
-	s.cooldown.set(candidate.ProviderModelID, failedAt, until, candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, message)
+	s.cooldown.set(rowAccountID(row), candidate.ProviderModelID, failedAt, until, candidate.Provider.Name, candidate.UpstreamModelID, row.clientRequestID, class, message)
 	if s.logger != nil {
 		s.logger.Warn("target cooled down",
 			"provider", candidate.Provider.Name,
@@ -1865,7 +2111,7 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 		// log it at Info (visible at the default level) with the origin of the
 		// failure that opened the cooldown so the skip explains itself.
 		if s.cooldown != nil {
-			if entry, ok := s.cooldown.statusByName(attempt.provider, attempt.model, time.Now()); ok {
+			if entry, ok := s.cooldown.statusByName(rowAccountID(row), attempt.provider, attempt.model, time.Now()); ok {
 				attrs = append(attrs,
 					"cooldown_origin_request_id", entry.originRequestLogID,
 					"cooldown_origin_error_class", entry.originErrorClass,
@@ -1876,5 +2122,22 @@ func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
 		s.logger.Info("provider request skipped", attrs...)
 		return
 	}
+	if attempt.failureClass == "context_limit_exceeded" || attempt.failureClass == "translation_error" || attempt.failureClass == "unsupported_feature" || attempt.failureClass == "protocol_unavailable" || attempt.failureClass == "free_model_requires_keyless" {
+		s.logger.Info("provider request skipped", attrs...)
+		return
+	}
 	s.logger.Debug("provider request skipped", attrs...)
+}
+
+func (s *Server) recordSkippedAttempt(row *logRow, route resolvedRoute, attempt requestAttempt, advancesFallback bool) {
+	attempt.result = "skipped"
+	row.attempts = append(row.attempts, attempt)
+	if advancesFallback && route.Virtual && route.RoutingMode == "ordered_fallback" {
+		row.fallbackUsed = true
+		if row.fallbackReason == nil {
+			row.fallbackReason = strPtr(attempt.failureClass)
+		}
+	}
+	s.inflight.targetSkipped(row.accountID, route.RouteModelID, row.clientKeyID, attempt.providerModelID, attempt.failureClass)
+	s.logAttempt(row, attempt)
 }

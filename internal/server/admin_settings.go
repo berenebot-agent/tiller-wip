@@ -5,33 +5,38 @@ import (
 	"net/url"
 	"reflect"
 	"strconv"
-	"time"
 
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/config"
+	"github.com/tiller-router/tiller-router/internal/hostednet"
+	"github.com/tiller-router/tiller-router/internal/store"
 )
 
 func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
-	enabled, retention, err := s.db.GetLoggingDefaults(r.Context())
+	sc := s.scope(r)
+	enabled, retention, err := sc.GetLoggingDefaults(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	logErrorBodies, err := s.db.GetLogErrorBodies(r.Context())
+	logErrorBodies := false
+	if s.config.Mode != config.ModeHosted {
+		logErrorBodies, err = sc.GetLogErrorBodies(r.Context())
+	}
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	fallbackTimeout, err := s.db.GetFallbackTimeout(r.Context())
+	fallbackTimeout, err := sc.GetFallbackTimeout(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	fallbackCooldown, err := s.db.GetFallbackCooldownSeconds(r.Context())
+	fallbackCooldown, err := sc.GetFallbackCooldownSeconds(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	notifications, err := s.db.GetNotificationSettings(r.Context())
+	notifications, err := sc.GetNotificationSettings(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
@@ -51,6 +56,9 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"notifications_event_client_key_deleted": notifications.EventClientKeyDeleted,
 		"notifications_event_admin_login":        notifications.EventAdminLogin,
 		"notifications_auth_header_set":          notifications.AuthHeader != "",
+		"provider_credential_encryption": map[string]any{
+			"state": s.secretEncryptionState(),
+		},
 	})
 }
 
@@ -75,6 +83,11 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_request", err.Error())
 		return
 	}
+	sc := s.scope(r)
+	if s.config.Mode == config.ModeHosted && input.LogErrorBodies != nil && *input.LogErrorBodies {
+		adminError(w, http.StatusForbidden, "hosted_body_logging_disabled", "Detailed error logging is unavailable in hosted mode.")
+		return
+	}
 	if input.DefaultRetentionDays != nil && *input.DefaultRetentionDays < 1 {
 		adminError(w, 400, "invalid_retention", "Retention must be at least 1 day.")
 		return
@@ -88,8 +101,16 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.NotificationsWebhookURL != nil && *input.NotificationsWebhookURL != "" {
-		if !validWebhookURL(*input.NotificationsWebhookURL) {
-			adminError(w, 400, "invalid_webhook_url", "The webhook URL must be a valid http(s) URL.")
+		valid := validWebhookURL(*input.NotificationsWebhookURL)
+		if s.config.Mode == config.ModeHosted {
+			valid = hostednet.Validate(*input.NotificationsWebhookURL) == nil
+		}
+		if !valid {
+			message := "The webhook URL must be a valid http(s) URL."
+			if s.config.Mode == config.ModeHosted {
+				message = "Hosted webhook URLs must use validated public HTTPS on port 443."
+			}
+			adminError(w, 400, "invalid_webhook_url", message)
 			return
 		}
 	}
@@ -106,20 +127,20 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		key   string
 	}
 	updates := []settingUpdate{
-		{key: database.SettingDefaultLoggingEnabled, value: input.DefaultLoggingEnabled},
-		{key: database.SettingDefaultRetentionDays, value: input.DefaultRetentionDays},
-		{key: database.SettingLogErrorBodies, value: input.LogErrorBodies},
-		{key: database.SettingFallbackTimeoutSeconds, value: input.FallbackTimeoutSeconds},
-		{key: database.SettingFallbackCooldownSeconds, value: input.FallbackCooldownSeconds},
-		{key: database.SettingNotificationsEnabled, value: input.NotificationsEnabled},
-		{key: database.SettingNotificationsWebhookURL, value: input.NotificationsWebhookURL},
-		{key: database.SettingNotificationsEventFallback, value: input.NotificationsEventFallback},
-		{key: database.SettingNotificationsEventAllFailed, value: input.NotificationsEventAllFailed},
-		{key: database.SettingNotificationsCooldownSeconds, value: input.NotificationsCooldownSeconds},
-		{key: database.SettingNotificationsEventClientKeyCreated, value: input.NotificationsEventClientKeyCreated},
-		{key: database.SettingNotificationsEventClientKeyDeleted, value: input.NotificationsEventClientKeyDeleted},
-		{key: database.SettingNotificationsEventAdminLogin, value: input.NotificationsEventAdminLogin},
-		{key: database.SettingNotificationsAuthHeader, value: input.NotificationsAuthHeader},
+		{key: store.SettingDefaultLoggingEnabled, value: input.DefaultLoggingEnabled},
+		{key: store.SettingDefaultRetentionDays, value: input.DefaultRetentionDays},
+		{key: store.SettingLogErrorBodies, value: input.LogErrorBodies},
+		{key: store.SettingFallbackTimeoutSeconds, value: input.FallbackTimeoutSeconds},
+		{key: store.SettingFallbackCooldownSeconds, value: input.FallbackCooldownSeconds},
+		{key: store.SettingNotificationsEnabled, value: input.NotificationsEnabled},
+		{key: store.SettingNotificationsWebhookURL, value: input.NotificationsWebhookURL},
+		{key: store.SettingNotificationsEventFallback, value: input.NotificationsEventFallback},
+		{key: store.SettingNotificationsEventAllFailed, value: input.NotificationsEventAllFailed},
+		{key: store.SettingNotificationsCooldownSeconds, value: input.NotificationsCooldownSeconds},
+		{key: store.SettingNotificationsEventClientKeyCreated, value: input.NotificationsEventClientKeyCreated},
+		{key: store.SettingNotificationsEventClientKeyDeleted, value: input.NotificationsEventClientKeyDeleted},
+		{key: store.SettingNotificationsEventAdminLogin, value: input.NotificationsEventAdminLogin},
+		{key: store.SettingNotificationsAuthHeader, value: input.NotificationsAuthHeader},
 	}
 	for _, u := range updates {
 		if u.value == nil || reflect.ValueOf(u.value).IsNil() {
@@ -134,15 +155,12 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		case *string:
 			value = *v
 		}
-		if err := s.db.SetSetting(r.Context(), u.key, value); err != nil {
+		if err := sc.SetSetting(r.Context(), u.key, value); err != nil {
 			adminError(w, 500, "database_error", "Could not update settings.")
 			return
 		}
-		if u.key == database.SettingFallbackTimeoutSeconds {
-			s.providers.Registry().SetResponseHeaderTimeout(time.Duration(*input.FallbackTimeoutSeconds) * time.Second)
-		}
-		if u.key == database.SettingFallbackCooldownSeconds && *input.FallbackCooldownSeconds == 0 {
-			s.cooldown.clear()
+		if u.key == store.SettingFallbackCooldownSeconds && *input.FallbackCooldownSeconds == 0 {
+			s.cooldown.clearFor(sc.AccountID())
 		}
 	}
 	w.WriteHeader(204)

@@ -21,6 +21,8 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "The upstream provider reported a stream error"
 	case "upstream_response_too_large":
 		return "Upstream provider response exceeded Tiller's size limit"
+	case "context_limit_exceeded":
+		return "The request exceeds this target's context window. Shorten the conversation or use a target with a larger context window."
 	case "model_not_found":
 		return "The requested model was not found or is not configured"
 	case "database_error":
@@ -41,6 +43,8 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "No compatible protocol is available for this request"
 	case "free_model_requires_keyless":
 		return "This OpenCode free-tier model must be served without a credential"
+	case "free_tier_rejected":
+		return "OpenCode declined the free-tier request for third-party relay"
 	case "virtual_model_unavailable":
 		return "All targets for the virtual model are currently unavailable"
 	case "model_unavailable":

@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -19,9 +21,78 @@ const (
 	Scope          = "openid profile email offline_access"
 	DefaultBaseURL = "https://chatgpt.com/backend-api/codex"
 	Originator     = "codex_cli_rs"
-	ClientVersion  = "0.153.4"
-	UserAgent      = "codex_cli_rs/" + ClientVersion
+	// ClientVersion is the floor client version Tiller advertises when the live
+	// release channel cannot be reached. Codex model discovery gates each model
+	// on its minimal_client_version, so a stale floor silently hides newer
+	// models; discovery resolves the current version at runtime and only falls
+	// back to this value.
+	ClientVersion = "0.156.1"
+	UserAgent     = "codex_cli_rs/" + ClientVersion
 )
+
+// ReleaseChannelURL is the OpenAI-owned release channel the Codex installer
+// uses to resolve "latest". It reports {"tag_name":"rust-v0.156.1",...}. It is
+// a var so tests can point it at a local server.
+var ReleaseChannelURL = "https://releases.openai.com/codex/channels/latest"
+
+// ResolveLatestVersion fetches the latest Codex CLI release version from the
+// OpenAI release channel and returns it in bare x.y.z form (the channel reports
+// tag_name as "rust-v0.156.1"). Callers treat any error as non-fatal and fall
+// back to ClientVersion, so a release-channel outage never fails a refresh.
+func ResolveLatestVersion(ctx context.Context, client *http.Client) (string, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ReleaseChannelURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("codex release channel returned HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	var payload struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fmt.Errorf("decode codex release channel: %w", err)
+	}
+	version := strings.TrimPrefix(payload.TagName, "rust-v")
+	if !validCodexVersion(version) {
+		return "", fmt.Errorf("codex release channel returned invalid tag %q", payload.TagName)
+	}
+	return version, nil
+}
+
+// validCodexVersion accepts the x.y.z core the Codex models endpoint requires as
+// client_version, tolerating a pre-release suffix (e.g. 0.157.0-alpha.11).
+func validCodexVersion(version string) bool {
+	core, _, _ := strings.Cut(version, "-")
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 func AuthorizationURL(redirectURI, state, challenge string) (string, error) {
 	if redirectURI == "" || state == "" || challenge == "" {

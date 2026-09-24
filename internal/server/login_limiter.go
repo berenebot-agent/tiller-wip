@@ -9,13 +9,12 @@ import (
 	"time"
 )
 
-// loginLimiter is a simple in-memory brute-force guard for the admin login
-// endpoint. It tracks consecutive failed attempts per client IP and locks the
-// IP out for a window once a threshold is exceeded. It is intentionally simple:
-// no external dependency, no token bucket, no persistence.
+// loginLimiter is a bounded in-memory auth throttle. It tracks consecutive
+// failed attempts and fixed-window request budgets; neither state is persisted.
 type loginLimiter struct {
 	mu       sync.Mutex
 	failures map[string]*loginFailure
+	attempts map[string]*loginFailure
 	max      int           // consecutive failures before lockout
 	window   time.Duration // counting window for consecutive failures
 	lockout  time.Duration // how long a lockout lasts
@@ -30,19 +29,19 @@ type loginFailure struct {
 func newLoginLimiter(max int, window, lockout time.Duration) *loginLimiter {
 	return &loginLimiter{
 		failures: make(map[string]*loginFailure),
+		attempts: make(map[string]*loginFailure),
 		max:      max,
 		window:   window,
 		lockout:  lockout,
 	}
 }
 
-// maxLimiterEntries is a true hard bound on the limiter map so spoofed
+// maxLimiterEntries is a true hard bound per limiter map so spoofed
 // X-Forwarded-For values (usable by anyone behind the trusted proxy) cannot
 // grow memory without bound. When exceeded, expired entries are purged; if
-// still over budget, one non-locked-out counting entry is dropped (fail-open
-// for that IP, which only resets its failure streak). If every entry is an
-// active lockout and nothing can be safely evicted, the new entry is refused
-// and the caller proceeds unlocked (fail-open) rather than growing the map.
+// still over budget, one non-locked-out counting entry is dropped. If every
+// entry is an active lockout and nothing can be safely evicted, the new entry
+// is refused rather than growing the map.
 const maxLimiterEntries = 4096
 
 // purge removes expired lockouts and stale counting windows. Callers must
@@ -130,7 +129,69 @@ func (l *loginLimiter) recordFailure(key string) bool {
 	return false
 }
 
-// success clears the failure record for a successful login.
+// allowAttempt charges every request against a fixed window and returns
+// whether it is within the configured request budget. Unlike recordFailure,
+// successful operations do not clear this budget. The request that would
+// exceed the budget starts a lockout and is rejected.
+func (l *loginLimiter) allowAttempt(key string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := time.Now()
+	f, ok := l.attempts[key]
+	if ok {
+		if !f.until.IsZero() {
+			if now.Before(f.until) {
+				return false
+			}
+			delete(l.attempts, key)
+			ok = false
+		} else if now.Sub(f.first) > l.window {
+			delete(l.attempts, key)
+			ok = false
+		}
+	}
+	if !ok {
+		if len(l.attempts) >= maxLimiterEntries {
+			l.purgeAttempts(now)
+			if len(l.attempts) >= maxLimiterEntries {
+				for k, entry := range l.attempts {
+					if entry.until.IsZero() {
+						delete(l.attempts, k)
+						break
+					}
+				}
+			}
+			if len(l.attempts) >= maxLimiterEntries {
+				return false
+			}
+		}
+		l.attempts[key] = &loginFailure{count: 1, first: now}
+		return true
+	}
+	if f.count >= l.max {
+		f.until = now.Add(l.lockout)
+		return false
+	}
+	f.count++
+	return true
+}
+
+func (l *loginLimiter) purgeAttempts(now time.Time) {
+	for key, attempt := range l.attempts {
+		if !attempt.until.IsZero() {
+			if !now.Before(attempt.until) {
+				delete(l.attempts, key)
+			}
+			continue
+		}
+		if now.Sub(attempt.first) > l.window {
+			delete(l.attempts, key)
+		}
+	}
+}
+
+// success clears only the consecutive-failure record for a successful login;
+// request budgets intentionally remain charged.
 func (l *loginLimiter) success(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

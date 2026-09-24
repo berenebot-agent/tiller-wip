@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/tiller-router/tiller-router/internal/database"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -62,10 +63,10 @@ func TestCooldownSlowFailureStillCools(t *testing.T) {
 	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
 		t.Fatalf("lookup model-a: %v", err)
 	}
-	if !app.cooldown.cooled(modelA, time.Now()) {
+	if !app.cooldown.cooled(database.LocalAccountID, modelA, time.Now()) {
 		t.Fatal("A should still be cooling immediately after the slow failure")
 	}
-	entry, ok := app.cooldown.statusByName("provider-a", "model-a", time.Now())
+	entry, ok := app.cooldown.statusByName(database.LocalAccountID, "provider-a", "model-a", time.Now())
 	if !ok {
 		t.Fatal("cooldown entry for A should be live")
 	}
@@ -303,7 +304,7 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
 		t.Fatalf("lookup model-a: %v", err)
 	}
-	if app.cooldown.cooled(modelA, time.Now()) {
+	if app.cooldown.cooled(database.LocalAccountID, modelA, time.Now()) {
 		t.Fatal("client cancellation must not globally cool model A")
 	}
 
@@ -402,7 +403,7 @@ func TestCooldownClientCancelDuringBodyReadDoesNotCool(t *testing.T) {
 	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
 		t.Fatalf("lookup model-a: %v", err)
 	}
-	if app.cooldown.cooled(modelA, time.Now()) {
+	if app.cooldown.cooled(database.LocalAccountID, modelA, time.Now()) {
 		t.Fatal("client cancellation during body read must not globally cool model A")
 	}
 

@@ -22,6 +22,7 @@ type upstreamErrorDetail struct {
 	Message string
 	Code    string
 	Param   string
+	Type    string
 }
 
 // parseUpstreamErrorDetail extracts a bounded, client-safe summary from an
@@ -57,6 +58,7 @@ func parseUpstreamErrorDetail(body []byte, contentType string) upstreamErrorDeta
 					Message: sanitizeErrorText(obj.Message),
 					Code:    decodeErrorCode(obj.Code),
 					Param:   sanitizeErrorText(obj.Param),
+					Type:    sanitizeErrorText(obj.Type),
 				}
 				if detail.clientMessage() != "" {
 					return detail
@@ -76,6 +78,23 @@ func parseUpstreamErrorDetail(body []byte, contentType string) upstreamErrorDeta
 		return upstreamErrorDetail{Message: sanitizeErrorText(trimmed)}
 	}
 	return upstreamErrorDetail{}
+}
+
+// isOpenCodeFreeTierRejection reports whether an upstream error body is
+// OpenCode's Console-wrapped free-tier policy rejection ("from within
+// OpenCode"). The inner FreeTierError type is matched directly; the message
+// substring is a fallback so minor upstream rewording still trips detection.
+// Matching is case-insensitive and confined to OpenCode's explicit gate text —
+// ordinary provider errors never contain it.
+func isOpenCodeFreeTierRejection(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	lowered := strings.ToLower(string(body))
+	if !strings.Contains(lowered, "from within opencode") {
+		return false
+	}
+	return strings.Contains(lowered, "freetiererror") || strings.Contains(lowered, "free tier")
 }
 
 func decodeErrorCode(raw json.RawMessage) string {
@@ -120,6 +139,32 @@ func (d upstreamErrorDetail) clientMessage() string {
 		b.WriteString(")")
 	}
 	return b.String()
+}
+
+// isContextLimitError recognizes provider-reported context exhaustion without
+// relying on model names or provider-specific endpoint assumptions. The raw
+// body has already been reduced to bounded, sanitized metadata by the parser.
+func isContextLimitError(d upstreamErrorDetail) bool {
+	code := strings.ToLower(strings.TrimSpace(d.Code))
+	switch code {
+	case "context_length_exceeded", "context_window_exceeded", "input_too_long", "prompt_too_long":
+		return true
+	}
+	message := strings.ToLower(d.Message)
+	for _, phrase := range []string{
+		"maximum context length",
+		"context length exceeded",
+		"exceeds the context window",
+		"exceeded the context window",
+		"context window exceeded",
+		"input is too long",
+		"prompt is too long",
+	} {
+		if strings.Contains(message, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // redactProviderSecrets removes every known active secret for the provider
@@ -189,6 +234,12 @@ func exhaustedRouteMessage(attempts []requestAttempt) string {
 			route = "target"
 		}
 		switch {
+		case attempt.failureClass == "context_limit_exceeded":
+			reason := fixedUpstreamErrorMessage(attempt.failureClass)
+			if attempt.clientError != "" {
+				reason += " " + attempt.clientError
+			}
+			lines = append(lines, fmt.Sprintf("%s: %s", route, reason))
 		case attempt.result == "failed" && attempt.clientError != "":
 			prefix := ""
 			if attempt.httpStatus > 0 {

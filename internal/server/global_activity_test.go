@@ -56,7 +56,13 @@ func createClientWithModel(t *testing.T, api *testAPI, name string) (string, str
 // values and created_at ordering deterministically.
 func insertLogRow(t *testing.T, db *database.DB, id, clientKeyID, requestedModel string, resolvedProvider, resolvedModel *string, protocol string, streaming int, httpStatus int, latencyMs int64, inputTokens, outputTokens *int64, providerRequestID, clientRequestID string, errorText *string, createdAt string) {
 	t.Helper()
-	_, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, clientKeyID, requestedModel, resolvedProvider, resolvedModel, protocol, streaming, httpStatus, latencyMs, inputTokens, outputTokens, providerRequestID, clientRequestID, errorText, createdAt)
+	// client_name is denormalized into the Activity row; look it up from the
+	// central DB the way the write path does.
+	var clientName string
+	if err := db.SQL.QueryRow(`SELECT name FROM client_keys WHERE id=?`, clientKeyID).Scan(&clientName); err != nil {
+		t.Fatal(err)
+	}
+	_, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,client_name,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,provider_request_id,client_request_id,error_text,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, clientKeyID, clientName, requestedModel, resolvedProvider, resolvedModel, protocol, streaming, httpStatus, latencyMs, inputTokens, outputTokens, providerRequestID, clientRequestID, errorText, createdAt)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -77,6 +77,7 @@ type Flow struct {
 	ProviderID  string
 	RedirectURI string
 	PKCE        PKCE
+	Generation  int64
 	CreatedAt   time.Time
 }
 
@@ -125,37 +126,43 @@ func (s *FlowStore) save() {
 	}
 }
 
-func (s *FlowStore) Begin(providerID, redirectURI string) (Flow, error) {
+func (s *FlowStore) Begin(accountID, providerID, redirectURI string) (Flow, error) {
+	return s.BeginWithGeneration(accountID, providerID, redirectURI, 0)
+}
+
+func (s *FlowStore) BeginWithGeneration(accountID, providerID, redirectURI string, generation int64) (Flow, error) {
+	key := accountID + "\x00" + providerID
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
-	if flow, ok := s.byProvider[providerID]; ok && now.Sub(flow.CreatedAt) < flowLifetime {
+	if flow, ok := s.byProvider[key]; ok && now.Sub(flow.CreatedAt) < flowLifetime {
 		return Flow{}, ErrFlowActive
 	}
 	pkce, err := NewPKCE()
 	if err != nil {
 		return Flow{}, err
 	}
-	flow := Flow{ProviderID: providerID, RedirectURI: redirectURI, PKCE: pkce, CreatedAt: now}
-	s.byProvider[providerID] = flow
+	flow := Flow{ProviderID: providerID, RedirectURI: redirectURI, PKCE: pkce, Generation: generation, CreatedAt: now}
+	s.byProvider[key] = flow
 	s.save()
 	return flow, nil
 }
 
 // Consume validates and removes a flow before the token exchange. This makes
 // callbacks single-use even when the provider exchange fails.
-func (s *FlowStore) Consume(providerID, state string) (Flow, error) {
+func (s *FlowStore) Consume(accountID, providerID, state string) (Flow, error) {
+	key := accountID + "\x00" + providerID
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	flow, ok := s.byProvider[providerID]
+	flow, ok := s.byProvider[key]
 	if !ok && s.path != "" {
 		s.load()
-		flow, ok = s.byProvider[providerID]
+		flow, ok = s.byProvider[key]
 	}
 	if !ok {
 		return Flow{}, ErrFlowInvalid
 	}
-	delete(s.byProvider, providerID)
+	delete(s.byProvider, key)
 	s.save()
 	if s.now().UTC().Sub(flow.CreatedAt) >= flowLifetime {
 		return Flow{}, ErrFlowExpired
@@ -166,9 +173,9 @@ func (s *FlowStore) Consume(providerID, state string) (Flow, error) {
 	return flow, nil
 }
 
-func (s *FlowStore) Cancel(providerID string) {
+func (s *FlowStore) Cancel(accountID, providerID string) {
 	s.mu.Lock()
-	delete(s.byProvider, providerID)
+	delete(s.byProvider, accountID+"\x00"+providerID)
 	s.save()
 	s.mu.Unlock()
 }

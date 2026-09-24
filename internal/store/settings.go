@@ -1,4 +1,4 @@
-package database
+package store
 
 import (
 	"context"
@@ -25,48 +25,74 @@ const (
 	SettingFallbackCooldownSeconds            = "fallback_cooldown_seconds"
 )
 
-// GetSetting returns the raw string value for a settings key.
-func (d *DB) GetSetting(ctx context.Context, key string) (string, error) {
+// GetSetting returns the raw string value for an account settings key. Secret
+// settings are decrypted transparently.
+func (s *Scope) GetSetting(ctx context.Context, key string) (string, error) {
 	var value string
-	err := d.SQL.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, key).Scan(&value)
-	return value, err
+	err := s.q.QueryRowContext(ctx, `SELECT value FROM settings WHERE account_id=? AND key=?`, s.accountID, key).Scan(&value)
+	if err != nil {
+		return "", err
+	}
+	if secretSettingKey(key) {
+		return s.decryptSecret(secretAAD(s.accountID, "setting", key, "value"), value)
+	}
+	return value, nil
 }
 
-// SetSetting upserts a settings key.
-func (d *DB) SetSetting(ctx context.Context, key, value string) error {
-	_, err := d.SQL.ExecContext(ctx, `INSERT INTO settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, key, value, Now())
+// SetSetting upserts an account settings key. Secret settings are encrypted
+// before they are written.
+func (s *Scope) SetSetting(ctx context.Context, key, value string) error {
+	stored := value
+	if secretSettingKey(key) {
+		enc, err := s.encryptSecret(secretAAD(s.accountID, "setting", key, "value"), value)
+		if err != nil {
+			return err
+		}
+		stored = enc
+	}
+	_, err := s.q.ExecContext(ctx,
+		`INSERT INTO settings(account_id,key,value,updated_at) VALUES(?,?,?,?)
+ON CONFLICT(account_id,key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
+		s.accountID, key, stored, now())
 	return err
 }
 
-// GetBool reads a settings key as a boolean.
-func (d *DB) GetBool(ctx context.Context, key string) (bool, error) {
-	value, err := d.GetSetting(ctx, key)
+// secretSettingKey reports whether a settings key holds a recoverable secret.
+func secretSettingKey(key string) bool {
+	for _, k := range secretSettingKeys() {
+		if k == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scope) GetBool(ctx context.Context, key string) (bool, error) {
+	value, err := s.GetSetting(ctx, key)
 	if err != nil {
 		return false, err
 	}
 	return strconv.ParseBool(value)
 }
 
-// GetInt reads a settings key as an integer.
-func (d *DB) GetInt(ctx context.Context, key string) (int, error) {
-	value, err := d.GetSetting(ctx, key)
+func (s *Scope) GetInt(ctx context.Context, key string) (int, error) {
+	value, err := s.GetSetting(ctx, key)
 	if err != nil {
 		return 0, err
 	}
 	return strconv.Atoi(value)
 }
 
-// GetLoggingDefaults returns the global defaults for new client keys, with
-// sane fallbacks if a key is missing or malformed.
-func (d *DB) GetLoggingDefaults(ctx context.Context) (enabled bool, retentionDays int, err error) {
+// GetLoggingDefaults returns the account defaults for new client keys.
+func (s *Scope) GetLoggingDefaults(ctx context.Context) (enabled bool, retentionDays int, err error) {
 	enabled = true
 	retentionDays = 30
-	if v, e := d.GetBool(ctx, SettingDefaultLoggingEnabled); e == nil {
+	if v, e := s.GetBool(ctx, SettingDefaultLoggingEnabled); e == nil {
 		enabled = v
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return false, 0, e
 	}
-	if v, e := d.GetInt(ctx, SettingDefaultRetentionDays); e == nil {
+	if v, e := s.GetInt(ctx, SettingDefaultRetentionDays); e == nil {
 		retentionDays = v
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return false, 0, e
@@ -76,19 +102,18 @@ func (d *DB) GetLoggingDefaults(ctx context.Context) (enabled bool, retentionDay
 
 // GetLogErrorBodies returns whether failed request and upstream error bodies
 // should be retained. The safe default is disabled.
-func (d *DB) GetLogErrorBodies(ctx context.Context) (bool, error) {
-	v, err := d.GetBool(ctx, SettingLogErrorBodies)
+func (s *Scope) GetLogErrorBodies(ctx context.Context) (bool, error) {
+	v, err := s.GetBool(ctx, SettingLogErrorBodies)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
 	return v, err
 }
 
-// GetFallbackTimeout returns the configured fallback timeout in seconds, with a
-// sane default of 60 if the key is missing or malformed.
-func (d *DB) GetFallbackTimeout(ctx context.Context) (int, error) {
+// GetFallbackTimeout returns the configured fallback timeout in seconds.
+func (s *Scope) GetFallbackTimeout(ctx context.Context) (int, error) {
 	const fallback = 60
-	if v, e := d.GetInt(ctx, SettingFallbackTimeoutSeconds); e == nil {
+	if v, e := s.GetInt(ctx, SettingFallbackTimeoutSeconds); e == nil {
 		return v, nil
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return 0, e
@@ -96,12 +121,11 @@ func (d *DB) GetFallbackTimeout(ctx context.Context) (int, error) {
 	return fallback, nil
 }
 
-// GetFallbackCooldownSeconds returns the configured fallback cooldown in seconds,
-// with a sane default of 300 (5 minutes) if the key is missing or malformed.
-// A value of 0 disables the cooldown feature.
-func (d *DB) GetFallbackCooldownSeconds(ctx context.Context) (int, error) {
+// GetFallbackCooldownSeconds returns the configured fallback cooldown in
+// seconds; 0 disables the cooldown feature.
+func (s *Scope) GetFallbackCooldownSeconds(ctx context.Context) (int, error) {
 	const fallback = 300
-	if v, e := d.GetInt(ctx, SettingFallbackCooldownSeconds); e == nil {
+	if v, e := s.GetInt(ctx, SettingFallbackCooldownSeconds); e == nil {
 		return v, nil
 	} else if !errors.Is(e, sql.ErrNoRows) {
 		return 0, e
@@ -109,10 +133,7 @@ func (d *DB) GetFallbackCooldownSeconds(ctx context.Context) (int, error) {
 	return fallback, nil
 }
 
-// NotificationSettings holds the installation-global outbound webhook
-// notification configuration. Event toggles default to enabled so a configured
-// webhook starts notifying immediately. CooldownSeconds defaults to 60 so repeat
-// alerts for the same event + model are throttled to one per minute.
+// NotificationSettings holds the account's outbound webhook configuration.
 type NotificationSettings struct {
 	Enabled               bool
 	WebhookURL            string
@@ -125,17 +146,21 @@ type NotificationSettings struct {
 	EventAdminLogin       bool
 }
 
-// GetNotificationSettings reads the notification configuration, with sane
-// defaults if a key is missing or malformed.
-func (d *DB) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
-	return d.GetNotificationSettingsBatch(ctx)
+// GetNotificationSettings reads the account notification configuration.
+func (s *Scope) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
+	return s.GetNotificationSettingsBatch(ctx)
 }
 
-func (d *DB) GetNotificationSettingsBatch(ctx context.Context) (NotificationSettings, error) {
+func (s *Scope) GetNotificationSettingsBatch(ctx context.Context) (NotificationSettings, error) {
 	ns := NotificationSettings{EventFallback: true, EventAllFailed: true, CooldownSeconds: 60, EventAdminLogin: true}
 	keys := []string{SettingNotificationsEnabled, SettingNotificationsWebhookURL, SettingNotificationsEventFallback, SettingNotificationsEventAllFailed, SettingNotificationsAuthHeader, SettingNotificationsCooldownSeconds, SettingNotificationsEventClientKeyCreated, SettingNotificationsEventClientKeyDeleted, SettingNotificationsEventAdminLogin}
 	placeholders := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
-	rows, err := d.SQL.QueryContext(ctx, `SELECT key,value FROM settings WHERE key IN (`+placeholders+`)`, stringArgs(keys)...)
+	args := make([]any, 0, len(keys)+1)
+	args = append(args, s.accountID)
+	for _, k := range keys {
+		args = append(args, k)
+	}
+	rows, err := s.q.QueryContext(ctx, `SELECT key,value FROM settings WHERE account_id=? AND key IN (`+placeholders+`)`, args...)
 	if err != nil {
 		return ns, err
 	}
@@ -176,7 +201,11 @@ func (d *DB) GetNotificationSettingsBatch(ctx context.Context) (NotificationSett
 		return ns, err
 	}
 	if value, ok := values[SettingNotificationsAuthHeader]; ok {
-		ns.AuthHeader = value
+		decrypted, err := s.decryptSecret(secretAAD(s.accountID, "setting", SettingNotificationsAuthHeader, "value"), value)
+		if err != nil {
+			return ns, err
+		}
+		ns.AuthHeader = decrypted
 	}
 	if value, ok := values[SettingNotificationsCooldownSeconds]; ok {
 		parsed, err := strconv.Atoi(value)
@@ -195,12 +224,4 @@ func (d *DB) GetNotificationSettingsBatch(ctx context.Context) (NotificationSett
 		return ns, err
 	}
 	return ns, nil
-}
-
-func stringArgs(values []string) []any {
-	args := make([]any, len(values))
-	for i, value := range values {
-		args[i] = value
-	}
-	return args
 }

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"github.com/tiller-router/tiller-router/internal/database"
 	"sync"
 	"testing"
 	"time"
@@ -20,14 +21,14 @@ func TestUsageAggregatesReusedWithinTTL(t *testing.T) {
 	insert := func(id string, total int64) {
 		in := total / 2
 		out := total - in
-		if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			id, clientID, "provider-a/model-a", "provider-a", "model-a", "chat", 0, 200, 1, in, out, "req-"+id, now.Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	insert("a", 100)
-	snap, err := s.buildUsageSnapshot(context.Background())
+	snap, err := s.buildUsageSnapshot(context.Background(), database.LocalAccountID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +38,7 @@ func TestUsageAggregatesReusedWithinTTL(t *testing.T) {
 
 	// A second row within the TTL must not be visible: the aggregate is cached.
 	insert("b", 200)
-	snap, err = s.buildUsageSnapshot(context.Background())
+	snap, err = s.buildUsageSnapshot(context.Background(), database.LocalAccountID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +47,8 @@ func TestUsageAggregatesReusedWithinTTL(t *testing.T) {
 	}
 
 	// Invalidation forces a recompute that sees both rows.
-	s.invalidateUsageAggregates()
-	snap, err = s.buildUsageSnapshot(context.Background())
+	s.invalidateUsageAggregates(database.LocalAccountID)
+	snap, err = s.buildUsageSnapshot(context.Background(), database.LocalAccountID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +65,7 @@ func TestUsageSnapshotLiveStateNotCached(t *testing.T) {
 	s := api.server
 	s.usageCacheTTL = time.Minute
 
-	if _, err := s.buildUsageSnapshot(context.Background()); err != nil {
+	if _, err := s.buildUsageSnapshot(context.Background(), database.LocalAccountID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -72,7 +73,7 @@ func TestUsageSnapshotLiveStateNotCached(t *testing.T) {
 		{providerModelID: "pm-live", provider: "p", model: "m", result: "failed", httpStatus: 500, failureClass: "http_500"},
 	}})
 
-	snap, err := s.buildUsageSnapshot(context.Background())
+	snap, err := s.buildUsageSnapshot(context.Background(), database.LocalAccountID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestUsageAggregatesConcurrentCoalesce(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	s := api.server
 	s.usageCacheTTL = time.Minute
-	if _, err := db.SQL.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		"conc", clientID, "provider-a/model-a", "provider-a", "model-a", "chat", 0, 200, 1, 42, 8, "req-conc", time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +101,7 @@ func TestUsageAggregatesConcurrentCoalesce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			snap, err := s.buildUsageSnapshot(context.Background())
+			snap, err := s.buildUsageSnapshot(context.Background(), database.LocalAccountID)
 			if err != nil {
 				errs <- err
 				return

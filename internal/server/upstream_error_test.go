@@ -24,6 +24,57 @@ func TestParseUpstreamErrorDetailAnthropic(t *testing.T) {
 	}
 }
 
+func TestParseUpstreamErrorDetailKeepsInnerType(t *testing.T) {
+	body := []byte(`{"type":"error","error":{"type":"FreeTierError","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}`)
+	got := parseUpstreamErrorDetail(body, "application/json")
+	if got.Type != "FreeTierError" {
+		t.Fatalf("inner type = %q, want FreeTierError: %+v", got.Type, got)
+	}
+	if got.Message == "" {
+		t.Fatalf("message should survive: %+v", got)
+	}
+}
+
+func TestIsOpenCodeFreeTierRejection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"console wrapped anthropic shape", `{"type":"error","error":{"type":"FreeTierError","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}`, true},
+		{"openai shape", `{"error":{"type":"FreeTierError","message":"Error from provider (Console): free tier can only be used from within OpenCode"}}`, true},
+		{"case insensitive", `{"error":{"type":"freetiererror","message":"FROM WITHIN OPENCODE"}}`, true},
+		{"ordinary provider error", `{"error":{"type":"invalid_request_error","message":"credit balance too low"}}`, false},
+		{"free tier words without gate", `{"error":{"message":"free tier quota exceeded for today"}}`, false},
+		{"gate words without free tier", `{"error":{"message":"must be called from within OpenCode console"}}`, false},
+		{"empty", ``, false},
+		{"garbage", `<html>502</html>`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isOpenCodeFreeTierRejection([]byte(tc.body)); got != tc.want {
+				t.Fatalf("isOpenCodeFreeTierRejection(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFreeShadowSessionOpaqueAndStable(t *testing.T) {
+	a := freeShadowSession("tiller-req-123")
+	b := freeShadowSession("tiller-req-123")
+	if a != b || a == "" {
+		t.Fatalf("shadow session must be stable and non-empty, got %q vs %q", a, b)
+	}
+	if strings.Contains(a, "tiller") {
+		t.Fatalf("shadow session must not carry the tiller tell: %q", a)
+	}
+	if !strings.HasPrefix(a, "ses_") {
+		t.Fatalf("shadow session must mirror the ses_ shape, got %q", a)
+	}
+	if c := freeShadowSession("tiller-req-456"); c == a {
+		t.Fatalf("distinct sessions must not collide: %q", c)
+	}
+}
+
 func TestParseUpstreamErrorDetailTolerantForms(t *testing.T) {
 	if got := parseUpstreamErrorDetail([]byte(`{"error":{"code":429,"message":"rate limited"}}`), "application/json"); got.Code != "429" || got.Message != "rate limited" {
 		t.Fatalf("numeric code: %+v", got)
@@ -33,6 +84,31 @@ func TestParseUpstreamErrorDetailTolerantForms(t *testing.T) {
 	}
 	if got := parseUpstreamErrorDetail([]byte(`{"message":"top level"}`), "application/json"); got.Message != "top level" {
 		t.Fatalf("top-level message: %+v", got)
+	}
+}
+
+func TestIsContextLimitError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		detail upstreamErrorDetail
+		want   bool
+	}{
+		{name: "structured code", detail: upstreamErrorDetail{Code: "context_length_exceeded"}, want: true},
+		{name: "window message", detail: upstreamErrorDetail{Message: "The request exceeds the context window for this model."}, want: true},
+		{name: "input message", detail: upstreamErrorDetail{Message: "The input is too long."}, want: true},
+		{name: "unrelated validation", detail: upstreamErrorDetail{Message: "Invalid value for reasoning.effort", Code: "invalid_value"}, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isContextLimitError(tc.detail); got != tc.want {
+				t.Fatalf("isContextLimitError(%+v) = %v, want %v", tc.detail, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestContextLimitDoesNotTriggerCooldown(t *testing.T) {
+	if cooldownTrigger("context_limit_exceeded", http.StatusBadRequest) {
+		t.Fatal("context-limit rejection must not cool a target")
 	}
 }
 
