@@ -474,8 +474,15 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .wizard-body h3{margin:0 0 8px;color:var(--navy)}
 .wizard-body p{font-size:13px;color:#33465a;line-height:1.5}
 .wizard-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
-.platform-plan-form,.platform-legal-form{display:grid;gap:8px;padding:12px;border:1px solid var(--line);background:#fbfcfd;margin-bottom:10px}
-.platform-plan-form strong,.platform-legal-form strong{color:var(--navy);font:700 12px var(--mono)}
+.system-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 16px}
+.system-card-head h2{margin:0}
+.platform-plan-row{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}
+.platform-plan-row:hover{border-color:var(--blue)}
+.platform-plan-row:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.platform-plan-row>div:first-child{min-width:0}
+.platform-plan-row .platform-list-actions{margin-top:0;flex:none}
+.platform-legal-form{display:grid;gap:8px;padding:12px;border:1px solid var(--line);background:#fbfcfd;margin-bottom:10px}
+.platform-legal-form strong{color:var(--navy);font:700 12px var(--mono)}
 .platform-plan-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .platform-plan-fields label{display:grid;gap:4px;font-size:11px;color:var(--muted)}
 .platform-legal-form label{display:grid;gap:4px;font-size:11px;color:var(--muted)}

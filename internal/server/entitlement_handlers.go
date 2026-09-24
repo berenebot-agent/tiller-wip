@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -42,54 +43,150 @@ func (s *Server) writePlatformPlans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": plans})
 }
 
-// writePlatformPlanUpdate replaces the caps of one plan. Values below -1 are
-// rejected; -1 is the unlimited sentinel.
-func (s *Server) writePlatformPlanUpdate(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimSpace(r.PathValue("name"))
-	if name == "" {
+// planRequest is the shared body for plan create/update. Name is optional on
+// update (defaults to the path value) so caps-only edits can omit it; a
+// different name triggers a rename.
+type planRequest struct {
+	Name                  string `json:"name"`
+	MaxProviders          int    `json:"max_providers"`
+	MaxClientKeys         int    `json:"max_client_keys"`
+	MaxVirtualModels      int    `json:"max_virtual_models"`
+	MaxConcurrentStreams  int    `json:"max_concurrent_streams"`
+	ActivityRetentionDays int    `json:"activity_retention_days"`
+	MonthlyRequests       int    `json:"monthly_requests"`
+}
+
+func (in planRequest) plan(name string) store.Plan {
+	return store.Plan{
+		Name:                  name,
+		MaxProviders:          in.MaxProviders,
+		MaxClientKeys:         in.MaxClientKeys,
+		MaxVirtualModels:      in.MaxVirtualModels,
+		MaxConcurrentStreams:  in.MaxConcurrentStreams,
+		ActivityRetentionDays: in.ActivityRetentionDays,
+		MonthlyRequests:       in.MonthlyRequests,
+	}
+}
+
+// writePlanError maps the shared plan store errors to the contract's response.
+// It returns true when it handled the error.
+func writePlanError(w http.ResponseWriter, err error) bool {
+	var inUse *store.PlanInUseError
+	switch {
+	case errors.As(err, &inUse):
+		adminError(w, http.StatusConflict, "plan_in_use", fmt.Sprintf("%d account(s) are still on this plan. Move them to another plan first.", inUse.Accounts))
+	case errors.Is(err, store.ErrPlanExists):
+		adminError(w, http.StatusConflict, "plan_exists", "A plan with that name already exists.")
+	case errors.Is(err, store.ErrPlanReserved):
+		adminError(w, http.StatusConflict, "plan_reserved", "The default plan cannot be renamed or deleted.")
+	case errors.Is(err, store.ErrInvalidPlanName):
+		adminError(w, http.StatusBadRequest, "invalid_plan_name", "Plan names must be lowercase letters, digits, dashes or underscores (max 64).")
+	case errors.Is(err, store.ErrInvalidLimits):
+		adminError(w, http.StatusBadRequest, "invalid_limits", "Plan limits must be -1 (unlimited) or greater.")
+	case errors.Is(err, store.ErrPlanNotFound):
 		adminError(w, http.StatusNotFound, "plan_not_found", "Plan not found.")
-		return
+	default:
+		return false
 	}
-	var input struct {
-		MaxProviders          int `json:"max_providers"`
-		MaxClientKeys         int `json:"max_client_keys"`
-		MaxVirtualModels      int `json:"max_virtual_models"`
-		MaxConcurrentStreams  int `json:"max_concurrent_streams"`
-		ActivityRetentionDays int `json:"activity_retention_days"`
-		MonthlyRequests       int `json:"monthly_requests"`
-	}
+	return true
+}
+
+// writePlatformPlanCreate adds a plan to the catalogue (platform operator).
+func (s *Server) writePlatformPlanCreate(w http.ResponseWriter, r *http.Request) {
+	var input planRequest
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	plan := store.Plan{
-		Name:                  name,
-		MaxProviders:          input.MaxProviders,
-		MaxClientKeys:         input.MaxClientKeys,
-		MaxVirtualModels:      input.MaxVirtualModels,
-		MaxConcurrentStreams:  input.MaxConcurrentStreams,
-		ActivityRetentionDays: input.ActivityRetentionDays,
-		MonthlyRequests:       input.MonthlyRequests,
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		adminError(w, http.StatusBadRequest, "invalid_request", "A plan name is required.")
+		return
 	}
-	if err := s.storeHandle().UpdatePlan(r.Context(), plan); err != nil {
-		switch {
-		case errors.Is(err, store.ErrPlanNotFound):
-			adminError(w, http.StatusNotFound, "plan_not_found", "Plan not found.")
-		case errors.Is(err, store.ErrInvalidLimits):
-			adminError(w, http.StatusBadRequest, "invalid_limits", "Plan limits must be -1 (unlimited) or greater.")
-		default:
+	plan := input.plan(name)
+	if err := s.storeHandle().CreatePlan(r.Context(), plan); err != nil {
+		if !writePlanError(w, err) {
+			adminError(w, http.StatusInternalServerError, "database_error", "Could not create the plan.")
+		}
+		return
+	}
+	s.recordPlatformAudit(r.Context(), store.AuditEvent{
+		Event:      "platform.plan_created",
+		ActorType:  "platform",
+		TargetType: "plan",
+		TargetID:   name,
+		Metadata:   map[string]string{"plan": name},
+	})
+	writeJSON(w, http.StatusCreated, plan)
+}
+
+// writePlatformPlanUpdate replaces the caps of one plan, optionally renaming it.
+// Values below -1 are rejected; -1 is the unlimited sentinel.
+func (s *Server) writePlatformPlanUpdate(w http.ResponseWriter, r *http.Request) {
+	oldName := strings.TrimSpace(r.PathValue("name"))
+	if oldName == "" {
+		adminError(w, http.StatusNotFound, "plan_not_found", "Plan not found.")
+		return
+	}
+	var input planRequest
+	if err := decodeJSON(w, r, &input); err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	name := strings.TrimSpace(input.Name)
+	if name == "" {
+		name = oldName
+	}
+	plan := input.plan(name)
+	var err error
+	if name != oldName {
+		err = s.storeHandle().RenamePlan(r.Context(), oldName, plan)
+	} else {
+		err = s.storeHandle().UpdatePlan(r.Context(), plan)
+	}
+	if err != nil {
+		if !writePlanError(w, err) {
 			adminError(w, http.StatusInternalServerError, "database_error", "Could not update the plan.")
 		}
 		return
+	}
+	metadata := map[string]string{"plan": name}
+	if name != oldName {
+		metadata["previous_plan"] = oldName
 	}
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{
 		Event:      "platform.plan_changed",
 		ActorType:  "platform",
 		TargetType: "plan",
 		TargetID:   name,
-		Metadata:   map[string]string{"plan": name},
+		Metadata:   metadata,
 	})
 	writeJSON(w, http.StatusOK, plan)
+}
+
+// writePlatformPlanDelete removes a plan from the catalogue (platform
+// operator). A plan still assigned to accounts is refused; the default plan is
+// never deletable.
+func (s *Server) writePlatformPlanDelete(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimSpace(r.PathValue("name"))
+	if name == "" {
+		adminError(w, http.StatusNotFound, "plan_not_found", "Plan not found.")
+		return
+	}
+	if err := s.storeHandle().DeletePlan(r.Context(), name); err != nil {
+		if !writePlanError(w, err) {
+			adminError(w, http.StatusInternalServerError, "database_error", "Could not delete the plan.")
+		}
+		return
+	}
+	s.recordPlatformAudit(r.Context(), store.AuditEvent{
+		Event:      "platform.plan_deleted",
+		ActorType:  "platform",
+		TargetType: "plan",
+		TargetID:   name,
+		Metadata:   map[string]string{"plan": name},
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"name": name})
 }
 
 // writeAccountPlan returns the caller's plan caps and current usage counts.

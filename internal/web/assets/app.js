@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformPlans: [] };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformPlans: [], platformPlanData: [] };
 let runtimeMode = 'local';
 let hostedAuthOptions = {};
 let signupEmail = '';
@@ -2775,14 +2775,51 @@ function planOptionList(current) {
   return names.map(name => `<option value="${h(name)}"${name === current ? ' selected' : ''}>${h(name)}</option>`).join('');
 }
 
-// loadPlatformPlans renders the entitlements catalogue as editable rows.
+// PLAN_FIELDS drives both the caps dialog and the row summary.
+const PLAN_FIELDS = [['max_providers', 'Providers'], ['max_client_keys', 'Client keys'], ['max_virtual_models', 'Virtual models'], ['max_concurrent_streams', 'Streams'], ['activity_retention_days', 'Retention days'], ['monthly_requests', 'Monthly requests']];
+
+// planSummary is the compact one-line cap readout shown on each plan row.
+function planSummary(plan) {
+  return PLAN_FIELDS.map(([key, label]) => `${plan[key] === -1 ? '∞' : h(plan[key])} ${h(label.toLowerCase())}`).join(' · ');
+}
+
+// openPlanEditor opens the shared entity dialog to add or edit a plan. The name
+// is renameable on edit (the backend repoints account assignments); add
+// requires a lowercase slug. Cancel comes from the dialog itself.
+function openPlanEditor(plan) {
+  const editing = Boolean(plan);
+  const nameRules = editing ? '' : ' pattern="[a-z0-9][a-z0-9_-]{0,63}" title="Lowercase letters, digits, dashes or underscores" required';
+  const nameField = `<label>Name<input name="name" type="text" value="${editing ? h(plan.name) : ''}" placeholder="e.g. pro"${nameRules} autocomplete="off" spellcheck="false"></label>`;
+  const caps = PLAN_FIELDS.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${editing ? h(plan[key]) : '-1'}"></label>`).join('');
+  openEntity({
+    eyebrow: editing ? 'EDIT PLAN' : 'NEW PLAN',
+    title: editing ? `Edit ${plan.name}` : 'Add plan',
+    fields: nameField + `<div class="platform-plan-fields">${caps}</div>`,
+    submit: editing ? 'Save plan' : 'Add plan',
+    onSubmit: async form => {
+      const values = new FormData(form);
+      const name = String(values.get('name') || '').trim();
+      if (!name) throw new Error('Enter a plan name.');
+      const payload = { name };
+      for (const [key] of PLAN_FIELDS) payload[key] = Number(values.get(key));
+      if (editing) await api(`/api/platform/plans/${encodeURIComponent(plan.name)}`, { method: 'PUT', body: JSON.stringify(payload) });
+      else await api('/api/platform/plans', { method: 'POST', body: JSON.stringify(payload) });
+      flash(editing ? 'Plan saved.' : 'Plan added.');
+      await loadPlatformDashboard();
+    },
+  });
+}
+
+// loadPlatformPlans renders the entitlements catalogue as compact rows. A row
+// (or its Edit button) opens the caps dialog; Delete is guarded server-side.
 async function loadPlatformPlans() {
   const list = $('#platform-plans-list'); if (!list) return;
   try {
     const result = await api('/api/platform/plans');
-    state.platformPlans = (result.data || []).map(plan => plan.name);
-    const fields = [['max_providers', 'Providers'], ['max_client_keys', 'Client keys'], ['max_virtual_models', 'Virtual models'], ['max_concurrent_streams', 'Streams'], ['activity_retention_days', 'Retention days'], ['monthly_requests', 'Monthly requests']];
-    list.innerHTML = (result.data || []).map(plan => `<form class="platform-plan-form" data-plan="${h(plan.name)}"><strong>${h(plan.name)}</strong><div class="platform-plan-fields">${fields.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${h(plan[key])}"></label>`).join('')}</div><button class="btn btn-small btn-secondary" type="submit">Save</button></form>`).join('') || '<p class="meta-line">No plans.</p>';
+    const plans = result.data || [];
+    state.platformPlans = plans.map(plan => plan.name);
+    state.platformPlanData = plans;
+    list.innerHTML = plans.map(plan => `<div class="platform-list-item platform-plan-row" data-plan="${h(plan.name)}" role="button" tabindex="0"><div><strong>${h(plan.name)}</strong><small>${planSummary(plan)}</small></div><div class="platform-list-actions"><button class="btn btn-small btn-secondary" type="button" data-plan-edit="${h(plan.name)}">Edit</button><button class="btn btn-small btn-danger" type="button" data-plan-delete="${h(plan.name)}">Delete</button></div></div>`).join('') || '<p class="meta-line">No plans.</p>';
     $('#platform-plans-error').textContent = '';
   } catch (error) {
     $('#platform-plans-error').textContent = errorMessage(error, 'Could not load plans.');
@@ -2801,12 +2838,23 @@ async function loadPlatformLegal() {
   }
 }
 
-$('#platform-plans-list').addEventListener('submit', async event => {
-  const form = event.target.closest('.platform-plan-form'); if (!form) return;
-  event.preventDefault(); const data = new FormData(form);
-  const payload = { max_providers: Number(data.get('max_providers')), max_client_keys: Number(data.get('max_client_keys')), max_virtual_models: Number(data.get('max_virtual_models')), max_concurrent_streams: Number(data.get('max_concurrent_streams')), activity_retention_days: Number(data.get('activity_retention_days')), monthly_requests: Number(data.get('monthly_requests')) };
-  try { await api(`/api/platform/plans/${encodeURIComponent(form.dataset.plan)}`, { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-plans-error').textContent = 'Saved.'; $('#platform-plans-error').style.color = 'var(--green)'; }
-  catch (error) { $('#platform-plans-error').style.color = ''; $('#platform-plans-error').textContent = errorMessage(error, 'Could not save the plan.'); }
+function planForRow(el) { return state.platformPlanData.find(plan => plan.name === el.dataset.plan) || null; }
+$('#platform-plan-add').addEventListener('click', () => openPlanEditor(null));
+$('#platform-plans-list').addEventListener('click', async event => {
+  const edit = event.target.closest('[data-plan-edit]');
+  const del = event.target.closest('[data-plan-delete]');
+  const row = event.target.closest('.platform-plan-row');
+  try {
+    if (edit) { const plan = state.platformPlanData.find(item => item.name === edit.dataset.planEdit); if (plan) openPlanEditor(plan); return; }
+    if (del) { const name = del.dataset.planDelete; if (!await confirmAction({ title: `Delete ${name}?`, copy: 'Accounts still on this plan must be moved first. This cannot be undone.', action: 'Delete plan', typeMatch: name, typeLabel: 'plan name' })) return; await api(`/api/platform/plans/${encodeURIComponent(name)}`, { method: 'DELETE' }); flash('Plan deleted.'); await loadPlatformDashboard(); return; }
+    if (row) { const plan = planForRow(row); if (plan) openPlanEditor(plan); }
+  } catch (error) { $('#platform-plans-error').style.color = ''; $('#platform-plans-error').textContent = errorMessage(error, 'Plan operation failed.'); }
+});
+$('#platform-plans-list').addEventListener('keydown', event => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (event.target.closest('[data-plan-edit],[data-plan-delete]')) return;
+  const row = event.target.closest('.platform-plan-row'); if (!row) return;
+  event.preventDefault(); const plan = planForRow(row); if (plan) openPlanEditor(plan);
 });
 $('#platform-legal-list').addEventListener('submit', async event => {
   const form = event.target.closest('.platform-legal-form'); if (!form) return;
