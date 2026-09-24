@@ -466,14 +466,18 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .plan-value.plan-full{color:var(--red)}
 .app-footer{display:flex;justify-content:space-between;gap:12px;padding:14px 24px;color:var(--muted);font:11px var(--mono);border-top:1px solid var(--line-dark)}
 .app-footer a{color:var(--blue)}
-.wizard-dialog section{max-width:640px}
-.wizard-steps{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0}
+.wizard-dialog{width:min(640px,calc(100vw - 30px))}
+.wizard-steps{display:flex;flex-wrap:wrap;gap:6px;margin:12px 22px}
 .wizard-step{padding:4px 10px;border:1px solid var(--line);font:700 10px var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
 .wizard-step.active{border-color:var(--blue);color:var(--blue)}
 .wizard-step.done{border-color:var(--green);color:var(--green)}
+.wizard-body{padding:0 22px 18px}
 .wizard-body h3{margin:0 0 8px;color:var(--navy)}
 .wizard-body p{font-size:13px;color:#33465a;line-height:1.5}
+.wizard-body .secret-box{margin-left:0;margin-right:0}
 .wizard-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+#wizard-error{padding:0 22px}
+@media(max-width:720px){.wizard-steps{margin:12px 14px}.wizard-body{padding:0 14px 16px}#wizard-error{padding:0 14px}}
 .system-card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 16px}
 .system-card-head h2{margin:0}
 .platform-plan-row{display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer}

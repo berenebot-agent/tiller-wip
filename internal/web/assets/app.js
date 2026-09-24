@@ -384,18 +384,18 @@ function providerFields(provider) {
     <label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${provider?.enabled !== false ? 'checked' : ''}> Provider enabled</label>
     ${provider ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm_breaking_change" type="checkbox"> <span>Confirm if the provider name changes; every direct model ID will change.</span></label>' : ''}`;
 }
- function openProvider(provider = null) {
+ function openProvider(provider = null, onSaved = null) {
    openEntity({ eyebrow: provider ? 'EDIT UPSTREAM' : 'REGISTER UPSTREAM', title: provider ? `Edit ${provider.name}` : 'Add provider', fields: providerFields(provider), submit: provider ? 'Save provider' : 'Add & discover', onMount: form => { const select = $('[name="type"]', form); const protocolConfig = $('[data-protocol-config]', form); const showProtocols = () => protocolConfig.hidden = !['generic-openai','vllm'].includes(provider?.type || select.value); if (!provider) { const base = $('[name="base_url"]', form); const nameInput = $('[name="name"]', form); const credential = $('[name="credential"]', form); const createWrap = $('[data-credential-create]', form); const apiCredential = $('[data-api-credential]', form); const apply = () => { const item = state.providerTypes.find(t => t.type === select.value); if (!base.value || base.dataset.auto === 'true') { base.value = item?.default_base_url || ''; base.dataset.auto = 'true'; } if (nameInput) nameInput.placeholder = select.value || 'openai-main'; const isKeyless = item?.type === 'opencode-free'; const isOAuth = item?.auth_mode === 'oauth'; credential.required = Boolean(item?.credential_needed) && !isOAuth; if (createWrap) createWrap.hidden = isKeyless; if (apiCredential) apiCredential.hidden = isOAuth; if (isOAuth) { credential.value = ''; $('#dialog-submit').textContent = 'Connect with ' + item.label; } else $('#dialog-submit').textContent = 'Add & discover'; showProtocols(); }; base.addEventListener('input', () => base.dataset.auto = 'false'); select.addEventListener('change', apply); apply(); } else { const replaceWrap = $('[data-credential-replace]', form); if (replaceWrap) replaceWrap.hidden = provider.type === 'opencode-free' || (state.providerTypes.find(t => t.type === provider.type)?.auth_mode === 'oauth'); showProtocols(); const reconnectBtn = $('[data-provider-reconnect-btn]', form); if (reconnectBtn) reconnectBtn.onclick = () => { $('#form-dialog').close(); connectProviderOAuth(provider.id); }; const disconnectBtn = $('[data-provider-disconnect-btn]', form); if (disconnectBtn) disconnectBtn.onclick = () => { $('#form-dialog').close(); disconnectProviderOAuth(provider.id); }; const credentialInput = $('[name="credential"]', form); if (credentialInput) { const savedPlaceholder = credentialInput.placeholder; credentialInput.addEventListener('focus', () => { credentialInput.placeholder = ''; }); credentialInput.addEventListener('blur', () => { if (!credentialInput.value) credentialInput.placeholder = savedPlaceholder; }); } const nameInput = $('[name="name"]', form), confirmWrap = $('[data-confirm-wrap]', form); const syncConfirm = () => { confirmWrap.hidden = nameInput.value === provider.name; if (confirmWrap.hidden) { const cb = $('[name="confirm_breaking_change"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', syncConfirm); syncConfirm(); } }, onSubmit: async form => {
      const values = new FormData(form); const rawName = String(values.get('name') || '').trim(); const payload = { name: rawName || String(values.get('type') || '').trim(), base_url: values.get('base_url'), enabled: values.get('enabled') === 'on', protocols: values.getAll('protocol') };
     if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
-     else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
-    await loadProviders(); await loadClients();
+     else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id, onSaved); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
+    await loadProviders(); await loadClients(); if (onSaved) await onSaved();
   }});
 }
 async function refreshProvider(id) { const button = $(`[data-provider-refresh="${CSS.escape(id)}"]`); button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); await loadProviders(); await loadClients(); } finally { button.disabled = false; } }
- async function connectProviderOAuth(id) { const provider = state.providers.find(item => item.id === id); const type = provider?.type; try { const result = await api(`/api/admin/providers/${id}/oauth/start`, { method: 'POST' }); if (result.flow === 'device_code') { showGitHubDeviceDialog(id, result); return; } window.open(result.authorization_url, 'tiller-oauth-auth', 'popup,width=520,height=720,resizable=yes,scrollbars=yes'); showOAuthCallbackDialog(id, result.authorization_url, type, result.redirect_uri); } catch (error) { flash(errorMessage(error), 'error'); } }
- function showGitHubDeviceDialog(id, result) { openEntity({ eyebrow: 'GITHUB COPILOT', title: 'Connect GitHub Copilot', submit: 'Done', fields: `<p>1. Open GitHub device sign-in.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><a class="btn btn-secondary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Open GitHub</a> <button type="button" class="btn btn-secondary" data-copy-device>Copy code</button></p><p data-oauth-status>Waiting for GitHub authorization...</p>`, onMount: form => { $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const label = $('[data-oauth-status]', form); if (label) label.textContent = status.status === 'pending' ? 'Waiting for GitHub authorization...' : status.status === 'connected' ? 'GitHub connected.' : (status.error || 'GitHub connection failed.'); if (status.status !== 'pending') { clearInterval(poll); if (status.status === 'connected') { $('#form-dialog').close(); flash('GitHub Copilot connected.'); await loadProviders(); } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
- function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><label>Redirected URL <textarea name="redirected_url" rows="3" required placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label>`, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); }}); }
+ async function connectProviderOAuth(id, onSaved = null) { const provider = state.providers.find(item => item.id === id); const type = provider?.type; try { const result = await api(`/api/admin/providers/${id}/oauth/start`, { method: 'POST' }); if (result.flow === 'device_code') { showGitHubDeviceDialog(id, result, onSaved); return; } window.open(result.authorization_url, 'tiller-oauth-auth', 'popup,width=520,height=720,resizable=yes,scrollbars=yes'); showOAuthCallbackDialog(id, result.authorization_url, type, result.redirect_uri, onSaved); } catch (error) { flash(errorMessage(error), 'error'); } }
+ function showGitHubDeviceDialog(id, result, onSaved = null) { openEntity({ eyebrow: 'GITHUB COPILOT', title: 'Connect GitHub Copilot', submit: 'Done', fields: `<p>1. Open GitHub device sign-in.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><a class="btn btn-secondary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Open GitHub</a> <button type="button" class="btn btn-secondary" data-copy-device>Copy code</button></p><p data-oauth-status>Waiting for GitHub authorization...</p>`, onMount: form => { $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const label = $('[data-oauth-status]', form); if (label) label.textContent = status.status === 'pending' ? 'Waiting for GitHub authorization...' : status.status === 'connected' ? 'GitHub connected.' : (status.error || 'GitHub connection failed.'); if (status.status !== 'pending') { clearInterval(poll); if (status.status === 'connected') { $('#form-dialog').close(); flash('GitHub Copilot connected.'); await loadProviders(); if (onSaved) await onSaved(); } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
+ function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><label>Redirected URL <textarea name="redirected_url" rows="3" required placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label>`, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
 async function refreshModels(id) { const button = $(`[data-refresh-models="${CSS.escape(id)}"]`); button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); } catch (error) { flash(errorMessage(error), 'error'); } finally { await loadModels(); await loadProviders(); await loadClients(); button.disabled = false; } }
 async function deleteProvider(id) {
   const provider = state.providers.find(item => item.id === id);
@@ -1110,7 +1110,7 @@ function virtualModelFields(model) {
   const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
   return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Targets run from top to bottom. Turn a target off to skip it, or use the arrows to change its priority.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
-function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
+function openVirtualModel(model = null, onSaved = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id })); availableOptions = options;
@@ -1120,7 +1120,7 @@ function openVirtualModel(model = null) { if (!state.models.length) { flash('Dis
    const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; enableLabel.innerHTML='<span class="target-toggle-copy">Use</span>'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up"><span class="target-action-glyph">↑</span><span class="target-action-text">Up</span></button><button type="button" data-target-down title="Move target down" aria-label="Move target down"><span class="target-action-glyph">↓</span><span class="target-action-text">Down</span></button><button type="button" data-target-remove title="Remove target" aria-label="Remove target"><span class="target-action-glyph">×</span><span class="target-action-text">Remove</span></button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
    fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<16) addFallback(); else flash('The admin UI supports up to 16 targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
-  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); } }); }
+  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); if (onSaved) await onSaved(payload.name); } }); }
 async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function loadClients() {
@@ -1349,12 +1349,13 @@ $('#clients-cards').addEventListener('click', event => {
   if (!wasOpen) { detail.hidden = false; head.setAttribute('aria-expanded', 'true'); }
 });
 $('#add-client').onclick = () => openClient();
-function openClient(client = null) {
+function openClient(client = null, onSaved = null, defaultType = null) {
   const dialog = $('#form-dialog');
   dialog.classList.add('client-form-dialog');
   dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
+  const selectedType = client?.type || defaultType;
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
-  const typeField = `<label>Type <select name="type"><option value="catalogue" ${client?.type === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${client?.type !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
+  const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
   const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
@@ -1402,6 +1403,7 @@ function openClient(client = null) {
         }
         const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify(payload) });
         showSecret(result.secret);
+        if (onSaved) await onSaved(result, payload);
       }
       await loadClients();
     }
@@ -1410,7 +1412,9 @@ function openClient(client = null) {
 async function rotateClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Rotate ${client.name}?`, copy: 'The current secret will stop authenticating immediately. Permissions and metadata are preserved.', action: 'Rotate now' })) return; try { const result = await api(`/api/admin/client-keys/${id}/rotate`, { method: 'POST' }); showSecret(result.secret); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
-async function openPermissions(client) {
+let permissionsSavedHook = null;
+async function openPermissions(client, onSaved = null) {
+  permissionsSavedHook = onSaved;
   try {
     state.permissionData = await api(`/api/admin/client-keys/${client.id}/permissions`);
     state.modelClient = client;
@@ -1420,6 +1424,16 @@ async function openPermissions(client) {
     $('#permissions-dialog').showModal();
   }
   catch (error) { flash(errorMessage(error), 'error'); }
+}
+// enableAllClientModels gives a freshly-created catalogue key access to every
+// currently-available model and turns on the per-group "new models default" so
+// future models in those groups are enabled too. Retired models keep whatever
+// state they already had, matching the permissions dialog's Enable all action.
+async function enableAllClientModels(client) {
+  const data = await api(`/api/admin/client-keys/${client.id}/permissions`);
+  const defaults = (data.groups || []).map(group => ({ kind: group.kind, group_id: group.id, enabled: true }));
+  const permissions = (data.groups || []).flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.available ? true : model.enabled })));
+  await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
 }
 function renderPermissions() {
   const renderGroup = group => {
@@ -1530,7 +1544,7 @@ function bulkSetAllPermissions(enabled) {
 }
 $('#enable-all-permissions').onclick = () => bulkSetAllPermissions(true);
 $('#disable-all-permissions').onclick = () => bulkSetAllPermissions(false);
-$('#close-permissions').onclick = $('#cancel-permissions').onclick = () => $('#permissions-dialog').close();
+$('#close-permissions').onclick = $('#cancel-permissions').onclick = () => { permissionsSavedHook = null; $('#permissions-dialog').close(); };
 $('#save-permissions').onclick = async () => {
   const button = $('#save-permissions'), client = state.modelClient;
   button.disabled = true;
@@ -1540,8 +1554,10 @@ $('#save-permissions').onclick = async () => {
     const permissions = state.permissionData.groups.flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.enabled })));
     await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
     flash('Client catalogue permissions saved.');
+    const hook = permissionsSavedHook; permissionsSavedHook = null;
     $('#permissions-dialog').close();
     await loadClients();
+    if (hook) await hook();
   } catch (error) { $('#permissions-error').textContent = errorMessage(error); }
   finally { button.disabled = false; }
 };
@@ -2036,14 +2052,31 @@ async function refreshWizardButton(autoOpen = false) {
   } catch { $('#open-wizard').hidden = true; }
 }
 
-const WIZARD_STEPS = ['Provider', 'Target', 'Client key', 'Connect'];
+const WIZARD_STEPS = ['Provider', 'Client key', 'Virtual route', 'Connect'];
 let wizardStep = 0;
-const wizardState = { clientKey: '', modelName: '' };
+const wizardState = { clientType: '', clientName: '', virtualName: '' };
 
 function openWizard() {
   wizardStep = 0;
+  wizardState.clientType = ''; wizardState.clientName = ''; wizardState.virtualName = '';
   renderWizard();
   const dialog = $('#wizard-dialog'); if (dialog && !dialog.open) dialog.showModal();
+}
+
+// wizardAdvance moves to the next step when an action launched from the wizard
+// completes. It is a no-op if the wizard was closed in the meantime.
+function wizardAdvance() {
+  if (!$('#wizard-dialog')?.open) return;
+  if (wizardStep < WIZARD_STEPS.length - 1) { wizardStep++; renderWizard(); }
+}
+
+// modelNameForSnippet picks the model identity the Connect step should show: a
+// virtual route if one was created, else the Single key's exposed name, else the
+// first available real model, else a neutral fallback.
+function modelNameForSnippet() {
+  if (wizardState.virtualName) return wizardState.virtualName;
+  if (wizardState.clientType === 'single' && wizardState.clientName) return wizardState.clientName;
+  return state.models.find(model => model.available)?.canonical_model_id || 'main';
 }
 
 function renderWizard() {
@@ -2054,19 +2087,45 @@ function renderWizard() {
   $('#wizard-next').textContent = wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Continue';
   if (wizardStep === 0) {
     body.innerHTML = `<h3>Connect a provider</h3><p>Add the AI provider you want Tiller to route to. Your credential is encrypted at rest and never shown again.</p><button class="btn btn-primary" id="wizard-add-provider" type="button">Add provider</button><p class="meta-line">${state.providers.length ? h(state.providers.length + ' provider(s) configured.') : 'No providers configured yet.'}</p>`;
-    const button = $('#wizard-add-provider'); if (button) button.onclick = () => openProvider();
+    const button = $('#wizard-add-provider'); if (button) button.onclick = () => openProvider(null, wizardAdvance);
   } else if (wizardStep === 1) {
-    body.innerHTML = `<h3>Choose a target</h3><p>Point the client at a real model, or create a virtual route to map a stable name and add fallbacks.</p><div class="wizard-actions"><button class="btn btn-secondary" id="wizard-add-virtual" type="button">Create virtual route (optional)</button></div><p class="meta-line">You can skip this and use a real model directly.</p>`;
-    const button = $('#wizard-add-virtual'); if (button) button.onclick = () => openVirtualModel();
+    body.innerHTML = `<h3>Create a client key</h3><p>A client key is the API key your tools use. Tiller shows the secret once. First, choose how much this key can reach.</p><div class="wizard-actions"><button class="btn btn-primary" id="wizard-client-all" type="button">All models</button><button class="btn btn-secondary" id="wizard-client-subset" type="button">Choose models</button></div><p class="meta-line">All models reaches every model, including ones added later. You can change this in the client's settings.</p>`;
+    const allButton = $('#wizard-client-all'); if (allButton) allButton.onclick = () => wizardCreateClient('all');
+    const subsetButton = $('#wizard-client-subset'); if (subsetButton) subsetButton.onclick = () => wizardCreateClient('subset');
   } else if (wizardStep === 2) {
-    body.innerHTML = `<h3>Create a client key</h3><p>A client key is the API key your tools use. Tiller shows the secret once.</p><button class="btn btn-primary" id="wizard-add-client" type="button">Create client key</button>`;
-    const button = $('#wizard-add-client'); if (button) button.onclick = () => openClient();
+    body.innerHTML = `<h3>Create a virtual route (optional)</h3><p>Map a stable model name to one or more real models, with ordered fallback if the first target fails.</p><div class="wizard-actions"><button class="btn btn-secondary" id="wizard-add-virtual" type="button">Create virtual route</button></div><p class="meta-line">Optional — continue to use a real model directly.</p>`;
+    const button = $('#wizard-add-virtual'); if (button) button.onclick = () => openVirtualModel(null, name => { if (name) wizardState.virtualName = name; wizardAdvance(); });
   } else {
+    const modelName = modelNameForSnippet();
     const base = location.origin + '/v1';
-    const snippet = `curl ${base}/chat/completions -H "Authorization: Bearer $TILLER_API_KEY" -H "Content-Type: application/json" -d '{"model":"${wizardState.modelName || 'main'}","messages":[{"role":"user","content":"Hello"}]}'`;
-    body.innerHTML = `<h3>Point your tool at Tiller</h3><p>Use this endpoint and your client key (model name: <code>${h(wizardState.modelName || 'main')}</code>).</p><div class="secret-box"><code>${h(snippet)}</code><button class="btn btn-secondary" id="wizard-copy" type="button">Copy</button></div><p class="meta-line">Setup completes automatically when your first request routes successfully.</p>`;
+    const snippet = `curl ${base}/chat/completions -H "Authorization: Bearer $TILLER_API_KEY" -H "Content-Type: application/json" -d '{"model":"${modelName}","messages":[{"role":"user","content":"Hello"}]}'`;
+    body.innerHTML = `<h3>Point your tool at Tiller</h3><p>Use this endpoint and your client key (model name: <code>${h(modelName)}</code>).</p><div class="secret-box"><code>${h(snippet)}</code><button class="btn btn-secondary" id="wizard-copy" type="button">Copy</button></div><p class="meta-line">Setup completes automatically when your first request routes successfully.</p>`;
     const button = $('#wizard-copy'); if (button) button.onclick = () => navigator.clipboard?.writeText(snippet);
   }
+}
+
+// wizardCreateClient runs the wizard's access-mode choice against the shared
+// client form. "all" grants the new catalogue key every model (current and
+// future); "subset" hands off to the permissions dialog and only advances once
+// that catalogue is saved. Single keys carry their own target, so the mode is
+// ignored for them.
+function wizardCreateClient(mode) {
+  openClient(null, async (result, payload) => {
+    wizardState.clientType = result?.type || '';
+    if (wizardState.clientType === 'single') wizardState.clientName = payload?.single_model_name || 'main';
+    if (wizardState.clientType === 'catalogue' && mode === 'all') {
+      try { await enableAllClientModels(result); } catch (error) { flash(errorMessage(error, 'Could not grant all-model access.'), 'error'); return; }
+      wizardAdvance();
+    } else if (wizardState.clientType === 'catalogue' && mode === 'subset') {
+      // Wait for the one-time secret dialog to close so permissions opens on top
+      // of the wizard, not behind the key reveal.
+      const secret = $('#secret-dialog');
+      if (secret?.open) secret.addEventListener('close', () => openPermissions(result, wizardAdvance), { once: true });
+      else openPermissions(result, wizardAdvance);
+    } else {
+      wizardAdvance();
+    }
+  }, 'catalogue');
 }
 $('#wizard-prev').addEventListener('click', () => { if (wizardStep > 0) { wizardStep--; renderWizard(); } });
 $('#wizard-next').addEventListener('click', async () => {
