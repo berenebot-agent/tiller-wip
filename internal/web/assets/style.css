@@ -486,3 +486,11 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .auth-captcha{margin:12px 0;display:grid;justify-items:center;gap:4px}
 .auth-captcha .meta-line{text-align:center}
 #auth-captcha{min-height:0}
+.platform-login-banner{display:grid;gap:3px;margin:-38px -38px 2px;padding:16px 38px;background:var(--red);color:#fff;border-bottom:3px solid #8f2f2c}
+.platform-login-banner strong{font:700 23px Georgia,serif;letter-spacing:.02em}
+.platform-login-banner span{color:#ffe0dd;font-size:12px;line-height:1.4}
+.login-card.is-platform{border-top-color:var(--red);background:#fdf4f3}
+.login-card.is-platform .login-brand b{color:var(--red)}
+.login-card.is-platform .eyebrow{color:var(--red)}
+.login-card.is-platform .btn-primary{background:var(--red);border-color:var(--red)}
+.login-card.is-platform .btn-primary:hover{background:#96332f}

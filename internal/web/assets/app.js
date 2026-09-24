@@ -150,6 +150,7 @@ function deferUsage() {
 }
 function authView(name) {
   ['login-form','signup-form','signup-done','forgot-form','verify-panel','reset-form','platform-login-form','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  const loginCard = $('.login-card'); if (loginCard) loginCard.classList.toggle('is-platform', name === 'platform-login-form');
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
   $('#show-signup').hidden = !hosted || !hostedAuthOptions.signup_enabled;
