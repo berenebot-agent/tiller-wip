@@ -78,6 +78,10 @@ type Config struct {
 	// off by default and only turns on when TILLER_DEBUG_PPROF is explicitly
 	// true, so a normal deployment never exposes profiling surfaces.
 	DebugPprof bool
+	// CustomSiteEnabled switches hosted mode from the embedded landing page to
+	// the operator-supplied site at <DataDir>/site. Local mode always keeps the
+	// embedded admin application at the root.
+	CustomSiteEnabled bool
 	// ClientKeyCacheTTL is how long a verified client key is trusted by the
 	// in-memory auth cache. Verification is immediate on a cache miss and
 	// entries renew on use, so this bounds verification cost at scale. Any
@@ -245,6 +249,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_DEBUG_PPROF: %w", err)
 		}
 		c.DebugPprof = v
+	}
+	if raw := os.Getenv("TILLER_CUSTOM_SITE_ENABLED"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_CUSTOM_SITE_ENABLED: %w", err)
+		}
+		c.CustomSiteEnabled = v
 	}
 	if c.Mode == ModeHosted && c.DebugPprof && (strings.TrimSpace(c.TillerPlatformAdminUser) == "" || c.TillerPlatformAdminPassword == "") {
 		return Config{}, errors.New("TILLER_DEBUG_PPROF=true requires TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD in hosted mode")

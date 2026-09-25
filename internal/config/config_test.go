@@ -117,6 +117,34 @@ func TestHostedDebugPprofRequiresPlatformCredentials(t *testing.T) {
 	}
 }
 
+func TestCustomSiteEnabledFlag(t *testing.T) {
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_CUSTOM_SITE_ENABLED", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CustomSiteEnabled {
+		t.Fatal("CustomSiteEnabled should default to false")
+	}
+
+	t.Setenv("TILLER_CUSTOM_SITE_ENABLED", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.CustomSiteEnabled {
+		t.Fatal("CustomSiteEnabled should be true when enabled")
+	}
+
+	t.Setenv("TILLER_CUSTOM_SITE_ENABLED", "banana")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid TILLER_CUSTOM_SITE_ENABLED should fail to load")
+	}
+}
+
 func TestCacheTTLFlags(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_USERNAME", "admin")

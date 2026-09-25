@@ -3,6 +3,8 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -34,6 +36,47 @@ func TestHandlerServesSPAEntryWithoutRedirect(t *testing.T) {
 				t.Fatal("response does not contain embedded HTML")
 			}
 		})
+	}
+}
+
+func TestHandlerWithSiteUsesExternalLandingAndAssets(t *testing.T) {
+	siteDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(siteDir, "index.html"), []byte("<!doctype html><title>Custom</title>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(siteDir, "style.css"), []byte("body { color: red; }"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, err := HandlerWithSite(siteDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+
+	landing := request("/")
+	if landing.Code != http.StatusOK || !strings.Contains(landing.Body.String(), "Custom") {
+		t.Fatalf("custom landing: status=%d body=%q", landing.Code, landing.Body.String())
+	}
+	asset := request("/style.css")
+	if asset.Code != http.StatusOK || !strings.Contains(asset.Body.String(), "color: red") {
+		t.Fatalf("custom asset: status=%d body=%q", asset.Code, asset.Body.String())
+	}
+	app := request("/app")
+	if app.Code != http.StatusOK || !strings.Contains(app.Body.String(), "<!doctype html>") {
+		t.Fatalf("app route was replaced by custom site: status=%d body=%q", app.Code, app.Body.String())
+	}
+}
+
+func TestHandlerWithSiteRequiresIndex(t *testing.T) {
+	if _, err := HandlerWithSite(t.TempDir()); err == nil {
+		t.Fatal("custom site without index.html should fail")
 	}
 }
 
