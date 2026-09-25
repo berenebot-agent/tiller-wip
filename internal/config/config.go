@@ -246,6 +246,9 @@ func Load() (Config, error) {
 		}
 		c.DebugPprof = v
 	}
+	if c.Mode == ModeHosted && c.DebugPprof && (strings.TrimSpace(c.TillerPlatformAdminUser) == "" || c.TillerPlatformAdminPassword == "") {
+		return Config{}, errors.New("TILLER_DEBUG_PPROF=true requires TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD in hosted mode")
+	}
 	if raw := os.Getenv("TILLER_BACKUP_INTERVAL"); raw != "" {
 		v, err := time.ParseDuration(raw)
 		if err != nil {

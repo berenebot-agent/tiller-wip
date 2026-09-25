@@ -525,9 +525,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.cooldownStatus)))
 	mux.Handle("DELETE /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.clearCooldown)))
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
-	mux.Handle("GET /api/admin/debug/memory", s.requireAdmin(http.HandlerFunc(s.debugMemory)))
+	mux.Handle("GET /api/admin/debug/memory", s.requireDebugAdmin(http.HandlerFunc(s.debugMemory)))
 	if s.config.DebugPprof {
-		mux.Handle("GET "+debugPprofPrefix, s.requireAdmin(http.HandlerFunc(s.debugPprof)))
+		mux.Handle("GET "+debugPprofPrefix, s.requireDebugAdmin(http.HandlerFunc(s.debugPprof)))
 	}
 	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
 	mux.Handle("GET /v1/models/{model...}", s.requireClient(http.HandlerFunc(s.clientModel), false))

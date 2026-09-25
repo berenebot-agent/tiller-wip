@@ -98,6 +98,25 @@ func TestDebugPprofFlag(t *testing.T) {
 	}
 }
 
+func TestHostedDebugPprofRequiresPlatformCredentials(t *testing.T) {
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://tiller.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "127.0.0.1/32")
+	t.Setenv("TILLER_DEBUG_PPROF", "true")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("hosted TILLER_DEBUG_PPROF=true without platform credentials should fail")
+	}
+
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
+	if _, err := Load(); err != nil {
+		t.Fatalf("hosted TILLER_DEBUG_PPROF=true with platform credentials: %v", err)
+	}
+}
+
 func TestCacheTTLFlags(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_USERNAME", "admin")
