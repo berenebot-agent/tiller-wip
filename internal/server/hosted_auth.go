@@ -25,6 +25,17 @@ const (
 	genericResetMessage  = "If the address belongs to an account, a password-reset message will arrive shortly."
 )
 
+// requireSameOrigin rejects a browser auth POST whose Origin is present and not
+// the request's own origin, blocking cross-site form/script logins. It writes
+// the standard generic error and reports false when the request must stop.
+func (s *Server) requireSameOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if s.sameOriginRequest(r) {
+		return true
+	}
+	adminError(w, http.StatusBadRequest, "invalid_request", "Request did not originate from this site.")
+	return false
+}
+
 func platformMailSettings(m config.MailBootstrap) store.PlatformMailSettings {
 	return store.PlatformMailSettings{
 		Provider: m.Provider, From: m.From,
@@ -104,6 +115,9 @@ func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token
 }
 
 func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
@@ -165,6 +179,9 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if s.userLoginIPLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
@@ -203,6 +220,10 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 	s.userLoginEmailLimiter.success(emailKey)
 	session, err := s.identity.CreateUserSession(r.Context(), u)
 	if err != nil {
+		if errors.Is(err, identity.ErrStaleAuthentication) {
+			adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password.")
+			return
+		}
 		adminError(w, http.StatusInternalServerError, "internal_error", "Could not create session.")
 		return
 	}
@@ -284,6 +305,9 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
@@ -311,6 +335,9 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
@@ -338,6 +365,9 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	var input struct {
 		Token    string `json:"token"`
 		Password string `json:"password"`

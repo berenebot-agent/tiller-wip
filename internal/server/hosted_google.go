@@ -38,6 +38,9 @@ func (s *Server) googleConfig(ctx context.Context) (hostedauth.GoogleConfig, err
 }
 
 func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.oauthStartLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
@@ -220,6 +223,9 @@ func (s *Server) completeGoogleSignIn(w http.ResponseWriter, r *http.Request, cl
 // replaces the Turnstile check for this path (One Tap cannot be gated behind a
 // pre-flight captcha), with rate limiting as the abuse control.
 func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.oauthStartLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
@@ -331,6 +337,9 @@ func (s *Server) completeGoogleReauth(w http.ResponseWriter, r *http.Request, fl
 }
 
 func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")

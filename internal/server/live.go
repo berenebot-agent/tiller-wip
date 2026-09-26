@@ -294,6 +294,12 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.backgroundCtx.Done():
+			// Server shutdown cancels the background context (StartBackground
+			// is fed the signal-derived run context). Exit so an open dashboard
+			// does not hold http.Server.Shutdown to its deadline. The deferred
+			// unsubscribe removes the subscriber and stops the dispatcher.
+			return
 		case <-expires.C:
 			return
 		case <-validate.C:

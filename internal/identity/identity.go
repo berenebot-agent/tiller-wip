@@ -49,6 +49,11 @@ var (
 	ErrBootstrapCollision = errors.New("identity: hosted bootstrap email already exists")
 	ErrBootstrapRequired  = errors.New("identity: hosted customer bootstrap credentials are required for an existing local installation")
 	ErrAccountDeleting    = errors.New("identity: account is deleting")
+	// ErrStaleAuthentication is returned when a session is created against a
+	// generation that no longer matches the stored one, i.e. a credential
+	// change or revocation landed between authentication and session
+	// creation. Handlers map it to a generic authentication failure.
+	ErrStaleAuthentication = errors.New("identity: authentication is stale")
 )
 
 // User is the authenticated hosted identity and its one owned account.
@@ -60,6 +65,11 @@ type User struct {
 	AccountStatus   string
 	VerifiedAt      sql.NullString
 	PasswordEnabled bool
+	// AuthGeneration is the user's current authentication/recovery generation,
+	// as read from users.auth_generation. Session creation only succeeds when
+	// the database still holds this value, so a credential change that lands
+	// between authentication and session creation fails closed.
+	AuthGeneration int64
 }
 
 func (u User) Verified() bool { return u.VerifiedAt.Valid && u.VerifiedAt.String != "" }
@@ -511,8 +521,8 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 
 func (s *Store) userByEmail(ctx context.Context, email string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email=?`, email).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled,u.auth_generation FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email=?`, email).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled, &u.AuthGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -660,7 +670,7 @@ func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, str
 	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, u.ID); err != nil {
 		return User{}, "", err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO password_reset_tokens(id,user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?,?)`, selector, u.ID, hash, formatTime(now), formatTime(now.Add(resetTTL))); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO password_reset_tokens(id,user_id,token_hash,created_at,expires_at,auth_generation) VALUES(?,?,?,?,?,?)`, selector, u.ID, hash, formatTime(now), formatTime(now.Add(resetTTL)), u.AuthGeneration); err != nil {
 		return User{}, "", err
 	}
 	if err := s.enqueueMail(ctx, tx, mailoutbox.QueuedMessage{UserID: u.ID, Type: mailoutbox.TypePasswordReset, Recipient: u.Email, Token: raw}); err != nil {
@@ -684,11 +694,17 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 		return User{}, ErrInvalidToken
 	}
 	var userID, hash, expires string
-	if err := s.db.QueryRowContext(ctx, `SELECT t.user_id,t.token_hash,t.expires_at FROM password_reset_tokens t JOIN users u ON u.id=t.user_id AND u.password_auth_enabled=1 WHERE t.id=? AND t.used_at IS NULL`, selector).Scan(&userID, &hash, &expires); err != nil {
+	var tokenGeneration, currentGeneration int64
+	if err := s.db.QueryRowContext(ctx, `SELECT t.user_id,t.token_hash,t.expires_at,t.auth_generation,u.auth_generation FROM password_reset_tokens t JOIN users u ON u.id=t.user_id AND u.password_auth_enabled=1 WHERE t.id=? AND t.used_at IS NULL`, selector).Scan(&userID, &hash, &expires, &tokenGeneration, &currentGeneration); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrInvalidToken
 		}
 		return User{}, err
+	}
+	// A token issued before a sensitive credential change carries the older
+	// generation and is stale: reject it rather than let it reset the password.
+	if tokenGeneration != currentGeneration {
+		return User{}, ErrInvalidToken
 	}
 	if !s.tokenHasher.Verify(secret, hash) {
 		return User{}, ErrInvalidToken
@@ -714,10 +730,15 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=?,auth_generation=auth_generation+1 WHERE id=?`, newHash, formatTime(now), userID); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+		return User{}, err
+	}
+	// A token issued before this reset must not survive it: the generation
+	// bump above makes any other outstanding reset link stale.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
 		return User{}, err
 	}
 	// A password reset cancels any outstanding email change: the warning mail
@@ -734,7 +755,10 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 }
 
 // CreateUserSession creates a server-side customer session for an active,
-// verified account.
+// verified account. The insert is conditional on the user's auth_generation
+// still matching the value observed at authentication time, so a credential
+// change or revocation that commits in between yields ErrStaleAuthentication
+// instead of minting a session from stale credentials.
 func (s *Store) CreateUserSession(ctx context.Context, u User) (UserSession, error) {
 	if u.Status != "active" || !u.Verified() {
 		return UserSession{}, ErrNotVerified
@@ -752,8 +776,18 @@ func (s *Store) CreateUserSession(ctx context.Context, u User) (UserSession, err
 	}
 	now := time.Now().UTC()
 	expires := now.Add(s.userSessionTTL)
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO user_sessions(id,user_id,account_id,token_hash,csrf_token,created_at,expires_at,last_used_at) VALUES(?,?,?,?,?,?,?,?)`, selector, u.ID, u.AccountID, hash, csrf, formatTime(now), formatTime(expires), formatTime(now)); err != nil {
+	result, err := s.db.ExecContext(ctx, `INSERT INTO user_sessions(id,user_id,account_id,token_hash,csrf_token,created_at,expires_at,last_used_at)
+		SELECT ?,?,?,?,?,?,?,?
+		WHERE EXISTS(SELECT 1 FROM users u JOIN accounts a ON a.owner_user_id=u.id
+			WHERE u.id=? AND u.auth_generation=? AND u.status='active' AND a.status='active' AND u.email_verified_at IS NOT NULL)`,
+		selector, u.ID, u.AccountID, hash, csrf, formatTime(now), formatTime(expires), formatTime(now), u.ID, u.AuthGeneration)
+	if err != nil {
 		return UserSession{}, err
+	}
+	if n, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return UserSession{}, rowsErr
+	} else if n != 1 {
+		return UserSession{}, ErrStaleAuthentication
 	}
 	return UserSession{Token: raw, CSRFToken: csrf, ExpiresAt: expires, User: u}, nil
 }
@@ -837,8 +871,8 @@ func (s *Store) loadUserSession(ctx context.Context, selector, secret string, no
 	var hash, expires string
 	var status, accountStatus string
 	var passwordEnabled bool
-	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status,u.password_auth_enabled FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id AND a.owner_user_id=u.id WHERE us.id=?`, selector).
-		Scan(&session.CSRFToken, &hash, &expires, &session.User.ID, &session.User.Email, &status, &session.User.VerifiedAt, &session.User.AccountID, &accountStatus, &passwordEnabled); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status,u.password_auth_enabled,u.auth_generation FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id AND a.owner_user_id=u.id WHERE us.id=?`, selector).
+		Scan(&session.CSRFToken, &hash, &expires, &session.User.ID, &session.User.Email, &status, &session.User.VerifiedAt, &session.User.AccountID, &accountStatus, &passwordEnabled, &session.User.AuthGeneration); err != nil {
 		return UserSession{}, false
 	}
 	session.User.Status, session.User.AccountStatus = status, accountStatus
@@ -1155,8 +1189,8 @@ func (s *Store) ensurePlatformCacheRoomLocked(now time.Time) {
 
 func (s *Store) userByID(ctx context.Context, userID string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled,u.auth_generation FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled, &u.AuthGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}

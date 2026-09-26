@@ -293,6 +293,7 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		Group:          keyGroup,
 		Type:           keyType,
 		Enabled:        enabled,
+		EnabledSet:     input.Enabled != nil,
 		LoggingEnabled: loggingEnabled,
 		RetentionDays:  retentionDays,
 		WriteBinding:   writeBinding,

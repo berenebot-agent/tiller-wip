@@ -16,6 +16,13 @@ import (
 // secret (see docs/backup_restore_runbook.md).
 const MasterKeyFileName = "master.key"
 
+// PreviousMasterKeyFileName is the retained pre-rotation key sidecar written
+// beside master.key during `rotate-master-key`. It is kept by default so an
+// interrupted rotation (or old backups) remains recoverable; the operator
+// removes it deliberately once old ciphertext no longer needs to be read. It
+// contains key material and must be backed up and handled like master.key.
+const PreviousMasterKeyFileName = "master.key.previous"
+
 // KeySource names where the active master key came from. It is safe to log.
 type KeySource string
 

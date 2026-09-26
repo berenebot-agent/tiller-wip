@@ -263,11 +263,12 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		current.Protocols = providers.EncodeProtocols(input.Protocols)
 	}
 	err = sc.UpdateProvider(r.Context(), store.UpdateProviderInput{
-		ID:        providerID,
-		Name:      current.Name,
-		BaseURL:   current.BaseURL,
-		Enabled:   current.Enabled,
-		Protocols: current.Protocols,
+		ID:         providerID,
+		Name:       current.Name,
+		BaseURL:    current.BaseURL,
+		Enabled:    current.Enabled,
+		EnabledSet: input.Enabled != nil,
+		Protocols:  current.Protocols,
 	})
 	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")

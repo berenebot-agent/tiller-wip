@@ -570,6 +570,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// Extract the canonical reasoning selector once from the original request.
 	// It is recomputed for each candidate against that target's capabilities.
 	canonicalSelector := extractReasoningSelector(originalBody, incoming)
+	// clientNonStreaming is true only when the client explicitly sent
+	// `"stream": false`. A Codex target always streams upstream, so such a
+	// client must receive a single aggregated JSON response instead of SSE.
+	// An omitted `stream` is NOT treated as false: a target whose native
+	// protocol is SSE (notably Codex Responses) keeps its incremental relay
+	// for clients that did not explicitly opt out.
+	clientNonStreaming := clientExplicitlyNonStreaming(originalBody, incoming)
 	start := time.Now()
 	streamed := false
 	clientTracked := false
@@ -674,6 +681,20 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			streamKeepalive.Close()
 		}
 	}()
+	// failAfterCommit emits a terminal error. Once the client stream has been
+	// committed (streamKeepalive != nil), all later writes MUST use SSE framing
+	// through the single synchronized keepalive writer — never inferenceError's
+	// JSON on an already-started 200 stream. It reports whether it handled the
+	// error (true) so the caller returns; false means no stream was committed
+	// and the caller should use the normal JSON error path.
+	failAfterCommit := func(code string) bool {
+		if streamKeepalive == nil {
+			return false
+		}
+		writeStreamFailure(streamKeepalive, incoming, code, "tiller_"+row.clientRequestID, "")
+		streamKeepalive.Flush()
+		return true
+	}
 	for pass := 0; pass < 2 && !success; pass++ {
 		bypass := pass == 1
 		if bypass && (!skippedCooled || !allAttemptedFailed) {
@@ -928,6 +949,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.fallbackReason = strPtr(class)
+					if failAfterCommit(class) {
+						return
+					}
 					inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 					return
 				}
@@ -938,6 +962,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					if failAfterCommit(class) {
+						return
+					}
 					inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
 					return
 				}
@@ -1103,6 +1130,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
+					if failAfterCommit(errorCode) {
+						return
+					}
 					inferenceError(w, row.httpStatus, "api_error", errorCode, message, incoming == providers.ProtocolMessages)
 					return
 				}
@@ -1122,7 +1152,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// Only router-owned transport headers are committed before target selection;
 			// provider-specific request IDs / rate-limit headers are omitted because
 			// the serving provider isn't known yet.
-			if route.Virtual && route.RoutingMode == "ordered_fallback" && streaming && streamKeepalive == nil {
+			//
+			// The early commit is gated off only for a client that explicitly asked
+			// for stream:false: such a request must never have SSE committed on its
+			// behalf and instead takes the aggregation path below. An omitted stream
+			// keeps the historical early-commit behaviour.
+			if route.Virtual && route.RoutingMode == "ordered_fallback" && streaming && !clientNonStreaming && streamKeepalive == nil {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("X-Accel-Buffering", "no")
 				w.WriteHeader(response.StatusCode)
@@ -1165,6 +1200,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					if failAfterCommit(class) {
+						return
+					}
 					inferenceError(w, 502, "api_error", class, message, incoming == providers.ProtocolMessages)
 					return
 				}
@@ -1242,6 +1280,9 @@ routeDone:
 			row.httpStatus = 502
 			row.errorText = strPtr(terminalPreflightClass)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(terminalPreflightClass))
+			if failAfterCommit(terminalPreflightClass) {
+				return
+			}
 			inferenceError(w, 502, "api_error", terminalPreflightClass, "The upstream provider response exceeded Tiller's non-streaming response limit.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1249,6 +1290,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr(translationFailureClass)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(translationFailureClass))
+			if failAfterCommit(translationFailureClass) {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", translationFailureClass, "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1256,6 +1300,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr("protocol_unavailable")
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("protocol_unavailable"))
+			if failAfterCommit("protocol_unavailable") {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1263,6 +1310,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr("context_limit_exceeded")
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("context_limit_exceeded"))
+			if failAfterCommit("context_limit_exceeded") {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", "context_limit_exceeded", fixedUpstreamErrorMessage("context_limit_exceeded"), incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1270,6 +1320,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr("unsupported_feature")
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+			if failAfterCommit("unsupported_feature") {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1282,17 +1335,18 @@ routeDone:
 		}
 		if route.Virtual {
 			row.errorText = strPtr("virtual_model_unavailable")
-			if streamKeepalive != nil {
+			if failAfterCommit("virtual_model_unavailable") {
 				// The client stream was already committed while probing; surface
 				// the exhausted chain as an SSE failure frame instead of a JSON
 				// body on a 200 stream.
-				writeStreamFailure(streamKeepalive, incoming, "virtual_model_unavailable", "tiller_"+row.clientRequestID, "")
-				streamKeepalive.Flush()
 				return
 			}
 			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", exhaustedRouteMessage(row.attempts), incoming == providers.ProtocolMessages)
 		} else {
 			row.errorText = strPtr("model_unavailable")
+			if failAfterCommit("model_unavailable") {
+				return
+			}
 			inferenceError(w, 503, "service_unavailable_error", "model_unavailable", "The configured model is unavailable.", incoming == providers.ProtocolMessages)
 		}
 		return
@@ -1337,13 +1391,44 @@ routeDone:
 		}
 		return w
 	}
-	if isStreamingResponse(resp) {
+	upstreamStreams := isStreamingResponse(resp)
+	if upstreamStreams {
 		// Prevent common reverse proxies from buffering the live response until
 		// the model has finished generating it.
 		w.Header().Set("X-Accel-Buffering", "no")
 	}
+	// ASTRA-007: an upstream SSE stream must not be relayed to a client that
+	// asked for a non-streaming response (e.g. Codex forces stream:true
+	// upstream). Aggregate one JSON object and write it as application/json.
+	// No keepalive is ever committed on this path, so the normal JSON error
+	// handling above remains valid.
+	if upstreamStreams && clientNonStreaming {
+		w.Header().Set("Content-Type", "application/json")
+		row.httpStatus = resp.StatusCode
+		if err := relayNonstreamFromSSE(w, reader, incoming, target, selected.RequestedModel, usage); err != nil {
+			idle.Stop()
+			class := "upstream_read_error"
+			if attemptTimedOut.Load() {
+				class = "upstream_timeout"
+			}
+			class = clientFailureClass(r.Context(), class)
+			markLastAttemptFailed(row, class)
+			if errors.Is(err, errUpstreamStreamError) {
+				class = "upstream_stream_error"
+			}
+			row.httpStatus = 502
+			row.errorText = strPtr(class)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+			inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+			return
+		}
+		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
+		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+		clearSelectedCooldown()
+		return
+	}
 	if translated {
-		streamingResponse := isStreamingResponse(resp)
+		streamingResponse := upstreamStreams
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
@@ -1380,7 +1465,7 @@ routeDone:
 		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 		return
 	}
-	if isStreamingResponse(resp) {
+	if upstreamStreams {
 		streamed = true
 		row.streaming = true
 		s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
@@ -1420,13 +1505,24 @@ routeDone:
 		row.errorText = strPtr(class)
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 		markLastAttemptFailed(row, class)
+		failAfterCommit(class)
 		return
 	}
 	extractUsage(body, usage)
 	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
 	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
-	w.WriteHeader(resp.StatusCode)
 	row.httpStatus = resp.StatusCode
+	// ASTRA-008: if the client stream was already committed (ordered-fallback
+	// probing) but the selected target returned a non-streaming body, the JSON
+	// must be delivered as synthesized SSE through the single keepalive writer,
+	// never as raw JSON on the committed 200 stream.
+	if streamKeepalive != nil {
+		writeNonstreamAsSSE(streamKeepalive, incoming, selected.RequestedModel, rewriteModelBytes(body, selected.UpstreamModelID, selected.RequestedModel))
+		streamKeepalive.Flush()
+		clearSelectedCooldown()
+		return
+	}
+	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(rewriteModelBytes(body, selected.UpstreamModelID, selected.RequestedModel))
 	clearSelectedCooldown()
 }

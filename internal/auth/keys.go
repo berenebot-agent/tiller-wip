@@ -28,6 +28,19 @@ const (
 	argonKeyBytes    = 32
 )
 
+// argonAdmission bounds how many human-password Argon2id computations (hash or
+// verify) run at once, process-wide. Each call commits argonMemory (64 MiB), so
+// the capacity is the KDF memory bound: 4 x 64 MiB = 256 MiB peak. Blocking
+// (not rejecting) admits every request while keeping the memory ceiling fixed;
+// the alternative -- unbounded concurrency -- lets a burst of login attempts
+// park gigabytes. The SecretHasher interface is deliberately left unchanged:
+// callers acquire this slot inside the hasher implementation.
+var argonAdmission = make(chan struct{}, 4)
+
+func acquireArgonSlot() { argonAdmission <- struct{}{} }
+
+func releaseArgonSlot() { <-argonAdmission }
+
 type GeneratedKey struct {
 	Plaintext   string
 	Selector    string
@@ -68,15 +81,21 @@ func GenerateKey() (GeneratedKey, error) {
 }
 
 func HashSecret(secret string) (string, error) {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idHash(secret)
 }
 
 func VerifySecret(secret, encoded string) bool {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idVerify(secret, encoded)
 }
 
-// argon2idHash is the canonical Argon2id implementation. Both Argon2Hasher
-// and the package-level HashSecret delegate here.
+// argon2idHash is the canonical Argon2id implementation. Both Argon2Hasher and
+// the package-level HashSecret acquire the KDF slot before delegating here; it
+// must not acquire again (that would deadlock once the gate is saturated), so
+// direct callers are responsible for holding a slot.
 func argon2idHash(secret string) (string, error) {
 	salt, err := randomBytes(argonSaltBytes)
 	if err != nil {
@@ -87,8 +106,9 @@ func argon2idHash(secret string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
 }
 
-// argon2idVerify is the canonical Argon2id verification. Both Argon2Hasher
-// and the package-level VerifySecret delegate here.
+// argon2idVerify is the canonical Argon2id verification. Both Argon2Hasher and
+// the package-level VerifySecret acquire the KDF slot before delegating here; it
+// must not acquire again, so direct callers are responsible for holding a slot.
 func argon2idVerify(secret, encoded string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {

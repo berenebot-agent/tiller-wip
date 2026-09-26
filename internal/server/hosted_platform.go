@@ -19,6 +19,9 @@ import (
 )
 
 func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")

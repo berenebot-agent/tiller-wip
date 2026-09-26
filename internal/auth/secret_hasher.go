@@ -32,13 +32,19 @@ type SecretHasher interface {
 // HashSecret/VerifySecret, which hold the single Argon2id implementation.
 type Argon2Hasher struct{}
 
-// Hash implements SecretHasher by delegating to the production HashSecret.
+// Hash implements SecretHasher by delegating to the production HashSecret,
+// which acquires the process-wide Argon2id admission slot.
 func (Argon2Hasher) Hash(secret string) (string, error) {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idHash(secret)
 }
 
-// Verify implements SecretHasher by delegating to the production VerifySecret.
+// Verify implements SecretHasher by delegating to the production VerifySecret,
+// which acquires the process-wide Argon2id admission slot.
 func (Argon2Hasher) Verify(secret, encoded string) bool {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idVerify(secret, encoded)
 }
 
@@ -95,6 +101,8 @@ func (h BcryptHasher) NeedsRehash(encoded string) bool {
 func VerifyEncoded(secret, encoded string) bool {
 	switch {
 	case strings.HasPrefix(encoded, "$argon2id$"):
+		acquireArgonSlot()
+		defer releaseArgonSlot()
 		return argon2idVerify(secret, encoded)
 	case strings.HasPrefix(encoded, "$2a$"), strings.HasPrefix(encoded, "$2b$"), strings.HasPrefix(encoded, "$2y$"):
 		return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(secret)) == nil

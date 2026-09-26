@@ -271,13 +271,13 @@ function exposeSignupResend() {
   button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
 }
 $('#signup-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget);
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement);
   if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; }
   try {
     const captcha_token = authCaptchaToken('signup');
     await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) });
     signupEmail = String(form.get('email') || '');
-    event.currentTarget.reset();
+    formElement.reset();
     $('#signup-done-message').textContent = `If an account can be created for ${signupEmail}, a verification link is on its way. Click the link in the email to activate your account.`;
     authView('signup-done');
     exposeSignupResend();
@@ -2265,8 +2265,8 @@ $('#open-wizard').addEventListener('click', openWizard);
 $('#legal-back').addEventListener('click', () => { history.replaceState(null, '', '/login'); showLogin(); });
 
 $('#account-password-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-password-error').textContent = '';
-  try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); event.currentTarget.reset(); flash('Password updated. Other sessions were signed out.'); }
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); $('#account-password-error').textContent = '';
+  try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); formElement.reset(); flash('Password updated. Other sessions were signed out.'); }
   catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
 });
 $('#account-google-link-form').addEventListener('submit', async event => {
@@ -2299,8 +2299,8 @@ $('#account-google-unlink-form').addEventListener('submit', async event => {
   } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not unlink Google.'); }
 });
 $('#account-email-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
-  try { const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); event.currentTarget.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.'; }
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
+  try { const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); formElement.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.'; }
   catch (error) { note.textContent = errorMessage(error, 'Could not start the email change.'); }
 });
 $('#account-revoke-sessions').addEventListener('click', async () => {

@@ -137,10 +137,16 @@ func (s *Store) changePassword(ctx context.Context, userID, currentSession, curr
 		return User{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=?,auth_generation=auth_generation+1 WHERE id=?`, newHash, formatTime(now), userID); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=? AND id<>?`, userID, keepSelector); err != nil {
+		return User{}, err
+	}
+	// A password change invalidates any outstanding reset link: the generation
+	// bump above makes previously issued tokens stale, and the rows are removed
+	// outright so they cannot be retried.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
 		return User{}, err
 	}
 	// A pending email change must not survive a password change: the warning
@@ -159,7 +165,23 @@ func (s *Store) changePassword(ctx context.Context, userID, currentSession, curr
 // RevokeAllUserSessions deletes every session for the user, including the
 // initiating one, and clears the cache so revocation is immediate.
 func (s *Store) RevokeAllUserSessions(ctx context.Context, userID string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+	// Bump the generation so outstanding password-reset links are invalidated
+	// too, not just the sessions being deleted here.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET auth_generation=auth_generation+1,updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.InvalidateUser(userID)
@@ -269,10 +291,15 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, rawToken string) (User, 
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET email=?,email_verified_at=?,updated_at=? WHERE id=?`, newEmail, formatTime(now), formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET email=?,email_verified_at=?,updated_at=?,auth_generation=auth_generation+1 WHERE id=?`, newEmail, formatTime(now), formatTime(now), userID); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM email_change_tokens WHERE user_id=?`, userID); err != nil {
+		return User{}, err
+	}
+	// An email change invalidates outstanding password-reset links: the
+	// generation bump makes them stale and the rows are removed.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
 		return User{}, err
 	}
 	if keep.Valid && keep.String != "" {

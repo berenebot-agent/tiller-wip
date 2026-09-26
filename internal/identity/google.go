@@ -18,8 +18,8 @@ var (
 // identifier. Email is deliberately never used as the lookup key.
 func (s *Store) GoogleUserBySubject(ctx context.Context, subject string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM user_identities i JOIN users u ON u.id=i.user_id JOIN accounts a ON a.owner_user_id=u.id WHERE i.provider='google' AND i.subject=?`, subject).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled,u.auth_generation FROM user_identities i JOIN users u ON u.id=i.user_id JOIN accounts a ON a.owner_user_id=u.id WHERE i.provider='google' AND i.subject=?`, subject).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled, &u.AuthGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}

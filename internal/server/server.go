@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -572,6 +573,9 @@ func (s *Server) versionHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
@@ -758,6 +762,41 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
+// sameOriginRequest is the browser-binding check for the JSON auth endpoints.
+// A cross-site form/script cannot set Origin to the target's own origin, so a
+// present Origin must match the origin the request was served from: the
+// configured PublicURL in hosted mode, otherwise the request's own
+// scheme://Host. A missing Origin is allowed for non-browser clients (they
+// still must send a JSON content type); a present Sec-Fetch-Site of
+// "same-origin" or "none" is also accepted.
+func (s *Server) sameOriginRequest(r *http.Request) bool {
+	if site := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")); site != "" {
+		if !strings.EqualFold(site, "same-origin") && !strings.EqualFold(site, "none") {
+			return false
+		}
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	if s.config.Mode == config.ModeHosted {
+		publicURL, err := url.Parse(s.config.PublicURL)
+		if err != nil || publicURL.Host == "" {
+			return false
+		}
+		return strings.EqualFold(parsed.Scheme, publicURL.Scheme) && strings.EqualFold(parsed.Host, publicURL.Host)
+	}
+	scheme := "http"
+	if s.secureRequest(r) {
+		scheme = "https"
+	}
+	return strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, r.Host)
+}
+
 // tenantKey joins an account id with a tenant-variable cache/state key so a
 // value for one account can never be served to another.
 func tenantKey(accountID, id string) string {
@@ -837,7 +876,21 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 }
 
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
+	// Auth endpoints use this decoder, so require a JSON content type. Without
+	// it a cross-site HTML form can post an enctype=text/plain body that is
+	// still valid JSON ("JSON CSRF"). decodeJSON intentionally does not impose
+	// this so admin/provider endpoints keep their broader accepted types.
+	if !jsonContentType(r.Header.Get("Content-Type")) {
+		return errors.New("request body must be valid JSON")
+	}
 	return decodeJSONBody(w, r, target, maxBytes, true)
+}
+
+// jsonContentType reports whether a Content-Type header names application/json,
+// ignoring any parameters such as "; charset=utf-8".
+func jsonContentType(value string) bool {
+	mediaType := strings.TrimSpace(strings.SplitN(value, ";", 2)[0])
+	return strings.EqualFold(mediaType, "application/json")
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, maxBytes int64, requireSingleValue bool) error {

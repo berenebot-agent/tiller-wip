@@ -135,11 +135,16 @@ func (s *Scope) GetProviderEditable(ctx context.Context, id string) (ProviderEdi
 
 // UpdateProviderInput is the fully merged provider field set.
 type UpdateProviderInput struct {
-	ID        string
-	Name      string
-	BaseURL   string
-	Enabled   bool
-	Protocols string
+	ID      string
+	Name    string
+	BaseURL string
+	Enabled bool
+	// EnabledSet reports whether the caller explicitly supplied an enabled
+	// value. When false the UPDATE does not touch the enabled column, so a
+	// concurrent PATCH that does not mention enabled cannot silently re-enable a
+	// provider disabled by another request.
+	EnabledSet bool
+	Protocols  string
 }
 
 func (s *Scope) UpdateProvider(ctx context.Context, in UpdateProviderInput) error {
@@ -147,7 +152,16 @@ func (s *Scope) UpdateProvider(ctx context.Context, in UpdateProviderInput) erro
 		if _, err := tx.q.ExecContext(ctx, `UPDATE namespaces SET name=? WHERE entity_id=? AND kind='real' AND account_id=?`, in.Name, in.ID, tx.accountID); err != nil {
 			return err
 		}
-		res, err := tx.q.ExecContext(ctx, `UPDATE providers SET name=?,base_url=?,enabled=?,protocols=?,updated_at=? WHERE id=? AND account_id=?`, in.Name, in.BaseURL, boolInt(in.Enabled), in.Protocols, now(), in.ID, tx.accountID)
+		// updated_at is always written so a no-op update still affects one row
+		// and the RowsAffected()==0 → not-found signal stays correct.
+		set := "name=?,base_url=?,protocols=?,updated_at=?"
+		args := []any{in.Name, in.BaseURL, in.Protocols, now()}
+		if in.EnabledSet {
+			set += ",enabled=?"
+			args = append(args, boolInt(in.Enabled))
+		}
+		args = append(args, in.ID, tx.accountID)
+		res, err := tx.q.ExecContext(ctx, `UPDATE providers SET `+set+` WHERE id=? AND account_id=?`, args...)
 		if err != nil {
 			return err
 		}

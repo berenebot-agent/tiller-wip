@@ -302,12 +302,17 @@ VALUES(?,?,?,?,?,?,?) ON CONFLICT(client_key_id) DO UPDATE SET exposed_model_nam
 
 // UpdateClientKeyInput is the fully merged field set for an update.
 type UpdateClientKeyInput struct {
-	ID             string
-	Name           string
-	Description    string
-	Group          string
-	Type           string
-	Enabled        bool
+	ID          string
+	Name        string
+	Description string
+	Group       string
+	Type        string
+	Enabled     bool
+	// EnabledSet reports whether the caller explicitly supplied an enabled
+	// value. When false the UPDATE does not touch the enabled column, so a
+	// concurrent PATCH that does not mention enabled cannot silently re-enable a
+	// key disabled by another request.
+	EnabledSet     bool
 	LoggingEnabled bool
 	RetentionDays  int
 	WriteBinding   bool
@@ -321,8 +326,16 @@ type UpdateClientKeyInput struct {
 func (s *Scope) UpdateClientKey(ctx context.Context, in UpdateClientKeyInput) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
 		now := now()
-		res, err := tx.q.ExecContext(ctx, `UPDATE client_keys SET name=?,description=?,key_group=?,enabled=?,logging_enabled=?,retention_days=?,key_type=?,updated_at=? WHERE id=? AND account_id=?`,
-			in.Name, in.Description, in.Group, boolInt(in.Enabled), boolInt(in.LoggingEnabled), in.RetentionDays, in.Type, now, in.ID, tx.accountID)
+		// updated_at is always written so a no-op update still affects one row
+		// and the RowsAffected()==0 → not-found signal stays correct.
+		set := "name=?,description=?,key_group=?,logging_enabled=?,retention_days=?,key_type=?,updated_at=?"
+		args := []any{in.Name, in.Description, in.Group, boolInt(in.LoggingEnabled), in.RetentionDays, in.Type, now}
+		if in.EnabledSet {
+			set += ",enabled=?"
+			args = append(args, boolInt(in.Enabled))
+		}
+		args = append(args, in.ID, tx.accountID)
+		res, err := tx.q.ExecContext(ctx, `UPDATE client_keys SET `+set+` WHERE id=? AND account_id=?`, args...)
 		if err != nil {
 			return err
 		}
