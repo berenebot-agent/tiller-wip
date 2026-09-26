@@ -53,12 +53,20 @@ func (s *Server) authOptions(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "auth_unavailable", "Sign-in options are temporarily unavailable.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"google_enabled":     settings.GoogleEnabled && settings.GoogleClientID != "" && settings.GoogleClientSecret != "",
+	googleEnabled := settings.GoogleEnabled && settings.GoogleClientID != "" && settings.GoogleClientSecret != ""
+	options := map[string]any{
+		"google_enabled":     googleEnabled,
 		"turnstile_enabled":  settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != "",
 		"turnstile_site_key": settings.TurnstileSiteKey,
 		"signup_enabled":     signup,
-	})
+	}
+	// The client ID is public (it is embedded in every Google Identity Services
+	// page) and the frontend needs it to initialise GSI. Only expose it when
+	// Google sign-in is fully configured.
+	if googleEnabled {
+		options["google_client_id"] = settings.GoogleClientID
+	}
+	writeJSON(w, http.StatusOK, options)
 }
 
 func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token, action string) bool {

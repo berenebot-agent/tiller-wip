@@ -439,6 +439,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/auth/login", s.userLogin)
 		mux.HandleFunc("POST /api/auth/google/start", s.startGoogleSignIn)
 		mux.HandleFunc("GET /api/auth/google/callback", s.googleCallback)
+		mux.HandleFunc("POST /api/auth/google/gsi", s.completeGoogleGSI)
 		mux.HandleFunc("GET /auth/callback", s.completeProviderOAuthRedirect)
 		mux.HandleFunc("POST /api/auth/google/signup/complete", s.completeGoogleSignup)
 		mux.HandleFunc("GET /api/legal/{slug}", s.legalDoc)
@@ -812,7 +813,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		csp := "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		if s.config.Mode == config.ModeHosted {
-			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://accounts.google.com; style-src 'self'; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://challenges.cloudflare.com https://accounts.google.com; frame-src https://challenges.cloudflare.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		}
 		w.Header().Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)

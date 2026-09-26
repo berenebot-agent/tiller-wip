@@ -212,6 +212,88 @@ func (s *Server) completeGoogleSignIn(w http.ResponseWriter, r *http.Request, cl
 	http.Redirect(w, r, "/login?google_signup=1", http.StatusSeeOther)
 }
 
+// completeGoogleGSI handles sign-in from Google Identity Services (the rendered
+// "Sign in with Google" button and One Tap). Unlike the redirect flow it
+// receives a Google-issued ID token (credential) directly from the browser, so
+// there is no PKCE state to consume. The credential's signature, audience and
+// email_verified claims are checked by ValidateIDToken; the Google-issued token
+// replaces the Turnstile check for this path (One Tap cannot be gated behind a
+// pre-flight captcha), with rate limiting as the abuse control.
+func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
+	key := clientIP(r, s.config.TrustedProxy)
+	if !s.oauthStartLimiter.allowAttempt(key) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
+		return
+	}
+	var input struct {
+		Credential string `json:"credential"`
+	}
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	config, err := s.googleConfig(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	claims, err := s.googleVerifier.ValidateIDToken(r.Context(), input.Credential, config.ClientID, "")
+	if err != nil {
+		adminError(w, http.StatusUnauthorized, "google_failed", "Google sign-in could not be completed. Try again.")
+		return
+	}
+	s.platformSettingsMu.Lock()
+	defer s.platformSettingsMu.Unlock()
+	current, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
+	if err != nil || !current.GoogleEnabled || current.GoogleClientID != config.ClientID || current.GoogleClientSecret != config.ClientSecret {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	s.completeGoogleGSISignIn(w, r, claims)
+}
+
+// completeGoogleGSISignIn mirrors completeGoogleSignIn but answers with JSON
+// rather than a redirect, since the GSI callback runs in-page. Signup is still
+// handed off to the consent form via the pending-signup cookie.
+func (s *Server) completeGoogleGSISignIn(w http.ResponseWriter, r *http.Request, claims hostedauth.GoogleIdentity) {
+	u, err := s.identity.GoogleUserBySubject(r.Context(), claims.Subject)
+	if err == nil {
+		session, sessionErr := s.identity.CreateUserSession(r.Context(), u)
+		if sessionErr != nil {
+			adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
+			return
+		}
+		s.setUserSessionCookie(w, r, session.Token, session.ExpiresAt)
+		s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.login", ActorType: "user", ActorID: u.ID, Metadata: map[string]string{"method": "google"}})
+		writeJSON(w, http.StatusOK, userSessionPayload(session))
+		return
+	}
+	if !errors.Is(err, identity.ErrNotFound) {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	if _, err := s.identity.UserByEmail(r.Context(), claims.Email); err == nil {
+		adminError(w, http.StatusConflict, "google_link_required", "This Google email already has a Tiller account. Sign in with that account, then link Google in Account settings.")
+		return
+	} else if !errors.Is(err, identity.ErrNotFound) {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	enabled, err := s.storeHandle().HostedSignupEnabled(r.Context())
+	if err != nil || !enabled {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
+	}
+	pendingToken, ok := s.googlePending.Put(hostedauth.SignupClaims{Subject: claims.Subject, Email: claims.Email})
+	if !ok {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	expires := time.Now().Add(hostedauth.FlowTTL)
+	http.SetCookie(w, &http.Cookie{Name: googleSignupCookie, Value: pendingToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: maxAge(expires)})
+	writeJSON(w, http.StatusOK, map[string]any{"signup_required": true, "email": claims.Email})
+}
+
 func (s *Server) completeGoogleLink(w http.ResponseWriter, r *http.Request, flow hostedauth.Flow, claims hostedauth.GoogleIdentity) {
 	session, ok := s.identity.GetUserSession(r.Context(), flow.SessionToken)
 	if !ok {

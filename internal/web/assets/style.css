@@ -453,6 +453,8 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .legal-consent input[type="checkbox"]{flex:none;width:14px;height:14px;margin:1px 0 0}
 .legal-consent a{color:var(--blue)}
 .collection-notice{font-size:11px;line-height:1.5;color:var(--muted);border-left:3px solid var(--line-dark);padding:6px 10px;margin:4px 0}
+.google-signin-button{display:flex;justify-content:center;min-height:44px}
+.google-signin-button iframe,.google-signin-button>div{width:100%!important}
 .legal-shell{position:fixed;inset:0;z-index:110;overflow:auto;padding:40px 24px;background:radial-gradient(circle at 68% 32%,rgba(52,125,177,.32),transparent 32%),linear-gradient(135deg,#0f2944,#173c60 64%,#102a46)}
 .legal-card{max-width:960px;margin:0 auto;padding:38px 44px;background:#f8fafb;border-top:4px solid #55aadd;box-shadow:0 30px 80px rgba(0,15,30,.42)}
 .legal-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:16px;margin-bottom:18px;border-bottom:1px solid var(--line)}
