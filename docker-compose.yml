@@ -7,7 +7,8 @@ name: tiller-router
 
 services:
   tiller-router:
-    container_name: tiller-router
+    # Override per deployment so standalone and hosted instances can coexist.
+    container_name: ${TILLER_CONTAINER_NAME:-tiller-router}
     build:
       context: .
       args:

@@ -149,7 +149,8 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    ```yaml
    services:
      tiller-router:
-       container_name: tiller-router
+       # Set TILLER_CONTAINER_NAME=tiller-hosted for a parallel instance.
+       container_name: ${TILLER_CONTAINER_NAME:-tiller-router}
        image: ghcr.io/dellarb/tiller-router:latest
        ports:
          - "8080:8080"
