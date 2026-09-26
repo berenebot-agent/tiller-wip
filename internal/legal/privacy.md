@@ -2,8 +2,10 @@
 
 This document is an engineering first draft prepared for legal review. It has
 not been reviewed or approved by a qualified lawyer. It contains unresolved
-[PLACEHOLDER] tokens. Do not publish it to end users or rely on it as legal
-advice. Do not treat any part of it as final until a lawyer has signed off.
+[PLACEHOLDER] tokens and placeholder vendor names that must be replaced with the
+actual, contracted subprocessors before publication. Do not publish it to end
+users or rely on it as legal advice. Do not treat any part of it as final until
+a lawyer has signed off.
 
 ================================================================
 PRIVACY POLICY
@@ -13,6 +15,7 @@ Operator:    [OPERATOR_LEGAL_NAME]
 ABN:         [ABN]
 Address:     [REGISTERED_ADDRESS]
 Privacy contact: [PRIVACY_EMAIL]
+Security contact:[SECURITY_EMAIL]
 Effective:   [EFFECTIVE_DATE]
 
 1. WHO WE ARE
@@ -31,8 +34,7 @@ Privacy Act 1988 (Cth). Where the European Economic Area, the United Kingdom or
 another jurisdiction's data-protection law applies to you, additional rights may
 also apply to you. This Policy is written to be read alongside any such rights.
 
-1.4 This Policy should be read with our Terms of Service, Acceptable Use Policy,
-Subprocessor List and Security and Data Handling page.
+1.4 This Policy should be read with our Terms of Service.
 
 2. THE DATA WE HANDLE, AND HOW WE HANDLE IT
 
@@ -83,13 +85,13 @@ necessarily receive it while routing it.
       and operational logs; and
   (c) from service providers who process data on our behalf (see section 8).
 
-3.3 If you choose Google sign-in, Google processes the authorization request
+3.2 If you choose Google sign-in, Google processes the authorization request
 and returns your verified email address and stable account subject. We request
 only the OpenID Connect identity and email scopes. If Turnstile is enabled,
 Cloudflare receives the challenge request and token validation request,
 including browser and network information needed to assess abuse.
 
-3.2 We use only strictly necessary authentication and security cookies. We do
+3.3 We use only strictly necessary authentication and security cookies. We do
 not use non-essential tracking, advertising or analytics cookies. If that
 changes, we will update this Policy and, where required, obtain consent before
 deploying such technologies.
@@ -104,8 +106,7 @@ deploying such technologies.
   (d) enforce plan quotas and limits, and prevent abuse, fraud and security
       incidents;
   (e) provide support and respond to your enquiries;
-  (f) comply with law and enforce our Terms of Service and Acceptable Use
-      Policy; and
+  (f) comply with law and enforce our Terms of Service; and
   (g) improve the reliability and security of the Service.
 
 4.2 We do not sell your personal information. We do not use your prompt or
@@ -149,38 +150,72 @@ are decrypted only as needed to make the outbound provider call, and are never
 displayed back in plaintext after you enter them, never logged, and never
 included in platform-admin views.
 
-7.2 The Service cannot recover encrypted credentials if the master key is lost;
-see the Security and Data Handling page.
+7.2 The master key must be backed up separately from the database. A copy of the
+database alone does not reveal provider credentials, but if the master key is
+lost the Service cannot recover encrypted credentials.
 
 8. SUBPROCESSORS AND OVERSEAS PROCESSING AND DISCLOSURE
 
 8.1 We use a small number of third-party service providers ("subprocessors") to
-operate the Service. These include our cloud/compute host, transactional email
-provider, DNS/TLS/edge provider, and, when the operator enables the relevant
-feature, Google for sign-in and Cloudflare for Turnstile. The current list,
-with purpose, data categories, whether data is persisted or transient, country
-of processing, and transfer mechanism, is published in the Subprocessor List.
+operate the Service. We are an Australian-operated service and users may be
+located anywhere in the world. Depending on the subprocessor and your location,
+personal information may be processed or disclosed outside Australia, including
+in the United States. We disclose those likely locations rather than making a
+vague "anywhere" statement.
 
-8.2 We are an Australian-operated service. Depending on the subprocessor and
-your location, personal information may be processed or disclosed outside
-Australia, including in the United States. We disclose those likely locations
-rather than making a vague "anywhere" statement.
+8.2 The current subprocessors, with purpose, data categories, whether data is
+persisted or transient, country of processing, and transfer mechanism, are:
 
-8.3 Where personal information is transferred from the European Economic Area,
-the United Kingdom or another jurisdiction with transfer restrictions, we rely
-on an appropriate transfer mechanism for the relevant subprocessor (for example
-an adequacy decision, the EU-US Data Privacy Framework where the recipient is
-eligible, Standard Contractual Clauses, the UK Extension to the EU-US Data
-Privacy Framework, or the UK IDTA/Addendum). Transfer positions are reassessed
-when subprocessors change. Details are in the Subprocessor List.
+  Purpose                | Vendor (placeholder) | Data categories handled                     | Persisted / transient        | Country of processing | Transfer mechanism
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  Cloud / compute host   | [CLOUD_VENDOR]       | Account information; Activity metadata;     | Persisted (encrypted at rest)| Australia and/or the  | Adequacy / SCC / DPF
+                         |                      | encrypted provider credentials; operational |                              | United States         | as applicable
+                         |                      | logs (metadata only); transient request &  | Transient for prompt/        |                       |
+                         |                      | response content                            | response content             |                       |
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  Transactional email    | [EMAIL_VENDOR]       | Email address; account event notifications; | Persisted by the vendor      | United States and/or  | SCC / DPF / UK
+  (provider TBD: Resend, | (e.g. Resend, Brevo, | verification / password-reset tokens        | for delivery; tokens         | the vendor's region   | Extension as applicable
+  Brevo or self-managed  | or SMTP operator)    |                                             | short-lived                  |                       |
+  SMTP)                  |                      |                                             |                              |                       |
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  Google sign-in         | Google               | OAuth authorization; verified email and     | Transient OAuth response;    | United States and/or  | To be confirmed
+                         |                      | stable Google subject identifier            | Tiller stores subject/email  | Google's regions      | before launch
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  Bot protection         | Cloudflare Turnstile | Challenge token; browser and network signals| Transient challenge and      | Global edge network   | To be confirmed
+  (optional)             |                      | used for abuse prevention                   | validation data              |                       | before launch
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  DNS / TLS / edge       | [EDGE_VENDOR]        | Request metadata at the network edge;       | Transient (metadata only)    | Global edge network   | Adequacy / SCC /
+  protection             |                      | connection metadata; TLS termination        |                              | (incl. Australia and  | DPF as applicable
+                         |                      |                                             |                              | the United States)    |
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  Error monitoring       | [MONITORING_VENDOR]  | Error and performance metadata (no prompt    | Persisted by the vendor      | United States         | SCC / DPF as
+  (if enabled)           |                      | or response bodies; no credentials)         | for a limited window         |                       | applicable
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  Billing (future, once  | [BILLING_VENDOR]     | Billing contact; payment metadata; plan      | Persisted by the vendor      | To be determined      | To be assessed
+  paid plans launch)     |                      | status                                      |                              |                       | before enablement
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+
+8.3 Where personal information is transferred from the European Economic Area
+to a country without an adequacy decision, we rely on Standard Contractual
+Clauses with the relevant subprocessor (or another lawful Chapter V mechanism).
+Where a US recipient is eligible under the EU-US Data Privacy Framework, we may
+rely on that framework, and on the UK Extension to the EU-US Data Privacy
+Framework for UK transfers where applicable. Where the UK IDTA/Addendum or
+another UK safeguard is required, we put it in place with the relevant
+subprocessor. Transfer positions are reassessed when a subprocessor or its
+processing location changes.
 
 8.4 We do not disclose personal information to any other third party except:
 (a) with your direction (for example, routing your request to the provider you
-configure); (b) to subprocessors listed in the Subprocessor List; (c) where
-required by law or to respond to lawful requests; or (d) to protect the rights,
-safety and security of the Service, our users or others.
+configure); (b) to the subprocessors listed above; (c) where required by law or
+to respond to lawful requests; or (d) to protect the rights, safety and security
+of the Service, our users or others.
 
-8.5 When you configure a provider, request content is sent to that provider
+8.5 This list is reviewed before any new subprocessor that receives user data is
+added. Adding such a subprocessor requires an update to this Policy and, where
+appropriate, notice to users.
+
+8.6 When you configure a provider, request content is sent to that provider
 under that provider's own privacy terms. The provider is not our subprocessor;
 it is a third party selected and controlled by you, and its handling of the
 content is governed by your agreement with it.
@@ -210,16 +245,73 @@ backups.
 10. SECURITY
 
 10.1 We use technical and organisational measures to protect personal
-information, including encryption of provider credentials at rest, hashed
-storage of secrets, transport encryption (HTTPS/TLS), access controls, and
-outbound network restrictions. A fuller summary is on the Security and Data
-Handling page.
+information.
 
-10.2 No system is perfectly secure. If a data breach occurs that is likely to
+10.2 Provider credentials - API keys, OAuth access/refresh/id tokens, OAuth
+provider data and the notification authorization header - are encrypted at rest
+using authenticated encryption (AES-256-GCM). The master key is held outside the
+database in a location the database dump does not contain. Credentials are
+decrypted only as late as practical, only to make the outbound provider call,
+and are never displayed back in plaintext after entry, written to logs, error
+messages or crash output, exposed through platform-admin interfaces, or included
+in analytics or persisted to temporary files. Key rotation is supported without
+requiring you to reconnect every provider.
+
+10.3 Secrets that do not need to be recovered are stored only as hashes:
+human-chosen passwords use a memory-hard password hash (Argon2id); high-entropy
+machine tokens (client API keys, session tokens) use a slow, salted password
+hash (bcrypt) suited to their threat model. Plaintext secrets are never stored
+and are never re-displayed after creation.
+
+10.4 All client and control-plane traffic is served over HTTPS/TLS. Session
+cookies are set with the Secure, HttpOnly and SameSite attributes and a narrow
+host scope. Sessions are server-side, opaque and revocable, and are rotated on
+sensitive authentication transitions. State-changing control-plane requests
+require a CSRF token in addition to the authenticated session.
+
+10.5 Custom provider endpoints are supported only through a shared safe outbound
+transport that permits validated public HTTPS destinations. The transport
+requires HTTPS and forbids embedded userinfo; resolves the destination and
+validates every resolved address against a deny policy; re-validates the actual
+address dialled, to defeat DNS-rebinding and time-of-check/time-of-use attacks;
+re-validates every redirect under the same policy and bounds redirects; and
+applies bounded connect/read/header timeouts and bounded response sizes. The
+deny policy blocks loopback, private, link-local, multicast, reserved and
+unspecified address ranges, cloud-metadata destinations, and our own internal
+infrastructure ranges. Application-layer controls are backed by network egress
+controls.
+
+10.6 The account is the tenancy boundary. Account authority is always derived
+from an authenticated principal, never from a URL, body or header value supplied
+by the client. Every tenant-owned read and write is account-scoped in the
+persistence layer. A client API key authorises exactly one account, and a client
+cannot reach data or models belonging to another account, even if it guesses or
+infers an identifier.
+
+10.7 Operational logs record metadata and opaque identifiers only. They do not
+record prompt or response bodies, tool arguments, reasoning content, credentials
+or API keys, and this is true at every log level. Detailed body logging (which
+would store failed request bodies or provider error bodies) is disabled in
+hosted V1 and is not available as a setting.
+
+10.8 Platform operators have access only to the minimum needed to operate the
+Service. Platform administrators cannot reveal stored provider credentials in
+plaintext, and there is no customer impersonation ("login as") capability in V1.
+
+10.9 We maintain a privacy and data-breach runbook covering incident
+identification and containment; determining affected data and accounts;
+preserving evidence; revoking credentials and sessions where necessary;
+assessing notification requirements; and regulator, customer and user
+communications and post-incident remediation.
+
+10.10 No system is perfectly secure. If a data breach occurs that is likely to
 result in serious harm and meets the threshold under the Notifiable Data
 Breaches scheme, we will notify affected individuals and the Office of the
-Australian Information Commissioner as required by law. Where EU/UK breach
-notification obligations apply, we will comply with those as well.
+Australian Information Commissioner as required by law. We will also meet
+applicable EU/UK breach obligations where those regimes apply.
+
+10.11 Report a suspected security issue to [SECURITY_EMAIL]. We aim to
+acknowledge reports promptly and to act on credible reports of vulnerabilities.
 
 11. ACCESS, CORRECTION AND DELETION
 

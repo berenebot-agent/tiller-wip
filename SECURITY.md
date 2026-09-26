@@ -154,9 +154,10 @@ the verified session and never contains provider credentials, OAuth tokens, or
 client-key secrets or hashes. It is distinct from the administrator-only
 whole-database backup export, which remains restricted to local mode.
 
-**Published legal documents.** Terms, Privacy, AUP, Subprocessor List, and the
-Security/Data Handling page are operator-editable and served publicly so signup
-can link them before authentication. Signup records the accepted document
+**Published legal documents.** The Terms of Service (which incorporate the
+acceptable-use rules) and the Privacy Policy (which documents the subprocessors
+and security/data-handling posture) are operator-editable and served publicly so
+signup can link them before authentication. Signup records the accepted document
 timestamps in `legal_acceptances`.
 
 For questions that are not security reports, please use the project's normal

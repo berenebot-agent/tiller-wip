@@ -61,7 +61,7 @@ func legalTestServer(t *testing.T) (*Server, *testAPI, *http.Client, string) {
 func TestLegalDocPublicGetReturnsSeededDraft(t *testing.T) {
 	_, _, client, base := legalTestServer(t)
 
-	for _, slug := range []string{"terms", "privacy", "aup", "subprocessors", "security"} {
+	for _, slug := range []string{"terms", "privacy"} {
 		resp, err := client.Get(base + "/api/legal/" + slug)
 		if err != nil {
 			t.Fatal(err)
@@ -146,11 +146,6 @@ func TestPlatformLegalListAndPublish(t *testing.T) {
 	status, _, _ = api.request("PUT", "/api/platform/legal/made-up", map[string]any{"title": "x", "body": "y"})
 	if status != http.StatusNotFound {
 		t.Fatalf("unknown publish slug status = %d, want 404", status)
-	}
-	// The signup notice is not a platform-editable document.
-	status, _, _ = api.request("PUT", "/api/platform/legal/signup-notice", map[string]any{"title": "x", "body": "y"})
-	if status != http.StatusNotFound {
-		t.Fatalf("publish to signup-notice status = %d, want 404", status)
 	}
 }
 

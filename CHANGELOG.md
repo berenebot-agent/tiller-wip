@@ -14,11 +14,12 @@ behavior may still change before a stable `1.0`.
   tunable from the platform dashboard. A first-run setup wizard (provider →
   target → client key → curl snippet) opens on first hosted login and completion
   is derived from Activity. Email verification now signs the user straight in.
-- **Published legal pack.** First-draft Terms, Privacy Policy, Acceptable Use,
-  Subprocessor List, Security/Data Handling, and a signup collection notice are
+- **Published legal pack.** First-draft Terms of Service and Privacy Policy are
   embedded in the binary, seeded at startup, editable from the platform
-  dashboard, and served publicly (e.g. `/legal/terms`). Signup requires an
-  explicit Terms acceptance recorded with a timestamp.
+  dashboard, and served publicly (e.g. `/legal/terms`). The Terms incorporate
+  the acceptable-use rules; the Privacy Policy documents the subprocessors and
+  the security/data-handling posture. Signup requires an explicit Terms
+  acceptance recorded with a timestamp.
 - **Account data export.** Hosted customers can download an account-scoped ZIP
   containing their configuration, Activity metadata, and audit history. Provider
   credentials and client secrets are never included.

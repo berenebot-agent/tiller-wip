@@ -23,10 +23,13 @@ func TestDocumentsAreDraftsWithBannerAndBodies(t *testing.T) {
 			t.Fatalf("document %q missing draft banner", doc.Slug)
 		}
 	}
-	for _, want := range []string{"terms", "privacy", "aup", "subprocessors", "security", "signup-notice"} {
+	for _, want := range []string{"terms", "privacy"} {
 		if !seen[want] {
 			t.Fatalf("missing required slug %q", want)
 		}
+	}
+	if len(docs) != 2 {
+		t.Fatalf("published legal documents = %d, want exactly terms and privacy", len(docs))
 	}
 }
 
@@ -42,8 +45,14 @@ func TestKnownSlugAndPlatformEditable(t *testing.T) {
 			t.Fatalf("%q should be platform-editable", slug)
 		}
 	}
-	if PlatformEditable("signup-notice") {
-		t.Fatal("signup-notice is a collection notice, not platform-editable")
+	// Retired slugs are no longer known or editable.
+	for _, slug := range []string{"aup", "subprocessors", "security", "signup-notice"} {
+		if KnownSlug(slug) {
+			t.Fatalf("retired slug %q should not be known", slug)
+		}
+		if PlatformEditable(slug) {
+			t.Fatalf("retired slug %q should not be platform-editable", slug)
+		}
 	}
 	if PlatformEditable("terms-typo") {
 		t.Fatal("unknown slug must not be platform-editable")

@@ -26,15 +26,11 @@ Service"), made available by [OPERATOR_LEGAL_NAME] ("we", "us", "our").
 be bound by these Terms. If you do not agree, do not create an account and do
 not use the Service.
 
-1.3 These Terms incorporate the following documents by reference:
-
-  (a) the Acceptable Use Policy;
-  (b) the Privacy Policy;
-  (c) the Subprocessor List; and
-  (d) the Security and Data Handling page.
-
-If there is a conflict between these Terms and another incorporated document on
-a matter of your obligations, these Terms prevail.
+1.3 These Terms incorporate the Privacy Policy by reference. The Privacy Policy
+explains what personal information we handle and how we handle it, including
+the third-party service providers we use. If there is a conflict between these
+Terms and the Privacy Policy on a matter of your obligations, these Terms
+prevail.
 
 1.4 You must be at least 18 years old, or the age of legal majority in your
 jurisdiction, to create an account. If you use the Service on behalf of an
@@ -114,8 +110,8 @@ you must deliberately expose it through a secured public HTTPS endpoint that
 you control. We do not and will not connect to your private network.
 
 5.4 The Service must not be used as a general-purpose proxy, tunnel, VPN, or
-onward relay for traffic unrelated to your configured Providers. See the
-Acceptable Use Policy.
+onward relay for traffic unrelated to your configured Providers. See section 7
+for the full list of prohibited uses.
 
 6. YOUR CONTENT, OWNERSHIP AND LICENCE
 
@@ -130,8 +126,7 @@ licence is limited to the transient processing described in the Privacy Policy.
 
 6.3 Hosted Tiller processes request and response content transiently in order to
 route it to your configured Provider. Hosted V1 does not persist prompt bodies
-or response bodies. See the Privacy Policy and the Security and Data Handling
-page for the metadata that is stored.
+or response bodies. See the Privacy Policy for the metadata that is stored.
 
 6.4 You are responsible for Your Content and for ensuring you have the rights
 and any necessary consents to send it through the Service and to your Provider.
@@ -146,17 +141,110 @@ metadata) as described in the Privacy Policy.
 7.1 You are responsible for the security of your account, your client API keys
 and your provider credentials, and for all activity that occurs under them.
 
-7.2 You must comply with the Acceptable Use Policy. It prohibits, among other
-things: using the Service as a general-purpose proxy; targeting private or
-internal destinations; misusing credentials; attempting to access another
-account's data; and using the Service to break the law or infringe the rights of
-others.
+7.2 Hosted Tiller is a routing and control-plane service for AI model providers
+that you configure with your own credentials. This section 7 sets out what you
+must not do with the Service. It is not exhaustive: conduct that is unlawful,
+harmful to the Service or others, or contrary to the spirit of these Terms is
+prohibited even if it is not listed. It is enforced to protect the Service, our
+users, Providers and third parties.
 
-7.3 We may suspend or terminate your access, in whole or in part, if we
-reasonably believe you have breached these Terms, the Acceptable Use Policy, or
-applicable law, or that your use presents a security, legal or operational risk
-to the Service, to other users, or to third parties. Where practicable, we will
-give notice and an opportunity to remedy.
+7.3 General-purpose proxy and tunnelling. You must not:
+
+  (a) use the Service as a general-purpose proxy, tunnel, VPN, onion-routing
+      relay, port-forwarder or onward relay for traffic unrelated to your
+      configured Providers;
+  (b) use the Service to proxy arbitrary HTTP or non-inference traffic;
+  (c) use the Service to evade network controls, geo-restrictions, sanctions,
+      or access controls imposed by the Service or a third party.
+
+7.4 Private and internal targeting. You must not:
+
+  (a) attempt to make the Service connect to private, loopback, link-local,
+      multicast, reserved or cloud-metadata addresses, or to any internal
+      service, database or control-plane endpoint;
+  (b) attempt to bypass the hosted outbound network policy, including through
+      redirects, DNS rebinding, hostname confusion, URL parsing tricks, or by
+      configuring an endpoint that resolves to a blocked address;
+  (c) probe, scan or enumerate our infrastructure, our network or any other
+      user's resources.
+
+7.5 Credential misuse. You must not:
+
+  (a) connect a provider credential you do not own or are not authorised to use;
+  (b) share, resell, sublicense or make available provider credentials in
+      breach of the applicable Provider's terms;
+  (c) use the Service to circumvent a Provider's rate limits, quotas, billing
+      or access restrictions, including by cycling credentials or accounts;
+  (d) use another person's account, client key or credential without authority;
+  (e) attempt to obtain, decrypt, infer or access provider credentials or
+      secrets belonging to another user or to us.
+
+7.6 Breaking the law or the rights of others. You must not:
+
+  (a) use the Service for unlawful purposes or to facilitate unlawful activity;
+  (b) generate, distribute or process material that infringes intellectual
+      property rights, that is defamatory, or that is unlawful in the relevant
+      jurisdiction;
+  (c) process content you are not lawfully permitted to process, or that you do
+      not have the necessary rights or consents to send to a Provider;
+  (d) use the Service to harm, harass, threaten or exploit any person,
+      including to generate child sexual abuse material or other prohibited
+      content.
+
+7.7 Attacking the Service or other users. You must not:
+
+  (a) overload, disrupt, degrade or interfere with the Service, its
+      infrastructure, or other users' use of the Service, including through
+      denial-of-service, resource exhaustion, or abusive traffic patterns;
+  (b) attempt to gain unauthorised access to another account's data, or to any
+      system, network or data you are not authorised to access;
+  (c) upload or transmit malware, or anything designed to interfere with the
+      operation of any system;
+  (d) reverse-engineer, decompile or attempt to derive the master key or other
+      secrets, except to the extent permitted by the AGPL or by law.
+
+7.8 Circumventing limits and controls. You must not:
+
+  (a) create multiple accounts, or use multiple credentials, to circumvent plan
+      quotas, fair-use limits, suspensions or other controls;
+  (b) falsify information provided to us, including in account registration.
+
+7.9 Provider terms. You must not:
+
+  (a) use the Service in breach of any Provider's terms of service,
+      acceptable-use policy, developer policy or other applicable rules;
+  (b) connect a Provider where that Provider's terms prohibit the use of its
+      service through a third-party router or proxy.
+
+7.10 Responsibility for content. You are responsible for the content you send
+through the Service and for the outputs you choose to use or distribute. You
+must not use the Service in any way that would cause us to breach any law or
+the rights of any third party.
+
+7.11 Enforcement and response times.
+
+  (a) Report abuse to [SECURITY_EMAIL]. We aim to acknowledge abuse reports
+      within 48 hours and to take appropriate action promptly.
+  (b) If we reasonably believe you have breached these Terms, we may take action
+      proportionate to the breach, which may include warning you and asking you
+      to stop; removing or disabling specific content, providers or client
+      keys; limiting quotas or features; suspending your account; or
+      terminating your account.
+  (c) For serious, urgent or repeated breaches - including credential misuse,
+      private-network targeting, proxy abuse, or unlawful content - we may act
+      immediately, including suspending your account without prior notice.
+  (d) We may report unlawful activity to law enforcement or other appropriate
+      authorities where required or permitted by law.
+  (e) You may contact [SECURITY_EMAIL] to appeal an enforcement decision. We
+      will review appeals in good faith but are not obliged to reverse a
+      decision where we reasonably believe the risk to the Service or others
+      remains.
+
+7.12 We may suspend or terminate your access, in whole or in part, if we
+reasonably believe you have breached these Terms or applicable law, or that
+your use presents a security, legal or operational risk to the Service, to
+other users, or to third parties. Where practicable, we will give notice and an
+opportunity to remedy.
 
 8. QUOTAS, FREE PLAN AND SERVICE CHANGES
 
@@ -206,7 +294,7 @@ the Provider.
 11.2 You may stop using the Service at any time and may delete your account
 through the account settings, or by contacting us at [PRIVACY_EMAIL].
 
-11.3 We may suspend or terminate your account as described in section 7.3.
+11.3 We may suspend or terminate your account as described in section 7.12.
 
 11.4 On termination or account deletion, we will delete or de-identify your
 account data in accordance with the Privacy Policy and the retention periods
@@ -265,15 +353,14 @@ professional advice.
 
 14.1 To the extent permitted by law, you indemnify us against loss, damage,
 liability, cost and expense (including reasonable legal costs) arising from:
-(a) Your Content; (b) your breach of these Terms or the Acceptable Use Policy;
+(a) Your Content; (b) your breach of these Terms;
 (c) your breach of a Provider's terms; or (d) your unlawful use of the Service.
 This indemnity does not apply to the extent the loss is caused by our own
 negligence, wilful misconduct, or breach of these Terms.
 
 15. PRIVACY
 
-15.1 Our handling of personal information is described in the Privacy Policy
-and, at signup, in the collection notice.
+15.1 Our handling of personal information is described in the Privacy Policy.
 
 15.2 The Privacy Policy explains the categories of personal information we
 handle, why and how we handle it, the subprocessors we use, likely overseas

@@ -31,6 +31,12 @@ type Document struct {
 
 // documentFiles maps the stable public slug to its embedded filename and human
 // title. The order of this table is the canonical publication order.
+//
+// Hosted Tiller publishes exactly two legal documents: the Terms of Service
+// (which now carry the acceptable-use rules) and the Privacy Policy (which now
+// carries the subprocessor and security/data-handling disclosures). Keeping the
+// public set to the two documents users actually accept avoids presenting
+// supporting disclosures as if they were separate agreements.
 var documentFiles = []struct {
 	Slug  string
 	Title string
@@ -38,10 +44,6 @@ var documentFiles = []struct {
 }{
 	{Slug: "terms", Title: "Terms of Service", File: "terms.md"},
 	{Slug: "privacy", Title: "Privacy Policy", File: "privacy.md"},
-	{Slug: "aup", Title: "Acceptable Use Policy", File: "aup.md"},
-	{Slug: "subprocessors", Title: "Subprocessor List", File: "subprocessors.md"},
-	{Slug: "security", Title: "Security and Data Handling", File: "security.md"},
-	{Slug: "signup-notice", Title: "Signup Privacy Notice", File: "signup-notice.md"},
 }
 
 // Documents returns every embedded draft in canonical publication order. It
@@ -94,10 +96,9 @@ func DocumentBySlug(slug string) (Document, bool) {
 	return Document{}, false
 }
 
-// platformEditableSlugs are the slugs the platform editor may publish. The
-// signup-notice draft is a collection notice resource, not a document published
-// through the platform editor, so it is excluded.
-var platformEditableSlugs = []string{"terms", "privacy", "aup", "subprocessors", "security"}
+// platformEditableSlugs are the slugs the platform editor may publish. It is
+// the same set as the published documents.
+var platformEditableSlugs = []string{"terms", "privacy"}
 
 // PlatformSlugs returns the slugs the platform editor may publish, in canonical
 // order.
@@ -108,7 +109,7 @@ func PlatformSlugs() []string {
 }
 
 // PlatformEditable reports whether the platform editor may publish to slug. It
-// requires the slug to be a known embedded document and not the signup notice.
+// requires the slug to be a known embedded document.
 func PlatformEditable(slug string) bool {
 	if !KnownSlug(slug) {
 		return false

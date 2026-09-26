@@ -57,12 +57,12 @@ func TestSeedLegalDocRefreshesPlaceholderButNotOperatorEdit(t *testing.T) {
 	}
 
 	// A slug with no row at all is inserted by SeedLegalDoc.
-	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "aup", Title: "Acceptable Use Policy", Body: "aup draft"}); err != nil {
+	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "extra-doc", Title: "Extra", Body: "extra draft"}); err != nil {
 		t.Fatal(err)
 	}
-	aup, err := st.GetLegalDoc(ctx, "aup")
-	if err != nil || aup.Body != "aup draft" || aup.UpdatedBy != "" {
-		t.Fatalf("seed did not insert new slug: %+v err=%v", aup, err)
+	extra, err := st.GetLegalDoc(ctx, "extra-doc")
+	if err != nil || extra.Body != "extra draft" || extra.UpdatedBy != "" {
+		t.Fatalf("seed did not insert new slug: %+v err=%v", extra, err)
 	}
 }
 
@@ -77,7 +77,7 @@ func TestGetLegalDocUnknownSlug(t *testing.T) {
 func TestListLegalDocsOrdersBySlug(t *testing.T) {
 	db, st := openLegalStore(t)
 	ctx := context.Background()
-	if _, err := db.SQL.Exec(`INSERT INTO legal_documents(slug,title,body,updated_at,updated_by) VALUES('security','Security','s','2026-09-21T00:00:00Z','platform')`); err != nil {
+	if _, err := db.SQL.Exec(`INSERT INTO legal_documents(slug,title,body,updated_at,updated_by) VALUES('extra-doc','Extra','s','2026-09-21T00:00:00Z','platform')`); err != nil {
 		t.Fatal(err)
 	}
 	docs, err := st.ListLegalDocs(ctx)
