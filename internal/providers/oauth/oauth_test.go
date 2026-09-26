@@ -95,6 +95,92 @@ func TestFlowStorePreservesRedirectURI(t *testing.T) {
 	}
 }
 
+func TestFlowStoreTakeByStateSingleUseAndBinding(t *testing.T) {
+	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
+	store := NewFlowStore(func() time.Time { return now })
+	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taken, err := store.TakeByState(flow.PKCE.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taken.AccountID != "acct-1" || taken.ProviderID != "provider-1" || taken.PKCE.Verifier != flow.PKCE.Verifier || taken.RedirectURI != flow.RedirectURI {
+		t.Fatalf("taken = %+v, want account/provider/verifier/redirect from flow", taken)
+	}
+	// Single use: the state cannot be redeemed twice.
+	if _, err := store.TakeByState(flow.PKCE.State); !errors.Is(err, ErrFlowInvalid) {
+		t.Fatalf("reused state error = %v, want ErrFlowInvalid", err)
+	}
+	// The provider entry is gone too, so a fresh Begin succeeds.
+	if _, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback"); err != nil {
+		t.Fatalf("Begin after TakeByState error = %v, want success", err)
+	}
+	if _, err := store.TakeByState(""); !errors.Is(err, ErrFlowInvalid) {
+		t.Fatalf("empty state error = %v, want ErrFlowInvalid", err)
+	}
+}
+
+func TestFlowStoreTakeByStateExpiryAndCancel(t *testing.T) {
+	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
+	store := NewFlowStore(func() time.Time { return now })
+	expired, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(flowLifetime)
+	if _, err := store.TakeByState(expired.PKCE.State); !errors.Is(err, ErrFlowExpired) {
+		t.Fatalf("expired state error = %v, want ErrFlowExpired", err)
+	}
+	// Cancel must clear the state index as well as the provider entry.
+	flow, err := store.Begin("acct-2", "provider-2", "https://tiller.example.com/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Cancel("acct-2", "provider-2")
+	if _, err := store.TakeByState(flow.PKCE.State); !errors.Is(err, ErrFlowInvalid) {
+		t.Fatalf("cancelled state error = %v, want ErrFlowInvalid", err)
+	}
+}
+
+func TestFlowStoreReplacementClearsSupersededState(t *testing.T) {
+	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
+	store := NewFlowStore(func() time.Time { return now })
+	first, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(flowLifetime)
+	second, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.TakeByState(first.PKCE.State); !errors.Is(err, ErrFlowInvalid) {
+		t.Fatalf("superseded state error = %v, want ErrFlowInvalid", err)
+	}
+	if _, err := store.TakeByState(second.PKCE.State); err != nil {
+		t.Fatalf("current state error = %v, want success", err)
+	}
+}
+
+func TestPersistentFlowStoreRebuildsStateIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "flows.json")
+	store := NewPersistentFlowStore(nil, path)
+	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded := NewPersistentFlowStore(nil, path)
+	taken, err := reloaded.TakeByState(flow.PKCE.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if taken.AccountID != "acct-1" || taken.ProviderID != "provider-1" {
+		t.Fatalf("reloaded flow = %+v", taken)
+	}
+}
+
 func TestMergeTokenPreservesOmittedRefreshToken(t *testing.T) {
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	old := TokenRecord{ProviderID: "provider-1", AccessToken: "old-access", RefreshToken: "durable-refresh", TokenType: "Bearer", AuthState: AuthReconnectRequired, CreatedAt: now.Add(-time.Hour)}

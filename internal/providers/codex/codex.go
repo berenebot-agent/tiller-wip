@@ -30,6 +30,13 @@ const (
 	UserAgent     = "codex_cli_rs/" + ClientVersion
 )
 
+// RedirectCallbackSupported reports whether the provider returns the
+// authorization code as a browser redirect the server can observe. Codex
+// delivers a standard ?code=&state= query callback, so hosted deployments can
+// complete sign-in without paste-back. This is a provider-scoped compatibility
+// fact, not a model-ID guess.
+const RedirectCallbackSupported = true
+
 // ReleaseChannelURL is the OpenAI-owned release channel the Codex installer
 // uses to resolve "latest". It reports {"tag_name":"rust-v0.156.1",...}. It is
 // a var so tests can point it at a local server.

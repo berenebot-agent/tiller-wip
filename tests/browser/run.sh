@@ -256,7 +256,7 @@ while read -r i router_port mock_port; do
         -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
         -v "$run_dir/worker-$i-data:/fixture-data:rw" \
         -v "$run_dir/playwright-results:/tests/test-results" \
-        "$BROWSER_IMAGE" npx playwright test admin.spec.js live.spec.js capabilities.spec.js --shard="$((i + 1))/$workers" &
+        "$BROWSER_IMAGE" npx playwright test admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js --shard="$((i + 1))/$workers" &
     echo "$i $!" >> "$pids_file"
 done < "$ports_file"
 
