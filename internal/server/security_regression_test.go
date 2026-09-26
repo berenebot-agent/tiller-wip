@@ -112,6 +112,27 @@ func TestEveryAdministrativeRouteRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestPlatformStatsRequireAuthentication(t *testing.T) {
+	app, _ := newSecurityTestServer(t, config.Config{
+		Mode: config.ModeHosted, TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
+		DataDir: t.TempDir(), ListenAddr: ":8080", PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/platform/stats", nil)
+	response := httptest.NewRecorder()
+	app.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated platform stats status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPlatformStatsRequirePlatformAuthentication(t *testing.T) {
+	_, userAPI, _ := hostedServerHarness(t, false)
+	status, payload, _ := userAPI.request(http.MethodGet, "/api/platform/stats", nil)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("customer-authenticated platform stats status = %d, payload %v, want %d", status, payload, http.StatusUnauthorized)
+	}
+}
+
 func newSecurityTestServer(t *testing.T, cfg config.Config) (*Server, *database.DB) {
 	t.Helper()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))

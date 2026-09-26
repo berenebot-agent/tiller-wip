@@ -43,6 +43,58 @@ func requestWithIdentity(accountID, clientID string) *http.Request {
 	return req.WithContext(ctx)
 }
 
+func TestPlatformStatsAggregateAccountsAndUsage(t *testing.T) {
+	app, _, accountID := hostedServerHarness(t, false)
+	papi := hostedPlatformAPI(t, app)
+	second, err := app.identity.CreateSignup(context.Background(), "second-platform-stats@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherAccount := second.User.AccountID
+	now := time.Now().UTC()
+	for _, row := range []struct {
+		id, accountID, created string
+		input, output          int
+	}{
+		{"platform-stat-24h", accountID, now.Add(-time.Hour).Format(time.RFC3339Nano), 3, 5},
+		{"platform-stat-7d", otherAccount, now.Add(-48 * time.Hour).Format(time.RFC3339Nano), 7, 11},
+	} {
+		if _, err := app.db.Activity.Exec(`INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,'model','chat',0,200,1,?,?,?,?)`, row.id, row.accountID, "key-"+row.id, row.input, row.output, "req-"+row.id, row.created); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, payload, _ := papi.request(http.MethodGet, "/api/platform/stats", nil)
+	if status != http.StatusOK {
+		t.Fatalf("platform stats: %d %v", status, payload)
+	}
+	accounts, _ := payload["accounts"].(map[string]any)
+	if accounts["accounts"] != float64(2) || accounts["users"] != float64(2) {
+		t.Fatalf("account stats = %v", accounts)
+	}
+	if payload["usage_available"] != true {
+		t.Fatalf("usage_available = %v, want true", payload["usage_available"])
+	}
+	usage, _ := payload["usage"].(map[string]any)
+	if usage["requests_24h"] != float64(1) || usage["tokens_24h"] != float64(8) || usage["requests_7d"] != float64(2) || usage["tokens_7d"] != float64(26) {
+		t.Fatalf("usage stats = %v", usage)
+	}
+	if _, exposesRows := payload["data"]; exposesRows {
+		t.Fatalf("platform stats exposed request rows: %v", payload)
+	}
+}
+
+func TestPlatformStatsRepresentUnavailableActivity(t *testing.T) {
+	app, _, _ := hostedServerHarness(t, true)
+	papi := hostedPlatformAPI(t, app)
+	status, payload, _ := papi.request(http.MethodGet, "/api/platform/stats", nil)
+	if status != http.StatusOK || payload["usage_available"] != false {
+		t.Fatalf("platform stats with unavailable Activity: %d %v", status, payload)
+	}
+	if _, hasUsage := payload["usage"]; hasUsage {
+		t.Fatalf("unavailable usage was reported as totals: %v", payload)
+	}
+}
+
 func TestPlatformPlansListUpdateAndValidation(t *testing.T) {
 	app, _, accountID := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)

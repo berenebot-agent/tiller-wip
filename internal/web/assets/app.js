@@ -1,7 +1,7 @@
 import { LiveStream } from './live.js';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformPlans: [], platformPlanData: [] };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformTab: 'overview', platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformAuditOffset: 0, platformPlans: [], platformPlanData: [] };
 let runtimeMode = 'local';
 let hostedAuthOptions = {};
 // accountEmailForDelete holds the signed-in email for the delete confirmation
@@ -169,7 +169,7 @@ function authView(name) {
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
   showAuthCaptcha(action);
 }
-function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
 function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
@@ -360,8 +360,54 @@ $('#google-consent-form').addEventListener('submit', async event => {
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-login').onclick = () => authView('login-form');
 $('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; $('#reset-login').hidden = false; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
-$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
+$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await selectPlatformTab(platformTabFromHash(), { push: false }); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
 $('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
+
+const PLATFORM_TABS = ['overview', 'users', 'plans', 'mail', 'logs', 'legal', 'settings'];
+function platformTabFromHash() {
+  const tab = location.hash.replace(/^#\/?/, '').split('/')[0];
+  return PLATFORM_TABS.includes(tab) ? tab : 'overview';
+}
+async function selectPlatformTab(tab, { push = true } = {}) {
+  if (!PLATFORM_TABS.includes(tab)) tab = 'overview';
+  state.platformTab = tab;
+  const hash = `#${tab}`;
+  if (location.hash !== hash) {
+    if (push) history.pushState(null, '', `/platform${hash}`);
+    else history.replaceState(null, '', `/platform${hash}`);
+  }
+  $$('.platform-tab').forEach(button => {
+    const active = button.dataset.platformTab === tab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  $$('.platform-panel').forEach(panel => {
+    const active = panel.id === `platform-panel-${tab}`;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+  try { await loadPlatformDashboard(tab); }
+  catch (error) {
+    if (tab === 'overview') setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'));
+    const errorEl = $(`#platform-${tab === 'overview' ? 'overview' : tab === 'logs' ? 'audit' : tab}-error`);
+    if (errorEl) errorEl.textContent = errorMessage(error, `Could not load ${tab}.`);
+  }
+}
+$$('.platform-tab').forEach((button, index, buttons) => {
+  button.addEventListener('click', () => selectPlatformTab(button.dataset.platformTab));
+  button.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length;
+    buttons[next].focus();
+    selectPlatformTab(buttons[next].dataset.platformTab);
+  });
+});
+window.addEventListener('popstate', () => {
+  if (location.pathname.startsWith('/platform') && !$('#platform-shell').hidden) selectPlatformTab(platformTabFromHash(), { push: false });
+});
+$('#platform-stats-refresh').addEventListener('click', () => loadPlatformDashboard('overview').catch(error => setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'))));
 
 async function navigate(view) {
   state.view = view;
@@ -374,7 +420,7 @@ async function navigate(view) {
   if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
-window.addEventListener('popstate', () => navigate(viewFromHash()));
+window.addEventListener('popstate', () => { if (!location.pathname.startsWith('/platform')) navigate(viewFromHash()); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
   const bar = button.closest('[data-filter-bar]');
@@ -2792,7 +2838,7 @@ function liveStop() { live.stop(); }
         state.csrf = session.csrf_token;
         $('#login-shell').hidden = true;
         $('#platform-shell').hidden = false;
-        await loadPlatformDashboard();
+        await selectPlatformTab(platformTabFromHash(), { push: false });
       } catch { showLogin(); }
       return;
     }
@@ -2859,20 +2905,79 @@ function googleAuthErrorMessage(code) {
   return messages[code] || 'Google sign-in could not be completed. Try again.';
 }
 
-async function loadPlatformDashboard() {
-  const token = ++state.platformUsersLoadToken;
+async function loadPlatformDashboard(tab = state.platformTab) {
+  if (tab === 'overview') {
+    $('#platform-overview-error').textContent = '';
+    $('#platform-overview-metrics').innerHTML = [
+      metric('…', 'Accounts'), metric('…', 'Active accounts'), metric('…', 'Pending accounts'),
+      metric('…', 'Suspended accounts'), metric('…', 'Users'), metric('…', 'Requests · 24h'),
+      metric('…', 'Tokens · 24h'), metric('…', 'Requests · 7d'), metric('…', 'Tokens · 7d'),
+    ].join('');
+    const stats = await api('/api/platform/stats');
+    const accounts = stats.accounts || {};
+    const usage = stats.usage || {};
+    const usageValue = value => stats.usage_available === false ? 'Unavailable' : formatCount(value);
+    const accountValue = value => value == null ? '—' : formatCount(value);
+    $('#platform-overview-metrics').innerHTML = [
+      metric(accountValue(accounts.accounts), 'Accounts'),
+      metric(accountValue(accounts.active_accounts), 'Active accounts'),
+      metric(accountValue(accounts.pending_accounts), 'Pending accounts'),
+      metric(accountValue(accounts.suspended_accounts), 'Suspended accounts'),
+      metric(accountValue(accounts.users), 'Users'),
+      metric(usageValue(usage.requests_24h), 'Requests · 24h'),
+      metric(stats.usage_available === false ? 'Unavailable' : formatMetricTotal(usage.tokens_24h), 'Tokens · 24h'),
+      metric(usageValue(usage.requests_7d), 'Requests · 7d'),
+      metric(stats.usage_available === false ? 'Unavailable' : formatMetricTotal(usage.tokens_7d), 'Tokens · 7d'),
+    ].join('');
+    $('#platform-overview-error').textContent = stats.usage_available === false ? 'Request and token totals are unavailable because the Activity store could not be read.' : '';
+    return;
+  }
+  if (tab === 'users') {
+    const token = ++state.platformUsersLoadToken;
+    if (!state.platformPlanData.length) await loadPlatformPlans();
+    if (token !== state.platformUsersLoadToken) return;
+    const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });
+    if (state.platformUsersSearch) params.set('search', state.platformUsersSearch);
+    const users = await api(`/api/platform/users?${params}`);
+    if (token !== state.platformUsersLoadToken) return;
+    const userRows = users.data || [];
+    $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<span class="plan-assign"><select class="plan-select" data-account-plan="${h(user.account_id)}" aria-label="Plan for ${h(user.email)}">${planOptionList(user.plan)}</select><button class="btn btn-small btn-secondary" data-account-plan-save="${h(user.account_id)}">Save plan</button></span><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
+    $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
+    $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
+    $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || !users.has_more;
+    $('#platform-users-error').textContent = '';
+    return;
+  }
+  if (tab === 'plans') { await loadPlatformPlans(); return; }
+  if (tab === 'mail') { await loadPlatformMail(); return; }
+  if (tab === 'logs') { await loadPlatformAudit(); return; }
+  if (tab === 'legal') { await loadPlatformLegal(); return; }
+  if (tab === 'settings') { await loadPlatformSettings(); return; }
+}
+
+function setPlatformStatsUnavailable(message) {
+  $('#platform-overview-metrics').innerHTML = [
+    metric('—', 'Accounts'), metric('—', 'Active accounts'), metric('—', 'Pending accounts'),
+    metric('—', 'Suspended accounts'), metric('—', 'Users'), metric('Unavailable', 'Requests · 24h'),
+    metric('Unavailable', 'Tokens · 24h'), metric('Unavailable', 'Requests · 7d'), metric('Unavailable', 'Tokens · 7d'),
+  ].join('');
+  $('#platform-overview-error').textContent = message;
+}
+
+function formatMetricTotal(value) {
+  const formatted = formatCount(value);
+  return formatted === '—' ? formatted : `${formatted} tokens`;
+}
+
+function formatCount(value) {
+  return value == null ? '—' : new Intl.NumberFormat().format(value);
+}
+
+async function loadPlatformSettings() {
   const settings = await api('/api/platform/settings');
-  $('#backup-card').hidden = true;
   const form = $('#platform-settings-form');
   form.elements.hosted_signup_enabled.checked = !!settings.hosted_signup_enabled;
   form.elements.audit_retention_days.value = settings.audit_retention_days;
-  form.elements.mail_provider.value = settings.mail?.provider || '';
-  applyMailProviderVisibility(settings.mail?.provider || '');
-  form.elements.mail_from.value = settings.mail?.from || '';
-   form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
-   form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
-   form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
-  form.elements.mail_smtp_mode.value = settings.mail?.smtp_mode || 'starttls';
   form.elements.google_signin_enabled.checked = !!settings.google?.enabled;
   form.elements.google_client_id.value = settings.google?.client_id || '';
   form.elements.google_client_secret.value = '';
@@ -2883,30 +2988,48 @@ async function loadPlatformDashboard() {
   form.elements.clear_turnstile_secret.checked = false;
   $('#google-settings-status').textContent = `Client secret ${settings.google?.secret_configured ? 'stored' : 'missing'}. Redirect URI: ${settings.google?.redirect_uri || ''}`;
   $('#turnstile-settings-status').textContent = `Secret key ${settings.turnstile?.secret_configured ? 'stored' : 'missing'}. Challenge hostname: ${settings.turnstile?.hostname || ''}`;
+  $('#platform-settings-error').textContent = '';
+}
+
+async function loadPlatformMail() {
+  const settings = await api('/api/platform/settings');
+  const form = $('#platform-mail-settings-form');
+  form.elements.mail_provider.value = settings.mail?.provider || '';
+  applyMailProviderVisibility(settings.mail?.provider || '');
+  form.elements.mail_from.value = settings.mail?.from || '';
+  form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
+  form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
+  form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
+  form.elements.mail_smtp_mode.value = settings.mail?.smtp_mode || 'starttls';
+  form.elements.mail_resend_api_key.value = '';
+  form.elements.mail_brevo_api_key.value = '';
+  form.elements.mail_smtp_password.value = '';
   $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
-  await loadPlatformPlans();
-  const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });
-  if (state.platformUsersSearch) params.set('search', state.platformUsersSearch);
-  const users = await api(`/api/platform/users?${params}`);
-  if (token !== state.platformUsersLoadToken) return;
-  const userRows = users.data || [];
-  $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<span class="plan-assign"><select class="plan-select" data-account-plan="${h(user.account_id)}" aria-label="Plan for ${h(user.email)}">${planOptionList(user.plan)}</select><button class="btn btn-small btn-secondary" data-account-plan-save="${h(user.account_id)}">Save plan</button></span><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
-  $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
-  $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
-  $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || userRows.length < 100;
-  const audit = await api('/api/platform/audit?limit=100');
-  $('#platform-audit-list').innerHTML = (audit.data || []).map(row => `<div class="platform-list-item"><strong>${h(row.event)}</strong><small>${h(row.created_at)} · ${h(row.target_id || '')}</small></div>`).join('') || '<p class="meta-line">No platform events.</p>';
+  const queue = await api('/api/platform/mail/queue');
+  $('#platform-mail-queued').textContent = queue.queued;
+  $('#platform-mail-sent').textContent = queue.sent_recent;
+  $('#platform-mail-dead').textContent = queue.dead_recent;
+  $('#platform-mail-log').innerHTML = (queue.log || []).map(row => `<div class="platform-list-item"><strong>${h(mailTypeLabel(row.type))}</strong><small>${h(row.recipient)} · ${h(row.status)} · ${h(row.attempts)} attempt(s) · ${h(row.created_at)}</small></div>`).join('') || '<p class="meta-line">No recent mail.</p>';
+  $('#platform-mail-error').textContent = '';
+  $('#platform-mail-settings-error').textContent = '';
+}
+
+async function loadPlatformAudit() {
+  const audit = await api(`/api/platform/audit?limit=100&offset=${state.platformAuditOffset}`);
+  const rows = audit.data || [];
+  $('#platform-audit-list').innerHTML = rows.map(row => `<div class="platform-list-item"><strong>${h(row.event)}</strong><small>${h(row.created_at)} · ${h(row.actor_type)}${row.target_type ? ` · ${h(row.target_type)}: ${h(row.target_id || '')}` : ''} · ${h(row.outcome)}</small><small>${h(formatAuditMetadata(row.metadata))}</small></div>`).join('') || '<p class="meta-line">No platform events.</p>';
+  $('#platform-audit-count').textContent = rows.length ? `${state.platformAuditOffset + 1}–${state.platformAuditOffset + rows.length}` : '0 events';
+  $('#platform-audit-prev').disabled = state.platformAuditOffset === 0;
+  $('#platform-audit-next').disabled = state.platformAuditOffset >= 10000 || !audit.has_more;
+  $('#platform-audit-error').textContent = '';
+}
+
+function formatAuditMetadata(raw) {
   try {
-    const queue = await api('/api/platform/mail/queue');
-    $('#platform-mail-queued').textContent = queue.queued;
-    $('#platform-mail-sent').textContent = queue.sent_recent;
-    $('#platform-mail-dead').textContent = queue.dead_recent;
-    $('#platform-mail-log').innerHTML = (queue.log || []).map(row => `<div class="platform-list-item"><strong>${h(mailTypeLabel(row.type))}</strong><small>${h(row.recipient)} · ${h(row.status)} · ${h(row.attempts)} attempt(s) · ${h(row.created_at)}</small></div>`).join('') || '<p class="meta-line">No recent mail.</p>';
-    $('#platform-mail-error').textContent = '';
-  } catch (error) {
-    $('#platform-mail-error').textContent = errorMessage(error, 'Could not load the mail queue.');
-  }
-  await loadPlatformLegal();
+    const metadata = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!metadata || typeof metadata !== 'object') return '';
+    return Object.entries(metadata).map(([key, value]) => `${key}: ${value}`).join(' · ');
+  } catch { return ''; }
 }
 
 // mailTypeLabel turns a mail_outbox type into a short human label for the
@@ -2955,7 +3078,7 @@ function openPlanEditor(plan) {
       if (editing) await api(`/api/platform/plans/${encodeURIComponent(plan.name)}`, { method: 'PUT', body: JSON.stringify(payload) });
       else await api('/api/platform/plans', { method: 'POST', body: JSON.stringify(payload) });
       flash(editing ? 'Plan saved.' : 'Plan added.');
-      await loadPlatformDashboard();
+      await loadPlatformDashboard('plans');
     },
   });
 }
@@ -2996,7 +3119,7 @@ $('#platform-plans-list').addEventListener('click', async event => {
   const row = event.target.closest('.platform-plan-row');
   try {
     if (edit) { const plan = state.platformPlanData.find(item => item.name === edit.dataset.planEdit); if (plan) openPlanEditor(plan); return; }
-    if (del) { const name = del.dataset.planDelete; if (!await confirmAction({ title: `Delete ${name}?`, copy: 'Accounts still on this plan must be moved first. This cannot be undone.', action: 'Delete plan', typeMatch: name, typeLabel: 'plan name' })) return; await api(`/api/platform/plans/${encodeURIComponent(name)}`, { method: 'DELETE' }); flash('Plan deleted.'); await loadPlatformDashboard(); return; }
+    if (del) { const name = del.dataset.planDelete; if (!await confirmAction({ title: `Delete ${name}?`, copy: 'Accounts still on this plan must be moved first. This cannot be undone.', action: 'Delete plan', typeMatch: name, typeLabel: 'plan name' })) return; await api(`/api/platform/plans/${encodeURIComponent(name)}`, { method: 'DELETE' }); flash('Plan deleted.'); await loadPlatformDashboard('plans'); return; }
     if (row) { const plan = planForRow(row); if (plan) openPlanEditor(plan); }
   } catch (error) { $('#platform-plans-error').style.color = ''; $('#platform-plans-error').textContent = errorMessage(error, 'Plan operation failed.'); }
 });
@@ -3013,13 +3136,87 @@ $('#platform-legal-list').addEventListener('submit', async event => {
   catch (error) { $('#platform-legal-error').style.color = ''; $('#platform-legal-error').textContent = errorMessage(error, 'Could not publish the document.'); }
 });
 function applyMailProviderVisibility(provider) {
-  document.querySelectorAll('#platform-settings-form [data-mail-when]').forEach(el => {
+  document.querySelectorAll('#platform-mail-settings-form [data-mail-when]').forEach(el => {
     el.hidden = provider === '' || (el.dataset.mailWhen !== 'any' && el.dataset.mailWhen !== provider);
   });
 }
-document.querySelector('#platform-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
-$('#platform-settings-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on', audit_retention_days: Number(form.get('audit_retention_days')), mail_provider: form.get('mail_provider'), mail_from: form.get('mail_from'), mail_smtp_host: form.get('mail_smtp_host'), mail_smtp_port: Number(form.get('mail_smtp_port')) || 0, mail_smtp_mode: form.get('mail_smtp_mode'), mail_smtp_username: form.get('mail_smtp_username'), google_signin_enabled: form.get('google_signin_enabled') === 'on', google_client_id: form.get('google_client_id'), clear_google_client_secret: form.get('clear_google_client_secret') === 'on', turnstile_enabled: form.get('turnstile_enabled') === 'on', turnstile_site_key: form.get('turnstile_site_key'), clear_turnstile_secret: form.get('clear_turnstile_secret') === 'on' }; const resendKey = String(form.get('mail_resend_api_key') || ''); const brevoKey = String(form.get('mail_brevo_api_key') || ''); const smtpPassword = String(form.get('mail_smtp_password') || ''); const googleSecret = String(form.get('google_client_secret') || ''); const turnstileSecret = String(form.get('turnstile_secret') || ''); if (resendKey) payload.mail_resend_api_key = resendKey; if (brevoKey) payload.mail_brevo_api_key = brevoKey; if (smtpPassword) payload.mail_smtp_password = smtpPassword; if (googleSecret) payload.google_client_secret = googleSecret; if (turnstileSecret) payload.turnstile_secret = turnstileSecret; try { await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-settings-error').textContent = 'Saved.'; $('#platform-settings-error').style.color = 'var(--green)'; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-settings-error', error, 'Could not save platform settings.'); } });
-$('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); const planSave = event.target.closest('[data-account-plan-save]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } if (planSave) { const accountID = planSave.dataset.accountPlanSave; const plan = planSave.closest('.plan-assign')?.querySelector('select')?.value; if (plan) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
-  $('#platform-users-prev').onclick = () => { state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100); loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
-$('#platform-users-next').onclick = () => { state.platformUsersOffset += 100; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
-filterInput('#platform-user-search', value => { state.platformUsersSearch = value.trim(); state.platformUsersOffset = 0; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); });
+document.querySelector('#platform-mail-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
+document.querySelector('#platform-settings-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on',
+    audit_retention_days: Number(form.get('audit_retention_days')),
+    google_signin_enabled: form.get('google_signin_enabled') === 'on',
+    google_client_id: form.get('google_client_id'),
+    clear_google_client_secret: form.get('clear_google_client_secret') === 'on',
+    turnstile_enabled: form.get('turnstile_enabled') === 'on',
+    turnstile_site_key: form.get('turnstile_site_key'),
+    clear_turnstile_secret: form.get('clear_turnstile_secret') === 'on',
+  };
+  const googleSecret = String(form.get('google_client_secret') || '');
+  const turnstileSecret = String(form.get('turnstile_secret') || '');
+  if (googleSecret) payload.google_client_secret = googleSecret;
+  if (turnstileSecret) payload.turnstile_secret = turnstileSecret;
+  try {
+    await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#platform-settings-error').textContent = 'Saved.';
+    $('#platform-settings-error').style.color = 'var(--green)';
+    await loadPlatformSettings();
+  } catch (error) {
+    $('#platform-settings-error').style.color = '';
+    $('#platform-settings-error').textContent = errorMessage(error, 'Could not save platform settings.');
+  }
+});
+$('#platform-mail-settings-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    mail_provider: form.get('mail_provider'),
+    mail_from: form.get('mail_from'),
+    mail_smtp_host: form.get('mail_smtp_host'),
+    mail_smtp_port: Number(form.get('mail_smtp_port')) || 0,
+    mail_smtp_mode: form.get('mail_smtp_mode'),
+    mail_smtp_username: form.get('mail_smtp_username'),
+  };
+  for (const field of ['mail_resend_api_key', 'mail_brevo_api_key', 'mail_smtp_password']) {
+    const value = String(form.get(field) || '');
+    if (value) payload[field] = value;
+  }
+  try {
+    await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#platform-mail-settings-error').textContent = 'Saved.';
+    $('#platform-mail-settings-error').style.color = 'var(--green)';
+    await loadPlatformMail();
+  } catch (error) {
+    $('#platform-mail-settings-error').style.color = '';
+    $('#platform-mail-settings-error').textContent = errorMessage(error, 'Could not save mail settings.');
+  }
+});
+$('#platform-users-prev').onclick = () => {
+  state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100);
+  loadPlatformDashboard('users').catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); });
+};
+$('#platform-users-next').onclick = () => {
+  state.platformUsersOffset += 100;
+  loadPlatformDashboard('users').catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); });
+};
+$('#platform-users-list').addEventListener('click', async event => {
+  const status = event.target.closest('[data-account-status]');
+  const deletion = event.target.closest('[data-account-delete], [data-account-retry]');
+  const planSave = event.target.closest('[data-account-plan-save]');
+  try {
+    if (status) await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' });
+    if (deletion) {
+      const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry;
+      if (!deletion.dataset.accountRetry && !window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) return;
+      await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) });
+    }
+    if (planSave) {
+      const accountID = planSave.dataset.accountPlanSave;
+      const plan = planSave.closest('.plan-assign')?.querySelector('select')?.value;
+      if (plan) await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) });
+    }
+    if (status || deletion || planSave) await loadPlatformDashboard('users');
+  } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); }
+});

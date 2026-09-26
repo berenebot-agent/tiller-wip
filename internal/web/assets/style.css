@@ -494,6 +494,21 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .platform-legal-form label{display:grid;gap:4px;font-size:11px;color:var(--muted)}
 .platform-legal-form textarea,.platform-legal-form input{width:100%;font-family:var(--mono);font-size:12px}
 @media(max-width:720px){.platform-plan-fields{grid-template-columns:1fr}.app-footer{flex-direction:column}}
+.platform-tabs{display:flex;gap:4px;margin:0 0 18px;border-bottom:1px solid var(--line-dark);overflow-x:auto;overscroll-behavior-inline:contain;scrollbar-width:thin}
+.platform-tab{position:relative;flex:0 0 auto;border:0;background:transparent;color:#536779;padding:11px 15px;font:700 12px var(--mono);letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
+.platform-tab:hover,.platform-tab.active{color:var(--navy)}
+.platform-tab.active:after{content:"";position:absolute;left:10px;right:10px;bottom:-1px;height:3px;background:var(--blue)}
+.platform-panel{display:none}
+.platform-panel.active{display:block}
+.platform-panel>.system-card{max-width:100%;margin-bottom:16px}
+.platform-panel .dashboard-header{align-items:flex-end}
+.platform-metric-strip{grid-template-columns:repeat(5,minmax(0,1fr));}
+.platform-metric-strip .metric{min-width:0}
+.platform-mail-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.platform-mail-grid .system-card:first-child{grid-column:auto}
+.platform-panel .form-error:empty{display:none}
+@media(max-width:1000px){.platform-metric-strip{grid-template-columns:repeat(3,minmax(0,1fr))}}
+@media(max-width:720px){.platform-tabs{margin-right:-12px;padding-right:12px}.platform-tab{padding:10px 12px}.platform-metric-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.platform-metric-strip .metric:nth-child(2){border-right:0}.platform-metric-strip .metric:nth-child(-n+2){border-bottom:1px solid var(--line)}.platform-mail-grid{grid-template-columns:1fr}.platform-mail-grid .system-card:first-child{grid-column:auto}}
 .auth-captcha{margin:12px 0;display:grid;justify-items:center;gap:4px}
 .auth-captcha .meta-line{text-align:center}
 #auth-captcha{min-height:0}

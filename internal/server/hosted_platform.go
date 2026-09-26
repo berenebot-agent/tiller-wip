@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -77,6 +79,54 @@ func (s *Server) platformSessionStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, platformSessionPayload(session))
 }
 
+func (s *Server) platformStats(w http.ResponseWriter, r *http.Request) {
+	accounts, err := s.identity.PlatformCounts(r.Context())
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform statistics.")
+		return
+	}
+	usage, err := s.platformUsageTotals(r.Context(), time.Now())
+	if err != nil {
+		if errors.Is(err, store.ErrActivityUnavailable) {
+			writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts, "usage_available": false})
+			return
+		}
+		if s.logger != nil {
+			s.logger.Error("platform statistics query failed", "error_class", fmt.Sprintf("%T", err))
+		}
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform statistics.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts, "usage": usage, "usage_available": true})
+}
+
+// platformUsageTotals queries the global account-id list, then obtains one
+// account-scoped aggregate at a time through store.Scope. The response is
+// totals only; it never returns tenant identifiers or request metadata.
+func (s *Server) platformUsageTotals(ctx context.Context, current time.Time) (store.PlatformUsageWindows, error) {
+	if s.db.Activity == nil {
+		return store.PlatformUsageWindows{}, store.ErrActivityUnavailable
+	}
+	accountIDs, err := s.identity.PlatformAccountIDs(ctx)
+	if err != nil {
+		return store.PlatformUsageWindows{}, err
+	}
+	activityStore := store.New(s.db.SQL, store.WithActivityDB(s.db.Activity))
+
+	var totals store.PlatformUsageWindows
+	for _, accountID := range accountIDs {
+		usage, err := activityStore.For(accountID).PlatformUsage(ctx, current)
+		if err != nil {
+			return store.PlatformUsageWindows{}, err
+		}
+		totals.Requests24h += usage.Requests24h
+		totals.Tokens24h += usage.Tokens24h
+		totals.Requests7d += usage.Requests7d
+		totals.Tokens7d += usage.Tokens7d
+	}
+	return totals, nil
+}
+
 func (s *Server) platformLogout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(platformSessionCookie); err == nil {
 		s.identity.DeletePlatformSession(cookie.Value)
@@ -106,6 +156,11 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := s.mailer.Status()
+	mail, err := s.storeHandle().GetPlatformMailSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
+		return
+	}
 	publicURL, _ := url.Parse(s.config.PublicURL)
 	authSettings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
 	if err != nil {
@@ -113,7 +168,8 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"hosted_signup_enabled": signup, "audit_retention_days": retention, "mail": status,
+		"hosted_signup_enabled": signup, "audit_retention_days": retention,
+		"mail":      map[string]any{"provider": mail.Provider, "from": mail.From, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
 		"google":    map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
 		"turnstile": map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
 	})
@@ -141,10 +197,46 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		TurnstileSecret      *string `json:"turnstile_secret"`
 		ClearTurnstileSecret bool    `json:"clear_turnstile_secret"`
 	}
-	if err := decodeJSONLimit(w, r, &input, 64<<10); err != nil {
+	var fields map[string]json.RawMessage
+	if err := decodeJSONLimit(w, r, &fields, 64<<10); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	allowed := map[string]bool{
+		"hosted_signup_enabled": true, "audit_retention_days": true,
+		"mail_provider": true, "mail_from": true, "mail_resend_api_key": true, "mail_brevo_api_key": true,
+		"mail_smtp_host": true, "mail_smtp_port": true, "mail_smtp_username": true, "mail_smtp_password": true, "mail_smtp_mode": true,
+		"google_signin_enabled": true, "google_client_id": true, "google_client_secret": true, "clear_google_client_secret": true,
+		"turnstile_enabled": true, "turnstile_site_key": true, "turnstile_secret": true, "clear_turnstile_secret": true,
+	}
+	for key := range fields {
+		if !allowed[key] {
+			adminError(w, http.StatusBadRequest, "invalid_request", "Settings payload is invalid.")
+			return
+		}
+	}
+	mailFields := []string{"mail_provider", "mail_from", "mail_resend_api_key", "mail_brevo_api_key", "mail_smtp_host", "mail_smtp_port", "mail_smtp_username", "mail_smtp_password", "mail_smtp_mode"}
+	hasAnyMailField := false
+	for _, key := range mailFields {
+		if _, ok := fields[key]; ok {
+			hasAnyMailField = true
+			break
+		}
+	}
+	rawSettings, err := json.Marshal(fields)
+	if err != nil || json.Unmarshal(rawSettings, &input) != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", "Settings payload is invalid.")
+		return
+	}
+	_, hasSignup := fields["hosted_signup_enabled"]
+	_, hasGoogleEnabled := fields["google_signin_enabled"]
+	_, hasGoogleClientID := fields["google_client_id"]
+	_, hasGoogleSecret := fields["google_client_secret"]
+	_, hasClearGoogleSecret := fields["clear_google_client_secret"]
+	_, hasTurnstileEnabled := fields["turnstile_enabled"]
+	_, hasTurnstileSiteKey := fields["turnstile_site_key"]
+	_, hasTurnstileSecret := fields["turnstile_secret"]
+	_, hasClearTurnstileSecret := fields["clear_turnstile_secret"]
 	if input.GoogleClientID != nil && len(*input.GoogleClientID) > 2048 || input.GoogleClientSecret != nil && len(*input.GoogleClientSecret) > 8192 || input.TurnstileSiteKey != nil && len(*input.TurnstileSiteKey) > 2048 || input.TurnstileSecret != nil && len(*input.TurnstileSecret) > 8192 {
 		adminError(w, http.StatusBadRequest, "invalid_auth_settings", "Authentication settings are too long.")
 		return
@@ -157,29 +249,36 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
 		return
 	}
+	if err != nil {
+		currentMail = store.PlatformMailSettings{SMTPMode: "starttls"}
+	}
 	if input.MailProvider != nil {
 		currentMail.Provider = strings.ToLower(strings.TrimSpace(*input.MailProvider))
 	}
 	if input.MailFrom != nil {
 		currentMail.From = strings.TrimSpace(*input.MailFrom)
 	}
+	if input.MailSMTPHost != nil {
+		currentMail.SMTPHost = strings.TrimSpace(*input.MailSMTPHost)
+	}
+	if input.MailSMTPUsername != nil {
+		currentMail.SMTPUsername = *input.MailSMTPUsername
+	}
+	if input.MailSMTPPort != nil {
+		if *input.MailSMTPPort == 0 {
+			currentMail.SMTPPort = ""
+		} else {
+			currentMail.SMTPPort = strconv.Itoa(*input.MailSMTPPort)
+		}
+	}
+	if input.MailSMTPPassword != nil {
+		currentMail.SMTPPassword = *input.MailSMTPPassword
+	}
 	if input.MailResendAPIKey != nil {
 		currentMail.ResendAPIKey = *input.MailResendAPIKey
 	}
 	if input.MailBrevoAPIKey != nil {
 		currentMail.BrevoAPIKey = *input.MailBrevoAPIKey
-	}
-	if input.MailSMTPHost != nil {
-		currentMail.SMTPHost = strings.TrimSpace(*input.MailSMTPHost)
-	}
-	if input.MailSMTPPort != nil {
-		currentMail.SMTPPort = strconv.Itoa(*input.MailSMTPPort)
-	}
-	if input.MailSMTPUsername != nil {
-		currentMail.SMTPUsername = *input.MailSMTPUsername
-	}
-	if input.MailSMTPPassword != nil {
-		currentMail.SMTPPassword = *input.MailSMTPPassword
 	}
 	if input.MailSMTPMode != nil {
 		currentMail.SMTPMode = strings.ToLower(strings.TrimSpace(*input.MailSMTPMode))
@@ -191,32 +290,32 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	wasGoogleEnabled := authSettings.GoogleEnabled
 	previousGoogleClientID := authSettings.GoogleClientID
-	if input.GoogleEnabled != nil {
+	if hasGoogleEnabled && input.GoogleEnabled != nil {
 		authSettings.GoogleEnabled = *input.GoogleEnabled
 	}
-	if input.GoogleClientID != nil {
+	if hasGoogleClientID && input.GoogleClientID != nil {
 		authSettings.GoogleClientID = strings.TrimSpace(*input.GoogleClientID)
 	}
-	if input.GoogleClientSecret != nil && *input.GoogleClientSecret != "" {
+	if hasGoogleSecret && input.GoogleClientSecret != nil && *input.GoogleClientSecret != "" {
 		authSettings.GoogleClientSecret = *input.GoogleClientSecret
 	}
-	if input.ClearGoogleSecret {
+	if hasClearGoogleSecret && input.ClearGoogleSecret {
 		authSettings.GoogleClientSecret = ""
 	}
-	if input.TurnstileEnabled != nil {
+	if hasTurnstileEnabled && input.TurnstileEnabled != nil {
 		authSettings.TurnstileEnabled = *input.TurnstileEnabled
 	}
-	if input.TurnstileSiteKey != nil {
+	if hasTurnstileSiteKey && input.TurnstileSiteKey != nil {
 		authSettings.TurnstileSiteKey = strings.TrimSpace(*input.TurnstileSiteKey)
 	}
-	if input.TurnstileSecret != nil && *input.TurnstileSecret != "" {
+	if hasTurnstileSecret && input.TurnstileSecret != nil && *input.TurnstileSecret != "" {
 		authSettings.TurnstileSecret = *input.TurnstileSecret
 	}
-	if input.ClearTurnstileSecret {
+	if hasClearTurnstileSecret && input.ClearTurnstileSecret {
 		authSettings.TurnstileSecret = ""
 	}
-	googleDisableRequested := input.GoogleEnabled != nil && !*input.GoogleEnabled && wasGoogleEnabled
-	googleClientIDChanged := input.GoogleClientID != nil && authSettings.GoogleClientID != previousGoogleClientID
+	googleDisableRequested := hasGoogleEnabled && input.GoogleEnabled != nil && !*input.GoogleEnabled && wasGoogleEnabled
+	googleClientIDChanged := hasGoogleClientID && input.GoogleClientID != nil && authSettings.GoogleClientID != previousGoogleClientID
 	if googleDisableRequested || googleClientIDChanged {
 		linked, countErr := s.identity.GoogleIdentityCount(r.Context())
 		if countErr != nil {
@@ -243,7 +342,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
 		return
 	}
-	if input.AuditRetentionDays != nil {
+	if _, hasRetention := fields["audit_retention_days"]; hasRetention && input.AuditRetentionDays != nil {
 		retention = *input.AuditRetentionDays
 	}
 	signup, err := st.HostedSignupEnabled(r.Context())
@@ -251,7 +350,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
 		return
 	}
-	if input.HostedSignupEnabled != nil {
+	if hasSignup && input.HostedSignupEnabled != nil {
 		signup = *input.HostedSignupEnabled
 	}
 	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
@@ -259,7 +358,12 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
 		return
 	}
-	if err := st.SavePlatformSettings(r.Context(), store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail, Auth: authSettings}); err != nil {
+	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail, Auth: authSettings}
+	if !hasSignup && input.AuditRetentionDays == nil && !hasAnyMailField && !hasGoogleEnabled && !hasGoogleClientID && !hasGoogleSecret && !hasClearGoogleSecret && !hasTurnstileEnabled && !hasTurnstileSiteKey && !hasTurnstileSecret && !hasClearTurnstileSecret {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err := st.SavePlatformSettings(r.Context(), proposal); err != nil {
 		adminError(w, http.StatusServiceUnavailable, "settings_locked", "Platform settings could not be saved.")
 		return
 	}
@@ -269,16 +373,16 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusInternalServerError, "internal_error", "Mail settings could not be activated.")
 		return
 	}
-	if input.HostedSignupEnabled != nil {
+	if hasSignup && input.HostedSignupEnabled != nil {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.signup_setting_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(*input.HostedSignupEnabled)}})
 	}
 	if hasMailUpdate(input) {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.mail_settings_changed", ActorType: "platform"})
 	}
-	if input.GoogleEnabled != nil || input.GoogleClientID != nil || input.GoogleClientSecret != nil || input.ClearGoogleSecret {
+	if hasGoogleEnabled || hasGoogleClientID || hasGoogleSecret || (hasClearGoogleSecret && input.ClearGoogleSecret) {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.google_signin_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(authSettings.GoogleEnabled)}})
 	}
-	if input.TurnstileEnabled != nil || input.TurnstileSiteKey != nil || input.TurnstileSecret != nil || input.ClearTurnstileSecret {
+	if hasTurnstileEnabled || hasTurnstileSiteKey || hasTurnstileSecret || (hasClearTurnstileSecret && input.ClearTurnstileSecret) {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.turnstile_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(authSettings.TurnstileEnabled)}})
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -315,7 +419,7 @@ func (s *Server) platformUsers(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not list users.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "limit": limit, "offset": offset, "has_more": len(rows) == limit})
 }
 
 func (s *Server) platformAudit(w http.ResponseWriter, r *http.Request) {
@@ -325,7 +429,7 @@ func (s *Server) platformAudit(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not list audit events.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "limit": limit, "offset": offset})
+	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "limit": limit, "offset": offset, "has_more": len(rows) == limit})
 }
 
 // platformMailQueue reports queued, sent, and recently dead-lettered mail plus a

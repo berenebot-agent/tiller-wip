@@ -111,6 +111,15 @@ type PlatformUserRow struct {
 	CreatedAt     string `json:"created_at"`
 }
 
+// PlatformCounts is the platform-wide identity summary shown to an operator.
+type PlatformCounts struct {
+	Accounts  int64 `json:"accounts"`
+	Active    int64 `json:"active_accounts"`
+	Pending   int64 `json:"pending_accounts"`
+	Suspended int64 `json:"suspended_accounts"`
+	Users     int64 `json:"users"`
+}
+
 // Store owns hosted identity and platform-admin persistence.
 type Store struct {
 	db                 *sql.DB
@@ -200,6 +209,37 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// PlatformCounts returns aggregate counts from platform-global identity tables.
+func (s *Store) PlatformCounts(ctx context.Context) (PlatformCounts, error) {
+	var counts PlatformCounts
+	err := s.db.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL),
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL AND status='active'),
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL AND status='pending'),
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL AND status='suspended'),
+		(SELECT count(*) FROM users)`).Scan(&counts.Accounts, &counts.Active, &counts.Pending, &counts.Suspended, &counts.Users)
+	return counts, err
+}
+
+// PlatformAccountIDs returns hosted account identifiers for operator-level
+// aggregate jobs. Callers must use each ID only to obtain account-scoped data.
+func (s *Store) PlatformAccountIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM accounts WHERE owner_user_id IS NOT NULL AND status <> 'deleting' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var accountIDs []string
+	for rows.Next() {
+		var accountID string
+		if err := rows.Scan(&accountID); err != nil {
+			return nil, err
+		}
+		accountIDs = append(accountIDs, accountID)
+	}
+	return accountIDs, rows.Err()
 }
 
 func (s *Store) SetAccountStatus(ctx context.Context, accountID, status string) error {

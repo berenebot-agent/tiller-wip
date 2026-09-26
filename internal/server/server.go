@@ -465,6 +465,7 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/platform/session", s.platformLogin)
 		mux.Handle("GET /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformSessionStatus)))
 		mux.Handle("DELETE /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformLogout)))
+		mux.Handle("GET /api/platform/stats", s.requirePlatform(http.HandlerFunc(s.platformStats)))
 		mux.Handle("GET /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.platformSettings)))
 		mux.Handle("PUT /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.updatePlatformSettings)))
 		mux.Handle("GET /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlans)))

@@ -138,6 +138,41 @@ func TestUserSessionRejectsMismatchedAccountOwner(t *testing.T) {
 	}
 }
 
+func TestPlatformCounts(t *testing.T) {
+	st, db := newTestStore(t)
+	ctx := context.Background()
+	if _, err := st.CreateSignup(ctx, "pending@example.com", "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateGoogleSignup(ctx, "active@example.com", "google-subject", SignupAcceptance{TermsUpdatedAt: "2026-09-01T00:00:00Z", PrivacyUpdatedAt: "2026-09-01T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	suspended, err := st.CreateSignup(ctx, "suspended@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE accounts SET status='suspended' WHERE id=?`, suspended.User.AccountID); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := st.PlatformCounts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Accounts != 3 || counts.Active != 1 || counts.Pending != 1 || counts.Suspended != 1 || counts.Users != 3 {
+		t.Fatalf("platform counts = %+v", counts)
+	}
+	accountIDs, err := st.PlatformAccountIDs(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accountIDs) != 3 {
+		t.Fatalf("platform account IDs = %v, want 3 accounts", accountIDs)
+	}
+	if accountIDs[0] == database.LocalAccountID || accountIDs[1] == database.LocalAccountID || accountIDs[2] == database.LocalAccountID {
+		t.Fatalf("platform account IDs include the local bootstrap account: %v", accountIDs)
+	}
+}
+
 func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 	st, db := newTestStore(t)
 	ctx := context.Background()
