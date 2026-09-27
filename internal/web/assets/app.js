@@ -2286,8 +2286,18 @@ $('#wizard-next').addEventListener('click', async () => {
   await refreshWizardButton(false);
 });
 $('#wizard-dismiss').addEventListener('click', async () => {
-  try { await api('/api/auth/onboarding/dismiss', { method: 'POST', body: '{}' }); } catch { /* best-effort */ }
-  $('#wizard-dialog').close(); $('#open-wizard').hidden = true;
+  const button = $('#wizard-dismiss');
+  const error = $('#wizard-error');
+  button.disabled = true;
+  error.textContent = '';
+  try {
+    await api('/api/auth/onboarding/dismiss', { method: 'POST', body: '{}' });
+    $('#wizard-dialog').close(); $('#open-wizard').hidden = true;
+  } catch (err) {
+    error.textContent = errorMessage(err, 'Could not save your setup preference.');
+  } finally {
+    button.disabled = false;
+  }
 });
 $('#close-wizard').addEventListener('click', () => $('#wizard-dialog').close());
 $('#open-wizard').addEventListener('click', openWizard);
@@ -2410,9 +2420,11 @@ async function handleEntitySubmit(event) { const form = event.currentTarget, but
 
 function confirmAction({ title, copy, action, breaking = false, typeMatch = null, typeLabel = 'name' }) { return new Promise(resolve => { const dialog = $('#confirm-dialog'), form = $('form', dialog), checkWrap = $('#confirm-check-wrap'), check = $('#confirm-check'), typeWrap = $('#confirm-type-wrap'), typeInput = $('#confirm-type'); $('#confirm-title').textContent = title; $('#confirm-copy').textContent = copy; $('#confirm-action').textContent = action; $('#confirm-error').textContent = ''; checkWrap.hidden = !breaking; check.checked = false; typeWrap.hidden = !typeMatch; typeInput.value = ''; if (typeMatch) $('#confirm-type-label').textContent = `Type the ${typeLabel} to confirm`; const valid = () => !typeMatch || typeInput.value === typeMatch; const close = event => { dialog.removeEventListener('close', close); resolve(dialog.returnValue === 'confirm' && (!breaking || check.checked) && valid()); }; form.onsubmit = event => { if (event.submitter?.value !== 'confirm') return; if (breaking && !check.checked) { event.preventDefault(); $('#confirm-error').textContent = 'Acknowledge the breaking client-facing change first.'; return; } if (typeMatch && !valid()) { event.preventDefault(); $('#confirm-error').textContent = `Type the ${typeLabel} exactly to confirm.`; } }; dialog.addEventListener('close', close); dialog.showModal(); if (typeMatch) setTimeout(() => typeInput.focus(), 0); }); }
 
-function selectSecretText() { const node = $('#secret-value'); const sel = window.getSelection(); sel.removeAllRanges(); const range = document.createRange(); range.selectNodeContents(node); sel.addRange(range); }
-function showSecret(secret) { $('#secret-value').textContent = secret; const secure = window.isSecureContext && navigator.clipboard?.writeText; $('#copy-secret').hidden = !secure; $('#copy-state').textContent = ''; $('#secret-dialog').showModal(); if (!secure) { selectSecretText(); $('#copy-state').textContent = 'Key selected — press Ctrl/Cmd+C to copy it.'; } }
+function selectTextContent(selector) { const node = $(selector); const sel = window.getSelection(); sel.removeAllRanges(); const range = document.createRange(); range.selectNodeContents(node); sel.addRange(range); }
+function selectSecretText() { selectTextContent('#secret-value'); }
+function showSecret(secret) { const secure = window.isSecureContext && navigator.clipboard?.writeText; $('#secret-value').textContent = secret; $('#api-base-url').textContent = `${location.origin}/v1`; $('#copy-secret').hidden = !secure; $('#copy-api-base-url').hidden = !secure; $('#copy-state').textContent = ''; $('#api-base-url-copy-state').textContent = ''; $('#secret-dialog').showModal(); if (!secure) { selectSecretText(); $('#copy-state').textContent = 'Key selected — press Ctrl/Cmd+C to copy it.'; $('#api-base-url-copy-state').textContent = 'Select the URL to copy it manually.'; } }
 $('#copy-secret').onclick = async () => { const text = $('#secret-value').textContent; const state = $('#copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { selectSecretText(); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy it.'; } };
+$('#copy-api-base-url').onclick = async () => { const text = $('#api-base-url').textContent; const state = $('#api-base-url-copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Base URL copied to clipboard.'; } catch { selectTextContent('#api-base-url'); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy the URL.'; } };
 $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#secret-dialog').close(); };
 
 document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); const input = $(`#view-${state.view} input[type="search"]`); input?.focus(); } });
