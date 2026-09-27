@@ -156,6 +156,8 @@ function deferUsage() {
   loadUsage().then(() => reconcileLive()).catch(() => {});
 }
 function authView(name) {
+  hideBoot();
+  $('#login-shell').hidden = false;
   ['login-form','signup-form','signup-done','forgot-form','verify-panel','reset-form','platform-login-form','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const loginCard = $('.login-card'); if (loginCard) loginCard.classList.toggle('is-platform', name === 'platform-login-form');
   const hosted = runtimeMode === 'hosted';
@@ -169,8 +171,17 @@ function authView(name) {
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
   showAuthCaptcha(action);
 }
-function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
-function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
+// UI_SESSION_HINT is a purely presentational, client-side flag: when set, the
+// next boot paints the app skeleton instead of the login card while the session
+// probe resolves. It never carries identity or a token and is never consulted
+// for an auth decision — the session endpoint remains the sole authority.
+const UI_SESSION_HINT = 'tiller_ui_session';
+function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = true; }
+function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
+function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
+function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
 
@@ -360,7 +371,7 @@ $('#google-consent-form').addEventListener('submit', async event => {
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-login').onclick = () => authView('login-form');
 $('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; $('#reset-login').hidden = false; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
-$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await selectPlatformTab(platformTabFromHash(), { push: false }); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
+$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; setSessionHint(true); hideBoot(); $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await selectPlatformTab(platformTabFromHash(), { push: false }); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
 $('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
 
 const PLATFORM_TABS = ['overview', 'users', 'plans', 'mail', 'logs', 'legal', 'settings'];
@@ -2822,6 +2833,7 @@ function liveStop() { live.stop(); }
 
 (async function initialise() {
   try {
+    if (sessionHint()) showBootSkeleton();
     const runtime = await fetch('/api/runtime', { credentials: 'same-origin' }).then(res => res.json());
     runtimeMode = runtime.mode === 'hosted' ? 'hosted' : 'local';
     if (runtimeMode === 'hosted') {
@@ -2836,6 +2848,8 @@ function liveStop() { live.stop(); }
       try {
         const session = await api('/api/platform/session');
         state.csrf = session.csrf_token;
+        setSessionHint(true);
+        hideBoot();
         $('#login-shell').hidden = true;
         $('#platform-shell').hidden = false;
         await selectPlatformTab(platformTabFromHash(), { push: false });

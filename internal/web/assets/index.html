@@ -12,7 +12,20 @@
   <link rel="stylesheet" href="/activity-graph.css">
 </head>
 <body>
-  <div class="login-shell" id="login-shell">
+  <div class="boot-shell" id="boot-shell" hidden>
+    <div class="boot-panel">
+      <div class="boot-mark"><img class="login-mark" src="/media/tiller-mark.svg" alt=""><span>Tiller <b>Router</b></span></div>
+      <div class="boot-bar"></div>
+      <div class="boot-grid">
+        <div class="boot-block"></div>
+        <div class="boot-block"></div>
+        <div class="boot-block"></div>
+      </div>
+      <span class="boot-spin" role="status" aria-label="Loading"></span>
+    </div>
+  </div>
+
+  <div class="login-shell" id="login-shell" hidden>
     <section class="login-card" aria-labelledby="login-title">
       <h1 id="login-title" class="login-brand"><a href="/login"><img class="login-mark" src="/media/tiller-mark.svg" alt=""><span>Tiller <b>Router</b></span></a></h1>
       <form id="login-form" class="stack-form">
@@ -272,5 +285,8 @@
   <footer class="app-footer" id="app-footer" hidden><span>Tiller Router</span><span id="footer-source"></span></footer>
 
   <script type="module" src="/app.js"></script>
+  <noscript>
+    <style>#login-shell{display:block!important}</style>
+  </noscript>
 </body>
 </html>
