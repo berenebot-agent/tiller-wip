@@ -1,9 +1,18 @@
 package mailer
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"net/http"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
 
 func TestValidateMailConfigs(t *testing.T) {
 	valid := []Config{
@@ -34,7 +43,7 @@ func TestManagerStartsUnconfiguredAndHotSwaps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Send(context.Background(), Message{To: "x@y.z", Subject: "x", Text: "x"}); err != ErrNotConfigured {
+	if _, err := m.Send(context.Background(), Message{To: "x@y.z", Subject: "x", Text: "x"}); err != ErrNotConfigured {
 		t.Fatalf("unconfigured send = %v", err)
 	}
 	if err := m.Update(Config{Provider: "resend", From: "no-reply@example.com", ResendAPIKey: "re_test"}); err != nil {
@@ -47,5 +56,57 @@ func TestManagerStartsUnconfiguredAndHotSwaps(t *testing.T) {
 	m.Clear()
 	if m.Status().Configured {
 		t.Fatal("clear left mail configured")
+	}
+}
+
+func TestBrevoSendReturnsProviderMessageID(t *testing.T) {
+	const wantMessageID = "<20260927.12345@example.brevo.com>"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "https://api.brevo.com/v3/smtp/email" {
+			t.Fatalf("request URL = %q", r.URL)
+		}
+		if got := r.Header.Get("api-key"); got != "test-api-key" {
+			t.Fatalf("api-key header = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(bytes.NewBufferString(`{"messageId":"` + wantMessageID + `"}`)),
+			Request:    r,
+		}, nil
+	})}
+	mailer := &brevoMailer{from: "no-reply@example.com", apiKey: "test-api-key", client: client}
+	result, err := mailer.Send(context.Background(), Message{To: "user@example.com", Subject: "Verify", Text: "body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.MessageID != wantMessageID {
+		t.Fatalf("message ID = %q, want %q", result.MessageID, wantMessageID)
+	}
+}
+
+func TestBrevoSendAcceptsMissingOrMalformedMessageID(t *testing.T) {
+	for _, body := range []string{"", "not-json", `{"messageId":42}`} {
+		t.Run(body, func(t *testing.T) {
+			mailer := &brevoMailer{
+				from:   "no-reply@example.com",
+				apiKey: "test-api-key",
+				client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusCreated,
+						Header:     make(http.Header),
+						Body:       io.NopCloser(bytes.NewBufferString(body)),
+						Request:    r,
+					}, nil
+				})},
+			}
+			result, err := mailer.Send(context.Background(), Message{To: "user@example.com", Subject: "Verify", Text: "body"})
+			if err != nil {
+				t.Fatalf("accepted 2xx response returned error: %v", err)
+			}
+			if result.MessageID != "" {
+				t.Fatalf("message ID = %q, want empty", result.MessageID)
+			}
+		})
 	}
 }

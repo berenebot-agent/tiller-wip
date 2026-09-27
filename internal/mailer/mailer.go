@@ -59,9 +59,15 @@ type Message struct {
 	Text    string
 }
 
+// SendResult contains provider-assigned delivery metadata. MessageID is an
+// opaque identifier useful for correlating a delivery in the provider console.
+type SendResult struct {
+	MessageID string
+}
+
 // Mailer is the provider-neutral delivery boundary.
 type Mailer interface {
-	Send(context.Context, Message) error
+	Send(context.Context, Message) (SendResult, error)
 }
 
 // Manager hot-swaps the active provider without restarting the process. The
@@ -105,12 +111,12 @@ func (m *Manager) Clear() {
 	m.mu.Unlock()
 }
 
-func (m *Manager) Send(ctx context.Context, message Message) error {
+func (m *Manager) Send(ctx context.Context, message Message) (SendResult, error) {
 	m.mu.RLock()
 	active := m.active
 	m.mu.RUnlock()
 	if active == nil {
-		return ErrNotConfigured
+		return SendResult{}, ErrNotConfigured
 	}
 	return active.Send(ctx, message)
 }
@@ -194,30 +200,30 @@ type resendMailer struct {
 	client *http.Client
 }
 
-func (m *resendMailer) Send(ctx context.Context, message Message) error {
+func (m *resendMailer) Send(ctx context.Context, message Message) (SendResult, error) {
 	if strings.ContainsAny(message.To+message.Subject, "\r\n") {
-		return errors.New("mailer: invalid message headers")
+		return SendResult{}, errors.New("mailer: invalid message headers")
 	}
 	payload, err := json.Marshal(map[string]any{"from": m.from, "to": []string{message.To}, "subject": message.Subject, "text": message.Text})
 	if err != nil {
-		return err
+		return SendResult{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.resend.com/emails", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return SendResult{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+m.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("resend delivery: %w", err)
+		return SendResult{}, fmt.Errorf("resend delivery: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
-		return fmt.Errorf("resend delivery returned HTTP %d", resp.StatusCode)
+		return SendResult{}, fmt.Errorf("resend delivery returned HTTP %d", resp.StatusCode)
 	}
-	return nil
+	return SendResult{}, nil
 }
 
 type brevoMailer struct {
@@ -226,9 +232,9 @@ type brevoMailer struct {
 	client *http.Client
 }
 
-func (m *brevoMailer) Send(ctx context.Context, message Message) error {
+func (m *brevoMailer) Send(ctx context.Context, message Message) (SendResult, error) {
 	if strings.ContainsAny(message.To+message.Subject, "\r\n") {
-		return errors.New("mailer: invalid message headers")
+		return SendResult{}, errors.New("mailer: invalid message headers")
 	}
 	payload, err := json.Marshal(map[string]any{
 		"sender":      map[string]string{"email": m.from},
@@ -237,24 +243,37 @@ func (m *brevoMailer) Send(ctx context.Context, message Message) error {
 		"textContent": message.Text,
 	})
 	if err != nil {
-		return err
+		return SendResult{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://api.brevo.com/v3/smtp/email", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return SendResult{}, err
 	}
 	req.Header.Set("api-key", m.apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("brevo delivery: %w", err)
+		return SendResult{}, fmt.Errorf("brevo delivery: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		_, _ = io.CopyN(io.Discard, resp.Body, 4096)
-		return fmt.Errorf("brevo delivery returned HTTP %d", resp.StatusCode)
+		return SendResult{}, fmt.Errorf("brevo delivery returned HTTP %d", resp.StatusCode)
 	}
-	return nil
+	var response struct {
+		MessageID string `json:"messageId"`
+	}
+	// Brevo returns a messageId on acceptance. Bound parsing and treat a missing
+	// or malformed ID as non-fatal: the 2xx response still means the provider
+	// accepted the send, and retrying could deliver a duplicate.
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&response); err != nil {
+		return SendResult{}, nil
+	}
+	messageID := strings.TrimSpace(response.MessageID)
+	if len(messageID) > 512 {
+		messageID = ""
+	}
+	return SendResult{MessageID: messageID}, nil
 }
 
 type smtpMailer struct {
@@ -263,14 +282,14 @@ type smtpMailer struct {
 	timeout                              time.Duration
 }
 
-func (m *smtpMailer) Send(ctx context.Context, message Message) error {
+func (m *smtpMailer) Send(ctx context.Context, message Message) (SendResult, error) {
 	from, err := mail.ParseAddress(m.from)
 	if err != nil {
-		return errors.New("mailer: invalid from address")
+		return SendResult{}, errors.New("mailer: invalid from address")
 	}
 	to, err := mail.ParseAddress(message.To)
 	if err != nil || strings.ContainsAny(message.Subject, "\r\n") {
-		return errors.New("mailer: invalid recipient or subject")
+		return SendResult{}, errors.New("mailer: invalid recipient or subject")
 	}
 	address := net.JoinHostPort(m.host, strconv.Itoa(m.port))
 	dialer := &net.Dialer{Timeout: m.timeout}
@@ -281,7 +300,7 @@ func (m *smtpMailer) Send(ctx context.Context, message Message) error {
 		conn, err = dialer.DialContext(ctx, "tcp", address)
 	}
 	if err != nil {
-		return fmt.Errorf("SMTP connection: %w", err)
+		return SendResult{}, fmt.Errorf("SMTP connection: %w", err)
 	}
 	defer conn.Close()
 	deadline := time.Now().Add(m.timeout)
@@ -291,39 +310,42 @@ func (m *smtpMailer) Send(ctx context.Context, message Message) error {
 	_ = conn.SetDeadline(deadline)
 	client, err := smtp.NewClient(conn, m.host)
 	if err != nil {
-		return fmt.Errorf("SMTP handshake: %w", err)
+		return SendResult{}, fmt.Errorf("SMTP handshake: %w", err)
 	}
 	defer client.Close()
 	if m.mode == "starttls" {
 		if ok, _ := client.Extension("STARTTLS"); !ok {
-			return errors.New("SMTP server does not support STARTTLS")
+			return SendResult{}, errors.New("SMTP server does not support STARTTLS")
 		}
 		if err := client.StartTLS(&tls.Config{ServerName: m.host, MinVersion: tls.VersionTLS12}); err != nil {
-			return fmt.Errorf("SMTP STARTTLS: %w", err)
+			return SendResult{}, fmt.Errorf("SMTP STARTTLS: %w", err)
 		}
 	}
 	if m.username != "" {
 		if err := client.Auth(smtp.PlainAuth("", m.username, m.password, m.host)); err != nil {
-			return fmt.Errorf("SMTP authentication: %w", err)
+			return SendResult{}, fmt.Errorf("SMTP authentication: %w", err)
 		}
 	}
 	if err := client.Mail(from.Address); err != nil {
-		return fmt.Errorf("SMTP sender: %w", err)
+		return SendResult{}, fmt.Errorf("SMTP sender: %w", err)
 	}
 	if err := client.Rcpt(to.Address); err != nil {
-		return fmt.Errorf("SMTP recipient: %w", err)
+		return SendResult{}, fmt.Errorf("SMTP recipient: %w", err)
 	}
 	writer, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("SMTP data: %w", err)
+		return SendResult{}, fmt.Errorf("SMTP data: %w", err)
 	}
 	body := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", from.String(), to.String(), message.Subject, message.Text)
 	if _, err := io.WriteString(writer, body); err != nil {
 		_ = writer.Close()
-		return fmt.Errorf("SMTP write: %w", err)
+		return SendResult{}, fmt.Errorf("SMTP write: %w", err)
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("SMTP commit: %w", err)
+		return SendResult{}, fmt.Errorf("SMTP commit: %w", err)
 	}
-	return client.Quit()
+	if err := client.Quit(); err != nil {
+		return SendResult{}, err
+	}
+	return SendResult{}, nil
 }

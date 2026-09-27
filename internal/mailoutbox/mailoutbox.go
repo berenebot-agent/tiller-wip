@@ -92,7 +92,7 @@ type DeadLetterFunc func(ctx context.Context, row DeadLetter)
 // Outbox owns the mail_outbox table and its delivery worker.
 type Outbox struct {
 	db         *sql.DB
-	mailer     *mailer.Manager
+	mailer     messageSender
 	baseURL    string
 	cipher     Cipher
 	logger     *slog.Logger
@@ -102,9 +102,13 @@ type Outbox struct {
 	batchLimit int
 }
 
+type messageSender interface {
+	Send(context.Context, mailer.Message) (mailer.SendResult, error)
+}
+
 // New constructs an Outbox. baseURL is the public origin used to build links;
 // onDead may be nil.
-func New(db *sql.DB, m *mailer.Manager, baseURL string, c Cipher, logger *slog.Logger, onDead DeadLetterFunc) *Outbox {
+func New(db *sql.DB, m messageSender, baseURL string, c Cipher, logger *slog.Logger, onDead DeadLetterFunc) *Outbox {
 	return &Outbox{
 		db: db, mailer: m, baseURL: baseURL, cipher: c, logger: logger, onDead: onDead,
 		nudge: make(chan struct{}, 1), interval: 30 * time.Second, batchLimit: 50,
@@ -269,7 +273,8 @@ func (o *Outbox) processDue(ctx context.Context) {
 			o.fail(ctx, row, err)
 			continue
 		}
-		if err := o.mailer.Send(ctx, message); err != nil {
+		result, err := o.mailer.Send(ctx, message)
+		if err != nil {
 			if errors.Is(err, mailer.ErrNotConfigured) {
 				// Provider unavailable: defer the whole pass, consume no attempt.
 				return
@@ -277,7 +282,7 @@ func (o *Outbox) processDue(ctx context.Context) {
 			o.fail(ctx, row, err)
 			continue
 		}
-		if _, err := o.db.ExecContext(ctx, `UPDATE mail_outbox SET sent_at=?,token_ciphertext=NULL,last_error=NULL WHERE id=?`, formatTime(time.Now()), row.id); err != nil {
+		if _, err := o.db.ExecContext(ctx, `UPDATE mail_outbox SET sent_at=?,provider_message_id=?,token_ciphertext=NULL,last_error=NULL WHERE id=?`, formatTime(time.Now()), nullableText(result.MessageID), row.id); err != nil {
 			o.warn("mail outbox completion write failed", err)
 		}
 	}
@@ -375,14 +380,15 @@ func (o *Outbox) DueCounts(ctx context.Context, deadWindow time.Duration) (queue
 // carries delivery metadata only: never the encrypted one-time token and never
 // the message body.
 type MailLogEntry struct {
-	ID        string `json:"id"`
-	Type      string `json:"type"`
-	Recipient string `json:"recipient"`
-	Attempts  int    `json:"attempts"`
-	Status    string `json:"status"`
-	CreatedAt string `json:"created_at"`
-	SentAt    string `json:"sent_at,omitempty"`
-	DeadAt    string `json:"dead_at,omitempty"`
+	ID                string `json:"id"`
+	Type              string `json:"type"`
+	Recipient         string `json:"recipient"`
+	Attempts          int    `json:"attempts"`
+	Status            string `json:"status"`
+	CreatedAt         string `json:"created_at"`
+	SentAt            string `json:"sent_at,omitempty"`
+	DeadAt            string `json:"dead_at,omitempty"`
+	ProviderMessageID string `json:"provider_message_id,omitempty"`
 }
 
 // SentCount reports messages delivered within the window.
@@ -408,7 +414,7 @@ func (o *Outbox) Recent(ctx context.Context, limit int) ([]MailLogEntry, error) 
 	if limit <= 0 || limit > 200 {
 		limit = 25
 	}
-	rows, err := o.db.QueryContext(ctx, `SELECT id,type,recipient,attempts,created_at,coalesce(sent_at,''),coalesce(dead_at,'') FROM mail_outbox ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := o.db.QueryContext(ctx, `SELECT id,type,recipient,attempts,created_at,coalesce(sent_at,''),coalesce(dead_at,''),coalesce(provider_message_id,'') FROM mail_outbox ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -416,12 +422,15 @@ func (o *Outbox) Recent(ctx context.Context, limit int) ([]MailLogEntry, error) 
 	out := []MailLogEntry{}
 	for rows.Next() {
 		var e MailLogEntry
-		if err := rows.Scan(&e.ID, &e.Type, &e.Recipient, &e.Attempts, &e.CreatedAt, &e.SentAt, &e.DeadAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Type, &e.Recipient, &e.Attempts, &e.CreatedAt, &e.SentAt, &e.DeadAt, &e.ProviderMessageID); err != nil {
 			return nil, err
 		}
 		switch {
 		case e.SentAt != "":
 			e.Status = "sent"
+			// attempts stores failed sends for retry/backoff. A completed row
+			// also had one successful send, so include it in the operator count.
+			e.Attempts++
 		case e.DeadAt != "":
 			e.Status = "dead"
 		default:

@@ -127,8 +127,46 @@ func TestNotConfiguredDefersWithoutConsumingAttempt(t *testing.T) {
 // real manager that always returns a delivery error.
 type alwaysFailMailer struct{}
 
-func (alwaysFailMailer) Send(context.Context, mailer.Message) error {
-	return errors.New("boom")
+func (alwaysFailMailer) Send(context.Context, mailer.Message) (mailer.SendResult, error) {
+	return mailer.SendResult{}, errors.New("boom")
+}
+
+type successfulMailer struct {
+	result mailer.SendResult
+}
+
+func (m successfulMailer) Send(context.Context, mailer.Message) (mailer.SendResult, error) {
+	return m.result, nil
+}
+
+func TestProcessDueRecordsSuccessfulSendMetadata(t *testing.T) {
+	o, _ := newTestOutbox(t)
+	const messageID = "<accepted-message@example.brevo.com>"
+	o.mailer = successfulMailer{result: mailer.SendResult{MessageID: messageID}}
+	id := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
+	o.processDue(context.Background())
+
+	var sentAt, storedID string
+	var token sql.NullString
+	if err := o.db.QueryRow(`SELECT sent_at,provider_message_id,token_ciphertext FROM mail_outbox WHERE id=?`, id).Scan(&sentAt, &storedID, &token); err != nil {
+		t.Fatal(err)
+	}
+	if sentAt == "" {
+		t.Fatal("successful send was not marked sent")
+	}
+	if storedID != messageID {
+		t.Fatalf("provider message ID = %q, want %q", storedID, messageID)
+	}
+	if token.Valid {
+		t.Fatal("successful send retained its verification token")
+	}
+	log, err := o.Recent(context.Background(), 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(log) != 1 || log[0].Status != "sent" || log[0].Attempts != 1 || log[0].SentAt != sentAt || log[0].ProviderMessageID != messageID {
+		t.Fatalf("recent mail log = %+v", log)
+	}
 }
 
 func TestRetryBackoffAndDeadLetter(t *testing.T) {
@@ -215,10 +253,10 @@ func TestSentCountAndRecent(t *testing.T) {
 	sentID := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "sent@example.com", Token: "tok"})
 	enqueueOnce(t, o, QueuedMessage{Type: TypePasswordReset, Recipient: "queued@example.com", Token: "tok"})
 	deadID := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "dead@example.com", Token: "tok"})
-	if _, err := o.db.Exec(`UPDATE mail_outbox SET sent_at=?,token_ciphertext=NULL WHERE id=?`, formatTime(time.Now()), sentID); err != nil {
+	if _, err := o.db.Exec(`UPDATE mail_outbox SET sent_at=?,attempts=2,provider_message_id=?,token_ciphertext=NULL WHERE id=?`, formatTime(time.Now()), "<sent-message@example.brevo.com>", sentID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := o.db.Exec(`UPDATE mail_outbox SET dead_at=?,token_ciphertext=NULL WHERE id=?`, formatTime(time.Now()), deadID); err != nil {
+	if _, err := o.db.Exec(`UPDATE mail_outbox SET attempts=5,dead_at=?,token_ciphertext=NULL WHERE id=?`, formatTime(time.Now()), deadID); err != nil {
 		t.Fatal(err)
 	}
 	sent, err := o.SentCount(context.Background(), 24*time.Hour)
@@ -232,11 +270,23 @@ func TestSentCountAndRecent(t *testing.T) {
 	if len(log) != 3 {
 		t.Fatalf("log len = %d, want 3", len(log))
 	}
-	statuses := map[string]string{}
+	entries := map[string]MailLogEntry{}
 	for _, e := range log {
-		statuses[e.Recipient] = e.Status
+		entries[e.Recipient] = e
 	}
-	if statuses["sent@example.com"] != "sent" || statuses["queued@example.com"] != "queued" || statuses["dead@example.com"] != "dead" {
-		t.Fatalf("statuses = %v", statuses)
+	if entries["sent@example.com"].Status != "sent" || entries["queued@example.com"].Status != "queued" || entries["dead@example.com"].Status != "dead" {
+		t.Fatalf("entries = %v", entries)
+	}
+	if got := entries["sent@example.com"].Attempts; got != 3 {
+		t.Fatalf("sent attempts = %d, want 2 failed attempts plus one successful send", got)
+	}
+	if got := entries["sent@example.com"].ProviderMessageID; got != "<sent-message@example.brevo.com>" {
+		t.Fatalf("provider message ID = %q", got)
+	}
+	if got := entries["queued@example.com"].Attempts; got != 0 {
+		t.Fatalf("queued attempts = %d, want 0", got)
+	}
+	if got := entries["dead@example.com"].Attempts; got != maxAttempts {
+		t.Fatalf("dead attempts = %d, want %d failed attempts", got, maxAttempts)
 	}
 }

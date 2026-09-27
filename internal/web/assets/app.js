@@ -3119,7 +3119,13 @@ async function loadPlatformMail() {
   $('#platform-mail-queued').textContent = queue.queued;
   $('#platform-mail-sent').textContent = queue.sent_recent;
   $('#platform-mail-dead').textContent = queue.dead_recent;
-  $('#platform-mail-log').innerHTML = (queue.log || []).map(row => `<div class="platform-list-item"><strong>${h(mailTypeLabel(row.type))}</strong><small>${h(row.recipient)} · ${h(row.status)} · ${h(row.attempts)} attempt(s) · ${h(row.created_at)}</small></div>`).join('') || '<p class="meta-line">No recent mail.</p>';
+  $('#platform-mail-log').innerHTML = (queue.log || []).map(row => {
+    const attempts = Number(row.attempts) === 1 ? '1 attempt' : `${h(row.attempts)} attempts`;
+    const timestampLabel = row.sent_at ? 'sent' : row.dead_at ? 'failed' : 'queued';
+    const timestamp = row.sent_at || row.dead_at || row.created_at;
+    const providerID = row.provider_message_id ? `<small>Provider message ID: ${h(row.provider_message_id)}</small>` : '';
+    return `<div class="platform-list-item"><strong>${h(mailTypeLabel(row.type))}</strong><small>${h(row.recipient)} · ${h(row.status)} · ${attempts} · ${timestampLabel} ${h(date(timestamp))}</small>${providerID}</div>`;
+  }).join('') || '<p class="meta-line">No recent mail.</p>';
   $('#platform-mail-error').textContent = '';
   $('#platform-mail-settings-error').textContent = '';
 }

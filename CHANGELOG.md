@@ -36,7 +36,9 @@ behavior may still change before a stable `1.0`.
   and email-change messages are queued in the same transaction that creates the
   one-time token and delivered by a retrying background worker. The one-time
   token is encrypted at rest and scrubbed on send, and dead letters surface on
-  the platform dashboard.
+  the platform dashboard. The delivery log shows the actual delivery time,
+  counts successful sends as attempts, and displays Brevo message IDs for
+  provider-side delivery correlation.
 - **Activity living-pane graph.** The Activity view now renders live request
   legs as a graph (self-hosted D3, no CDN) with an active-only pane, per-client
   legs, and click-through from graph nodes into the request dialog. Cooldown
