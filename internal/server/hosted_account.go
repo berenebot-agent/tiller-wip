@@ -49,6 +49,15 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not verify your account details.")
+		return
+	}
+	if profile.GoogleLinked {
+		adminError(w, http.StatusConflict, "password_disabled", "Password changes are unavailable while Google is linked.")
+		return
+	}
 	_, authErr := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword)
 	if authErr != nil {
 		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your password.")
@@ -83,7 +92,17 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+	profile, profileErr := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if profileErr != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not verify your account details.")
+		return
+	}
+	if profile.GoogleLinked && !profile.PasswordEnabled {
+		if !s.consumeGoogleReauth(rawUserSessionToken(r)) {
+			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google before changing your email.")
+			return
+		}
+	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
 		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your email.")
 		return
 	}
@@ -166,7 +185,17 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "confirmation_required", "Type your email address to confirm deletion.")
 		return
 	}
-	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not verify your account details.")
+		return
+	}
+	if profile.GoogleLinked && !profile.PasswordEnabled {
+		if !s.consumeGoogleReauth(rawUserSessionToken(r)) {
+			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google before deleting your account.")
+			return
+		}
+	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
 		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before deleting your account.")
 		return
 	}

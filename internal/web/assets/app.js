@@ -10,6 +10,7 @@ let hostedAuthOptions = {};
 // lives five minutes, so the delete card treats it as valid for the same window.
 let accountEmailForDelete = '';
 let googleReauthConfirmedAt = 0;
+let accountGoogleLinked = false;
 const googleReauthValid = () => Date.now() - googleReauthConfirmedAt < 5 * 60 * 1000;
 let signupEmail = '';
 let captchaWidgetID = null;
@@ -180,8 +181,23 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
-function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
+function showAccountDeleteConfirmation({ email, google }) {
+  hideBoot();
+  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true;
+  $('#account-delete-shell').hidden = false;
+  $('#account-delete-confirm-form').hidden = false;
+  $('#account-delete-confirm-email').value = '';
+  $('#account-delete-confirm-password').value = '';
+  $('#account-delete-confirm-password-row').hidden = google;
+  $('#account-delete-confirm-password').required = !google;
+  $('#account-delete-confirm-error').textContent = '';
+  $('#account-delete-confirm-form').dataset.email = email;
+  $('#account-delete-confirm-form').dataset.google = google ? '1' : '0';
+  $('#account-delete-page-copy').textContent = `This permanently deletes ${email}, including the account, provider credentials, client keys, and activity history. Audit history is retained.`;
+  $('#account-delete-confirm-email').focus();
+}
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
 
@@ -2088,20 +2104,23 @@ async function loadAccount() {
     $('#account-created').textContent = profile.created_at ? new Date(profile.created_at).toLocaleString() : '—';
     accountEmailForDelete = profile.email;
     const googleEnabled = !!hostedAuthOptions.google_enabled, googleLinked = !!profile.google_linked;
+    accountGoogleLinked = googleLinked;
     $('#account-google-card').hidden = !googleEnabled && !googleLinked;
     $('#account-google-note').hidden = !googleEnabled;
-    $('#account-google-note').textContent = profile.password_enabled
-      ? 'Linking Google requires your password. A fresh Google confirmation can be used once for a password, email, or account change.'
-      : 'A fresh Google confirmation can be used once for a password, email, or account change.';
+    $('#account-google-note').textContent = googleLinked
+      ? 'Password sign-in and recovery are disabled while Google is linked. Unlink Google to restore password sign-in.'
+      : 'Linking Google requires your password. While linked, password sign-in and recovery are disabled.';
     $('#account-google-status').hidden = !googleEnabled;
     $('#account-google-status').textContent = googleLinked ? 'Google is linked to this account.' : 'Google is not linked to this account.';
     $('#account-google-link-form').hidden = googleLinked || !profile.password_enabled || !googleEnabled;
-    $('#account-google-reauth').hidden = !googleLinked || !googleEnabled;
-    $('#account-google-unlink').hidden = !googleLinked || !profile.password_enabled;
-    $('#account-google-unlink-form').hidden = true;
-    $('#account-password-auth-hint').textContent = profile.password_enabled ? '' : 'Confirm with Google before setting a password.';
-    $('#account-current-password').required = profile.password_enabled;
-    $('#account-email-password').required = profile.password_enabled;
+    $('#account-google-reauth').hidden = true;
+    $('#account-google-unlink').hidden = !googleLinked || !profile.has_password;
+    $('#account-password-card').hidden = googleLinked;
+    $('#account-password-auth-hint').textContent = '';
+    $('#account-current-password').required = true;
+    $('#account-email-password').required = !googleLinked;
+    $('#account-email-password').disabled = googleLinked;
+    $('#account-email-password-row').hidden = googleLinked;
     // Google-only accounts have no password: replace the password row with a
     // "Confirm with Google" action that grants the one-shot reauth token the
     // delete endpoint accepts in place of a password.
@@ -2110,10 +2129,9 @@ async function loadAccount() {
     $('#account-delete-password').required = profile.password_enabled;
     $('#account-delete-password').disabled = googleOnlyDelete;
     $('#account-delete-google-row').hidden = !googleOnlyDelete;
-    $('#account-delete-google-confirm').textContent = googleReauthValid() ? 'Confirm with Google again' : 'Confirm with Google';
     $('#account-delete-google-status').textContent = googleReauthValid()
-      ? 'Google confirmed your identity. You can delete your account now (within five minutes).'
-      : 'You will be redirected to Google to confirm it is you, then return here to delete.';
+      ? 'Google confirmed your identity. Click Delete my account to continue.'
+      : 'Click Delete my account to confirm with Google, then return here to complete deletion.';
     const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
@@ -2287,32 +2305,28 @@ $('#account-google-link-form').addEventListener('submit', async event => {
     location.assign(result.redirect_url);
   } catch (error) { $('#account-google-link-error').textContent = errorMessage(error, 'Could not start Google linking.'); }
 });
-$('#account-google-reauth').addEventListener('click', async () => {
+$('#account-google-reauth').hidden = true;
+$('#account-google-unlink').addEventListener('click', async () => {
   $('#account-google-error').textContent = '';
   try {
+    sessionStorage.setItem('googleReauthAction', 'unlink');
     const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
     location.assign(result.redirect_url);
-  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not start Google confirmation.'); }
-});
-$('#account-delete-google-confirm').addEventListener('click', async () => {
-  $('#account-delete-error').textContent = '';
-  try {
-    const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
-    location.assign(result.redirect_url);
-  } catch (error) { $('#account-delete-error').textContent = errorMessage(error, 'Could not start Google confirmation.'); }
-});
-$('#account-google-unlink').addEventListener('click', () => { $('#account-google-unlink-form').hidden = !$('#account-google-unlink-form').hidden; });
-$('#account-google-unlink-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget);
-  try {
-    await api('/api/auth/account/google', { method: 'DELETE', body: JSON.stringify({ password: form.get('password') }) });
-    await loadAccount(); flash('Google was unlinked from your account.');
-  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not unlink Google.'); }
+  } catch (error) { sessionStorage.removeItem('googleReauthAction'); $('#account-google-error').textContent = errorMessage(error, 'Could not start Google confirmation.'); }
 });
 $('#account-email-form').addEventListener('submit', async event => {
   event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
-  try { const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); formElement.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.'; }
-  catch (error) { note.textContent = errorMessage(error, 'Could not start the email change.'); }
+  try {
+    if (accountGoogleLinked) {
+      sessionStorage.setItem('googleReauthAction', 'email');
+      sessionStorage.setItem('googleReauthEmail', String(form.get('new_email') || ''));
+      const reauth = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+      location.assign(reauth.redirect_url);
+      return;
+    }
+    const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); formElement.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.';
+  }
+  catch (error) { sessionStorage.removeItem('googleReauthAction'); sessionStorage.removeItem('googleReauthEmail'); note.textContent = errorMessage(error, 'Could not start the email change.'); }
 });
 $('#account-revoke-sessions').addEventListener('click', async () => {
   const button = $('#account-revoke-sessions'); button.disabled = true; $('#account-sessions-error').textContent = '';
@@ -2332,17 +2346,57 @@ $('#account-export').addEventListener('click', async event => {
 });
 $('#account-delete-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-delete-error').textContent = '';
-  const confirmed = await confirmAction({
-    title: 'Delete your account?',
-    copy: 'This is immediate and irreversible. Your account, provider credentials, client keys, and activity history are removed. Audit history is retained.',
-    action: 'Delete account',
-    typeMatch: accountEmailForDelete,
-    typeLabel: 'email',
-  });
-  if (!confirmed) return;
-  const button = $('#account-delete-form button[type="submit"]'); button.disabled = true;
-  try { const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: accountEmailForDelete, password: form.get('password') || '' }) }); flash(result.message || 'Account deleted.'); showLogin(); }
-  catch (error) { $('#account-delete-error').textContent = errorMessage(error, 'Could not delete the account.'); button.disabled = false; }
+  if (accountGoogleLinked && !googleReauthValid()) {
+    try {
+      sessionStorage.setItem('googleReauthAction', 'delete');
+      const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+      location.assign(result.redirect_url);
+    } catch (error) {
+      sessionStorage.removeItem('googleReauthAction');
+      $('#account-delete-error').textContent = errorMessage(error, 'Could not start Google confirmation.');
+    }
+    return;
+  }
+  if (accountGoogleLinked) {
+    showAccountDeleteConfirmation({ email: accountEmailForDelete, google: true });
+    return;
+  }
+  showAccountDeleteConfirmation({ email: accountEmailForDelete, google: false });
+});
+
+$('#account-delete-cancel').addEventListener('click', () => {
+  $('#account-delete-shell').hidden = true;
+  $('#app').hidden = false;
+  if (sessionStorage.getItem('googleReauthAction') === 'delete') sessionStorage.removeItem('googleReauthAction');
+  state.view = 'settings';
+  showSettingsTab('account');
+  history.replaceState(null, '', '/#settings/account');
+});
+
+$('#account-delete-confirm-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const email = formElement.dataset.email || '';
+  const google = formElement.dataset.google === '1';
+  const button = $('button[type="submit"]', formElement);
+  const typedEmail = String(form.get('confirm') || '').trim();
+  $('#account-delete-confirm-error').textContent = '';
+  if (typedEmail.toLowerCase() !== email.trim().toLowerCase()) {
+    $('#account-delete-confirm-error').textContent = 'Enter the account email exactly to confirm deletion.';
+    return;
+  }
+  button.disabled = true;
+  try {
+    const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: email, password: google ? '' : form.get('password') || '' }) });
+    sessionStorage.removeItem('googleReauthAction');
+    flash(result.message || 'Account deleted.');
+    showLogin();
+  } catch (error) {
+    $('#account-delete-confirm-error').textContent = errorMessage(error, google ? 'Could not delete the account. Start deletion again to confirm with Google.' : 'Could not delete the account. Check your password and try again.');
+    if (google) googleReauthConfirmedAt = 0;
+    button.disabled = false;
+  }
 });
 
 let entitySubmit = null;
@@ -2890,13 +2944,43 @@ function liveStop() { live.stop(); }
       const authError = runtimeMode === 'hosted' ? query.get('auth_error') : '';
       const googleLinked = runtimeMode === 'hosted' && query.get('google_linked') === '1';
       const googleReauth = runtimeMode === 'hosted' && query.get('google_reauth') === '1';
+      const googleAction = sessionStorage.getItem('googleReauthAction') || '';
       if (googleReauth) googleReauthConfirmedAt = Date.now();
       if (authError || googleLinked || googleReauth) history.replaceState(null, '', location.pathname + location.hash);
       try {
         const session = await api(sessionPath);
+        if (googleReauth && googleAction === 'delete') {
+          state.csrf = session.csrf_token;
+          setSessionHint(true);
+          const profile = await api('/api/auth/account');
+          accountEmailForDelete = profile.email;
+          showAccountDeleteConfirmation({ email: profile.email, google: true });
+          history.replaceState(null, '', '/#settings/account');
+          return;
+        }
         showApp(session);
         if (googleLinked) flash('Google is linked to your account.');
-        else if (googleReauth) flash('Google confirmed your identity. Complete the account change within five minutes.');
+        else if (googleReauth) {
+          flash('Google confirmed your identity.');
+          if (googleAction === 'unlink') {
+            try {
+              await api('/api/auth/account/google', { method: 'DELETE' });
+              flash('Google was unlinked. Password sign-in is restored.');
+            } catch (error) { $('#account-google-error').textContent = `${errorMessage(error, 'Google could not be unlinked.')} Start Unlink Google again to confirm with Google.`; }
+          }
+          if (googleAction === 'email') {
+            const newEmail = sessionStorage.getItem('googleReauthEmail') || '';
+            try {
+              const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: newEmail, password: '' }) });
+              $('#account-email-form').reset();
+              $('#account-email-error').style.color = 'var(--green)';
+              $('#account-email-error').textContent = result.message || 'Check the new address for a confirmation link.';
+            } catch (error) { $('#account-email-error').textContent = `${errorMessage(error, 'Could not start the email change.')} Confirm with Google again and retry.`; }
+            sessionStorage.removeItem('googleReauthEmail');
+          }
+          if (googleAction === 'unlink') await loadAccount();
+          sessionStorage.removeItem('googleReauthAction');
+        }
         else if (authError) flash(googleAuthErrorMessage(authError), 'error');
       } catch {
         showLogin();

@@ -457,6 +457,7 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .google-signin-button iframe,.google-signin-button>div{width:100%!important}
 .legal-shell{position:fixed;inset:0;z-index:110;overflow:auto;padding:40px 24px;background:radial-gradient(circle at 68% 32%,rgba(52,125,177,.32),transparent 32%),linear-gradient(135deg,#0f2944,#173c60 64%,#102a46)}
 .legal-card{max-width:960px;margin:0 auto;padding:38px 44px;background:#f8fafb;border-top:4px solid #55aadd;box-shadow:0 30px 80px rgba(0,15,30,.42)}
+.account-delete-card{width:min(520px,100%);margin:8vh auto 0}
 .legal-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding-bottom:16px;margin-bottom:18px;border-bottom:1px solid var(--line)}
 .legal-header h1{margin:4px 0 2px;color:var(--navy);font:600 30px Georgia,serif}
 .legal-body{white-space:pre-wrap;overflow-wrap:anywhere;font:14px/1.65 var(--body);color:#2c4156;background:#fff;border:1px solid var(--line);padding:24px 26px;margin:0}

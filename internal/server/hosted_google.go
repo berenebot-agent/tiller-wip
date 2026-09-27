@@ -412,25 +412,19 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) unlinkGoogle(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(userSessionKey).(identity.UserSession)
-	var input struct {
-		Password string `json:"password"`
-	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+	if !s.consumeGoogleReauth(rawUserSessionToken(r)) {
 		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before unlinking Google.")
 		return
 	}
 	if err := s.identity.UnlinkGoogleIdentity(r.Context(), session.User.ID); err != nil {
 		if errors.Is(err, identity.ErrLastIdentity) {
-			adminError(w, http.StatusConflict, "last_signin_method", "Set a password before removing Google as your sign-in method.")
+			adminError(w, http.StatusConflict, "last_signin_method", "Set a password sign-in before unlinking Google.")
 			return
 		}
 		adminError(w, http.StatusConflict, "google_unavailable", "Google could not be unlinked from this account.")
 		return
 	}
+	s.clients.InvalidateAccount(session.User.AccountID)
 	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.google_unlinked", ActorType: "user", ActorID: session.User.ID})
 	w.WriteHeader(http.StatusNoContent)
 }
