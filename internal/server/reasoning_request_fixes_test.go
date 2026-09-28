@@ -203,7 +203,8 @@ func TestPlainChatDefaultDisableLeavesUnknownAndMandatoryAlone(t *testing.T) {
 	if out, ok := injectChatDisable(body, nil); ok || string(out) != string(body) {
 		t.Fatalf("unknown caps must pass through unchanged: %s ok=%v", out, ok)
 	}
-	// Mandatory reasoning: the caller skips the target instead of disabling.
+	// Mandatory reasoning: the caller forwards the request unchanged so the
+	// provider applies its default reasoning instead of a rejected disable.
 	mandatory := true
 	caps := &providers.ReasoningCapabilities{
 		Mandatory: &mandatory,

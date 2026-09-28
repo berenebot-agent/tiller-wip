@@ -964,11 +964,12 @@ func TestPlainChatDefaultDisableReachesUpstream(t *testing.T) {
 	}
 }
 
-// TestMandatoryReasoningSkipsVirtualTarget verifies B2 honesty: a mandatory-
-// reasoning target cannot serve plain chat, so a virtual route falls through
-// to the next target, and a direct request fails loud with
-// unsupported_feature instead of returning empty content.
-func TestMandatoryReasoningSkipsVirtualTarget(t *testing.T) {
+// TestMandatoryReasoningServesPlainChat verifies that a mandatory-reasoning
+// target serves a plain request unchanged: the router neither injects a
+// disable (which the provider would reject) nor fails the request. The
+// provider applies its own default reasoning, matching OpenRouter, where
+// `mandatory: true` only forbids `reasoning_effort: "none"`.
+func TestMandatoryReasoningServesPlainChat(t *testing.T) {
 	var mu sync.Mutex
 	var seen []string
 	api, db, _, _ := loggingTestHarness(t, recordingChatUpstream([]string{"model-a", "model-b"}, &seen, &mu))
@@ -1020,30 +1021,32 @@ func TestMandatoryReasoningSkipsVirtualTarget(t *testing.T) {
 		t.Fatalf("permissions: %d", status)
 	}
 
-	// Mandatory first target is skipped; the disablable second target serves.
+	// The mandatory first target serves the plain request; no fallback needed.
 	mu.Lock()
 	seen = nil
 	mu.Unlock()
 	if status, out := postChat(t, api, vmSecret, "reason-vg/reason-vm", nil); status != 200 {
-		t.Fatalf("virtual fallback: expected 200, got %d (%v)", status, out)
+		t.Fatalf("virtual plain chat: expected 200, got %d (%v)", status, out)
 	}
 	mu.Lock()
-	defer mu.Unlock()
 	if len(seen) != 1 {
-		t.Fatalf("expected exactly one upstream call (mandatory skipped), got %d: %v", len(seen), seen)
+		mu.Unlock()
+		t.Fatalf("expected exactly one upstream call, got %d: %v", len(seen), seen)
 	}
-	if strings.Contains(seen[0], `"model":"model-b"`) {
-		t.Fatalf("mandatory target must be skipped, but upstream saw: %s", seen[0])
+	if !strings.Contains(seen[0], `"model":"model-b"`) {
+		mu.Unlock()
+		t.Fatalf("mandatory target not reached upstream: %s", seen[0])
 	}
-	if !strings.Contains(seen[0], `"model":"model-a"`) {
-		t.Fatalf("fallback target not reached upstream: %s", seen[0])
+	if strings.Contains(seen[0], "reasoning") {
+		mu.Unlock()
+		t.Fatalf("mandatory target must receive the request unchanged, got: %s", seen[0])
 	}
-	if !strings.Contains(seen[0], `"reasoning_effort":"none"`) {
-		t.Fatalf("fallback target missing injected disable: %s", seen[0])
-	}
+	mu.Unlock()
 
-	// Direct request to the mandatory model fails loud, never hits upstream.
+	// A direct request to the mandatory model also passes through unchanged.
+	mu.Lock()
 	before := len(seen)
+	mu.Unlock()
 	status, payload, _ = api.request("POST", "/api/admin/client-keys", map[string]any{"name": "direct-client", "type": "catalogue"})
 	if status != 201 {
 		t.Fatalf("create direct key: %d %v", status, payload)
@@ -1057,13 +1060,59 @@ func TestMandatoryReasoningSkipsVirtualTarget(t *testing.T) {
 	if status != 204 {
 		t.Fatalf("direct permissions: %d", status)
 	}
-	if status, out := postChat(t, api, directSecret, "provider-a/model-b", nil); status != 400 {
-		t.Fatalf("direct mandatory: expected 400, got %d (%v)", status, out)
-	} else if errObj, ok := out["error"].(map[string]any); !ok || errObj["code"] != "unsupported_feature" {
-		t.Fatalf("direct mandatory: expected unsupported_feature, got %v", out)
+	if status, out := postChat(t, api, directSecret, "provider-a/model-b", nil); status != 200 {
+		t.Fatalf("direct mandatory: expected 200, got %d (%v)", status, out)
 	}
-	if len(seen) != before {
-		t.Fatalf("direct mandatory must not reach upstream")
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != before+1 {
+		t.Fatalf("direct mandatory must reach upstream unchanged")
+	}
+	if got := seen[len(seen)-1]; strings.Contains(got, "reasoning") {
+		t.Fatalf("direct mandatory must receive the request unchanged, got: %s", got)
+	}
+}
+
+// TestDiscoveredMandatoryReasoningServesPlainChat covers the Tiller-to-Tiller
+// chain end to end: a downstream router discovers an upstream router whose
+// catalogue advertises mandatory reasoning, and a plain Chat request must be
+// forwarded unchanged and succeed rather than surfacing as an upstream 400.
+func TestDiscoveredMandatoryReasoningServesPlainChat(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{
+				"id":                "model-a",
+				"reasoning":         map[string]any{"mandatory": true, "supported_efforts": []string{"high"}, "default_effort": "high"},
+				"reasoning_options": []any{map[string]any{"type": "effort", "values": []string{"high"}}},
+			}}})
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen = append(seen, string(body))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "resp", "object": "chat.completion", "model": "model-a", "choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}}})
+	})
+	api, _, _, clientSecret := loggingTestHarness(t, upstream)
+
+	status, out := postChat(t, api, clientSecret, "provider-a/model-a", nil)
+	if status != 200 {
+		t.Fatalf("plain chat to discovered mandatory model: expected 200, got %d (%v)", status, out)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("expected exactly one upstream call, got %d: %v", len(seen), seen)
+	}
+	if strings.Contains(seen[0], "reasoning") {
+		t.Fatalf("discovered mandatory target must receive the request unchanged, got: %s", seen[0])
 	}
 }
 

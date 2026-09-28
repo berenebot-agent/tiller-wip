@@ -921,16 +921,38 @@ func copilotNativeProtocol(endpoints []string) Protocol {
 // metadata is reported by the provider. supportedParams is the top-level
 // supported_parameters array from the model entry (used as fallback for
 // parameter hints when the reasoning object omits them).
-func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesObj any, supportedParams []string) *ReasoningCapabilities {
+func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesObj any, supportedParams []string, reasoningOptions *[]map[string]any) *ReasoningCapabilities {
 	if providerType == "anthropic" || providerType == "claude-subscription" {
 		return anthropicReasoning(capabilitiesObj)
 	}
+	var parsed *ReasoningCapabilities
 	if reasoningObj != nil {
-		if rc := openRouterReasoning(reasoningObj, supportedParams); rc != nil {
-			return rc
+		parsed = openRouterReasoning(reasoningObj, supportedParams)
+	}
+	if reasoningOptions == nil {
+		return parsed
+	}
+	options := parseModelsDevReasoningOptions(*reasoningOptions)
+	if options == nil {
+		return parsed
+	}
+	if parsed == nil {
+		return options
+	}
+	// The nested `reasoning` object carries the defaults/flags; the flat
+	// `reasoning_options` list carries the selector mechanisms. Merge the
+	// mechanisms the nested object did not already describe (e.g. toggle and
+	// budget), keyed by option type, so both survive a Tiller-to-Tiller hop.
+	present := make(map[ReasoningOptionType]bool, len(parsed.Options))
+	for _, option := range parsed.Options {
+		present[option.Type] = true
+	}
+	for _, option := range options.Options {
+		if !present[option.Type] {
+			parsed.Options = append(parsed.Options, option)
 		}
 	}
-	return nil
+	return parsed
 }
 
 // openRouterReasoning parses an OpenRouter-style `reasoning` object from a
@@ -1101,7 +1123,11 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 					MaxCompletionTokens int `json:"max_completion_tokens"`
 				} `json:"top_provider"`
 				SupportedParameters []string `json:"supported_parameters"`
-				Architecture        struct {
+				// Tiller-compatible catalogues publish the selector mechanisms as
+				// a flat `reasoning_options` list alongside the OpenRouter-style
+				// nested `reasoning` object.
+				ReasoningOptions *[]map[string]any `json:"reasoning_options"`
+				Architecture     struct {
 					InputModalities  []string `json:"input_modalities"`
 					OutputModalities []string `json:"output_modalities"`
 				} `json:"architecture"`
@@ -1135,7 +1161,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			}
 			sp := item.SupportedParameters
 			arch := item.Architecture
-			reasoningCaps := parseReasoningCapabilities(provider.Type, item.Reasoning, item.Capabilities, sp)
+			reasoningCaps := parseReasoningCapabilities(provider.Type, item.Reasoning, item.Capabilities, sp, item.ReasoningOptions)
 			result = append(result, Model{
 				ID: modelID, DisplayName: display,
 				ContextLength:            firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens),

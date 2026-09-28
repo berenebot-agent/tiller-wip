@@ -239,9 +239,43 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	if len(options) > 0 {
 		entry["reasoning_options"] = options
 	}
-	if hasEffort {
-		entry["reasoning"] = map[string]any{"supported_efforts": catalogueEffortValues}
+	if hasEffort || rc.Mandatory != nil || rc.DefaultEffort != "" || rc.DefaultEnabled != nil || len(rc.Parameters) > 0 {
+		reasoning := map[string]any{}
+		if hasEffort {
+			reasoning["supported_efforts"] = catalogueEffortValues
+		}
+		if rc.Mandatory != nil {
+			reasoning["mandatory"] = *rc.Mandatory
+		}
+		if rc.DefaultEffort != "" {
+			reasoning["default_effort"] = rc.DefaultEffort
+		}
+		if rc.DefaultEnabled != nil {
+			reasoning["default_enabled"] = *rc.DefaultEnabled
+		}
+		if len(rc.Parameters) > 0 {
+			reasoning["supported_parameters"] = rc.Parameters
+		}
+		if hasBudgetOption(rc) {
+			reasoning["supports_max_tokens"] = true
+		}
+		entry["reasoning"] = reasoning
 	}
+}
+
+// hasBudgetOption reports whether the target advertises a numeric token budget
+// selector, so the Tiller-compatible catalogue can round-trip
+// `supports_max_tokens` to a downstream Tiller.
+func hasBudgetOption(rc *providers.ReasoningCapabilities) bool {
+	if rc == nil {
+		return false
+	}
+	for _, option := range rc.Options {
+		if option.Type == providers.ReasoningOptionBudgetTokens {
+			return true
+		}
+	}
+	return false
 }
 
 // catalogueEfforts returns client-selectable effort values when the provider
@@ -821,20 +855,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// reasoning selector gets an explicit disable when the Chat
 				// target advertises one, so a reasoning-default upstream cannot
 				// return a reasoning-only response with empty content.
-				// Mandatory-reasoning targets cannot serve plain chat: skip on
-				// virtual routes (fallback), fail loud on direct routes.
+				// Mandatory-reasoning targets advertise no disable; the request
+				// is forwarded unchanged so the provider applies its default
+				// reasoning. OpenRouter's `mandatory: true` forbids
+				// `reasoning_effort: "none"`, not a plain request, so rejecting
+				// one would refuse traffic the provider serves.
 				if !canonicalSelector.Present && incoming == providers.ProtocolChat && target == providers.ProtocolChat {
-					if isMandatoryReasoning(candidate.ReasoningCapabilities) {
-						if !route.Virtual {
-							row.httpStatus = 400
-							row.errorText = strPtr("unsupported_feature")
-							row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
-							inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires reasoning and cannot serve a plain non-reasoning request.", incoming == providers.ProtocolMessages)
-							return
-						}
-						s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
-						continue
-					}
 					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
 						attemptBody = disabled
 					}
