@@ -1116,6 +1116,40 @@ func TestDiscoveredMandatoryReasoningServesPlainChat(t *testing.T) {
 	}
 }
 
+// TestPlainResponsesRequestToChatTargetNotRejected covers the translated plain
+// path end to end: a Responses client that supplies no reasoning control must
+// have its request translated to the Chat target and served, not rejected for
+// a missing selector.
+func TestPlainResponsesRequestToChatTargetNotRejected(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	api, _, _, clientSecret := loggingTestHarness(t, recordingChatUpstream([]string{"model-a"}, &seen, &mu))
+
+	raw, _ := json.Marshal(map[string]any{"model": "provider-a/model-a", "input": "hi", "stream": false})
+	req, _ := http.NewRequest("POST", api.base+"/v1/responses", bytes.NewReader(raw))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+clientSecret)
+	resp, err := api.client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("plain Responses request: expected 200, got %d (%s)", resp.StatusCode, body)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) != 1 {
+		t.Fatalf("expected exactly one upstream call, got %d: %v", len(seen), seen)
+	}
+	for _, key := range []string{"reasoning", "reasoning_effort", "thinking"} {
+		if strings.Contains(seen[0], `"`+key+`"`) {
+			t.Fatalf("translated plain request invented %q upstream: %s", key, seen[0])
+		}
+	}
+}
+
 // TestExplicitSelectorSameProtocolChatValidated covers B3a: an explicit
 // reasoning selector on a same-protocol Chat target is checked against that
 // target's capabilities — advertised efforts are forwarded verbatim,
