@@ -149,12 +149,16 @@ type ReasoningOption struct {
 // empty Options list means the source explicitly reported no configurable
 // selector.
 type ReasoningCapabilities struct {
-	Options        []ReasoningOption `json:"options"`
-	ThinkingModes  []string          `json:"thinking_modes,omitempty"`
-	DefaultEffort  string            `json:"default_effort,omitempty"`
-	Mandatory      *bool             `json:"mandatory,omitempty"`
-	DefaultEnabled *bool             `json:"default_enabled,omitempty"`
-	Parameters     []string          `json:"parameters,omitempty"`
+	Options []ReasoningOption `json:"options"`
+	// ClientEfforts optionally narrows the effort values advertised to clients
+	// when the provider's wire-level values include backend-only aliases or
+	// implementation details. Nil means advertise the values in Options.
+	ClientEfforts  *[]string `json:"client_efforts,omitempty"`
+	ThinkingModes  []string  `json:"thinking_modes,omitempty"`
+	DefaultEffort  string    `json:"default_effort,omitempty"`
+	Mandatory      *bool     `json:"mandatory,omitempty"`
+	DefaultEnabled *bool     `json:"default_enabled,omitempty"`
+	Parameters     []string  `json:"parameters,omitempty"`
 	// EffortAliases maps a client-selectable effort alias (e.g. Codex "ultra")
 	// to the upstream wire effort the provider actually accepts (e.g. "max").
 	EffortAliases map[string]string `json:"effort_aliases,omitempty"`
@@ -666,8 +670,10 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		var reasoning *ReasoningCapabilities
 		if len(efforts) > 0 {
 			aliases := codexEffortAliases(efforts, derefString(item.MultiAgentReasoningEffort))
+			clientEfforts := codexClientEfforts(efforts)
 			reasoning = &ReasoningCapabilities{
 				Options:       []ReasoningOption{{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)}},
+				ClientEfforts: &clientEfforts,
 				EffortAliases: aliases,
 				DefaultEffort: resolveCodexEffort(derefString(item.DefaultReasoningLevel), aliases),
 			}
@@ -686,6 +692,22 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	return models, nil
+}
+
+// codexClientEfforts returns the effort vocabulary Codex clients can select.
+// Codex discovery also reports backend wire levels; when both "ultra" and
+// "max" are advertised, "ultra" is the native client option and "max" is an
+// upstream implementation level. Keep "max" in Options for wire validation,
+// but don't expose it as a separate client-selectable variant.
+func codexClientEfforts(levels []string) []string {
+	clientEfforts := make([]string, 0, len(levels))
+	for _, level := range levels {
+		if level == "max" {
+			continue
+		}
+		clientEfforts = append(clientEfforts, level)
+	}
+	return SortEfforts(clientEfforts)
 }
 
 // derefString returns the pointed-to string, or "" when the pointer is nil.

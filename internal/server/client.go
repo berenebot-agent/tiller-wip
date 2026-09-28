@@ -167,6 +167,7 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	if rc == nil {
 		return
 	}
+	catalogueEffortValues, hasCatalogueEffort := catalogueEfforts(rc)
 	if anthropic {
 		caps := map[string]any{}
 		var thinking map[string]any
@@ -175,7 +176,7 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 			case providers.ReasoningOptionEffort:
 				effort := map[string]any{"supported": true}
 				for _, level := range providers.CanonicalEffortOrder() {
-					for _, value := range opt.Values {
+					for _, value := range catalogueEffortValues {
 						if value == level {
 							effort[level] = map[string]any{"supported": true}
 							break
@@ -211,15 +212,17 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 		return
 	}
 
-	var effortValues []string
 	var hasEffort bool
 	var options []map[string]any
+	effortAdded := false
 	for _, opt := range rc.Options {
 		switch opt.Type {
 		case providers.ReasoningOptionEffort:
-			hasEffort = true
-			effortValues = opt.Values
-			options = append(options, map[string]any{"type": "effort", "values": opt.Values})
+			if !effortAdded {
+				hasEffort = hasCatalogueEffort
+				options = append(options, map[string]any{"type": "effort", "values": catalogueEffortValues})
+				effortAdded = true
+			}
 		case providers.ReasoningOptionToggle:
 			options = append(options, map[string]any{"type": "toggle"})
 		case providers.ReasoningOptionBudgetTokens:
@@ -237,8 +240,43 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 		entry["reasoning_options"] = options
 	}
 	if hasEffort {
-		entry["reasoning"] = map[string]any{"supported_efforts": effortValues}
+		entry["reasoning"] = map[string]any{"supported_efforts": catalogueEffortValues}
 	}
+}
+
+// catalogueEfforts returns client-selectable effort values when the provider
+// distinguishes them from its upstream wire values. Otherwise it derives the
+// list from the normalized effort options. An empty list remains meaningful for
+// providers that report unrestricted effort support.
+func catalogueEfforts(rc *providers.ReasoningCapabilities) ([]string, bool) {
+	if rc == nil {
+		return nil, false
+	}
+	if rc.ClientEfforts != nil {
+		return *rc.ClientEfforts, true
+	}
+	var values []string
+	seen := make(map[string]bool)
+	hasEffort, unrestricted := false, false
+	for _, option := range rc.Options {
+		if option.Type != providers.ReasoningOptionEffort {
+			continue
+		}
+		hasEffort = true
+		if len(option.Values) == 0 {
+			unrestricted = true
+		}
+		for _, value := range option.Values {
+			if !seen[value] {
+				seen[value] = true
+				values = append(values, value)
+			}
+		}
+	}
+	if unrestricted || !hasEffort {
+		return nil, hasEffort
+	}
+	return providers.SortEfforts(values), true
 }
 
 func (s *Server) loadVirtualCapabilities(ctx context.Context, accountID string, virtualModelIDs []string) (map[string]aggregatedVirtualCapabilities, error) {

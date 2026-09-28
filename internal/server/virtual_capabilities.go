@@ -183,6 +183,29 @@ func mergeReasoningCapabilities(a, b *providers.ReasoningCapabilities) *provider
 			Type:   providers.ReasoningOptionEffort,
 			Values: values,
 		})
+		if !unrestrictedEffort && (a.ClientEfforts != nil || b.ClientEfforts != nil) {
+			clientValues := make(map[string]bool)
+			for _, capability := range []*providers.ReasoningCapabilities{a, b} {
+				for _, option := range capability.Options {
+					if option.Type != providers.ReasoningOptionEffort {
+						continue
+					}
+					efforts := option.Values
+					if capability.ClientEfforts != nil {
+						efforts = *capability.ClientEfforts
+					}
+					for _, effort := range efforts {
+						clientValues[effort] = true
+					}
+				}
+			}
+			union := make([]string, 0, len(clientValues))
+			for effort := range clientValues {
+				union = append(union, effort)
+			}
+			clientEfforts := providers.SortEfforts(union)
+			result.ClientEfforts = &clientEfforts
+		}
 	}
 	// Toggle if either reports it.
 	if hasOption(a, providers.ReasoningOptionToggle) || hasOption(b, providers.ReasoningOptionToggle) {

@@ -100,6 +100,40 @@ func TestMergeReasoningCapabilitiesHandlesNilAndFiniteEffortUnion(t *testing.T) 
 	}
 }
 
+func TestMergeReasoningCapabilitiesMergesClientEffortsSeparately(t *testing.T) {
+	codexEfforts := []string{"low", "high", "ultra"}
+	merged := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{
+			Options:       []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high", "max", "ultra"}}},
+			ClientEfforts: &codexEfforts,
+		},
+		&providers.ReasoningCapabilities{
+			Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"medium", "max"}}},
+		},
+	)
+	if merged == nil {
+		t.Fatal("merged capabilities = nil")
+	}
+	if got, want := merged.Options[0].Values, []string{"low", "medium", "high", "max", "ultra"}; !equalStrings(got, want) {
+		t.Fatalf("wire effort union = %v, want %v", got, want)
+	}
+	if merged.ClientEfforts == nil || !equalStrings(*merged.ClientEfforts, []string{"low", "medium", "high", "max", "ultra"}) {
+		t.Fatalf("client effort union = %v", merged.ClientEfforts)
+	}
+
+	codexOnlyEfforts := []string{"low", "ultra"}
+	codexOnly := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{
+			Options:       []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "max", "ultra"}}},
+			ClientEfforts: &codexOnlyEfforts,
+		},
+		&providers.ReasoningCapabilities{},
+	)
+	if codexOnly.ClientEfforts == nil || !equalStrings(*codexOnly.ClientEfforts, []string{"low", "ultra"}) {
+		t.Fatalf("single-target client efforts = %v", codexOnly.ClientEfforts)
+	}
+}
+
 func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *testing.T) {
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 	var modelA string

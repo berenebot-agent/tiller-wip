@@ -939,6 +939,9 @@ func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
 	if !slicesEqual(astra.ReasoningCapabilities.Options[0].Values, []string{"low", "medium", "high", "xhigh", "max", "ultra"}) {
 		t.Errorf("astra effort values = %v", astra.ReasoningCapabilities.Options[0].Values)
 	}
+	if astra.ReasoningCapabilities.ClientEfforts == nil || !slicesEqual(*astra.ReasoningCapabilities.ClientEfforts, []string{"low", "medium", "high", "xhigh", "ultra"}) {
+		t.Errorf("astra client effort values = %v", astra.ReasoningCapabilities.ClientEfforts)
+	}
 	if got := astra.ReasoningCapabilities.EffortAliases["ultra"]; got != "max" {
 		t.Errorf("astra ultra alias = %q, want max", got)
 	}
@@ -952,6 +955,28 @@ func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
 	}
 	if got := noMax.ReasoningCapabilities.EffortAliases["ultra"]; got != "low" {
 		t.Errorf("no-max ultra alias = %q, want low (last non-ultra fallback)", got)
+	}
+	if noMax.ReasoningCapabilities.ClientEfforts == nil || !slicesEqual(*noMax.ReasoningCapabilities.ClientEfforts, []string{"low", "high", "ultra"}) {
+		t.Errorf("no-max client effort values = %v", noMax.ReasoningCapabilities.ClientEfforts)
+	}
+}
+
+func TestCodexClientEffortsHideWireMax(t *testing.T) {
+	cases := []struct {
+		name   string
+		levels []string
+		want   []string
+	}{
+		{name: "wire max and native ultra", levels: []string{"low", "max", "ultra"}, want: []string{"low", "ultra"}},
+		{name: "wire max without ultra", levels: []string{"low", "high", "max"}, want: []string{"low", "high"}},
+		{name: "no max", levels: []string{"medium", "low"}, want: []string{"low", "medium"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexClientEfforts(tc.levels); !slicesEqual(got, tc.want) {
+				t.Fatalf("codexClientEfforts(%v) = %v, want %v", tc.levels, got, tc.want)
+			}
+		})
 	}
 }
 
