@@ -37,7 +37,8 @@ async function setupRedirectOAuth(page, { statusRef }) {
 async function openRedirectDialog(page) {
   await openAdmin(page);
   await page.locator('a[data-view="providers"]').first().click();
-  await page.locator(`[data-provider-edit="${PROVIDER_ID}"]`).click();
+  await page.getByRole('button', { name: 'Browse codex-redirect models' }).click();
+  await page.locator('#drawer-edit').click();
   await page.locator('[data-provider-reconnect-btn]').click();
 }
 

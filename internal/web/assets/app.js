@@ -41,17 +41,17 @@ const routeActivity = routeID => {
 // from one client key on different routes distinct.
 const routeTicketKey = (clientID, routeID) => `${clientID}\u0000${routeID || ''}`;
 const sortState = { column: '1h', direction: 'desc' };
+let drawerProviderID = '';
+let drawerModelSearch = '';
+let providerSearchValue = '';
 const SORT_DEFAULTS = { canonical: 'asc', provider: 'asc', '1h': 'desc', '24h': 'desc', '7d': 'desc' };
 // MODEL_USAGE_SORTS names the model-table sort columns whose ordering depends on
 // the usage envelope. The catalogue renders before usage arrives, so a usage
 // sort is only meaningful once usage lands — at which point the rows must be
-// re-sorted (see modelsResortPending / reorderModelRows).
+// re-sorted (see modelsResortPending / renderModels).
 const MODEL_USAGE_SORTS = new Set(['1h', '24h', '7d']);
 // modelsResortPending records that usage first became available while a
-// usage-sorted model table may still be in catalogue order. Set by
-// markUsageReady, consumed once by reconcileLive (which respects an open dialog
-// and the user's current sortState). This deliberately re-applies the *current*
-// sort — it never resets the user's chosen column or direction.
+// usage-sorted model drawer may still be in catalogue order.
 let modelsResortPending = false;
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
@@ -99,8 +99,8 @@ const rowCache = (row) => {
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
 };
-const VIEWS = ['providers', 'models', 'virtual', 'clients', 'activity', 'settings'];
-const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return VIEWS.includes(v) ? v : 'clients'; };
+const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
+const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return v === 'models' ? 'providers' : VIEWS.includes(v) ? v : 'clients'; };
 const settingsTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'settings' && parts[1] ? parts[1] : ''; };
 
 async function api(path, options = {}) {
@@ -437,12 +437,18 @@ window.addEventListener('popstate', () => {
 $('#platform-stats-refresh').addEventListener('click', () => loadPlatformDashboard('overview').catch(error => setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'))));
 
 async function navigate(view) {
+  const legacyModelsHash = location.hash === '#models';
+  if (view === 'models') view = 'providers';
+  if (view !== 'providers' && drawerProviderID) closeProviderDrawer(false);
   state.view = view;
   // Preserve the settings sub-tab in the hash; only the base view is rewritten.
   const desiredHash = view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : '#' + view;
-  if (location.hash !== desiredHash) history.pushState(null, '', desiredHash);
+  if (location.hash !== desiredHash) {
+    if (legacyModelsHash) history.replaceState(null, '', desiredHash);
+    else history.pushState(null, '', desiredHash);
+  }
   $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); } }
+  try { if (view === 'providers') await loadProviders(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); } }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
@@ -456,50 +462,57 @@ $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', ()
 }));
 $('#add-client-mobile').onclick = () => openClient();
 $('#add-provider-mobile').onclick = () => openProvider();
-$('#add-real-model-mobile').onclick = openManualModel;
 $('#add-virtual-group-mobile').onclick = () => openVirtualGroup();
 $('#add-virtual-model-mobile').onclick = () => openVirtualModel();
 
 let filterTimers = new Map();
 function filterInput(selector, callback) { $(selector).addEventListener('input', event => { clearTimeout(filterTimers.get(selector)); filterTimers.set(selector, setTimeout(() => callback(event.target.value), 180)); }); }
-filterInput('#provider-search', loadProviders); filterInput('#model-search', loadModels); filterInput('#virtual-search', loadVirtual); filterInput('#client-search', loadClients);
-$('#show-retired').addEventListener('change', renderModels);
+filterInput('#provider-search', value => { providerSearchValue = value; loadProviders(value); }); filterInput('#virtual-search', loadVirtual); filterInput('#client-search', loadClients);
+$('#show-retired').addEventListener('change', event => { $('#drawer-show-retired').checked = event.target.checked; renderModels(); });
+$('#drawer-show-retired').addEventListener('change', event => { $('#show-retired').checked = event.target.checked; renderModels(); });
+$('#drawer-sort').addEventListener('change', event => { sortState.column = event.target.value; sortState.direction = SORT_DEFAULTS[sortState.column] || 'asc'; renderModels(); });
+$('#provider-drawer-close').addEventListener('click', closeProviderDrawer);
+$('#drawer-refresh').addEventListener('click', async () => { if (drawerProviderID) await refreshProvider(drawerProviderID); });
+$('#drawer-edit').addEventListener('click', () => { const provider = state.providers.find(item => item.id === drawerProviderID); if (provider) openProvider(provider); });
+$('#drawer-delete').addEventListener('click', async () => { if (drawerProviderID) await deleteProvider(drawerProviderID); });
 $('#client-group-filter').addEventListener('change', loadClients);
 
 async function loadProviders(search = $('#provider-search').value) {
   const token = ++state.loadToken;
-  const [result, types] = await Promise.all([api(`/api/admin/providers?limit=200&search=${encodeURIComponent(search || '')}`), state.providerTypes.length ? Promise.resolve({ data: state.providerTypes }) : api('/api/admin/provider-types')]);
+  const [result, types, models] = await Promise.all([api(`/api/admin/providers?limit=200&search=${encodeURIComponent(search || '')}`), state.providerTypes.length ? Promise.resolve({ data: state.providerTypes }) : api('/api/admin/provider-types'), api('/api/admin/models?all=1')]);
   if (token !== state.loadToken) return;
-  state.providers = result.data; state.providerTypes = types.data; renderProviders();
+  const term = (search || '').trim().toLowerCase();
+  state.providers = result.data; state.providerTypes = types.data; state.models = models.data;
+  renderModels();
+  const matchingProviders = term ? [...new Map([
+    ...result.data.filter(provider => provider.name.toLowerCase().includes(term) || typeLabel(provider.type).toLowerCase().includes(term)).map(provider => [provider.id, provider]),
+    ...models.data.filter(model => model.canonical_model_id.toLowerCase().includes(term) || model.upstream_model_id.toLowerCase().includes(term)).map(model => [model.provider_id, result.data.find(provider => provider.id === model.provider_id)]).filter(([, provider]) => provider),
+  ]).values()] : result.data;
+  renderProviders(matchingProviders);
+  if (drawerProviderID && !state.providers.some(provider => provider.id === drawerProviderID)) closeProviderDrawer();
+  else if (drawerProviderID) {
+    const provider = state.providers.find(item => item.id === drawerProviderID);
+    $('#provider-drawer-title').textContent = provider.name;
+    $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`;
+    $('#drawer-refresh').disabled = false;
+    renderModels();
+  }
 }
-function renderProviders() {
-  const body = $('#providers-body'); $('#providers-empty').hidden = state.providers.length > 0; body.innerHTML = state.providers.map(provider => `<tr>
-    <td class="primary-cell"><strong>${h(provider.name)}</strong><small>${h(provider.base_url)}</small>${provider.last_refresh_error ? `<span class="error-text">${h(provider.last_refresh_error)}</span>` : ''}</td>
-    <td><strong>${h(typeLabel(provider.type))}</strong><div class="protocols">${provider.protocols.map(p => `<span class="protocol">${h(p)}</span>`).join('')}</div></td>
-    <td><strong>${provider.available_model_count}</strong> available${provider.model_count !== provider.available_model_count ? `<span class="meta-line"> · ${provider.model_count - provider.available_model_count} retired</span>` : ''}</td>
-    <td><span class="meta-line">${date(provider.last_refresh_at)}</span></td>
-    <td>${badge(provider.enabled && !provider.last_refresh_error, provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled', provider.enabled ? (provider.last_refresh_error ? 'warn' : 'good') : 'neutral')}<div class="meta-line">Credential: ${provider.auth_state ? provider.auth_state : (provider.credential_configured ? 'configured' : 'none')}</div></td>
-   <td><div class="actions"><button class="btn btn-small btn-secondary" data-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-provider-delete="${h(provider.id)}">Delete</button></div></td></tr>`).join('');
-  $('#providers-empty-mobile').hidden = state.providers.length > 0;
-  $('#providers-cards').innerHTML = state.providers.map(providerCard).join('');
+function renderProviders(providers = state.providers) {
+  $('#providers-empty').hidden = providers.length > 0;
+  $('#providers-cards').innerHTML = providers.map(providerCard).join('');
   const available = state.providers.reduce((sum, item) => sum + item.available_model_count, 0), retired = state.providers.reduce((sum, item) => sum + item.model_count - item.available_model_count, 0), errors = state.providers.filter(item => item.last_refresh_error).length;
   $('#provider-metrics').innerHTML = metric(state.providers.length, 'Provider instances') + metric(available, 'Available models') + metric(retired, 'Retired models') + metric(errors, 'Refresh errors');
-  $$('[data-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.providerRefresh));
-  $$('[data-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.providerEdit)));
-  $$('[data-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.providerDelete));
-  $$('[data-mobile-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.mobileProviderRefresh));
-  $$('[data-mobile-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.mobileProviderEdit)));
-  $$('[data-mobile-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.mobileProviderDelete));
+  $$('[data-provider-open]').forEach(button => button.onclick = () => openProviderDrawer(button.dataset.providerOpen));
 }
 function providerCard(provider) {
   const healthy = provider.enabled && !provider.last_refresh_error;
   const stateLabel = provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled';
-  return `<article class="mobile-card provider-card" data-provider-id="${h(provider.id)}">
-    <div class="mobile-card-head"><div class="mobile-card-title"><span class="status-roundel${healthy ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(stateLabel)}"></span><strong>${h(provider.name)}</strong></div>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</div>
-    <div class="mobile-card-subtitle">${h(typeLabel(provider.type))} · ${h((provider.protocols || []).join(' · ') || 'provider default')}</div>
-    <div class="mobile-card-meta"><span><b>${h(provider.available_model_count)}</b> available</span><span><b>${h(provider.model_count - provider.available_model_count)}</b> retired</span><span>${h(date(provider.last_refresh_at))}</span></div>
-    ${provider.last_refresh_error ? `<p class="mobile-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
-    <div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-mobile-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-mobile-provider-delete="${h(provider.id)}">Delete</button></div>
+  const retired = provider.model_count - provider.available_model_count;
+  const providerLabel = typeLabel(provider.type) || 'Provider';
+  return `<article class="provider-card${provider.enabled ? '' : ' provider-card-disabled'}" data-provider-id="${h(provider.id)}" data-provider-name="${h(provider.name.toLowerCase())}" data-provider-type="${h(providerLabel.toLowerCase())}">
+    <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models"><span class="provider-card-mark" aria-hidden="true">${h(providerLabel.slice(0, 2).toUpperCase())}</span><span class="provider-card-identity"><strong>${h(provider.name)}</strong><small>${h(providerLabel)} · ${(provider.protocols || []).map(h).join(' · ') || 'provider default'}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}<span class="provider-card-counts"><span><b>${provider.available_model_count}</b> available</span><span><b>${retired}</b> retired</span></span><span class="provider-card-refresh">${h(date(provider.last_refresh_at))}</span><span class="provider-card-cta">Browse ${provider.model_count} models <b aria-hidden="true">→</b></span></button>
+    ${provider.last_refresh_error ? `<p class="provider-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
   </article>`;
 }
 const metric = (value, label) => `<div class="metric"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
@@ -507,6 +520,7 @@ const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="b
 const typeLabel = type => state.providerTypes.find(item => item.type === type)?.label || type;
 
 $('#add-provider').onclick = () => openProvider();
+$('#add-provider-empty').onclick = () => openProvider();
 function providerFields(provider) {
   const options = state.providerTypes.map(item => `<option value="${h(item.type)}" ${provider?.type === item.type ? 'selected' : ''}>${h(item.label)}</option>`).join('');
   const selectedProtocols = provider?.protocols || ['chat'];
@@ -529,12 +543,11 @@ function providerFields(provider) {
     await loadProviders(); await loadClients(); if (onSaved) await onSaved();
   }});
 }
-async function refreshProvider(id) { const button = $(`[data-provider-refresh="${CSS.escape(id)}"]`); button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); await loadProviders(); await loadClients(); } finally { button.disabled = false; } }
+async function refreshProvider(id) { const button = $('#drawer-refresh'); if (drawerProviderID === id) button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); await loadProviders(); await loadClients(); } finally { button.disabled = false; } }
  async function connectProviderOAuth(id, onSaved = null) { const provider = state.providers.find(item => item.id === id); const type = provider?.type; try { const result = await api(`/api/admin/providers/${id}/oauth/start`, { method: 'POST' }); if (result.flow === 'device_code') { showGitHubDeviceDialog(id, result, onSaved); return; } window.open(result.authorization_url, 'tiller-oauth-auth', 'popup,width=520,height=720,resizable=yes,scrollbars=yes'); if (result.callback_mode === 'redirect') { showOAuthRedirectDialog(id, result.authorization_url, type, result.redirect_uri, onSaved); return; } showOAuthCallbackDialog(id, result.authorization_url, type, result.redirect_uri, onSaved); } catch (error) { flash(errorMessage(error), 'error'); } }
  function showGitHubDeviceDialog(id, result, onSaved = null) { openEntity({ eyebrow: 'GITHUB COPILOT', title: 'Connect GitHub Copilot', submit: 'Done', fields: `<p>1. Open GitHub device sign-in.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><a class="btn btn-secondary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Open GitHub</a> <button type="button" class="btn btn-secondary" data-copy-device>Copy code</button></p><p data-oauth-status>Waiting for GitHub authorization...</p>`, onMount: form => { $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const label = $('[data-oauth-status]', form); if (label) label.textContent = status.status === 'pending' ? 'Waiting for GitHub authorization...' : status.status === 'connected' ? 'GitHub connected.' : (status.error || 'GitHub connection failed.'); if (status.status !== 'pending') { clearInterval(poll); if (status.status === 'connected') { $('#form-dialog').close(); flash('GitHub Copilot connected.'); await loadProviders(); if (onSaved) await onSaved(); } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
 function showOAuthRedirectDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. It returns to <code>${h(redirectURI)}</code> automatically. Leave this dialog open.</p><p data-oauth-status>Waiting for sign-in...</p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><details><summary>Trouble signing in? Paste the redirected URL instead.</summary><label>Redirected URL <textarea name="redirected_url" rows="3" placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label><small>Copy the complete URL from the sign-in window's address bar and paste it above, then choose Connect.</small></details>`, onMount: form => { const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const node = $('[data-oauth-status]', form); if (status.status === 'connected') { if (node) node.textContent = label + ' connected.'; clearInterval(poll); $('#form-dialog').close(); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async form => { const value = String(new FormData(form).get('redirected_url') || '').trim(); if (!value) { throw new Error('Finish sign-in in the popup, or paste the complete redirected URL.'); } await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
  function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><label>Redirected URL <textarea name="redirected_url" rows="3" required placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label>`, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
-async function refreshModels(id) { const button = $(`[data-refresh-models="${CSS.escape(id)}"]`); button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); } catch (error) { flash(errorMessage(error), 'error'); } finally { await loadModels(); await loadProviders(); await loadClients(); button.disabled = false; } }
 async function deleteProvider(id) {
   const provider = state.providers.find(item => item.id === id);
   const doDelete = async () => {
@@ -560,11 +573,11 @@ async function deleteProvider(id) {
 
 async function disconnectProviderOAuth(id) { const provider = state.providers.find(item => item.id === id); if (!await confirmAction({ title: `Disconnect ${provider?.name || 'provider'}?`, copy: 'This removes the OAuth connection. Provider configuration, models, and routing are preserved.', action: 'Disconnect', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/providers/${id}/oauth`, { method: 'DELETE' }); flash('Provider disconnected.'); await loadProviders(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
-async function deleteManualModel(id) { const model = state.models.find(item => item.id === id); if (!model || !await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'This manually-added model will be removed from the provider catalogue.', action: 'Delete model', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/models/${id}`, { method: 'DELETE' }); flash('Manual model deleted.'); await loadModels(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
-function manualModelFields() {
+async function deleteManualModel(id) { const model = state.models.find(item => item.id === id); if (!model || !await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'This manually-added model will be removed from the provider catalogue.', action: 'Delete model', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/models/${id}`, { method: 'DELETE' }); flash('Manual model deleted.'); await loadProviders(); if (drawerProviderID) await loadModels($('#model-search').value); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
+function manualModelFields(preferredProviderID = '') {
   const providers = state.providers.filter(item => item.enabled);
   const protocols = ['', 'chat', 'responses', 'messages'];
-  return `<label>Provider <select name="provider_id" required>${providers.map(provider => `<option value="${h(provider.id)}">${h(provider.name)}</option>`).join('')}</select></label>
+  return `<label>Provider <select name="provider_id" required>${providers.map(provider => `<option value="${h(provider.id)}" ${provider.id === preferredProviderID ? 'selected' : ''}>${h(provider.name)}</option>`).join('')}</select></label>
     <label>Provider-native model ID <input name="upstream_model_id" required maxlength="255" placeholder="model-name"><small>Enter the exact model ID accepted by the provider.</small></label>
     <div class="detect-row"><button type="button" class="btn btn-small btn-secondary" data-detect-model>Detect metadata</button><span class="meta-line">Fills from the provider, then models.dev. Blank fields are detected on save.</span></div>
     <label>Display name <input name="display_name" placeholder="Optional"></label>
@@ -572,10 +585,10 @@ function manualModelFields() {
     <label>Max output tokens <input name="max_output_tokens" type="number" min="1" placeholder="Optional"></label>
     <label>Native protocol <select name="native_protocol">${protocols.map(protocol => `<option value="${protocol}">${protocol || 'Provider default'}</option>`).join('')}</select><small>Leave as provider default unless the upstream surface is known.</small></label>`;
 }
-function openManualModel() {
+function openManualModel(preferredProviderID = '') {
   if (!state.providers.some(item => item.enabled)) { flash('Add an enabled provider before adding a model.', 'error'); return; }
   openEntity({
-    eyebrow: 'REAL MODEL', title: 'Add manual model', fields: manualModelFields(), submit: 'Add model',
+    eyebrow: preferredProviderID ? typeLabel(state.providers.find(item => item.id === preferredProviderID)?.type || '') : 'REAL MODEL', title: 'Add manual model', fields: manualModelFields(preferredProviderID), submit: 'Add model',
     onMount: form => {
       const button = $('[data-detect-model]', form);
       if (!button) return;
@@ -600,13 +613,42 @@ function openManualModel() {
     onSubmit: async form => {
       const values = new FormData(form);
       const number = name => values.get(name) ? Number(values.get(name)) : null;
-      await api(`/api/admin/providers/${values.get('provider_id')}/models`, { method: 'POST', body: JSON.stringify({ upstream_model_id: values.get('upstream_model_id'), display_name: values.get('display_name'), context_length: number('context_length'), max_output_tokens: number('max_output_tokens'), native_protocol: values.get('native_protocol') }) });
-      flash('Manual model added.'); await loadModels(); await loadClients();
+      const providerID = values.get('provider_id');
+      await api(`/api/admin/providers/${providerID}/models`, { method: 'POST', body: JSON.stringify({ upstream_model_id: values.get('upstream_model_id'), display_name: values.get('display_name'), context_length: number('context_length'), max_output_tokens: number('max_output_tokens'), native_protocol: values.get('native_protocol') }) });
+      flash('Manual model added.'); await loadProviders(); if (drawerProviderID) openProviderDrawer(providerID); await loadClients();
     }
   });
 }
-$('#add-real-model').onclick = openManualModel;
-async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.providers = providersResult.data; renderModels(); deferUsage(); }
+$('#add-real-model').onclick = () => openManualModel(drawerProviderID);
+async function loadModels(search = $('#model-search').value) { drawerModelSearch = (search || '').trim().toLowerCase(); const provider = state.providers.find(item => item.id === drawerProviderID); if (provider) $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`; renderModels(); deferUsage(); }
+function openProviderDrawer(id) {
+  drawerProviderID = id;
+  drawerModelSearch = '';
+  const provider = state.providers.find(item => item.id === id);
+  if (!provider) return;
+  $('#provider-drawer-title').textContent = provider.name;
+  $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`;
+  $('#add-real-model').disabled = !provider.enabled;
+  $('#model-search').value = '';
+  $('#show-retired').checked = true;
+  $('#drawer-show-retired').checked = true;
+  $('#provider-drawer').hidden = false;
+  $('#provider-drawer').classList.add('open');
+  $('#provider-drawer').setAttribute('aria-hidden', 'false');
+  $('#provider-drawer').inert = false;
+  loadModels('').then(() => { $('#provider-drawer-close').focus(); }).catch(error => flash(errorMessage(error), 'error'));
+}
+function closeProviderDrawer(restoreFocus = true) {
+  $('#provider-drawer').classList.remove('open');
+  $('#provider-drawer').setAttribute('aria-hidden', 'true');
+  $('#provider-drawer').inert = true;
+  $('#provider-drawer').hidden = true;
+  drawerProviderID = '';
+  $('#show-retired').checked = $('#drawer-show-retired').checked;
+  $('#provider-search').value = providerSearchValue;
+  if (restoreFocus) $('#provider-search').focus({ preventScroll: true });
+}
+$('#model-search').addEventListener('input', event => loadModels(event.target.value));
 function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 7 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
 function toggleGroup(event) {
   const header = event.currentTarget;
@@ -695,36 +737,15 @@ function cycleModelSort(column) {
 // shownModels is the set the Models table renders: available models (unless
 // "show retired" is checked) owned by an enabled provider.
 function shownModels() {
-  const disabledProviders = new Set(state.providers.filter(item => !item.enabled).map(item => item.id));
-  return state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
-}
-// reorderModelRows re-applies the current sort in place, moving the existing
-// <tr> nodes rather than rebuilding the tbody. It exists for the one-time
-// correction after usage first arrives: a models table rendered before usage
-// was known sorts every row as zero and keeps catalogue order, while the header
-// still claims the default "1h ↓". applyModelSort reads the live sortState, so
-// this honours whatever column/direction the user has selected — it never
-// resets the sort. Event handlers and transient DOM state are preserved because
-// the nodes are moved, not replaced.
-function reorderModelRows() {
-  const body = $('#models-body');
-  if (!body) return;
-  const rowsByID = new Map();
-  $$('tr[data-model-id]', body).forEach(row => rowsByID.set(row.dataset.modelId, row));
-  const fragment = document.createDocumentFragment();
-  applyModelSort(shownModels()).forEach(model => {
-    const row = rowsByID.get(model.id);
-    if (row) fragment.appendChild(row);
-  });
-  body.appendChild(fragment);
+  return state.models.filter(item => item.provider_id === drawerProviderID && ($('#show-retired').checked || item.available) && (!drawerModelSearch || item.canonical_model_id.toLowerCase().includes(drawerModelSearch) || item.upstream_model_id.toLowerCase().includes(drawerModelSearch)));
 }
  function renderModels() {
    const shown = shownModels();
-   $('#models-empty').hidden = shown.length > 0;
-   $('#models-empty-mobile').hidden = shown.length > 0;
+  $('#models-empty').hidden = shown.length > 0;
+  $('#models-empty-mobile').hidden = shown.length > 0;
    const rows = applyModelSort(shown);
    const mobile = window.matchMedia('(max-width: 720px)').matches;
-   $('#models-body').innerHTML = mobile ? '' : rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
+   $('#models-body').innerHTML = mobile ? '' : rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
    $('#models-cards').innerHTML = mobile ? rows.map(modelCard).join('') : '';
   const head = $('#models-body').parentElement.querySelector('thead');
   if (head) {
@@ -1144,7 +1165,8 @@ $('#refresh-capabilities').onclick = async () => {
       const model = state.models.find(item => item.id === modelId);
       if (!model) return;
       await refreshProviderCatalogues([model.provider_id]);
-      await loadModels();
+      await loadProviders();
+      if (drawerProviderID) await loadModels($('#model-search').value);
       $('#capabilities-dialog').close();
       openRealModelCapabilities(state.models.find(item => item.id === modelId) || model);
     } else {
@@ -2700,10 +2722,10 @@ function reconcileLive() {
   // a usage sort while usage was unknown is in catalogue order. Re-sort only if
   // the models view is active and the active sort is usage-based; a
   // canonical/provider sort needs no correction. If the view is elsewhere, drop
-  // the flag — the next loadModels() renders already-sorted with usage present.
+  // the flag — the next drawer render uses the current usage snapshot.
   if (modelsResortPending) {
     modelsResortPending = false;
-    if (liveViewActive('models') && MODEL_USAGE_SORTS.has(sortState.column)) reorderModelRows();
+    if (liveViewActive('providers') && $('#provider-drawer').classList.contains('open') && MODEL_USAGE_SORTS.has(sortState.column)) renderModels();
   }
   if (liveViewActive('virtual')) {
     state.virtualModels.forEach(model => {
@@ -2722,7 +2744,7 @@ function reconcileLive() {
       patchVirtualSpinner(row, routeActivity(model.id));
     });
   }
-  if (liveViewActive('models')) {
+  if (liveViewActive('providers') && $('#provider-drawer').classList.contains('open')) {
     state.models.forEach(model => {
       const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
       if (!row) return;
@@ -2887,7 +2909,7 @@ $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
 const liveNavigate = navigate;
 navigate = function (view) {
   liveNavigate(view);
-  if (liveViewActive('models', 'virtual', 'clients')) reconcileLive();
+    if (liveViewActive('providers', 'virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
     try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }

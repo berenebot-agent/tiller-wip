@@ -27,7 +27,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   // must be visible (not hidden) and must actually land the secret on the
   // OS clipboard — not just claim it.
   await expect(page.locator('#copy-secret')).toBeVisible();
-  await page.getByRole('button', { name: 'Copy' }).click();
+  await page.locator('#copy-secret').click();
   await expect(page.locator('#copy-state')).toHaveText('Copied to clipboard.');
   await expect.poll(
     () => page.evaluate(() => navigator.clipboard.readText()),
@@ -765,7 +765,13 @@ test('real model search matches the displayed canonical model ID', async ({ page
   const providerName = 'canonical-model-search';
   await createProvider(page, csrf, providerName);
 
-  await page.getByRole('link', { name: 'Real Models' }).click();
+  await page.getByRole('link', { name: 'Providers' }).click();
+  await expect(page.locator('#provider-drawer')).toBeHidden();
+  await page.getByRole('button', { name: `Browse ${providerName} models` }).click();
+  await expect(page.locator('#provider-drawer')).toBeVisible();
+  await expect(page.locator('#drawer-edit')).toBeVisible();
+  await expect(page.locator('#drawer-delete')).toBeVisible();
+  await expect(page.locator('#providers-cards [data-provider-edit]')).toHaveCount(0);
   const search = page.locator('#model-search');
   const row = page.locator('#models-body tr', { hasText: `${providerName}/mock-model` });
   await expect(row).toBeVisible();
