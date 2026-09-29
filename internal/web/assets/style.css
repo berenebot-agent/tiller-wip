@@ -569,3 +569,6 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .login-card.is-platform .eyebrow{color:var(--red)}
 .login-card.is-platform .btn-primary{background:var(--red);border-color:var(--red)}
 .login-card.is-platform .btn-primary:hover{background:#96332f}
+.oauth-status{display:flex;align-items:center;gap:8px}
+.oauth-wait-spin{flex:none;width:14px;height:14px;border-radius:50%;border:2px solid rgba(39,120,184,.22);border-top-color:var(--blue);animation:status-roundel-spin 1.05s linear infinite}
+@media(prefers-reduced-motion:reduce){.oauth-wait-spin{animation:none}}

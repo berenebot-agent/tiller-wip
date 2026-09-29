@@ -204,7 +204,14 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 // shared by the paste-back and redirect-callback completion paths.
 func (s *Server) persistOAuthToken(ctx context.Context, accountID string, flow oauth.Flow, record oauth.TokenRecord) error {
 	record.Generation = flow.Generation
-	return s.scopeFor(accountID).PutOAuthTokenIfGeneration(ctx, oauth.TokenToStore(record), flow.Generation)
+	if err := s.scopeFor(accountID).PutOAuthTokenIfGeneration(ctx, oauth.TokenToStore(record), flow.Generation); err != nil {
+		return err
+	}
+	// The pre-OAuth discovery at provider creation ran without a credential.
+	// Re-discover now that the OAuth token exists (in the background so the
+	// callback/paste response is not blocked by upstream discovery).
+	s.refreshProviderCatalogueAsync(accountID, flow.ProviderID)
+	return nil
 }
 
 func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
@@ -434,7 +441,32 @@ func (s *Server) storeDeviceToken(ctx context.Context, accountID, id string, gen
 		s.finishDevice(accountID, id, generation, "failed", err)
 		return
 	}
+	// The provider's catalogue was discovered before OAuth connected and failed
+	// for lack of a credential, leaving a stale refresh error. Re-discover now
+	// that the token exists, before reporting the connection complete, so the
+	// catalogue the UI reloads is fresh.
+	s.refreshProviderCatalogue(ctx, accountID, id)
 	s.setDeviceConnected(accountID, id, generation, record)
+}
+
+// refreshProviderCatalogue re-runs discovery after an OAuth connection supplies
+// the provider's credential. Failure is non-fatal: discovery records the error
+// as last_refresh_error and the connection itself stays connected.
+func (s *Server) refreshProviderCatalogue(ctx context.Context, accountID, providerID string) {
+	if err := s.providers.Refresh(ctx, accountID, providerID); err != nil && s.logger != nil {
+		s.logger.Warn("oauth catalogue refresh failed", "provider_id", providerID, "error", err.Error())
+	}
+}
+
+// refreshProviderCatalogueAsync re-discovers in the background for completions
+// that run on an HTTP request path, so upstream discovery never blocks or fails
+// the OAuth response.
+func (s *Server) refreshProviderCatalogueAsync(accountID, providerID string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(s.backgroundCtx, 3*time.Minute)
+		defer cancel()
+		s.refreshProviderCatalogue(ctx, accountID, providerID)
+	}()
 }
 
 func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (devicePrompt, error) {
