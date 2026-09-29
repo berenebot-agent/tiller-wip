@@ -41,6 +41,8 @@ services:
       # Custom hosted landing page. Hosted mode only (ignored in local mode):
       # serves <DataDir>/site/index.html and its sibling assets at "/" instead
       # of the embedded SPA. Requires ./data/site/index.html at startup.
+      # Application asset names (app.js, live.js, *.css, media/) are reserved:
+      # a custom file at one of those paths is ignored and logged as a warning.
       TILLER_CUSTOM_SITE_ENABLED: ${TILLER_CUSTOM_SITE_ENABLED:-false}
 
       # Force the admin session cookie's Secure attribute. Set to "true" when
