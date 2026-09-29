@@ -72,16 +72,19 @@ func (s *Server) oauthRedirectURI(r *http.Request) string {
 // oauthRedirectCallback reports whether hosted deployments can complete this
 // provider through a server-observed redirect callback rather than paste-back.
 // The decision is a provider-scoped compatibility fact (see each provider
-// package), never a guess from the model or provider name shape.
+// package), never a guess from the model or provider name shape. Codex uses the
+// device authorization flow, so it is not part of this path.
 func oauthRedirectCallback(providerType string) bool {
 	switch providerType {
-	case "codex-subscription":
-		return codex.RedirectCallbackSupported
 	case "claude-subscription":
 		return claude.RedirectCallbackSupported
 	default:
 		return false
 	}
+}
+
+func writeDeviceCodeResponse(w http.ResponseWriter, prompt devicePrompt) {
+	writeJSON(w, 200, map[string]any{"flow": "device_code", "verification_uri": prompt.VerificationURI, "verification_uri_complete": prompt.VerificationURIComplete, "user_code": prompt.UserCode, "expires_in": prompt.ExpiresIn, "interval": int(prompt.Interval / time.Second)})
 }
 
 func (s *Server) oauthRateLimited(w http.ResponseWriter, r *http.Request, limiter *loginLimiter) bool {
@@ -97,10 +100,20 @@ func (s *Server) recordOAuthFailure(r *http.Request, limiter *loginLimiter) bool
 	return limiter.recordFailure(clientIP(r, s.config.TrustedProxy))
 }
 
+// devicePrompt is the provider-neutral subset of a device authorization that
+// the admin UI and status endpoint need.
+type devicePrompt struct {
+	UserCode                string
+	VerificationURI         string
+	VerificationURIComplete string
+	ExpiresIn               int64
+	Interval                time.Duration
+}
+
 type oauthDeviceState struct {
 	Status     string
 	Generation int64
-	Device     github.DeviceCode
+	Prompt     devicePrompt
 	Token      oauth.TokenRecord
 	Err        string
 	Cancel     context.CancelFunc
@@ -121,15 +134,28 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if providerType == "github-copilot" {
-		device, startErr := s.startGitHubDeviceFlow(r.Context(), s.scope(r).AccountID(), id)
+		prompt, startErr := s.startGitHubDeviceFlow(r.Context(), s.scope(r).AccountID(), id)
 		if startErr != nil {
 			adminError(w, 502, "oauth_start_failed", "Could not start GitHub OAuth.")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"flow": "device_code", "verification_uri": device.VerificationURI, "verification_uri_complete": device.VerificationURIComplete, "user_code": device.UserCode, "expires_in": device.ExpiresIn, "interval": int(device.Interval / time.Second)})
+		writeDeviceCodeResponse(w, prompt)
 		return
 	}
-	if providerType != "codex-subscription" && providerType != "claude-subscription" {
+	if providerType == "codex-subscription" {
+		prompt, startErr := s.startCodexDeviceFlow(r.Context(), s.scope(r).AccountID(), id)
+		if errors.Is(startErr, codex.ErrDeviceCodeUnsupported) {
+			adminError(w, 502, "oauth_device_code_unsupported", "OpenAI has device sign-in disabled for this account. Try again later.")
+			return
+		}
+		if startErr != nil {
+			adminError(w, 502, "oauth_start_failed", "Could not start Codex device sign-in.")
+			return
+		}
+		writeDeviceCodeResponse(w, prompt)
+		return
+	}
+	if providerType != "claude-subscription" {
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
@@ -160,12 +186,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 409, "oauth_disconnected", "OAuth connection was disconnected while it was starting.")
 		return
 	}
-	authURL := ""
-	if providerType == "codex-subscription" {
-		authURL, err = codex.AuthorizationURL(redirectURI, flow.PKCE.State, flow.PKCE.Challenge)
-	} else {
-		authURL, err = claude.AuthorizationURL(redirectURI, flow.PKCE.State, flow.PKCE.Challenge)
-	}
+	authURL, err := claude.AuthorizationURL(redirectURI, flow.PKCE.State, flow.PKCE.Challenge)
 	if err != nil {
 		adminError(w, 500, "oauth_start_failed", "Could not build OAuth authorization URL.")
 		return
@@ -201,7 +222,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load provider.")
 		return
 	}
-	if providerType != "codex-subscription" && providerType != "claude-subscription" {
+	if providerType != "claude-subscription" {
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
@@ -216,10 +237,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_request", err.Error())
 		return
 	}
-	callback, err := oauth.ParseCallback(input.RedirectedURL)
-	if providerType == "claude-subscription" {
-		callback, err = claude.ParseCallback(input.RedirectedURL)
-	}
+	callback, err := claude.ParseCallback(input.RedirectedURL)
 	if err != nil {
 		if s.recordOAuthFailure(r, s.oauthCallbackLimiter) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
@@ -244,12 +262,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 502, "oauth_exchange_failed", "OAuth connection state is invalid.")
 		return
 	}
-	var tokens oauth.TokenResponse
-	if providerType == "codex-subscription" {
-		tokens, err = codex.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, flow.RedirectURI, flow.PKCE.Verifier)
-	} else {
-		tokens, err = claude.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, flow.RedirectURI, flow.PKCE.Verifier, flow.PKCE.State)
-	}
+	tokens, err := claude.Exchange(r.Context(), s.providers.Registry().HTTPClient(), callback.Code, flow.RedirectURI, flow.PKCE.Verifier, flow.PKCE.State)
 	if err != nil {
 		adminError(w, 502, "oauth_exchange_failed", "OAuth token exchange failed.")
 		return
@@ -356,56 +369,96 @@ func (s *Server) writeOAuthCallbackPage(w http.ResponseWriter, status int, title
 	_, _ = io.WriteString(w, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>"+html.EscapeString(title)+" - Tiller</title></head><body><main><h1>"+html.EscapeString(title)+"</h1><p>"+html.EscapeString(message)+"</p></main></body></html>")
 }
 
-func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (github.DeviceCode, error) {
-	generation, err := s.scopeFor(accountID).OAuthGeneration(ctx, id)
+// beginDeviceFlow reuses a pending device authorization for the provider or
+// registers a fresh one. When reused is true the caller should return the
+// existing prompt without starting another poll.
+func (s *Server) beginDeviceFlow(ctx context.Context, accountID, id string) (flowCtx context.Context, cancel context.CancelFunc, generation int64, prompt devicePrompt, reused bool, err error) {
+	generation, err = s.scopeFor(accountID).OAuthGeneration(ctx, id)
 	if err != nil {
-		return github.DeviceCode{}, err
+		return nil, nil, 0, devicePrompt{}, false, err
 	}
 	s.oauthDeviceMu.Lock()
 	if existing := s.oauthDevices[tenantKey(accountID, id)]; existing != nil && existing.Status == "pending" {
-		device := existing.Device
+		prompt = existing.Prompt
 		s.oauthDeviceMu.Unlock()
-		return device, nil
+		return nil, nil, generation, prompt, true, nil
 	}
-	flowCtx, cancel := context.WithCancel(s.backgroundCtx)
+	flowCtx, cancel = context.WithCancel(s.backgroundCtx)
 	s.oauthDevices[tenantKey(accountID, id)] = &oauthDeviceState{Status: "pending", Generation: generation, Cancel: cancel}
 	s.oauthDeviceMu.Unlock()
 	currentGeneration, err := s.scopeFor(accountID).OAuthGeneration(ctx, id)
 	if err != nil {
-		cancel()
-		s.oauthDeviceMu.Lock()
-		delete(s.oauthDevices, tenantKey(accountID, id))
-		s.oauthDeviceMu.Unlock()
-		return github.DeviceCode{}, err
+		s.clearDeviceState(accountID, id, cancel)
+		return nil, nil, 0, devicePrompt{}, false, err
 	}
 	if currentGeneration != generation {
+		s.clearDeviceState(accountID, id, cancel)
+		return nil, nil, 0, devicePrompt{}, false, store.ErrOAuthGenerationChanged
+	}
+	return flowCtx, cancel, generation, devicePrompt{}, false, nil
+}
+
+func (s *Server) clearDeviceState(accountID, id string, cancel context.CancelFunc) {
+	if cancel != nil {
 		cancel()
-		s.oauthDeviceMu.Lock()
-		delete(s.oauthDevices, tenantKey(accountID, id))
-		s.oauthDeviceMu.Unlock()
-		return github.DeviceCode{}, store.ErrOAuthGenerationChanged
+	}
+	s.oauthDeviceMu.Lock()
+	delete(s.oauthDevices, tenantKey(accountID, id))
+	s.oauthDeviceMu.Unlock()
+}
+
+func (s *Server) setDevicePrompt(accountID, id string, generation int64, prompt devicePrompt) {
+	s.oauthDeviceMu.Lock()
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
+		state.Prompt = prompt
+	}
+	s.oauthDeviceMu.Unlock()
+}
+
+func (s *Server) setDeviceConnected(accountID, id string, generation int64, record oauth.TokenRecord) {
+	s.oauthDeviceMu.Lock()
+	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
+		state.Status, state.Token = "connected", record
+	}
+	s.oauthDeviceMu.Unlock()
+}
+
+func (s *Server) storeDeviceToken(ctx context.Context, accountID, id string, generation int64, tokens oauth.TokenResponse) {
+	record, err := oauth.MergeToken(oauth.TokenRecord{ProviderID: id}, tokens, time.Now().UTC())
+	if err != nil {
+		s.finishDevice(accountID, id, generation, "failed", err)
+		return
+	}
+	record.Generation = generation
+	if err := s.scopeFor(accountID).PutOAuthTokenIfGeneration(ctx, oauth.TokenToStore(record), generation); err != nil {
+		s.finishDevice(accountID, id, generation, "failed", err)
+		return
+	}
+	s.setDeviceConnected(accountID, id, generation, record)
+}
+
+func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (devicePrompt, error) {
+	flowCtx, _, generation, prompt, reused, err := s.beginDeviceFlow(ctx, accountID, id)
+	if err != nil || reused {
+		return prompt, err
 	}
 	device, err := github.RequestDeviceCode(flowCtx, s.providers.Registry().HTTPClient())
 	if err != nil {
 		s.finishDevice(accountID, id, generation, "failed", err)
-		return github.DeviceCode{}, err
+		return devicePrompt{}, err
 	}
-	s.oauthDeviceMu.Lock()
-	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
-		state.Device = device
-	}
-	s.oauthDeviceMu.Unlock()
-	pollCtx := flowCtx
+	prompt = devicePrompt{UserCode: device.UserCode, VerificationURI: device.VerificationURI, VerificationURIComplete: device.VerificationURIComplete, ExpiresIn: device.ExpiresIn, Interval: device.Interval}
+	s.setDevicePrompt(accountID, id, generation, prompt)
 	go func() {
-		tokens, err := github.PollToken(pollCtx, s.providers.Registry().HTTPClient(), device)
+		tokens, err := github.PollToken(flowCtx, s.providers.Registry().HTTPClient(), device)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				s.finishDevice(accountID, id, generation, "failed", err)
 			}
 			return
 		}
-		user, _ := github.FetchUser(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
-		copilot, _, err := github.FetchCopilotToken(pollCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
+		user, _ := github.FetchUser(flowCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
+		copilot, _, err := github.FetchCopilotToken(flowCtx, s.providers.Registry().HTTPClient(), tokens.AccessToken)
 		if err != nil {
 			s.finishDevice(accountID, id, generation, "failed", err)
 			return
@@ -418,23 +471,38 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		}
 		tokens.ExpiresIn = copilot.ExpiresIn
 		tokens.AccountEmail, tokens.AccountPlan = user.Email, user.Login
-		record, err := oauth.MergeToken(oauth.TokenRecord{ProviderID: id}, tokens, time.Now().UTC())
-		if err != nil {
-			s.finishDevice(accountID, id, generation, "failed", err)
-			return
-		}
-		record.Generation = generation
-		if err := s.scopeFor(accountID).PutOAuthTokenIfGeneration(pollCtx, oauth.TokenToStore(record), generation); err != nil {
-			s.finishDevice(accountID, id, generation, "failed", err)
-			return
-		}
-		s.oauthDeviceMu.Lock()
-		if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
-			state.Status, state.Token = "connected", record
-		}
-		s.oauthDeviceMu.Unlock()
+		s.storeDeviceToken(flowCtx, accountID, id, generation, tokens)
 	}()
-	return device, nil
+	return prompt, nil
+}
+
+// startCodexDeviceFlow signs in to Codex with the OpenAI device authorization
+// flow. It is the hosted-safe equivalent of the Codex CLI's
+// `codex login --device-auth`: the token exchange uses OpenAI's own registered
+// device callback, so no client-supplied redirect URI is involved.
+func (s *Server) startCodexDeviceFlow(ctx context.Context, accountID, id string) (devicePrompt, error) {
+	flowCtx, _, generation, prompt, reused, err := s.beginDeviceFlow(ctx, accountID, id)
+	if err != nil || reused {
+		return prompt, err
+	}
+	device, err := codex.RequestDeviceCode(flowCtx, s.providers.Registry().HTTPClient())
+	if err != nil {
+		s.finishDevice(accountID, id, generation, "failed", err)
+		return devicePrompt{}, err
+	}
+	prompt = devicePrompt{UserCode: device.UserCode, VerificationURI: device.VerificationURI, ExpiresIn: device.ExpiresIn, Interval: device.Interval}
+	s.setDevicePrompt(accountID, id, generation, prompt)
+	go func() {
+		tokens, err := codex.PollDeviceToken(flowCtx, s.providers.Registry().HTTPClient(), device)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				s.finishDevice(accountID, id, generation, "failed", err)
+			}
+			return
+		}
+		s.storeDeviceToken(flowCtx, accountID, id, generation, tokens)
+	}()
+	return prompt, nil
 }
 
 func (s *Server) finishDevice(accountID, id string, generation int64, status string, err error) {
@@ -443,7 +511,7 @@ func (s *Server) finishDevice(accountID, id string, generation int64, status str
 	if state := s.oauthDevices[tenantKey(accountID, id)]; state != nil && state.Generation == generation {
 		state.Status = status
 		if err != nil {
-			state.Err = "GitHub OAuth connection failed."
+			state.Err = "OAuth connection failed."
 		}
 	}
 }
@@ -455,11 +523,11 @@ func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	s.oauthDeviceMu.Unlock()
 	if state != nil {
 		result := map[string]any{"status": state.Status}
-		if state.Device.VerificationURI != "" {
-			result["verification_uri"] = state.Device.VerificationURI
-			result["verification_uri_complete"] = state.Device.VerificationURIComplete
-			result["user_code"] = state.Device.UserCode
-			result["expires_in"] = state.Device.ExpiresIn
+		if state.Prompt.VerificationURI != "" {
+			result["verification_uri"] = state.Prompt.VerificationURI
+			result["verification_uri_complete"] = state.Prompt.VerificationURIComplete
+			result["user_code"] = state.Prompt.UserCode
+			result["expires_in"] = state.Prompt.ExpiresIn
 		}
 		if state.Err != "" {
 			result["error"] = state.Err

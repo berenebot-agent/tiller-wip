@@ -55,6 +55,15 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Hosted Codex subscription sign-in.** Codex now connects with OpenAI's
+  device authorization flow (the flow `codex login --device-auth` uses for
+  remote/headless clients) instead of the browser PKCE flow. The PKCE flow's
+  redirect URI must be the registered loopback callback, which a hosted router
+  cannot receive; OpenAI rejected the hosted URL with its generic
+  `unknown_error` page and sign-in never completed. Device authorization
+  exchanges through OpenAI's own registered device callback, so it works from a
+  hosted server with no client registration. Claude subscription sign-in keeps
+  the existing paste-back flow.
 - **Hosted release-readiness paths.** Hosted SPA entry URLs now retain their
   requested flow without redirects or initialization errors; verification
   resend/reset recovery, hosted account search/paging, deletion retry, and

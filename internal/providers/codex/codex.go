@@ -9,14 +9,15 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 const (
 	ClientID       = "app_EMoamEEZ73f0CkXaXp7hrann"
-	AuthorizeURL   = "https://auth.openai.com/oauth/authorize"
 	TokenURL       = "https://auth.openai.com/oauth/token"
 	Scope          = "openid profile email offline_access"
 	DefaultBaseURL = "https://chatgpt.com/backend-api/codex"
@@ -28,19 +29,35 @@ const (
 	// back to this value.
 	ClientVersion = "0.156.1"
 	UserAgent     = "codex_cli_rs/" + ClientVersion
+
+	// Device authorization is the sign-in flow OpenAI provides for remote or
+	// headless clients (see `codex login --device-auth`). It requires no
+	// client-supplied redirect URI: the token exchange uses OpenAI's own
+	// registered DeviceRedirectURI, so it is the only Codex sign-in path that
+	// works from a hosted server. The PKCE browser flow's redirect URI must be
+	// the registered loopback callback, which a hosted router cannot observe.
+	Issuer                = "https://auth.openai.com"
+	DeviceVerificationURL = Issuer + "/codex/device"
+	DeviceRedirectURI     = Issuer + "/deviceauth/callback"
+	devicePollTimeout     = 15 * time.Minute
 )
 
-// RedirectCallbackSupported reports whether the provider returns the
-// authorization code as a browser redirect the server can observe. Codex
-// delivers a standard ?code=&state= query callback, so hosted deployments can
-// complete sign-in without paste-back. This is a provider-scoped compatibility
-// fact, not a model-ID guess.
-const RedirectCallbackSupported = true
+// ErrDeviceCodeUnsupported reports that the issuer has device authorization
+// disabled. The reference CLI treats this as a signal to fall back to browser
+// sign-in.
+var ErrDeviceCodeUnsupported = errors.New("codex device authorization is not enabled")
 
 // ReleaseChannelURL is the OpenAI-owned release channel the Codex installer
 // uses to resolve "latest". It reports {"tag_name":"rust-v0.156.1",...}. It is
 // a var so tests can point it at a local server.
 var ReleaseChannelURL = "https://releases.openai.com/codex/channels/latest"
+
+// DeviceUsercodeURL and DeviceTokenURL are vars so tests can point them at a
+// local server.
+var (
+	DeviceUsercodeURL = Issuer + "/api/accounts/deviceauth/usercode"
+	DeviceTokenURL    = Issuer + "/api/accounts/deviceauth/token"
+)
 
 // ResolveLatestVersion fetches the latest Codex CLI release version from the
 // OpenAI release channel and returns it in bare x.y.z form (the channel reports
@@ -101,23 +118,130 @@ func validCodexVersion(version string) bool {
 	return true
 }
 
-func AuthorizationURL(redirectURI, state, challenge string) (string, error) {
-	if redirectURI == "" || state == "" || challenge == "" {
-		return "", errors.New("codex OAuth parameters are required")
+// DeviceCode is the in-progress device authorization returned by
+// RequestDeviceCode. VerificationURI is where the user approves the sign-in.
+type DeviceCode struct {
+	DeviceAuthID    string
+	UserCode        string
+	VerificationURI string
+	ExpiresIn       int64
+	Interval        time.Duration
+}
+
+// RequestDeviceCode starts the device authorization flow. A 404 from the issuer
+// means device authorization is disabled and the caller should surface that
+// rather than retrying.
+func RequestDeviceCode(ctx context.Context, client *http.Client) (DeviceCode, error) {
+	if client == nil {
+		client = http.DefaultClient
 	}
-	q := url.Values{}
-	q.Set("response_type", "code")
-	q.Set("client_id", ClientID)
-	q.Set("redirect_uri", redirectURI)
-	q.Set("scope", Scope)
-	q.Set("code_challenge", challenge)
-	q.Set("code_challenge_method", "S256")
-	q.Set("id_token_add_organizations", "true")
-	q.Set("codex_cli_simplified_flow", "true")
-	q.Set("originator", Originator)
-	q.Set("state", state)
-	// The reference client uses %20 rather than form-style '+' for spaces.
-	return AuthorizeURL + "?" + strings.ReplaceAll(q.Encode(), "+", "%20"), nil
+	payload, err := json.Marshal(map[string]string{"client_id": ClientID})
+	if err != nil {
+		return DeviceCode{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, DeviceUsercodeURL, strings.NewReader(string(payload)))
+	if err != nil {
+		return DeviceCode{}, err
+	}
+	setDeviceHeaders(req)
+	resp, err := client.Do(req)
+	if err != nil {
+		return DeviceCode{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return DeviceCode{}, ErrDeviceCodeUnsupported
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return DeviceCode{}, fmt.Errorf("codex device authorization request failed with HTTP %d", resp.StatusCode)
+	}
+	var result struct {
+		DeviceAuthID string `json:"device_auth_id"`
+		UserCode     string `json:"user_code"`
+		UserCodeAlt  string `json:"usercode"`
+		Interval     string `json:"interval"`
+		ExpiresAt    string `json:"expires_at"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return DeviceCode{}, errors.New("invalid codex device authorization response")
+	}
+	userCode := result.UserCode
+	if userCode == "" {
+		userCode = result.UserCodeAlt
+	}
+	if result.DeviceAuthID == "" || userCode == "" {
+		return DeviceCode{}, errors.New("invalid codex device authorization response")
+	}
+	interval := 5 * time.Second
+	if seconds, err := strconv.Atoi(strings.TrimSpace(result.Interval)); err == nil && seconds > 0 {
+		interval = time.Duration(seconds) * time.Second
+	}
+	expiresIn := int64(devicePollTimeout / time.Second)
+	if expiresAt, err := time.Parse(time.RFC3339, result.ExpiresAt); err == nil {
+		if remaining := int64(time.Until(expiresAt).Seconds()); remaining > 0 {
+			expiresIn = remaining
+		}
+	}
+	return DeviceCode{DeviceAuthID: result.DeviceAuthID, UserCode: userCode, VerificationURI: DeviceVerificationURL, ExpiresIn: expiresIn, Interval: interval}, nil
+}
+
+// PollDeviceToken polls until the user approves the device code, then exchanges
+// the returned authorization code for tokens using the PKCE verifier the issuer
+// supplies. It returns the same token shape as the browser flow, so the caller's
+// persistence path is unchanged.
+func PollDeviceToken(ctx context.Context, client *http.Client, device DeviceCode) (oauth.TokenResponse, error) {
+	if client == nil {
+		client = http.DefaultClient
+	}
+	expiresIn := device.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = int64(devicePollTimeout / time.Second)
+	}
+	expiresAt := time.Now().Add(time.Duration(expiresIn) * time.Second)
+	return oauth.PollDeviceCode(ctx, expiresAt, device.Interval, func(pollCtx context.Context) oauth.DevicePollResult {
+		payload, err := json.Marshal(map[string]string{"device_auth_id": device.DeviceAuthID, "user_code": device.UserCode})
+		if err != nil {
+			return oauth.DevicePollResult{Err: err}
+		}
+		req, err := http.NewRequestWithContext(pollCtx, http.MethodPost, DeviceTokenURL, strings.NewReader(string(payload)))
+		if err != nil {
+			return oauth.DevicePollResult{Err: err}
+		}
+		setDeviceHeaders(req)
+		resp, err := client.Do(req)
+		if err != nil {
+			return oauth.DevicePollResult{Err: err}
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
+			return oauth.DevicePollResult{Status: oauth.DevicePending}
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return oauth.DevicePollResult{Err: fmt.Errorf("codex device authorization failed with HTTP %d", resp.StatusCode)}
+		}
+		var result struct {
+			AuthorizationCode string `json:"authorization_code"`
+			CodeVerifier      string `json:"code_verifier"`
+		}
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+			return oauth.DevicePollResult{Err: errors.New("invalid codex device token response")}
+		}
+		if result.AuthorizationCode == "" {
+			return oauth.DevicePollResult{Err: errors.New("codex device authorization returned no code")}
+		}
+		tokens, err := Exchange(pollCtx, client, result.AuthorizationCode, DeviceRedirectURI, result.CodeVerifier)
+		if err != nil {
+			return oauth.DevicePollResult{Err: err}
+		}
+		return oauth.DevicePollResult{Status: oauth.DeviceSuccess, Token: tokens}
+	})
+}
+
+func setDeviceHeaders(req *http.Request) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", UserAgent)
+	req.Header.Set("originator", Originator)
 }
 
 func Exchange(ctx context.Context, client *http.Client, code, redirectURI, verifier string) (oauth.TokenResponse, error) {
