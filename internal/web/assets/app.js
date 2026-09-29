@@ -356,6 +356,7 @@ $('#forgot-form').addEventListener('submit', async event => { event.preventDefau
 // Tap cannot be gated behind a pre-flight captcha).
 let gsiScriptPromise = null;
 let gsiInitialized = false;
+let googlePromptIssued = false;
 function loadGsiScript() {
   if (window.google?.accounts?.id) return Promise.resolve();
   if (!gsiScriptPromise) {
@@ -370,10 +371,9 @@ function loadGsiScript() {
   }
   return gsiScriptPromise;
 }
-// setupGoogleSignIn renders the official button and requests One Tap. It is
-// idempotent and safe to call every time the login view is shown; the render is
-// guarded so a re-show does not stack buttons, but prompt() is re-issued so the
-// chooser can reappear after a dismissal.
+// setupGoogleSignIn renders the official button and requests One Tap once.
+// Subsequent re-shows are idempotent; prompt() is not re-issued so the
+// chooser does not flash in and out on repeated view switches.
 async function setupGoogleSignIn() {
   const clientID = hostedAuthOptions.google_client_id;
   const container = $('#google-signin-button');
@@ -398,7 +398,7 @@ async function setupGoogleSignIn() {
       });
       container.dataset.rendered = '1';
     }
-    window.google.accounts.id.prompt();
+     if (!googlePromptIssued) { window.google.accounts.id.prompt(); googlePromptIssued = true; }
   } catch { /* the button/One Tap is best-effort; password sign-in remains */ }
 }
 async function handleGoogleCredential(response) {
@@ -2171,20 +2171,45 @@ filterInput('#mobile-history-search', value => { mobileHistoryFeed.setSearch(val
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
+// HOSTED_NOTIFICATION_COOLDOWN mirrors the server's hosted clamp
+// (hostedNotificationCooldownSeconds in internal/server/notifications.go). The
+// server is authoritative — it re-clamps on read and on write — this only
+// keeps the form honest so a readonly-looking field never shows a stale value.
+const HOSTED_NOTIFICATION_COOLDOWN = 60;
+function applyHostedNotificationPolicy(hosted, nf) {
+  // Hosted accounts never perform an admin login, so the event does not apply.
+  $('#notifications-event-admin-login').hidden = hosted;
+  const cooldown = $('[name="notifications_cooldown_seconds"]', nf);
+  cooldown.readOnly = hosted;
+  if (hosted) cooldown.value = HOSTED_NOTIFICATION_COOLDOWN;
+  $('#notifications-cooldown-tip').textContent = hosted
+    ? 'Fixed at 60 seconds in hosted mode.'
+    : 'Suppress repeat notifications for the same event + model within this window. 0 disables.';
+}
 async function loadSettings() {
   $('#backup-card').hidden = runtimeMode === 'hosted';
+  const hosted = runtimeMode === 'hosted';
   const token = ++state.loadToken;
   const [health, settings] = await Promise.all([api('/api/admin/health'), api('/api/admin/settings')]);
   if (token !== state.loadToken) return;
-  $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; $('[name="notifications_cooldown_seconds"]', nf).value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; await loadGlobalActivity();
+  $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; applyHostedNotificationPolicy(hosted, nf); await loadGlobalActivity();
 }
-async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_event_admin_login: notificationsValues.get('notifications_event_admin_login') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
+async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (runtimeMode !== 'hosted') { body.notifications_event_admin_login = notificationsValues.get('notifications_event_admin_login') === 'on'; } if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
 $('#save-settings-top').addEventListener('click', saveSettings);
 $('#save-settings-bottom').addEventListener('click', saveSettings);
 $('[name="log_error_bodies"]', $('#settings-form')).addEventListener('change', async event => { try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ log_error_bodies: event.target.checked }) }); flash(event.target.checked ? 'Detailed error logging enabled.' : 'Detailed error logging disabled.'); } catch (error) { event.target.checked = !event.target.checked; $('#settings-error').textContent = errorMessage(error); } });
 $('[name="notifications_auth_header"]', $('#notifications-form')).addEventListener('input', () => { authHeaderDirty = true; authHeaderClear = false; });
 $('#clear-notifications-auth').addEventListener('click', async () => { const button = $('#clear-notifications-auth'); button.disabled = true; $('#notifications-error').textContent = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ notifications_auth_header: '' }) }); authHeaderClear = false; authHeaderDirty = false; $('[name="notifications_auth_header"]', $('#notifications-form')).value = ''; $('#notifications-auth-note').textContent = 'Authorization header cleared.'; $('#clear-notifications-auth').hidden = true; } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
-$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
+$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); if (runtimeMode === 'hosted') lockTestNotificationButton(); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { if (runtimeMode !== 'hosted') button.disabled = false; } });
+// In hosted mode the server allows one test delivery per minute per account
+// (hostedTestNotificationCooldown in internal/server/notifications.go). The
+// button is held disabled for that window so the UI matches the server budget
+// instead of surfacing a 429 on a second click.
+function lockTestNotificationButton() {
+  const button = $('#send-test-notification');
+  button.disabled = true;
+  setTimeout(() => { button.disabled = false; }, HOSTED_NOTIFICATION_COOLDOWN * 1000);
+}
 
 // Settings tabs. Account is hosted-only; the others carry the existing config
 // cards. The hash reflects the sub-tab (#settings/<tab>) so deep links work.

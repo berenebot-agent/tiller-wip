@@ -37,6 +37,20 @@ const notificationTimeout = 5 * time.Second
 
 const maxNotificationResponseBytes int64 = 64 << 10
 
+// hostedNotificationCooldownSeconds is the pinned notification cooldown in
+// hosted mode. A hosted customer can never perform an admin login (hosted
+// accounts authenticate through the user session, and the admin-login event is
+// only emitted by the local-mode admin session handler), so that event is
+// disabled for them. The cooldown floor stops a tenant setting 0 and using the
+// router as an unbounded webhook relay against arbitrary public HTTPS endpoints.
+const hostedNotificationCooldownSeconds = 60
+
+// hostedTestNotificationCooldown bounds how often a hosted account may trigger
+// a manual test delivery. The test bypasses the notification cooldown (it is
+// not subject to it), so without this a tenant could hammer any validated
+// public HTTPS endpoint the router is willing to reach.
+const hostedTestNotificationCooldown = 60 * time.Second
+
 // notificationPayload is the metadata captured for a single routing event. It
 // is rendered as a human-readable plain-text message for the webhook. It shares
 // the Activity privacy boundary: it never contains prompts, responses, tool
@@ -66,6 +80,23 @@ type notificationAttempt struct {
 	LatencyMs    int64  `json:"latency_ms"`
 }
 
+// notificationSettings reads an account's notification configuration and
+// applies the hosted-mode policy clamp. Every read of notification settings
+// must go through this helper rather than calling the store directly, so the
+// clamp cannot be bypassed at an individual call site (and so rows written
+// before the clamp existed are corrected on read, not just on write).
+func (s *Server) notificationSettings(ctx context.Context, sc *store.Scope) (store.NotificationSettings, error) {
+	cfg, err := sc.GetNotificationSettingsBatch(ctx)
+	if err != nil {
+		return cfg, err
+	}
+	if s.config.Mode == config.ModeHosted {
+		cfg.EventAdminLogin = false
+		cfg.CooldownSeconds = hostedNotificationCooldownSeconds
+	}
+	return cfg, nil
+}
+
 // maybeNotify emits a single logical notification for a routed request based on
 // its final outcome. The payload is built synchronously here (before the
 // goroutine) because the caller's logRow continues to be mutated after this
@@ -81,7 +112,7 @@ func (s *Server) maybeNotify(row *logRow, route resolvedRoute, resp *http.Respon
 	default:
 		return
 	}
-	cfg, err := s.scopeFor(row.accountID).GetNotificationSettingsBatch(context.Background())
+	cfg, err := s.notificationSettings(context.Background(), s.scopeFor(row.accountID))
 	if err != nil || !cfg.Enabled || cfg.WebhookURL == "" {
 		return
 	}
@@ -112,7 +143,7 @@ func (s *Server) notifyAdminEvent(accountID, event, message string) {
 		Timestamp: database.Now(),
 		Message:   message,
 	}
-	cfg, err := s.scopeFor(accountID).GetNotificationSettingsBatch(context.Background())
+	cfg, err := s.notificationSettings(context.Background(), s.scopeFor(accountID))
 	if err != nil || !cfg.Enabled || cfg.WebhookURL == "" || !notificationEventEnabled(event, cfg) {
 		return
 	}
@@ -404,7 +435,8 @@ func failureMessage(class string, httpStatus int) string {
 // the saved configuration (URL + optional auth header) regardless of the
 // enabled flag so an admin can verify delivery before enabling events.
 func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.scope(r).GetNotificationSettings(r.Context())
+	sc := s.scope(r)
+	cfg, err := s.notificationSettings(r.Context(), sc)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load notification settings.")
 		return
@@ -415,6 +447,13 @@ func (s *Server) sendTestNotification(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.config.Mode == config.ModeHosted && hostednet.Validate(cfg.WebhookURL) != nil {
 		adminError(w, 400, "invalid_webhook_url", "Hosted webhook URLs must use validated public HTTPS on port 443.")
+		return
+	}
+	// Charge the budget before the outbound POST so a failing or slow webhook
+	// cannot be used to burn through the allowance. The limiter is keyed by
+	// account, so one tenant's spend never affects another's.
+	if s.config.Mode == config.ModeHosted && !s.testNotificationLimiter.allowAttempt(sc.AccountID()) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Test notifications are limited to one per minute in hosted mode. Try again shortly.")
 		return
 	}
 	payload := notificationPayload{

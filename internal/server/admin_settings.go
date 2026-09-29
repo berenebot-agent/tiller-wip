@@ -36,7 +36,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	notifications, err := sc.GetNotificationSettings(r.Context())
+	notifications, err := s.notificationSettings(r.Context(), sc)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
@@ -114,6 +114,14 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if input.NotificationsCooldownSeconds != nil && *input.NotificationsCooldownSeconds < 0 {
 		adminError(w, 400, "invalid_cooldown", "Notification cooldown must be 0 or more seconds.")
 		return
+	}
+	// Hosted-mode policy: the cooldown is pinned at 60s and the admin-
+	// login event never applies (hosted accounts have no admin login).
+	if s.config.Mode == config.ModeHosted {
+		adminLoginDisabled := false
+		cooldownPinned := hostedNotificationCooldownSeconds
+		input.NotificationsEventAdminLogin = &adminLoginDisabled
+		input.NotificationsCooldownSeconds = &cooldownPinned
 	}
 	// Each entry writes its setting only when the field was supplied (non-nil),
 	// so a PATCH touches exactly the fields present. The auth header is a
