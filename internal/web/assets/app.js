@@ -217,7 +217,17 @@ function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidd
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
 function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
-function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
+// The signed-in identity in the top bar is the shortcut into Settings →
+// Account. Account is hosted-only, so in self-hosted mode the control stays
+// disabled and renders as plain text rather than as a dead link.
+function renderIdentity(session) {
+  const identity = $('#admin-name');
+  const hosted = runtimeMode === 'hosted';
+  identity.textContent = session.username || session.email;
+  identity.disabled = !hosted;
+  identity.title = hosted ? 'Account settings' : '';
+}
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
 function showAccountDeleteConfirmation({ email, google }) {
   hideBoot();
   $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true;
@@ -498,6 +508,14 @@ async function navigate(view) {
   if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
+// Clicking the identity opens Settings → Account. The hash is written first so
+// navigate() resolves the sub-tab from it, keeping deep links and the back
+// button working exactly as they do for the settings tabs themselves.
+$('#admin-name').addEventListener('click', () => {
+  if (runtimeMode !== 'hosted') return;
+  if (location.hash !== '#settings/account') history.pushState(null, '', '#settings/account');
+  navigate('settings');
+});
 window.addEventListener('popstate', () => { if (!location.pathname.startsWith('/platform')) navigate(viewFromHash()); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
