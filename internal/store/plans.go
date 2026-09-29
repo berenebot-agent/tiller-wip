@@ -53,14 +53,16 @@ func (e *PlanInUseError) Error() string {
 
 // ErrLimitExceeded reports that an account is at its plan's cap for a resource.
 // Kind is one of "providers", "client_keys" or "virtual_models"; Limit is the
-// plan cap. Handlers map it to a 409 with a stable payload.
+// plan cap; Used is the account's current count (>= Limit, since a plan can be
+// lowered below existing usage). Handlers map it to a 409 with a stable payload.
 type LimitExceededError struct {
 	Kind  string
 	Limit int
+	Used  int
 }
 
 func (e *LimitExceededError) Error() string {
-	return fmt.Sprintf("store: plan limit reached for %s (limit %d)", e.Kind, e.Limit)
+	return fmt.Sprintf("store: plan limit reached for %s (limit %d, used %d)", e.Kind, e.Limit, e.Used)
 }
 
 // Plan is one row of the plans catalogue. A Limit value of Unlimited means the
@@ -287,7 +289,7 @@ func (s *Scope) checkCreateLimit(ctx context.Context, table, kind string, limit 
 		return err
 	}
 	if count >= limit {
-		return &LimitExceededError{Kind: kind, Limit: limit}
+		return &LimitExceededError{Kind: kind, Limit: limit, Used: count}
 	}
 	return nil
 }

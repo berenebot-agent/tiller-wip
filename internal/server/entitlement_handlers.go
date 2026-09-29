@@ -14,6 +14,31 @@ import (
 // WS1 — entitlement / plan handlers. Own this file.
 // Implements the endpoint contract in docs/stage_d_api_contract.md.
 
+// limitKindLabel names a capped resource for the user-facing limit message.
+// Unknown kinds fall back to a generic sentence so a future capped resource
+// still gets a correct (if less specific) 409 rather than an empty message.
+var limitKindLabel = map[string]string{
+	"providers":      "Provider",
+	"client_keys":    "Client key",
+	"virtual_models": "Virtual model",
+}
+
+// limitMessage renders the specific "you are at your cap" sentence shown in the
+// create dialog. It is intentionally cause-free of the plan name: the client
+// already knows its plan, and this message must stay true independent of it.
+func limitMessage(limit *store.LimitExceededError) string {
+	label, ok := limitKindLabel[limit.Kind]
+	if !ok {
+		return "Your plan's limit for this resource has been reached."
+	}
+	noun := strings.ToLower(label)
+	if limit.Limit != 1 {
+		noun += "s"
+	}
+	return fmt.Sprintf("%s limit reached — your plan allows %d %s and you have %d. Delete one to add another.",
+		label, limit.Limit, noun, limit.Used)
+}
+
 // writeLimitExceeded maps a store limit violation to the contract's 409
 // response. It returns true when it handled the error, so create handlers can
 // delegate the plan-cap branch and keep their own error cases.
@@ -25,9 +50,10 @@ func writeLimitExceeded(w http.ResponseWriter, err error) bool {
 	writeJSON(w, http.StatusConflict, map[string]any{
 		"error": map[string]any{
 			"code":    "limit_exceeded",
-			"message": "Your plan's limit for this resource has been reached.",
+			"message": limitMessage(limit),
 			"kind":    limit.Kind,
 			"limit":   limit.Limit,
+			"used":    limit.Used,
 		},
 	})
 	return true

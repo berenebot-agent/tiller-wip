@@ -36,7 +36,7 @@ document.addEventListener('error', event => {
 }, true);
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformTab: 'overview', platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformAuditOffset: 0, platformPlans: [], platformPlanData: [] };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, planInfo: null, planInfoAt: 0, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformTab: 'overview', platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformAuditOffset: 0, platformPlans: [], platformPlanData: [] };
 let runtimeMode = 'local';
 let hostedAuthOptions = {};
 // accountEmailForDelete holds the signed-in email for the delete confirmation
@@ -191,6 +191,46 @@ async function loadUsage() {
 function deferUsage() {
   loadUsage().then(() => reconcileLive()).catch(() => {});
 }
+
+// PLAN_REUSE_MS bounds how long a cached plan snapshot (caps + usage) is
+// trusted for the create-button guard. Caps change rarely, but usage moves on
+// every create/delete, so those paths force a refresh rather than waiting this
+// out. The guard is advisory: the store create transaction stays the only
+// authority, and a raced create still returns 409 limit_exceeded.
+const PLAN_REUSE_MS = 60000;
+let planInfoInFlight = null;
+// loadPlanSnapshot fetches GET /api/auth/account/plan — the same payload the
+// Account settings tab renders. It is a hard no-op outside hosted mode, where
+// plan limits are never enforced, and errors are swallowed: this only feeds an
+// advisory UI hint and must never block a create.
+function loadPlanSnapshot(force = false) {
+  if (runtimeMode !== 'hosted') return Promise.resolve(null);
+  if (!force && state.planInfo && Date.now() - state.planInfoAt < PLAN_REUSE_MS) return Promise.resolve(state.planInfo);
+  if (planInfoInFlight) return planInfoInFlight;
+  planInfoInFlight = api('/api/auth/account/plan').then(info => {
+    state.planInfo = info; state.planInfoAt = Date.now();
+    return info;
+  }).catch(() => state.planInfo).finally(() => { planInfoInFlight = null; });
+  return planInfoInFlight;
+}
+// capReached reports whether a capped resource is at (or past) its plan cap. A
+// missing snapshot, a non-numeric cap, or an unlimited (-1) cap is never
+// "reached", so the guard degrades to today's behaviour whenever the snapshot
+// is unavailable.
+function capReached(kind) {
+  const limit = state.planInfo?.limits?.[`max_${kind}`], used = state.planInfo?.usage?.[kind];
+  if (typeof limit !== 'number' || limit === -1 || typeof used !== 'number') return false;
+  return used >= limit;
+}
+const CAP_NOUNS = { providers: 'provider', client_keys: 'client key', virtual_models: 'virtual model' };
+// capNotice renders the click-time refusal. Phrasing matches the server's 409
+// limit_exceeded message so the preflight and the race backstop read alike.
+function capNotice(kind) {
+  const noun = CAP_NOUNS[kind] || 'resource';
+  const label = noun.charAt(0).toUpperCase() + noun.slice(1);
+  const limit = state.planInfo?.limits?.[`max_${kind}`], used = state.planInfo?.usage?.[kind];
+  return `${label} limit reached — your plan allows ${limit} ${noun}${limit === 1 ? '' : 's'} and you have ${used}. Delete one to add another.`;
+}
 function authView(name) {
   hideBoot();
   $('#login-shell').hidden = false;
@@ -227,7 +267,7 @@ function renderIdentity(session) {
   identity.disabled = !hosted;
   identity.title = hosted ? 'Account settings' : '';
 }
-function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); loadPlanSnapshot(); } }
 function showAccountDeleteConfirmation({ email, google }) {
   hideBoot();
   $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true;
@@ -605,6 +645,7 @@ function providerFields(provider) {
     ${provider ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm_breaking_change" type="checkbox"> <span>Confirm if the provider name changes; every direct model ID will change.</span></label>' : ''}</div></div>`;
 }
 function openProvider(provider = null, onSaved = null) {
+  if (!provider && capReached('providers')) { flash(capNotice('providers'), 'error'); return; }
   // The provider-type picker needs a wider canvas than the standard form
   // dialog so the full logo catalogue fits without a cramped scroll box.
   if (!provider) {
@@ -645,7 +686,7 @@ function openProvider(provider = null, onSaved = null) {
   }, onSubmit: async form => {
     const values = new FormData(form), rawName = String(values.get('name') || '').trim(), payload = { name: rawName || String(values.get('type') || '').trim(), base_url: values.get('base_url'), enabled: values.get('enabled') === 'on', protocols: values.getAll('protocol') };
     if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
-    else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id, onSaved); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
+    else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id, onSaved); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
     await loadProviders(); await loadClients(); if (onSaved) await onSaved();
   }});
 }
@@ -660,6 +701,7 @@ async function deleteProvider(id) {
     try {
       await api(`/api/admin/providers/${id}`, { method: 'DELETE' });
       flash('Provider deleted.');
+      loadPlanSnapshot(true);
       await loadProviders();
       await loadClients();
     } catch (error) {
@@ -1376,7 +1418,7 @@ function virtualModelFields(model) {
   const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
   return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Targets run from top to bottom. Turn a target off to skip it, or use the arrows to change its priority.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
-function openVirtualModel(model = null, onSaved = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
+function openVirtualModel(model = null, onSaved = null) { if (!model && capReached('virtual_models')) { flash(capNotice('virtual_models'), 'error'); return; } if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id })); availableOptions = options;
@@ -1386,8 +1428,8 @@ function openVirtualModel(model = null, onSaved = null) { if (!state.models.leng
    const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; enableLabel.innerHTML='<span class="target-toggle-copy">Use</span>'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up"><span class="target-action-glyph">↑</span><span class="target-action-text">Up</span></button><button type="button" data-target-down title="Move target down" aria-label="Move target down"><span class="target-action-glyph">↓</span><span class="target-action-text">Down</span></button><button type="button" data-target-remove title="Remove target" aria-label="Remove target"><span class="target-action-glyph">×</span><span class="target-action-text">Remove</span></button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
    fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<16) addFallback(); else flash('The admin UI supports up to 16 targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
-  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); if (onSaved) await onSaved(payload.name); } }); }
-async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
+  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); if (onSaved) await onSaved(payload.name); } }); }
+async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); loadPlanSnapshot(true); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function loadClients() {
   const token = ++state.loadToken;
@@ -1616,6 +1658,7 @@ $('#clients-cards').addEventListener('click', event => {
 });
 $('#add-client').onclick = () => openClient();
 function openClient(client = null, onSaved = null, defaultType = null) {
+  if (!client && capReached('client_keys')) { flash(capNotice('client_keys'), 'error'); return; }
   const dialog = $('#form-dialog');
   dialog.classList.add('client-form-dialog');
   dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
@@ -1668,6 +1711,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
           payload.single_target_id = selected.slice(split + 1);
         }
         const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify(payload) });
+        loadPlanSnapshot(true);
         showSecret(result.secret);
         if (onSaved) await onSaved(result, payload);
       }
@@ -1676,7 +1720,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   });
 }
 async function rotateClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Rotate ${client.name}?`, copy: 'The current secret will stop authenticating immediately. Permissions and metadata are preserved.', action: 'Rotate now' })) return; try { const result = await api(`/api/admin/client-keys/${id}/rotate`, { method: 'POST' }); showSecret(result.secret); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
-async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
+async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); loadPlanSnapshot(true); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 let permissionsSavedHook = null;
 async function openPermissions(client, onSaved = null) {
@@ -2281,6 +2325,7 @@ async function loadAccount() {
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
     renderPlanCard(plan);
+    state.planInfo = plan; state.planInfoAt = Date.now();
   } catch (error) {
     flash(errorMessage(error, 'Could not load account details.'), 'error');
   }
