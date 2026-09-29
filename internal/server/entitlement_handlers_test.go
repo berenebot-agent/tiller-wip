@@ -421,6 +421,16 @@ func TestCreateLimitReturns409LimitExceeded(t *testing.T) {
 	if errObj["kind"] != "client_keys" {
 		t.Fatalf("limit kind = %v, want client_keys", errObj["kind"])
 	}
+	if errObj["limit"] != float64(1) {
+		t.Fatalf("limit limit = %v, want 1", errObj["limit"])
+	}
+	if errObj["used"] != float64(1) {
+		t.Fatalf("limit used = %v, want 1", errObj["used"])
+	}
+	wantMessage := "Client key limit reached — your plan allows 1 client key and you have 1. Delete one to add another."
+	if errObj["message"] != wantMessage {
+		t.Fatalf("limit message = %q, want %q", errObj["message"], wantMessage)
+	}
 }
 
 func auditContains(payload map[string]any, event string) bool {
