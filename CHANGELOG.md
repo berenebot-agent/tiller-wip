@@ -8,6 +8,12 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Optional consent-gated hosted analytics.** The platform dashboard can enable
+  web analytics for hosted pages (Umami primary; Plausible or a custom https
+  script URL). Disabled by default. When enabled, the script is requested only
+  after the visitor accepts the bottom consent banner, and the operator's origin
+  is added to the hosted Content-Security-Policy. Consent is stored client-side;
+  no server-side analytics collection is added. Matomo is not supported.
 - **Hosted product shell (private alpha).** The hosted product now has plan
   entitlements (creation limits, concurrent-stream and monthly-request limits,
   Activity retention clamp), all enforced only in hosted mode and operator-

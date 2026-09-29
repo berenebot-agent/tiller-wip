@@ -25,6 +25,10 @@ const (
 	PlatformSettingTurnstileEnabled    = "turnstile_enabled"
 	PlatformSettingTurnstileSiteKey    = "turnstile_site_key"
 	PlatformSettingTurnstileSecret     = "turnstile_secret"
+	PlatformSettingAnalyticsEnabled    = "analytics_enabled"
+	PlatformSettingAnalyticsProvider   = "analytics_provider"
+	PlatformSettingAnalyticsScriptURL  = "analytics_script_url"
+	PlatformSettingAnalyticsSiteID     = "analytics_site_id"
 )
 
 var platformSecretSettings = map[string]bool{
@@ -93,6 +97,17 @@ type PlatformSettingsProposal struct {
 	AuditRetentionDays  int
 	Mail                PlatformMailSettings
 	Auth                PlatformAuthSettings
+	Analytics           PlatformAnalyticsSettings
+}
+
+// PlatformAnalyticsSettings is the operator-configured, consent-gated web
+// analytics integration for hosted mode. Values are public (they are served to
+// every hosted page), so they are stored in plaintext and require no cipher.
+type PlatformAnalyticsSettings struct {
+	Enabled   bool
+	Provider  string
+	ScriptURL string
+	SiteID    string
 }
 
 // PlatformAuthSettings contains hosted-only login integration settings.
@@ -143,6 +158,10 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		PlatformSettingTurnstileEnabled:   boolString(proposal.Auth.TurnstileEnabled),
 		PlatformSettingTurnstileSiteKey:   proposal.Auth.TurnstileSiteKey,
 		PlatformSettingTurnstileSecret:    proposal.Auth.TurnstileSecret,
+		PlatformSettingAnalyticsEnabled:   boolString(proposal.Analytics.Enabled),
+		PlatformSettingAnalyticsProvider:  proposal.Analytics.Provider,
+		PlatformSettingAnalyticsScriptURL: proposal.Analytics.ScriptURL,
+		PlatformSettingAnalyticsSiteID:    proposal.Analytics.SiteID,
 	}
 	for key, value := range values {
 		if err := upsert(key, value); err != nil {
@@ -191,6 +210,44 @@ func (s *Store) GetPlatformAuthSettings(ctx context.Context) (PlatformAuthSettin
 		GoogleClientID: values[PlatformSettingGoogleClientID], GoogleClientSecret: values[PlatformSettingGoogleClientSecret],
 		TurnstileEnabled: values[PlatformSettingTurnstileEnabled] == "1" || strings.EqualFold(values[PlatformSettingTurnstileEnabled], "true"),
 		TurnstileSiteKey: values[PlatformSettingTurnstileSiteKey], TurnstileSecret: values[PlatformSettingTurnstileSecret],
+	}, nil
+}
+
+// GetPlatformAnalyticsSettings reads the operator-configured analytics
+// integration. Missing rows use disabled/empty defaults. These values are not
+// secrets and are safe to serve to the browser.
+func (s *Store) GetPlatformAnalyticsSettings(ctx context.Context) (PlatformAnalyticsSettings, error) {
+	keys := []string{
+		PlatformSettingAnalyticsEnabled, PlatformSettingAnalyticsProvider,
+		PlatformSettingAnalyticsScriptURL, PlatformSettingAnalyticsSiteID,
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(keys)), ",")
+	args := make([]any, 0, len(keys))
+	for _, key := range keys {
+		args = append(args, key)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT key,value FROM platform_settings WHERE key IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return PlatformAnalyticsSettings{}, err
+	}
+	defer rows.Close()
+	values := make(map[string]string, len(keys))
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return PlatformAnalyticsSettings{}, err
+		}
+		values[key] = value
+	}
+	if err := rows.Err(); err != nil {
+		return PlatformAnalyticsSettings{}, err
+	}
+	enabled := values[PlatformSettingAnalyticsEnabled]
+	return PlatformAnalyticsSettings{
+		Enabled:   enabled == "1" || strings.EqualFold(enabled, "true"),
+		Provider:  values[PlatformSettingAnalyticsProvider],
+		ScriptURL: values[PlatformSettingAnalyticsScriptURL],
+		SiteID:    values[PlatformSettingAnalyticsSiteID],
 	}, nil
 }
 
