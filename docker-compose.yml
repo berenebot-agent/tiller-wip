@@ -38,6 +38,11 @@ services:
       TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:-}
       TILLER_USER_SESSION_TTL: ${TILLER_USER_SESSION_TTL:-720h}
 
+      # Custom hosted landing page. Hosted mode only (ignored in local mode):
+      # serves <DataDir>/site/index.html and its sibling assets at "/" instead
+      # of the embedded SPA. Requires ./data/site/index.html at startup.
+      TILLER_CUSTOM_SITE_ENABLED: ${TILLER_CUSTOM_SITE_ENABLED:-false}
+
       # Force the admin session cookie's Secure attribute. Set to "true" when
       # serving the admin UI over HTTPS (behind a reverse proxy or with TLS at
       # the edge) so the cookie is only sent over secure connections. Defaults
