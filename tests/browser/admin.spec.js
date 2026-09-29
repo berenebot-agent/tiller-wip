@@ -1275,3 +1275,107 @@ test('virtual models table: group header colspan matches data row columns', asyn
   await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
   await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });
+
+test('provider picker searches the full catalogue, configures defaults, and serves local logos', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAdmin(page);
+  const externalAssetRequests = [];
+  page.on('request', request => { if (new URL(request.url()).origin !== new URL(page.url()).origin) externalAssetRequests.push(request.url()); });
+  const catalogue = (await (await page.request.get('/api/admin/provider-types')).json()).data;
+  await page.getByRole('link', { name: 'Providers' }).click();
+  await page.locator('#add-provider').click();
+  const dialog = page.locator('#form-dialog');
+  const search = dialog.getByRole('searchbox', { name: 'Search provider types' });
+  const allOptions = dialog.locator('[data-provider-type-option]');
+  const options = dialog.locator('[data-provider-type-option]:not([hidden])');
+  const option = type => dialog.locator(`[data-provider-type-option="${type}"]`);
+  const pickType = async type => { await search.fill(catalogue.find(item => item.type === type).label); await option(type).click(); };
+  const back = () => dialog.getByRole('button', { name: /choose another provider/i }).click();
+
+  // Full catalogue, commonly used types first, setup fields gated behind a pick.
+  await expect(allOptions).toHaveCount(catalogue.length);
+  await expect(options.first()).toHaveAttribute('data-provider-type-option', 'openai');
+  await expect(option('llama-cpp')).toHaveCount(1);
+  await expect(dialog.locator('[data-provider-setup]')).toBeHidden();
+  await expect(dialog.locator('#dialog-submit')).toBeHidden();
+  await search.fill('zzz-nomatch');
+  await expect(options).toHaveCount(0);
+  const keylessTypes = catalogue.filter(item => !item.credential_needed && item.auth_mode !== 'oauth').map(item => item.type);
+  await search.fill('no credential');
+  await expect(options).toHaveCount(keylessTypes.length);
+  await expect(option('opencode-free')).toBeVisible();
+
+  // Enter in the search box chooses the top visible match rather than letting
+  // the form submit against the still-empty hidden type input.
+  await search.fill('opencode-free');
+  await search.press('Enter');
+  await expect(dialog.locator('[data-provider-setup]')).toBeVisible();
+  await expect(dialog.locator('[name="type"]')).toHaveValue('opencode-free');
+  await expect(dialog.locator('[data-credential-create]')).toBeHidden();
+  await expect(dialog.locator('[name="credential"]')).toHaveJSProperty('required', false);
+  await expect(dialog.locator('#dialog-submit')).toBeVisible();
+
+  // Back keeps no selection submitted and re-opens the picker.
+  await back();
+  await expect(dialog.locator('[data-provider-setup]')).toBeHidden();
+  await expect(dialog.locator('#dialog-submit')).toBeHidden();
+
+  // API-key type: default base URL filled, credential required.
+  await pickType('openai');
+  await expect(dialog.locator('[name="base_url"]')).toHaveValue('https://api.openai.com/v1');
+  await expect(dialog.locator('[name="credential"]')).toHaveJSProperty('required', true);
+  await expect(dialog.locator('#dialog-submit')).toHaveText('Add & discover');
+
+  // OAuth type: submit label switches to the connect flow; no credential field.
+  await back();
+  await pickType('github-copilot');
+  await expect(dialog.locator('#dialog-submit')).toHaveText('Connect with GitHub Copilot');
+  await expect(dialog.locator('[data-credential-create]')).toBeHidden();
+
+  // Custom-endpoint type: base URL required and native-protocol controls exposed.
+  await back();
+  await pickType('generic-openai');
+  await expect(dialog.locator('[name="base_url"]')).toHaveJSProperty('required', true);
+  await expect(dialog.locator('[data-protocol-config]')).toBeVisible();
+  await expect(dialog.locator('[data-protocol-config]')).not.toHaveAttribute('hidden');
+
+  // A reviewed logo renders from a same-origin asset and never falls back.
+  await back();
+  await search.fill('Anthropic');
+  const anthropic = option('anthropic');
+  await expect(anthropic.locator('img')).toHaveAttribute('src', '/media/providers/anthropic.svg');
+  await expect(anthropic.locator('img')).toHaveJSProperty('complete', true);
+  await expect(anthropic.locator('.provider-mark-fallback')).toHaveCount(0);
+  const asset = await page.request.get('/media/providers/anthropic.svg');
+  expect(asset.ok()).toBeTruthy();
+  expect(asset.headers()['content-type']).toContain('image/svg+xml');
+
+  // Unmatched types fall back to a monogram, not a broken image.
+  await search.fill('llama');
+  const monogram = option('llama-cpp').locator('.provider-mark-fallback .provider-mark-initials');
+  await expect(monogram).toBeVisible();
+  await expect(option('llama-cpp').locator('img')).toHaveCount(0);
+
+  // Mobile: the option list stays inside the viewport and remains scrollable.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const listBox = await dialog.locator('.provider-type-options').boundingBox();
+  expect(listBox.x).toBeGreaterThanOrEqual(0);
+  expect(listBox.x + listBox.width).toBeLessThanOrEqual(390);
+  await expect(dialog.locator('.provider-type-options')).toHaveCSS('overflow-y', 'auto');
+  await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+  // A real provider of a logo-mapped type shows the same mark on its card.
+  // opencode-free is keyless, so no credential is needed for creation; its
+  // discovery may fail against the mock upstream, which the card tolerates.
+  const csrf = await adminCsrf(page);
+  const created = await page.request.post('/api/admin/providers', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'logo-card', type: 'opencode-free', base_url: MOCK_BASE } });
+  expect(created.status()).toBe(201);
+  const named = await created.json();
+  await page.reload();
+  await page.getByRole('link', { name: 'Providers' }).click();
+  const cardMark = page.locator(`[data-provider-id="${named.id}"] .provider-card-mark`);
+  await expect(cardMark.locator('img')).toHaveAttribute('src', '/media/providers/opencode.svg');
+  await expect(cardMark.locator('.provider-mark-fallback')).toHaveCount(0);
+  await page.request.delete(`/api/admin/providers/${named.id}`, { headers: { 'X-CSRF-Token': csrf } });
+  await expect.poll(() => externalAssetRequests).toHaveLength(0);
+});

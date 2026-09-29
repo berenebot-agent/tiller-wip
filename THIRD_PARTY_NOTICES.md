@@ -34,6 +34,9 @@ modules. Notices and source are also available from each upstream repository.
 | Asset | Version | License | Upstream notice |
 | --- | --- | --- | --- |
 | `internal/web/assets/d3.min.js` (D3.js, self-hosted for the Activity graph) | v7.9.0 | ISC | `internal/web/assets/D3-LICENSE`, [upstream LICENSE](https://github.com/d3/d3/blob/main/LICENSE) |
+| `internal/web/assets/media/providers/*.svg` (selected provider marks) | Simple Icons v16.29.0 | CC0-1.0 | [Simple Icons license](https://github.com/simple-icons/simple-icons/blob/16.29.0/LICENSE.md) |
+
+Provider mark mapping: Anthropic and Claude Code Subscription → `anthropic.svg`; DeepSeek → `deepseek.svg`; Google Gemini API → `google-gemini.svg`; GitHub Copilot → `github.svg`; Hugging Face → `huggingface.svg`; OpenRouter → `openrouter.svg`; OpenCode Zen/Go/Free → `opencode.svg`; Ollama Local/Cloud → `ollama.svg`; NVIDIA NIM → `nvidia.svg`. All other provider types use the in-UI monogram fallback. The SVG paths are derived from the pinned Simple Icons release; only CC0 assets with an available exact or parent-brand match were selected. Logos are decorative marks, not endorsements; provider names remain the identifying text.
 
 ## Test-only tooling and images
 
