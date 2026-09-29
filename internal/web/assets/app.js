@@ -371,11 +371,21 @@ async function handleGoogleCredential(response) {
   $('#login-error').textContent = '';
   try {
     const result = await api('/api/auth/google/gsi', { method: 'POST', body: JSON.stringify({ credential: response.credential }) });
+    if (result?.link_required) { $('#google-link-confirm-message').textContent = `A Tiller account already exists for ${result.email}. Link this Google account to sign in to it?`; history.replaceState(null, '', '/login'); authView('google-link-confirm-form'); return; }
     if (result?.signup_required) { history.replaceState(null, '', '/login?google_signup=1'); authView('google-consent-form'); return; }
     history.replaceState(null, '', '/#clients'); showApp(result);
   } catch (error) { showAuthError('login-error', error, 'Google sign-in could not be completed.'); }
 }
 $('#google-consent-cancel').onclick = () => { history.replaceState(null, '', '/login'); authView('login-form'); };
+$('#google-link-confirm-cancel').onclick = () => { history.replaceState(null, '', '/login'); authView('login-form'); };
+$('#google-link-confirm-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  $('#google-link-confirm-error').textContent = '';
+  try {
+    const session = await api('/api/auth/google/signup/complete', { method: 'POST', body: JSON.stringify({ link_existing: true }) });
+    history.replaceState(null, '', '/#clients'); showApp(session);
+  } catch (error) { showAuthError('google-link-confirm-error', error, 'Google could not be linked.'); }
+});
 $('#google-consent-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget);
   if (form.get('accept_terms') !== 'on') { showAuthError('google-consent-error', { message: 'Please agree to the Terms of Service and Privacy Policy.' }, 'Account creation failed.'); return; }
@@ -2127,16 +2137,8 @@ async function loadAccount() {
     accountEmailForDelete = profile.email;
     const googleEnabled = !!hostedAuthOptions.google_enabled, googleLinked = !!profile.google_linked;
     accountGoogleLinked = googleLinked;
-    $('#account-google-card').hidden = !googleEnabled && !googleLinked;
-    $('#account-google-note').hidden = !googleEnabled;
-    $('#account-google-note').textContent = googleLinked
-      ? 'Password sign-in and recovery are disabled while Google is linked. Unlink Google to restore password sign-in.'
-      : 'Linking Google requires your password. While linked, password sign-in and recovery are disabled.';
-    $('#account-google-status').hidden = !googleEnabled;
-    $('#account-google-status').textContent = googleLinked ? 'Google is linked to this account.' : 'Google is not linked to this account.';
-    $('#account-google-link-form').hidden = googleLinked || !profile.password_enabled || !googleEnabled;
-    $('#account-google-reauth').hidden = true;
-    $('#account-google-unlink').hidden = !googleLinked || !profile.has_password;
+    $('#account-google-card').hidden = !googleLinked;
+    $('#account-google-unlink').hidden = !profile.has_password;
     $('#account-password-card').hidden = googleLinked;
     $('#account-password-auth-hint').textContent = '';
     $('#account-current-password').required = true;
@@ -2330,14 +2332,6 @@ $('#account-password-form').addEventListener('submit', async event => {
   try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); formElement.reset(); flash('Password updated. Other sessions were signed out.'); }
   catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
 });
-$('#account-google-link-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-google-link-error').textContent = '';
-  try {
-    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password') }) });
-    location.assign(result.redirect_url);
-  } catch (error) { $('#account-google-link-error').textContent = errorMessage(error, 'Could not start Google linking.'); }
-});
-$('#account-google-reauth').hidden = true;
 $('#account-google-unlink').addEventListener('click', async () => {
   $('#account-google-error').textContent = '';
   try {
@@ -3029,7 +3023,7 @@ function googleAuthErrorMessage(code) {
     google_failed: 'Google sign-in could not be completed. Try again.',
     google_expired: 'That Google sign-in link expired. Start again.',
     google_unavailable: 'Google sign-in is temporarily unavailable.',
-    google_link_required: 'This Google email already has a Tiller account. Sign in to it, then link Google in Account settings.',
+    google_link_required: 'This Google email already has a Tiller account. Sign in to that account first, then try Google sign-in again.',
     google_already_linked: 'That Google account is already linked to a Tiller account.',
     google_session_expired: 'Your Tiller session expired. Sign in and try again.',
     signup_unavailable: 'Signup is currently unavailable.',

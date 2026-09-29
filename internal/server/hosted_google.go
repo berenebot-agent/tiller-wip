@@ -194,6 +194,17 @@ func (s *Server) completeGoogleSignIn(w http.ResponseWriter, r *http.Request, cl
 		return
 	}
 	if _, err := s.identity.UserByEmail(r.Context(), claims.Email); err == nil {
+		if !claims.EmailVerified {
+			s.googleCallbackError(w, r, "google_failed")
+			return
+		}
+		pendingToken, ok := s.googlePending.Put(hostedauth.SignupClaims{Subject: claims.Subject, Email: claims.Email})
+		if !ok {
+			s.googleCallbackError(w, r, "google_unavailable")
+			return
+		}
+		expires := time.Now().Add(hostedauth.FlowTTL)
+		http.SetCookie(w, &http.Cookie{Name: googleSignupCookie, Value: pendingToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: maxAge(expires)})
 		s.googleCallbackError(w, r, "google_link_required")
 		return
 	} else if !errors.Is(err, identity.ErrNotFound) {
@@ -279,7 +290,18 @@ func (s *Server) completeGoogleGSISignIn(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if _, err := s.identity.UserByEmail(r.Context(), claims.Email); err == nil {
-		adminError(w, http.StatusConflict, "google_link_required", "This Google email already has a Tiller account. Sign in with that account, then link Google in Account settings.")
+		if !claims.EmailVerified {
+			adminError(w, http.StatusUnauthorized, "google_failed", "Google sign-in could not be completed. Try again.")
+			return
+		}
+		pendingToken, ok := s.googlePending.Put(hostedauth.SignupClaims{Subject: claims.Subject, Email: claims.Email})
+		if !ok {
+			adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+			return
+		}
+		expires := time.Now().Add(hostedauth.FlowTTL)
+		http.SetCookie(w, &http.Cookie{Name: googleSignupCookie, Value: pendingToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: maxAge(expires)})
+		writeJSON(w, http.StatusOK, map[string]any{"link_required": true, "email": claims.Email})
 		return
 	} else if !errors.Is(err, identity.ErrNotFound) {
 		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
@@ -346,14 +368,11 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		AcceptTerms bool `json:"accept_terms"`
+		AcceptTerms  bool `json:"accept_terms"`
+		LinkExisting bool `json:"link_existing"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if !input.AcceptTerms {
-		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
 		return
 	}
 	cookie, err := r.Cookie(googleSignupCookie)
@@ -372,6 +391,32 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 	authSettings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
 	if err != nil || !authSettings.GoogleEnabled || authSettings.GoogleClientID == "" || authSettings.GoogleClientSecret == "" {
 		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	if input.LinkExisting {
+		u, lookupErr := s.identity.UserByEmail(r.Context(), claims.Email)
+		if lookupErr != nil {
+			adminError(w, http.StatusConflict, "google_link_expired", "The account could not be linked. Start Google sign-in again.")
+			return
+		}
+		if claims.Subject == "" || claims.Email == "" {
+			adminError(w, http.StatusUnauthorized, "google_failed", "Google sign-in could not be completed. Try again.")
+			return
+		}
+		if err := s.identity.LinkGoogleIdentity(r.Context(), u.ID, claims.Subject, claims.Email); err != nil {
+			adminError(w, http.StatusConflict, "google_link_failed", "Google could not be linked to this account. Start Google sign-in again.")
+			return
+		}
+		session, sessionErr := s.identity.CreateUserSession(r.Context(), u)
+		if sessionErr != nil {
+			adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
+			return
+		}
+		s.setUserSessionCookie(w, r, session.Token, session.ExpiresAt)
+		s.clients.InvalidateAccount(u.AccountID)
+		s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.google_linked", ActorType: "user", ActorID: u.ID})
+
+		writeJSON(w, http.StatusOK, userSessionPayload(session))
 		return
 	}
 	enabled, err := s.storeHandle().HostedSignupEnabled(r.Context())
