@@ -1,8 +1,18 @@
 import { LiveStream } from './live.js';
 const PROVIDER_LOGOS = {
-  anthropic: '/media/providers/anthropic.svg', 'claude-subscription': '/media/providers/anthropic.svg',
-  deepseek: '/media/providers/deepseek.svg', gemini: '/media/providers/google-gemini.svg',
-  'github-copilot': '/media/providers/github.svg', huggingface: '/media/providers/huggingface.svg',
+  openai: '/media/providers/openai.svg', 'codex-subscription': '/media/providers/codex.svg',
+  anthropic: '/media/providers/anthropic.svg', 'claude-subscription': '/media/providers/claude-code.svg',
+  'github-copilot': '/media/providers/github-copilot.svg', gemini: '/media/providers/gemini.svg',
+  deepseek: '/media/providers/deepseek.svg', zai: '/media/providers/zai.svg',
+  'azure-openai': '/media/providers/azure.svg', 'bedrock-api-key': '/media/providers/bedrock.svg',
+  groq: '/media/providers/groq.svg', mistral: '/media/providers/mistral.svg',
+  xai: '/media/providers/xai.svg', together: '/media/providers/together.svg',
+  fireworks: '/media/providers/fireworks.svg', cerebras: '/media/providers/cerebras.svg',
+  perplexity: '/media/providers/perplexity.svg', 'huggingface': '/media/providers/huggingface.svg',
+  'cloudflare-ai': '/media/providers/cloudflare.svg', 'alibaba-qwen': '/media/providers/qwen.svg',
+  minimax: '/media/providers/minimax.svg', commandcode: '/media/providers/commandcode.svg',
+  'generic-openai': '/media/providers/generic-openai.svg', vllm: '/media/providers/vllm.svg',
+  'lm-studio': '/media/providers/lm-studio.svg', 'llama-cpp': '/media/providers/llama-cpp.svg',
   openrouter: '/media/providers/openrouter.svg', 'opencode-zen': '/media/providers/opencode.svg',
   'opencode-go': '/media/providers/opencode.svg', 'opencode-free': '/media/providers/opencode.svg',
   'ollama-local': '/media/providers/ollama.svg', 'ollama-cloud': '/media/providers/ollama.svg',
@@ -577,6 +587,13 @@ function providerFields(provider) {
     ${provider ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm_breaking_change" type="checkbox"> <span>Confirm if the provider name changes; every direct model ID will change.</span></label>' : ''}</div></div>`;
 }
 function openProvider(provider = null, onSaved = null) {
+  // The provider-type picker needs a wider canvas than the standard form
+  // dialog so the full logo catalogue fits without a cramped scroll box.
+  if (!provider) {
+    const dialog = $('#form-dialog');
+    dialog.classList.add('provider-picker-dialog');
+    dialog.addEventListener('close', () => dialog.classList.remove('provider-picker-dialog'), { once: true });
+  }
   openEntity({ eyebrow: provider ? 'EDIT UPSTREAM' : 'REGISTER UPSTREAM', title: provider ? `Edit ${provider.name}` : 'Add provider', fields: providerFields(provider), submit: provider ? 'Save provider' : 'Add & discover', onMount: form => {
     const type = $('[name="type"]', form), setup = $('[data-provider-setup]', form), picker = $('[data-provider-picker]', form), submit = $('#dialog-submit'), protocols = $('[data-protocol-config]', form);
     const showProtocols = () => protocols.hidden = !['generic-openai','vllm'].includes(provider?.type || type.value);

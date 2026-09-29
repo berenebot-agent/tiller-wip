@@ -1350,11 +1350,26 @@ test('provider picker searches the full catalogue, configures defaults, and serv
   expect(asset.ok()).toBeTruthy();
   expect(asset.headers()['content-type']).toContain('image/svg+xml');
 
-  // Unmatched types fall back to a monogram, not a broken image.
+  // Every catalogued type now maps to a local mark; llama.cpp serves its
+  // vendored upstream asset rather than a monogram.
   await search.fill('llama');
-  const monogram = option('llama-cpp').locator('.provider-mark-fallback .provider-mark-initials');
-  await expect(monogram).toBeVisible();
-  await expect(option('llama-cpp').locator('img')).toHaveCount(0);
+  const llamaCpp = option('llama-cpp');
+  await expect(llamaCpp.locator('img')).toHaveAttribute('src', '/media/providers/llama-cpp.svg');
+  await expect(llamaCpp.locator('.provider-mark-fallback')).toHaveCount(0);
+
+  // The monogram fallback still covers an asset that fails to load: the
+  // document-level error handler swaps the broken image for its initials.
+  await page.evaluate(() => {
+    const mark = document.createElement('span');
+    mark.id = 'logo-fallback-probe';
+    mark.className = 'provider-mark';
+    mark.innerHTML = '<img src="/media/providers/__missing__.svg" alt=""><span class="provider-mark-initials">MM</span>';
+    document.body.appendChild(mark);
+  });
+  const probe = page.locator('#logo-fallback-probe');
+  await expect(probe).toHaveClass(/provider-mark-fallback/);
+  await expect(probe.locator('img')).toHaveCount(0);
+  await expect(probe.locator('.provider-mark-initials')).toBeVisible();
 
   // Mobile: the option list stays inside the viewport and remains scrollable.
   await page.setViewportSize({ width: 390, height: 844 });

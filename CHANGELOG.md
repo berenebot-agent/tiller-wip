@@ -46,12 +46,14 @@ behavior may still change before a stable `1.0`.
 - **Sanitized upstream provider errors surfaced.** Upstream failures now
   surface a sanitized, actionable error instead of an opaque failure.
 - **Provider logos and a searchable provider picker.** Provider cards and the
-  Add provider flow show locally served brand marks (self-hosted Simple Icons
-  SVGs, no CDN) keyed by provider type, falling back to a readable monogram for
-  types without a reviewed match. Adding a provider now opens a searchable,
-  keyboard-operable catalogue picker that lists every supported type — commonly
-  used ones first — with auth/protocol context, then advances to the existing
-  configuration fields; editing an existing provider is unchanged.
+  Add provider flow show locally served brand marks (self-hosted LobeHub
+  `@lobehub/icons-static-svg` SVGs, no CDN, plus an original in-house mark for
+  the generic OpenAI-compatible type) keyed by provider type, covering every
+  catalogued provider type and falling back to a readable monogram only for
+  unknown or future types. Adding a provider now opens an enlarged,
+  searchable, keyboard-operable catalogue picker that shows the full logo grid
+  (commonly used types first) with auth/protocol context, then advances to the
+  existing configuration fields; editing an existing provider is unchanged.
 
 ### Fixed
 
