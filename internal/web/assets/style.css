@@ -522,6 +522,11 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .plan-value.plan-full{color:var(--red)}
 .app-footer{display:flex;justify-content:space-between;gap:12px;padding:14px 24px;color:var(--muted);font:11px var(--mono);border-top:1px solid var(--line-dark)}
 .app-footer a{color:var(--blue)}
+.analytics-consent{position:fixed;left:0;right:0;bottom:0;z-index:120;display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:12px 24px;background:var(--navy-2);color:#dbe6ee;box-shadow:0 -4px 18px rgba(12,34,53,.25);font-size:13px}
+.analytics-consent[hidden]{display:none}
+.analytics-consent p{margin:0;max-width:70ch}
+.analytics-consent a{color:#9fd0f2}
+.analytics-consent-actions{display:flex;gap:8px;flex:none}
 .wizard-dialog{width:min(640px,calc(100vw - 30px))}
 .wizard-steps{display:flex;flex-wrap:wrap;gap:6px;margin:12px 22px}
 .wizard-step{padding:4px 10px;border:1px solid var(--line);font:700 10px var(--mono);text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}

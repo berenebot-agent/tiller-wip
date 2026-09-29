@@ -142,6 +142,12 @@ type Server struct {
 	// tests and direct Server construction stay deterministic.
 	logWriter          *logWriter
 	platformSettingsMu sync.Mutex
+	// platformAnalytics is the in-memory cache of the operator-configured
+	// analytics integration. It feeds the per-response CSP so the script origin
+	// is allow-listed without a database read on every request. Guarded by
+	// platformAnalyticsMu and refreshed at boot and whenever settings are saved.
+	platformAnalyticsMu sync.RWMutex
+	platformAnalytics   store.PlatformAnalyticsSettings
 }
 
 // secretsLocked reports whether the recoverable-secret cipher is in the locked
@@ -346,6 +352,11 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		if err := s.SeedLegalDocuments(context.Background()); err != nil && logger != nil {
 			logger.Warn("legal document seed failed", "error_class", fmt.Sprintf("%T", err))
 		}
+		if analytics, loadErr := st.GetPlatformAnalyticsSettings(context.Background()); loadErr == nil {
+			s.setPlatformAnalytics(analytics)
+		} else if logger != nil {
+			logger.Warn("analytics settings load failed", "error_class", fmt.Sprintf("%T", loadErr))
+		}
 	}
 	return s, nil
 }
@@ -440,6 +451,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /.well-known/security.txt", s.handleSecurityTxt)
 	if s.config.Mode == config.ModeHosted {
 		mux.HandleFunc("GET /api/auth/options", s.authOptions)
+		mux.HandleFunc("GET /api/analytics/options", s.analyticsOptions)
 		mux.HandleFunc("POST /api/auth/signup", s.signup)
 		mux.HandleFunc("POST /api/auth/login", s.userLogin)
 		mux.HandleFunc("POST /api/auth/google/start", s.startGoogleSignIn)
@@ -858,6 +870,14 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		csp := "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		if s.config.Mode == config.ModeHosted {
 			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://challenges.cloudflare.com https://accounts.google.com; frame-src https://challenges.cloudflare.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+			// The analytics origin is operator-configured and only extends the
+			// hosted policy. Its presence in the header does not load a script;
+			// the consent-gated frontend decides whether to request it.
+			if origin, ok := s.analyticsScriptOrigin(); ok {
+				csp = strings.Replace(csp, "script-src 'self'", "script-src 'self' "+origin, 1)
+				csp = strings.Replace(csp, "connect-src 'self'", "connect-src 'self' "+origin, 1)
+				csp = strings.Replace(csp, "img-src 'self' data:", "img-src 'self' data: "+origin, 1)
+			}
 		}
 		w.Header().Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)

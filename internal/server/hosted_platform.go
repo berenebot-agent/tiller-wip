@@ -170,11 +170,17 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "settings_locked", "Authentication settings are unavailable.")
 		return
 	}
+	analytics, err := s.storeHandle().GetPlatformAnalyticsSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"hosted_signup_enabled": signup, "audit_retention_days": retention,
 		"mail":      map[string]any{"provider": mail.Provider, "from": mail.From, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
 		"google":    map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
 		"turnstile": map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
+		"analytics": map[string]any{"enabled": analytics.Enabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
 	})
 }
 
@@ -199,6 +205,10 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		TurnstileSiteKey     *string `json:"turnstile_site_key"`
 		TurnstileSecret      *string `json:"turnstile_secret"`
 		ClearTurnstileSecret bool    `json:"clear_turnstile_secret"`
+		AnalyticsEnabled     *bool   `json:"analytics_enabled"`
+		AnalyticsProvider    *string `json:"analytics_provider"`
+		AnalyticsScriptURL   *string `json:"analytics_script_url"`
+		AnalyticsSiteID      *string `json:"analytics_site_id"`
 	}
 	var fields map[string]json.RawMessage
 	if err := decodeJSONLimit(w, r, &fields, 64<<10); err != nil {
@@ -211,6 +221,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		"mail_smtp_host": true, "mail_smtp_port": true, "mail_smtp_username": true, "mail_smtp_password": true, "mail_smtp_mode": true,
 		"google_signin_enabled": true, "google_client_id": true, "google_client_secret": true, "clear_google_client_secret": true,
 		"turnstile_enabled": true, "turnstile_site_key": true, "turnstile_secret": true, "clear_turnstile_secret": true,
+		"analytics_enabled": true, "analytics_provider": true, "analytics_script_url": true, "analytics_site_id": true,
 	}
 	for key := range fields {
 		if !allowed[key] {
@@ -240,6 +251,10 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	_, hasTurnstileSiteKey := fields["turnstile_site_key"]
 	_, hasTurnstileSecret := fields["turnstile_secret"]
 	_, hasClearTurnstileSecret := fields["clear_turnstile_secret"]
+	_, hasAnalyticsEnabled := fields["analytics_enabled"]
+	_, hasAnalyticsProvider := fields["analytics_provider"]
+	_, hasAnalyticsScriptURL := fields["analytics_script_url"]
+	_, hasAnalyticsSiteID := fields["analytics_site_id"]
 	if input.GoogleClientID != nil && len(*input.GoogleClientID) > 2048 || input.GoogleClientSecret != nil && len(*input.GoogleClientSecret) > 8192 || input.TurnstileSiteKey != nil && len(*input.TurnstileSiteKey) > 2048 || input.TurnstileSecret != nil && len(*input.TurnstileSecret) > 8192 {
 		adminError(w, http.StatusBadRequest, "invalid_auth_settings", "Authentication settings are too long.")
 		return
@@ -317,6 +332,27 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasClearTurnstileSecret && input.ClearTurnstileSecret {
 		authSettings.TurnstileSecret = ""
 	}
+	analytics, err := st.GetPlatformAnalyticsSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
+		return
+	}
+	if hasAnalyticsEnabled && input.AnalyticsEnabled != nil {
+		analytics.Enabled = *input.AnalyticsEnabled
+	}
+	if hasAnalyticsProvider && input.AnalyticsProvider != nil {
+		analytics.Provider = strings.ToLower(strings.TrimSpace(*input.AnalyticsProvider))
+	}
+	if hasAnalyticsScriptURL && input.AnalyticsScriptURL != nil {
+		analytics.ScriptURL = strings.TrimSpace(*input.AnalyticsScriptURL)
+	}
+	if hasAnalyticsSiteID && input.AnalyticsSiteID != nil {
+		analytics.SiteID = strings.TrimSpace(*input.AnalyticsSiteID)
+	}
+	if reason := validateAnalyticsSettings(analytics); reason != "" {
+		adminError(w, http.StatusBadRequest, "invalid_analytics_settings", reason)
+		return
+	}
 	googleDisableRequested := hasGoogleEnabled && input.GoogleEnabled != nil && !*input.GoogleEnabled && wasGoogleEnabled
 	googleClientIDChanged := hasGoogleClientID && input.GoogleClientID != nil && authSettings.GoogleClientID != previousGoogleClientID
 	if googleDisableRequested || googleClientIDChanged {
@@ -361,8 +397,8 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
 		return
 	}
-	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail, Auth: authSettings}
-	if !hasSignup && input.AuditRetentionDays == nil && !hasAnyMailField && !hasGoogleEnabled && !hasGoogleClientID && !hasGoogleSecret && !hasClearGoogleSecret && !hasTurnstileEnabled && !hasTurnstileSiteKey && !hasTurnstileSecret && !hasClearTurnstileSecret {
+	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail, Auth: authSettings, Analytics: analytics}
+	if !hasSignup && input.AuditRetentionDays == nil && !hasAnyMailField && !hasGoogleEnabled && !hasGoogleClientID && !hasGoogleSecret && !hasClearGoogleSecret && !hasTurnstileEnabled && !hasTurnstileSiteKey && !hasTurnstileSecret && !hasClearTurnstileSecret && !hasAnalyticsEnabled && !hasAnalyticsProvider && !hasAnalyticsScriptURL && !hasAnalyticsSiteID {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -370,6 +406,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		adminError(w, http.StatusServiceUnavailable, "settings_locked", "Platform settings could not be saved.")
 		return
 	}
+	s.setPlatformAnalytics(analytics)
 	if cfg.Provider == "" {
 		s.mailer.Clear()
 	} else if err := s.mailer.Update(cfg); err != nil {
@@ -387,6 +424,9 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	if hasTurnstileEnabled || hasTurnstileSiteKey || hasTurnstileSecret || (hasClearTurnstileSecret && input.ClearTurnstileSecret) {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.turnstile_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(authSettings.TurnstileEnabled)}})
+	}
+	if hasAnalyticsEnabled || hasAnalyticsProvider || hasAnalyticsScriptURL || hasAnalyticsSiteID {
+		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.analytics_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(analytics.Enabled)}})
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -411,6 +451,10 @@ func hasMailUpdate(input struct {
 	TurnstileSiteKey     *string `json:"turnstile_site_key"`
 	TurnstileSecret      *string `json:"turnstile_secret"`
 	ClearTurnstileSecret bool    `json:"clear_turnstile_secret"`
+	AnalyticsEnabled     *bool   `json:"analytics_enabled"`
+	AnalyticsProvider    *string `json:"analytics_provider"`
+	AnalyticsScriptURL   *string `json:"analytics_script_url"`
+	AnalyticsSiteID      *string `json:"analytics_site_id"`
 }) bool {
 	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
 }

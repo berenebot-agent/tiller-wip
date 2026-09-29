@@ -3079,6 +3079,51 @@ navigate = function (view) {
 function liveStart() { live.start(); }
 function liveStop() { live.stop(); }
 
+// Analytics consent is stored client-side only. The analytics script is never
+// requested until the visitor explicitly accepts; declining is remembered so
+// the banner is not shown again. The script origin is a server-side CSP
+// concern (see securityHeaders), so this layer only decides whether to load it.
+const ANALYTICS_CONSENT_KEY = 'tiller_analytics_consent';
+
+function storedAnalyticsConsent() {
+  try {
+    const value = localStorage.getItem(ANALYTICS_CONSENT_KEY);
+    return value === 'accepted' || value === 'declined' ? value : null;
+  } catch { return null; }
+}
+
+function setStoredAnalyticsConsent(choice) {
+  try { localStorage.setItem(ANALYTICS_CONSENT_KEY, choice); } catch { /* storage unavailable */ }
+}
+
+function loadAnalyticsScript(options) {
+  if (!options || !options.script_url) return;
+  if (document.querySelector('script[data-tiller-analytics]')) return;
+  const script = document.createElement('script');
+  script.src = options.script_url;
+  script.async = true;
+  script.defer = true;
+  script.dataset.tillerAnalytics = '1';
+  const siteID = String(options.site_id || '').trim();
+  if (options.provider === 'umami' && siteID) script.setAttribute('data-website-id', siteID);
+  else if (options.provider === 'plausible' && siteID) script.setAttribute('data-domain', siteID);
+  document.head.appendChild(script);
+}
+
+async function setupAnalyticsConsent() {
+  let options;
+  try { options = await api('/api/analytics/options'); } catch { return; }
+  if (!options || !options.enabled) return;
+  const decision = storedAnalyticsConsent();
+  if (decision === 'accepted') { loadAnalyticsScript(options); return; }
+  if (decision === 'declined') return;
+  const banner = $('#analytics-consent');
+  if (!banner) return;
+  banner.hidden = false;
+  $('#analytics-accept').onclick = () => { setStoredAnalyticsConsent('accepted'); banner.hidden = true; loadAnalyticsScript(options); };
+  $('#analytics-decline').onclick = () => { setStoredAnalyticsConsent('declined'); banner.hidden = true; };
+}
+
 (async function initialise() {
   try {
     if (sessionHint()) showBootSkeleton();
@@ -3088,6 +3133,7 @@ function liveStop() { live.stop(); }
       $('#login-identity-label').firstChild.textContent = 'Email ';
       $('#login-submit').textContent = 'Sign in';
       try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      await setupAnalyticsConsent();
     }
     const path = location.pathname;
     const query = new URLSearchParams(location.search);
@@ -3244,7 +3290,7 @@ async function loadPlatformDashboard(tab = state.platformTab) {
   if (tab === 'mail') { await loadPlatformMail(); return; }
   if (tab === 'logs') { await loadPlatformAudit(); return; }
   if (tab === 'legal') { await loadPlatformLegal(); return; }
-  if (tab === 'settings') { await loadPlatformSettings(); return; }
+  if (tab === 'settings') { await Promise.all([loadPlatformSettings(), loadPlatformAnalytics()]); return; }
 }
 
 function setPlatformStatsUnavailable(message) {
@@ -3281,6 +3327,27 @@ async function loadPlatformSettings() {
   $('#google-settings-status').textContent = `Client secret ${settings.google?.secret_configured ? 'stored' : 'missing'}. Redirect URI: ${settings.google?.redirect_uri || ''}`;
   $('#turnstile-settings-status').textContent = `Secret key ${settings.turnstile?.secret_configured ? 'stored' : 'missing'}. Challenge hostname: ${settings.turnstile?.hostname || ''}`;
   $('#platform-settings-error').textContent = '';
+}
+
+async function loadPlatformAnalytics() {
+  const settings = await api('/api/platform/settings');
+  const form = $('#platform-analytics-form');
+  form.elements.analytics_enabled.checked = !!settings.analytics?.enabled;
+  form.elements.analytics_provider.value = settings.analytics?.provider || 'umami';
+  form.elements.analytics_script_url.value = settings.analytics?.script_url || '';
+  form.elements.analytics_site_id.value = settings.analytics?.site_id || '';
+  applyAnalyticsProviderVisibility(form.elements.analytics_provider.value);
+  $('#platform-analytics-status').textContent = settings.analytics?.enabled ? 'Analytics is enabled and consent-gated on hosted pages.' : 'Analytics is disabled.';
+  $('#platform-analytics-error').textContent = '';
+}
+
+// applyAnalyticsProviderVisibility hides the site ID field for the custom
+// provider, which carries no provider-specific data attribute.
+function applyAnalyticsProviderVisibility(provider) {
+  const form = $('#platform-analytics-form');
+  if (!form) return;
+  const label = form.elements.analytics_site_id.closest('label');
+  if (label) label.hidden = provider === 'custom';
 }
 
 async function loadPlatformMail() {
@@ -3489,6 +3556,28 @@ $('#platform-mail-settings-form').addEventListener('submit', async event => {
   } catch (error) {
     $('#platform-mail-settings-error').style.color = '';
     $('#platform-mail-settings-error').textContent = errorMessage(error, 'Could not save mail settings.');
+  }
+});
+$('#platform-analytics-form').addEventListener('change', event => {
+  if (event.target.name === 'analytics_provider') applyAnalyticsProviderVisibility(event.target.value);
+});
+$('#platform-analytics-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    analytics_enabled: form.get('analytics_enabled') === 'on',
+    analytics_provider: form.get('analytics_provider'),
+    analytics_script_url: form.get('analytics_script_url'),
+    analytics_site_id: form.get('analytics_site_id'),
+  };
+  try {
+    await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#platform-analytics-error').textContent = 'Saved.';
+    $('#platform-analytics-error').style.color = 'var(--green)';
+    await loadPlatformAnalytics();
+  } catch (error) {
+    $('#platform-analytics-error').style.color = '';
+    $('#platform-analytics-error').textContent = errorMessage(error, 'Could not save analytics settings.');
   }
 });
 $('#platform-users-prev').onclick = () => {

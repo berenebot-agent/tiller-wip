@@ -177,6 +177,7 @@
         </section>
         <section class="platform-panel" id="platform-panel-settings" role="tabpanel" aria-labelledby="platform-tab-settings" hidden>
           <article class="system-card"><h2>Signup and authentication</h2><form id="platform-settings-form" class="stack-form"><label class="check-label"><input type="checkbox" name="hosted_signup_enabled"> Allow public signup</label><label>Audit retention (days) <input name="audit_retention_days" type="number" min="1" required></label><hr><h3>Google sign-in</h3><label class="check-label"><input type="checkbox" name="google_signin_enabled"> Allow Google sign-in</label><label>OAuth client ID <input name="google_client_id" type="text" autocomplete="off"></label><label>OAuth client secret <input name="google_client_secret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label class="check-label"><input type="checkbox" name="clear_google_client_secret"> Clear saved Google client secret</label><p class="meta-line">Google cannot be disabled or moved to a different OAuth client while accounts still depend on it. Each account must add a password and unlink Google first.</p><p class="meta-line" id="google-settings-status"></p><hr><h3>Cloudflare Turnstile</h3><label class="check-label"><input type="checkbox" name="turnstile_enabled"> Require Turnstile on signup and recovery</label><label>Site key <input name="turnstile_site_key" type="text" autocomplete="off"></label><label>Secret key <input name="turnstile_secret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label class="check-label"><input type="checkbox" name="clear_turnstile_secret"> Clear saved Turnstile secret</label><p class="meta-line" id="turnstile-settings-status"></p><p class="form-error" id="platform-settings-error" role="alert"></p><button class="btn btn-primary" type="submit">Save platform settings</button></form></article>
+          <article class="system-card"><h2>Analytics and tracking</h2><p>Optional, consent-gated web analytics for hosted pages. The script is loaded by the browser only after a visitor accepts the consent banner, and the script origin is added to the hosted Content-Security-Policy while enabled.</p><form id="platform-analytics-form" class="stack-form"><label class="check-label"><input type="checkbox" name="analytics_enabled"> Enable analytics</label><label>Provider <select name="analytics_provider"><option value="umami">Umami</option><option value="plausible">Plausible</option><option value="custom">Custom script</option></select></label><label>Script URL <input name="analytics_script_url" type="url" autocomplete="off" placeholder="https://analytics.example.com/script.js"></label><label>Site ID <input name="analytics_site_id" type="text" autocomplete="off"></label><p class="meta-line" id="platform-analytics-status"></p><p class="form-error" id="platform-analytics-error" role="alert"></p><button class="btn btn-primary" type="submit">Save analytics settings</button></form></article>
         </section>
       </div>
     </section>
@@ -306,6 +307,14 @@
   <dialog id="wizard-dialog" class="wizard-dialog" aria-labelledby="wizard-title"><section><header><div><p class="eyebrow">FIRST-RUN SETUP</p><h2 id="wizard-title">Get routing in minutes</h2></div><button class="dialog-close" id="close-wizard" aria-label="Close setup wizard">×</button></header><div class="wizard-steps" id="wizard-steps"></div><div class="wizard-body" id="wizard-body"></div><p class="form-error" id="wizard-error" role="alert"></p><footer><button class="btn btn-link" id="wizard-dismiss" type="button">Skip setup</button><button class="btn btn-secondary" id="wizard-prev" type="button">Back</button><button class="btn btn-primary" id="wizard-next" type="button">Continue</button></footer></section></dialog>
 
   <footer class="app-footer" id="app-footer" hidden><span>Tiller Router</span><span id="footer-source"></span></footer>
+
+  <section id="analytics-consent" class="analytics-consent" role="region" aria-label="Analytics consent" hidden>
+    <p>We use optional analytics to understand how the hosted pages are used. See the <a href="/legal/privacy">Privacy Policy</a>.</p>
+    <div class="analytics-consent-actions">
+      <button class="btn btn-small btn-secondary" id="analytics-decline" type="button">Decline</button>
+      <button class="btn btn-small btn-primary" id="analytics-accept" type="button">Accept</button>
+    </div>
+  </section>
 
   <script type="module" src="/app.js"></script>
   <noscript>

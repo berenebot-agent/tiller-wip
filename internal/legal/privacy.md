@@ -91,10 +91,19 @@ only the OpenID Connect identity and email scopes. If Turnstile is enabled,
 Cloudflare receives the challenge request and token validation request,
 including browser and network information needed to assess abuse.
 
-3.3 We use only strictly necessary authentication and security cookies. We do
-not use non-essential tracking, advertising or analytics cookies. If that
-changes, we will update this Policy and, where required, obtain consent before
-deploying such technologies.
+3.3 We use only strictly necessary authentication and security cookies by
+default. Optional web analytics is disabled unless the operator enables it. When
+enabled, a consent banner is shown before any analytics script is loaded: the
+script is requested only after you actively accept, and declining is honoured.
+If you accept, the configured analytics provider (an operator-selected
+subprocessor, see section 8) may set cookies or receive usage and device/browser
+data as configured by the operator. You can withdraw consent at any time by
+clearing the stored consent for this site in your browser. We do not use
+non-essential tracking or advertising cookies without consent.
+
+3.4 The analytics consent choice is stored locally in your browser. We do not
+load analytics scripts before consent, and enabling or disabling analytics is
+recorded as an operator action rather than a change to your account.
 
 4. WHY WE USE PERSONAL INFORMATION
 
@@ -190,6 +199,11 @@ persisted or transient, country of processing, and transfer mechanism, are:
   -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
   Error monitoring       | [MONITORING_VENDOR]  | Error and performance metadata (no prompt    | Persisted by the vendor      | United States         | SCC / DPF as
   (if enabled)           |                      | or response bodies; no credentials)         | for a limited window         |                       | applicable
+  -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
+  Web analytics          | Operator-configured  | Usage events; page views; device and        | Per the analytics vendor's   | Per the analytics     | To be confirmed
+  (optional, consent-    | analytics vendor     | browser signals; cookies and/or IP address  | retention                    | vendor's regions      | before enablement
+  gated)                 | (e.g. Umami,         | if configured by the operator               |                              |                       |
+                         | Plausible, custom)   |                                             |                              |                       |
   -----------------------|----------------------|---------------------------------------------|------------------------------|-----------------------|-------------------
   Billing (future, once  | [BILLING_VENDOR]     | Billing contact; payment metadata; plan      | Persisted by the vendor      | To be determined      | To be assessed
   paid plans launch)     |                      | status                                      |                              |                       | before enablement
