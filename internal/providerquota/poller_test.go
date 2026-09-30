@@ -4,13 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestSupports(t *testing.T) {
-	for _, ty := range []string{"codex-subscription", "claude-subscription", "github-copilot", "zai", "ollama-cloud"} {
+	for _, ty := range []string{"codex-subscription", "claude-subscription", "github-copilot", "zai", "ollama-cloud", "commandcode"} {
 		if !Supports(ty) {
 			t.Errorf("Supports(%q) = false, want true", ty)
 		}
@@ -155,6 +156,79 @@ func TestFetchOllamaCloudLegacyArrayFallback(t *testing.T) {
 	}
 	if len(snap.Windows) != 1 || snap.Windows[0].Label != "session" || *snap.Windows[0].UsedPercent != 30 {
 		t.Fatalf("windows = %+v", snap.Windows)
+	}
+}
+
+func TestFetchCommandCode(t *testing.T) {
+	resetAt := time.Now().Add(90 * time.Minute).UnixMilli()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q, want Bearer tok", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"credits":{"windowLimits":{"limited":true,` +
+			`"fiveHour":{"used":3,"cap":10,"resetAt":` + strconv.FormatInt(resetAt, 10) + `},` +
+			`"weekly":{"used":8,"cap":35,"resetAt":` + strconv.FormatInt(resetAt, 10) + `}},` +
+			`"purchasedRemaining":5,"freeRemaining":1}}`))
+	})
+	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"data":{"planId":"individual-pro"}}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// Base URL mimics the provider API path; the adapter must use the origin.
+	snap, err := fetchCommandCode(context.Background(), srv.Client(), Credential{BaseURL: srv.URL + "/provider/v1", Credential: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Plan != "individual-pro" {
+		t.Fatalf("plan = %q, want individual-pro", snap.Plan)
+	}
+	if len(snap.Windows) != 3 {
+		t.Fatalf("windows = %+v, want 3", snap.Windows)
+	}
+	fiveHour := snap.Windows[0]
+	if fiveHour.Label != "5h" || fiveHour.UsedPercent == nil || *fiveHour.UsedPercent != 30 {
+		t.Fatalf("5h window = %+v, want 30%%", fiveHour)
+	}
+	if fiveHour.Limit == nil || *fiveHour.Limit != 10 || fiveHour.Remaining == nil || *fiveHour.Remaining != 7 {
+		t.Fatalf("5h window limit/remaining = %+v", fiveHour)
+	}
+	if fiveHour.ResetsAt == nil || !fiveHour.ResetsAt.Equal(time.UnixMilli(resetAt).UTC()) {
+		t.Fatalf("5h resets_at = %v, want %v", fiveHour.ResetsAt, time.UnixMilli(resetAt).UTC())
+	}
+	weekly := snap.Windows[1]
+	if weekly.Label != "weekly" || weekly.UsedPercent == nil {
+		t.Fatalf("weekly window = %+v", weekly)
+	}
+	credits := snap.Windows[2]
+	if credits.Label != "credits" || credits.Remaining == nil || *credits.Remaining != 6 {
+		t.Fatalf("credits window = %+v, want 6 remaining", credits)
+	}
+}
+
+func TestFetchCommandCodePlanFailureStillReportsWindows(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"credits":{"windowLimits":{"limited":true,"fiveHour":{"used":1,"cap":10}}}}`))
+	})
+	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	snap, err := fetchCommandCode(context.Background(), srv.Client(), Credential{BaseURL: srv.URL, Credential: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Plan != "" {
+		t.Fatalf("plan = %q, want empty on failure", snap.Plan)
+	}
+	if len(snap.Windows) != 1 || snap.Windows[0].Label != "5h" {
+		t.Fatalf("windows = %+v, want the 5h window despite plan failure", snap.Windows)
 	}
 }
 

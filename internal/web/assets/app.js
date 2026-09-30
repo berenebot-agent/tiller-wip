@@ -662,7 +662,7 @@ const subscriptionProviderTypes = ['codex-subscription', 'claude-subscription', 
 const isSubscription = provider => subscriptionProviderTypes.includes(provider.type);
 // quotaProviderTypes have a quota endpoint (subscriptions plus plan-tiered
 // pay-as-you-go like Z.ai).
-const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github-copilot', 'zai', 'ollama-cloud'];
+const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github-copilot', 'zai', 'ollama-cloud', 'commandcode'];
 
 // providerQuotaHTML renders the compact quota block: one line per window with
 // the label, an inline bar, the used percentage and a short reset countdown.

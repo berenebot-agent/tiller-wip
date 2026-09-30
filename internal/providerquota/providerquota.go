@@ -1,7 +1,8 @@
 // Package providerquota polls subscription/quota endpoints for providers whose
 // usage is not visible from response token counts alone (Codex subscription,
 // Claude Code subscription, GitHub Copilot, Z.ai GLM coding plan, Ollama
-// Cloud). It returns read-only, best-effort snapshots for admin display.
+// Cloud, Command Code plans). It returns read-only, best-effort snapshots for
+// admin display.
 //
 // The poller never blocks routing: a failed poll yields an "unavailable"
 // snapshot and the request path is untouched. Snapshots are cached per
@@ -71,6 +72,7 @@ var adapters = map[string]Adapter{
 	"github-copilot":      fetchCopilot,
 	"zai":                 fetchZAI,
 	"ollama-cloud":        fetchOllamaCloud,
+	"commandcode":         fetchCommandCode,
 }
 
 // Supports reports whether a provider type has a quota adapter.
