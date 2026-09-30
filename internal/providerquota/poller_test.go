@@ -102,6 +102,62 @@ func TestParseClaudeWindow(t *testing.T) {
 	}
 }
 
+func TestFetchOllamaCloudNestedFractions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/usage" {
+			t.Errorf("path = %q, want /api/usage", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Verified shape: usage is a fraction (0-1).
+		w.Write([]byte(`{"limits":{"session":{"usage":0.42},"weekly":{"usage":0.55}}}`))
+	}))
+	defer srv.Close()
+	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL, Credential: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Windows) != 2 {
+		t.Fatalf("windows = %+v, want 2", snap.Windows)
+	}
+	if snap.Windows[0].Label != "session" || snap.Windows[0].UsedPercent == nil || *snap.Windows[0].UsedPercent != 42 {
+		t.Fatalf("session window = %+v, want 42%%", snap.Windows[0])
+	}
+	if snap.Windows[1].Label != "weekly" || snap.Windows[1].UsedPercent == nil {
+		t.Fatalf("weekly window = %+v, want 55%%", snap.Windows[1])
+	}
+	if got := *snap.Windows[1].UsedPercent; got != 55 {
+		t.Fatalf("weekly pct = %v, want 55", got)
+	}
+}
+
+func TestFetchOllamaCloudTopLevelFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"session":0.1,"weekly":0.2}`))
+	}))
+	defer srv.Close()
+	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Windows) != 2 || snap.Windows[0].UsedPercent == nil || *snap.Windows[0].UsedPercent != 10 {
+		t.Fatalf("windows = %+v", snap.Windows)
+	}
+}
+
+func TestFetchOllamaCloudLegacyArrayFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"limits":[{"label":"session","used_percent":30}]}`))
+	}))
+	defer srv.Close()
+	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Windows) != 1 || snap.Windows[0].Label != "session" || *snap.Windows[0].UsedPercent != 30 {
+		t.Fatalf("windows = %+v", snap.Windows)
+	}
+}
+
 func TestFetchZAI(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
