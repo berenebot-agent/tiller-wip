@@ -28,6 +28,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/mailer"
 	"github.com/tiller-router/tiller-router/internal/mailoutbox"
+	"github.com/tiller-router/tiller-router/internal/providerquota"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -71,8 +72,11 @@ type Server struct {
 	adminAccount func(auth.Session) string
 	// secretHasher is the token hasher used when generating client keys
 	// (bcrypt in production; a fast hasher in tests).
-	secretHasher  auth.SecretHasher
-	providers     *providers.Manager
+	secretHasher auth.SecretHasher
+	providers    *providers.Manager
+	// quota polls subscription/quota endpoints for display. It is best-effort:
+	// nil is tolerated by every reader.
+	quota         *providerquota.Poller
 	oauthFlows    *oauth.FlowStore
 	oauthDeviceMu sync.Mutex
 	oauthDevices  map[string]*oauthDeviceState
@@ -360,6 +364,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
+	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
 	if cfg.Mode == config.ModeHosted {
 		if err := s.SeedLegalDocuments(context.Background()); err != nil && logger != nil {
 			logger.Warn("legal document seed failed", "error_class", fmt.Sprintf("%T", err))
@@ -378,6 +383,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 		s.logger.Warn("activity cleanup reconciliation failed", "error_class", fmt.Sprintf("%T", err))
 	}
 	s.providers.StartScheduler(ctx)
+	s.startQuotaPoller(ctx)
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
@@ -564,6 +570,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.updateSettings)))
 	mux.Handle("POST /api/admin/notifications/test", s.requireAdmin(http.HandlerFunc(s.sendTestNotification)))
 	mux.Handle("GET /api/admin/usage", s.requireAdmin(http.HandlerFunc(s.usage)))
+	mux.Handle("GET /api/admin/quota", s.requireAdmin(http.HandlerFunc(s.quotaEndpoint)))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
 	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))

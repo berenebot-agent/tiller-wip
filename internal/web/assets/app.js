@@ -103,27 +103,53 @@ const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'm
 // carries aria-busy instead of each cell being a live region. It is transient:
 // the first usage snapshot replaces it.
 const tokLoadingInner = '<span class="tok-loading" aria-hidden="true"><span class="tok-loading-spin"></span></span>';
+// fmtCost renders a micro-dollar cost (1e-6 USD) as a short USD string. Small
+// amounts keep enough precision to be useful ($0.0004), larger ones round to
+// cents. null/undefined renders nothing.
+const fmtCost = (micros) => {
+  if (micros == null || isNaN(micros)) return '';
+  const usd = micros / 1e6;
+  if (usd === 0) return '$0';
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  if (usd < 1) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(2)}`;
+};
 // renderTokInner returns the inner markup of a .tok cell (no <span class="tok">
 // wrapper). Both initial render (tok) and live patching (patchTokenCell) build
 // their DOM from this single source so the .tok element is never re-wrapped and
 // transitions between loading, populated, and empty states keep consistent
-// structure.
-const renderTokInner = (tokens, pct, loading = false) => {
+// structure. cost is an optional estimated spend in micro-dollars.
+const renderTokInner = (tokens, pct, loading = false, cost = null) => {
   if (loading) return tokLoadingInner;
-  if (!tokens && pct == null) return '—';
+  if (!tokens && pct == null && cost == null) return '—';
   const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
   const cache = (pct != null && !isNaN(pct))
     ? `<span class="cache-hit"><b>${Math.round(pct)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
-  return `${num}${cache}`;
+  const costText = fmtCost(cost);
+  const costEl = costText ? `<span class="tok-cost" title="Estimated from published model prices — not a billing figure"><b>${costText}</b><small>est.</small></span>` : '';
+  return `${num}${cache}${costEl}`;
 };
+
+// tokenBreakdownTitle builds the tooltip for a token cell from the per-type
+// breakdown map (input/output/cache_read/cache_creation UsageWindows).
+const tokenBreakdownTitle = (types, window) => {
+  if (!types) return '';
+  const b = Object.fromEntries(['input', 'output', 'cache_read', 'cache_creation'].map(k => [k, types[k]?.[window]]));
+  const n = v => Number(v || 0).toLocaleString();
+  return `input ${n(b.input)} · output ${n(b.output)} · cache read ${n(b.cache_read)} · cache write ${n(b.cache_creation)}`;
+};
+// estimatedMark returns the "est." suffix for a client whose totals include at
+// least one locally-estimated input count (the provider omitted usage).
+const estimatedMark = (clientId) => state.usage?.tokens_estimated?.[clientId] ? ' (est.)' : '';
 // A cell is "loading" only while the usage envelope is unknown AND this cell has
 // no value yet. Once any snapshot/fetch has landed (usageReady), absent data is
 // a genuine empty state ("—").
-const tokLoading = (tokens, pct) => !state.usageReady && !tokens && pct == null;
-const tok = (tokens, pct, window) => {
-  const loading = tokLoading(tokens, pct);
-  return `<span class="tok" data-window="${window}"${loading ? ' aria-busy="true"' : ''}>${renderTokInner(tokens, pct, loading)}</span>`;
+const tokLoading = (tokens, pct, cost = null) => !state.usageReady && !tokens && pct == null && !cost;
+const tok = (tokens, pct, window, cost = null, breakdown = null) => {
+  const loading = tokLoading(tokens, pct, cost);
+  const title = tokenBreakdownTitle(breakdown, window);
+  return `<span class="tok" data-window="${window}"${title ? ` title="${h(title)}"` : ''}${loading ? ' aria-busy="true"' : ''}>${renderTokInner(tokens, pct, loading, cost)}</span>`;
 };
 const rowCache = (row) => {
   const inp = row.input_tokens;
@@ -132,7 +158,10 @@ const rowCache = (row) => {
   const line = (cache != null && inp > 0)
     ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
-  return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
+  const exact = row.provider_cost_micros;
+  const cost = exact ?? row.estimated_cost_micros;
+  const costLine = cost == null ? '<small>Cost —</small>' : `<span class="tok-cost">${exact == null ? '~' : ''}${fmtCost(cost)}${exact == null ? ' est.' : ''}</span>`;
+  return `<span class="activity-tokens"><b>${row.input_tokens_estimated ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
 };
 const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
 const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return v === 'models' ? 'providers' : VIEWS.includes(v) ? v : 'clients'; };
@@ -592,6 +621,7 @@ async function loadProviders(search = $('#provider-search').value) {
     ...models.data.filter(model => model.canonical_model_id.toLowerCase().includes(term) || model.upstream_model_id.toLowerCase().includes(term)).map(model => [model.provider_id, result.data.find(provider => provider.id === model.provider_id)]).filter(([, provider]) => provider),
   ]).values()] : result.data;
   renderProviders(matchingProviders);
+  loadQuota();
   if (drawerProviderID && !state.providers.some(provider => provider.id === drawerProviderID)) closeProviderDrawer();
   else if (drawerProviderID) {
     const provider = state.providers.find(item => item.id === drawerProviderID);
@@ -616,9 +646,35 @@ function providerCard(provider) {
   return `<article class="provider-card${provider.enabled ? '' : ' provider-card-disabled'}" data-provider-id="${h(provider.id)}" data-provider-name="${h(provider.name.toLowerCase())}" data-provider-type="${h(providerLabel.toLowerCase())}">
     <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models">${providerMark(provider.type, providerLabel, 'provider-card-mark')}<span class="provider-card-identity"><strong>${h(provider.name)}</strong><small>${h(providerLabel)} · ${(provider.protocols || []).map(h).join(' · ') || 'provider default'}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}<span class="provider-card-counts"><span><b>${provider.available_model_count}</b> available</span><span><b>${retired}</b> retired</span></span><span class="provider-card-refresh">${h(date(provider.last_refresh_at))}</span><span class="provider-card-cta">Browse provider models <b aria-hidden="true">→</b></span></button>
     ${provider.last_refresh_error ? `<p class="provider-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
+    <div class="provider-usage">${providerQuotaHTML(provider)}${providerCostHTML(provider)}</div>
   </article>`;
 }
 const metric = (value, label) => `<div class="metric"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
+function providerQuotaHTML(provider) {
+  if (!['codex-subscription', 'claude-subscription', 'github-copilot', 'zai', 'ollama-cloud'].includes(provider.type)) return '';
+  const snap = state.providerQuota?.[provider.id];
+  if (!snap) return '<p class="provider-quota-status">Quota: loading…</p>';
+  const updated = snap.fetched_at ? `Updated ${date(snap.fetched_at)}` : '';
+  if (!snap.available) return `<p class="provider-quota-status">Quota unavailable · ${h(updated)}</p>`;
+  const bars = (snap.windows || []).map(w => {
+    const pct = w.used_percent == null ? null : Math.max(0, Math.min(100, Number(w.used_percent)));
+    const minutes = w.resets_at ? Math.max(0, Math.ceil((new Date(w.resets_at) - Date.now()) / 60000)) : null;
+    const reset = minutes == null ? '' : ` · Resets in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+    return `<div class="provider-quota-window"><div><strong>${h(w.label)}</strong><span>${pct == null ? 'Unlimited / not reported' : `${Math.round(pct)}% used`}</span></div>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<small>${w.remaining == null ? '' : `${Number(w.remaining).toLocaleString()} remaining`}${h(reset)}</small></div>`;
+  });
+  return `<div class="provider-quota">${snap.plan ? `<strong>${h(snap.plan)}</strong>` : ''}${bars.slice(0, 2).join('')}${bars.length > 2 ? `<details><summary>Additional limits</summary>${bars.slice(2).join('')}</details>` : ''}<small>${h(updated)}${bars.length ? '' : ' · No quota windows reported'}</small></div>`;
+}
+function providerCostHTML(provider) {
+  const totals = { '24h': null, '7d': null };
+  for (const model of state.models.filter(m => m.provider_id === provider.id)) {
+    const costs = state.usage?.real_cost?.[model.canonical_model_id];
+    for (const window of Object.keys(totals)) {
+      if (costs?.[window] != null) totals[window] = (totals[window] ?? 0) + costs[window];
+    }
+  }
+  const subscription = ['codex-subscription', 'claude-subscription', 'github-copilot', 'ollama-cloud', 'opencode-go'].includes(provider.type);
+  return `<div class="provider-cost"><strong>${subscription ? 'API-equivalent router usage' : 'Router usage cost'}</strong><span>24h ${totals['24h'] == null ? '—' : `~${fmtCost(totals['24h'])} est.`} · 7d ${totals['7d'] == null ? '—' : `~${fmtCost(totals['7d'])} est.`}</span></div>`;
+}
 const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="badge badge-${kind}">${h(label)}</span>`;
 const typeLabel = type => state.providerTypes.find(item => item.type === type)?.label || type;
 
@@ -893,7 +949,7 @@ function shownModels() {
   $('#models-empty-mobile').hidden = shown.length > 0;
    const rows = applyModelSort(shown);
    const mobile = window.matchMedia('(max-width: 720px)').matches;
-   $('#models-body').innerHTML = mobile ? '' : rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
+   $('#models-body').innerHTML = mobile ? '' : rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h', state.usage?.real_cost?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h', state.usage?.real_cost?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d', state.usage?.real_cost?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
    $('#models-cards').innerHTML = mobile ? rows.map(modelCard).join('') : '';
   const head = $('#models-body').parentElement.querySelector('thead');
   if (head) {
@@ -919,7 +975,8 @@ function mobileUsage(model, kind = 'real') {
   const key = model.canonical_model_id;
   const usage = kind === 'virtual' ? state.usage?.virtual_models?.[key] : state.usage?.real_models?.[key];
   const cache = kind === 'virtual' ? state.usage?.virtual_cache?.[key] : state.usage?.real_cache?.[key];
-  return ['1h', '24h', '7d'].map(window => `<span><small>${window}</small>${tok(usage?.[window], cache?.[window], window)}</span>`).join('');
+  const cost = kind === 'virtual' ? state.usage?.virtual_cost?.[key] : state.usage?.real_cost?.[key];
+  return ['1h', '24h', '7d'].map(window => `<span><small>${window}</small>${tok(usage?.[window], cache?.[window], window, cost?.[window])}</span>`).join('');
 }
 function modelCard(model) {
   const available = model.available;
@@ -1002,7 +1059,7 @@ function renderVirtual() {
     const broken = models.filter(m => !m.available).length;
     const note = broken ? `${broken} broken target` : (models.length ? 'group' : 'empty group');
     const actions = grp ? `<button class="btn btn-small btn-secondary" data-group-edit="${h(grp.id)}">Edit</button><button class="btn btn-small btn-danger" data-group-delete="${h(grp.id)}">Delete</button>` : '';
-    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><div class="client-name-line"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(model.available ? 'Routable' : 'Broken target')}" title="${h(model.available ? 'Routable' : 'Broken target')}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(model.canonical_model_id)}</strong></div><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
+    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><div class="client-name-line"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(model.available ? 'Routable' : 'Broken target')}" title="${h(model.available ? 'Routable' : 'Broken target')}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(model.canonical_model_id)}</strong></div><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h', state.usage?.virtual_cost?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h', state.usage?.virtual_cost?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d', state.usage?.virtual_cost?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
   }).join('');
    $('#virtual-body').innerHTML = html;
    $('#virtual-empty-mobile').hidden = state.virtualModels.length > 0 || (!searching && state.groups.length > 0);
@@ -1616,7 +1673,7 @@ function clientRow(client) {
   const routeCell = client.type === 'single'
     ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
     : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
+  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong>${estimatedMark(client.id)}</div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h', state.usage?.client_cost?.[client.id]?.['1h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h', state.usage?.client_cost?.[client.id]?.['24h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d', state.usage?.client_cost?.[client.id]?.['7d'], state.usage?.client_tokens?.[client.id])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
@@ -1894,7 +1951,7 @@ function activityDetailHTML(row, kind) {
   return `${parts.join('')}${loadError}${pending}`;
 }
 function resolvedActivity(row) { return activityDetailHTML(row, 'table'); }
-function activityCardDetail(row) { return activityDetailHTML(row, 'card'); }
+function activityCardDetail(row) { return activityDetailHTML(row, 'card') + `<div class="history-meta">${rowCache(row)}</div>`; }
 
 // createActivityFeed renders a window of rows immediately, backfills each row's
 // attempt details as it scrolls into view (bounded concurrency), and loads
@@ -2157,6 +2214,7 @@ document.addEventListener('keydown', event => { if (event.key !== 'Enter' && eve
   const status = row.http_status >= 200 && row.http_status < 300 ? 'Succeeded' : `HTTP ${row.http_status || 'error'}`;
   const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
   const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
+  // Shared detail renderer below includes the request's accounting.
    return `<article class="history-card" data-activity-row="${h(row.id)}"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div data-activity-resolved="${h(row.id)}" data-activity-detail-kind="card">${activityCardDetail(row)}</div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
 }
  filterInput('#activity-search', value => { activityFeed.setSearch(value); });
@@ -2323,7 +2381,16 @@ async function loadAccount() {
       : 'Click Delete my account to confirm with Google, then return here to complete deletion.';
     const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
-    $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
+    const costWindows = usage.client_cost ? Object.values(usage.client_cost) : [];
+    const sumCost = windowKey => costWindows.reduce((total, w) => total + ((w?.[windowKey] ?? 0) || 0), 0);
+    const metric = (label, value) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
+    $('#account-usage').innerHTML = [
+      metric('1h tokens', sum('1h')),
+      metric('24h tokens', sum('24h')),
+      metric('7d tokens', sum('7d')),
+      metric('24h est. USD', (sumCost('24h') / 1e6).toFixed(2)),
+      metric('7d est. USD', (sumCost('7d') / 1e6).toFixed(2)),
+    ].join('');
     renderPlanCard(plan);
     state.planInfo = plan; state.planInfoAt = Date.now();
   } catch (error) {
@@ -2346,6 +2413,47 @@ function renderPlanCard(plan) {
     row('Monthly requests', usage.monthly_requests ?? 0, limits.monthly_requests ?? -1),
     `<div class="plan-row"><span class="plan-label">Activity retention</span><span class="plan-value">${h(fmt(limits.activity_retention_days ?? -1))} days</span></div>`,
   ].join('');
+}
+
+// loadQuota fetches cached subscription/quota snapshots and renders them in the
+// Subscriptions card. The card stays hidden when no provider has a snapshot.
+async function loadQuota() {
+  try {
+    const payload = await api('/api/admin/quota');
+    state.providerQuota = payload?.providers || {};
+    $$('article.provider-card').forEach(card => {
+      const provider = state.providers.find(p => p.id === card.dataset.providerId);
+      const usage = $('.provider-usage', card);
+      if (provider && usage) usage.innerHTML = providerQuotaHTML(provider) + providerCostHTML(provider);
+    });
+  } catch {
+    $$('article.provider-card .provider-quota-status').forEach(el => { el.textContent = 'Quota unavailable'; });
+  }
+}
+// Viewing Providers keeps the displayed snapshots fresh; the server owns the
+// 30-minute idle / 60-second active cadence and the 30-second on-view floor.
+setInterval(() => {
+  if (state.view === 'providers' && !document.hidden) loadQuota();
+}, 60000);
+
+// renderQuotaProvider renders one provider's quota snapshot.
+function renderQuotaProvider(snap) {
+  const name = h(snap.provider_name || snap.provider_id || 'Provider');
+  if (!snap.available) {
+    return `<div class="plan-row"><span class="plan-label">${name}</span><span class="plan-value">Unavailable${snap.reason ? ` (${h(snap.reason)})` : ''}</span></div>`;
+  }
+  const plan = snap.plan ? `<span class="plan-label">${name} <small>${h(snap.plan)}</small></span>` : `<span class="plan-label">${name}</span>`;
+  const windows = (snap.windows || []).map(w => {
+    if (w.used_percent != null) {
+      const pct = Math.round(w.used_percent);
+      return `<span class="quota-window"><small>${h(w.label)}</small><b>${pct}% used</b></span>`;
+    }
+    if (w.remaining != null) {
+      return `<span class="quota-window"><small>${h(w.label)}</small><b>${Number(w.remaining).toLocaleString()} left</b></span>`;
+    }
+    return `<span class="quota-window"><small>${h(w.label)}</small><b>—</b></span>`;
+  }).join('');
+  return `<div class="plan-row quota-row"><span class="plan-label">${plan}</span><span class="quota-windows">${windows}</span></div>`;
 }
 
 // loadFooterVersion shows the deployed version/commit with an AGPL source link.
@@ -2815,27 +2923,41 @@ function markChanged(el) {
 // text or class actually moved. The cell itself is never replaced, so
 // repeated updates cannot nest .tok .tok and a token value reverting to
 // zero always clears stale Mtok/cache markup.
-function patchTokenCell(cell, tokens, pct) {
+function patchTokenCell(cell, tokens, pct, cost = null) {
+  const row = cell.closest('[data-client-id], [data-model-id], [data-virtual-id]');
+  const window = cell.dataset.window;
+  let costs;
+  if (row?.dataset.clientId) costs = state.usage?.client_cost?.[row.dataset.clientId];
+  else if (row?.dataset.modelId) costs = state.usage?.real_cost?.[state.models.find(m => m.id === row.dataset.modelId)?.canonical_model_id];
+  else if (row?.dataset.virtualId) costs = state.usage?.virtual_cost?.[state.virtualModels.find(m => m.id === row.dataset.virtualId)?.canonical_model_id];
+  if (costs && !costs.estimated?.[window]) cell.dataset.costExact = 'true';
+  else delete cell.dataset.costExact;
   // Once usage has arrived, a still-unknown cell is a genuine empty state, not
   // loading. Rebuild from the loading spinner to the "—"/populated structure.
   if (cell.querySelector('.tok-loading')) {
-    if (tokLoading(tokens, pct)) return;
+    if (tokLoading(tokens, pct, cost)) return;
     cell.removeAttribute('aria-busy');
-    cell.innerHTML = renderTokInner(tokens, pct);
+    cell.innerHTML = renderTokInner(tokens, pct, false, cost);
     const first = $('b', cell);
     if (first) markChanged(first);
     return;
   }
-  const populated = Boolean(tokens) || (pct != null && !isNaN(pct));
-  const numEl = $('b', cell);
+  const costText = fmtCost(cost);
+  const populated = Boolean(tokens) || (pct != null && !isNaN(pct)) || Boolean(costText);
+  const numEl = cell.querySelector(':scope > b');
   const cacheEl = $('.cache-hit b', cell);
+  const costEl = $('.tok-cost b', cell);
   const hasStructured = Boolean(numEl) || Boolean(cacheEl);
-  if (populated !== hasStructured) {
-    cell.innerHTML = renderTokInner(tokens, pct);
+  // When only a cost is present, the structure differs from the token shape;
+  // rebuild so the cost line appears without a spurious Mtok/cache block.
+  if (populated !== hasStructured || Boolean(costText) !== Boolean(costEl)) {
+    cell.innerHTML = renderTokInner(tokens, pct, false, cost);
     const newNum = $('b', cell);
     if (newNum) markChanged(newNum);
     const newCache = $('.cache-hit b', cell);
     if (newCache) markChanged(newCache);
+    const newCost = $('.tok-cost b', cell);
+    if (newCost) markChanged(newCost);
     return;
   }
   if (!populated) return;
@@ -2849,6 +2971,12 @@ function patchTokenCell(cell, tokens, pct) {
     cacheEl.textContent = cache;
     markChanged(cacheEl);
   }
+  if (costEl && costEl.textContent !== costText) {
+    costEl.textContent = costText;
+    markChanged(costEl);
+  }
+  const costLabel = $('.tok-cost small', cell);
+  if (costLabel && costs) costLabel.textContent = costs.estimated?.[window] ? 'est.' : 'reported';
 }
 
 // Patch the resolution icon for one target line from the current state.
@@ -2899,7 +3027,7 @@ function reconcileLive() {
       const canonical = model.canonical_model_id;
       ['1h', '24h', '7d'].forEach(window => {
         const cell = $(`.tok[data-window="${window}"]`, row);
-        if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window]);
+        if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window], state.usage?.virtual_cost?.[canonical]?.[window]);
       });
       patchVirtualSpinner(row, routeActivity(model.id));
     });
@@ -2911,7 +3039,7 @@ function reconcileLive() {
       const canonical = model.canonical_model_id;
       ['1h', '24h', '7d'].forEach(window => {
         const cell = $(`.tok[data-window="${window}"]`, row);
-        if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window]);
+        if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window], state.usage?.real_cost?.[canonical]?.[window]);
       });
     });
   }
@@ -2921,7 +3049,7 @@ function reconcileLive() {
       if (row) {
         ['1h', '24h', '7d'].forEach(window => {
           const cell = $(`.tok[data-window="${window}"]`, row);
-          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
+          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window], state.usage?.client_cost?.[client.id]?.[window]);
         });
         applyClientRoundel($('.status-roundel', row), client, state.liveRequests[client.id]);
       }
@@ -2931,7 +3059,7 @@ function reconcileLive() {
           const cells = $$(`.tok[data-window="${window}"]`, card);
           const values = state.usage?.client_keys?.[client.id]?.[window];
           const caches = state.usage?.client_cache?.[client.id]?.[window];
-          cells.forEach(cell => patchTokenCell(cell, values, caches));
+          cells.forEach(cell => patchTokenCell(cell, values, caches, state.usage?.client_cost?.[client.id]?.[window]));
         });
         applyClientRoundel($('.status-roundel', card), client, state.liveRequests[client.id]);
       }

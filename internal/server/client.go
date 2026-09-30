@@ -625,6 +625,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// built up as the request progresses and written once, synchronously, in a
 	// deferred best-effort insert that never fails the request.
 	row := &logRow{
+		inputEstimate:   int64(EstimateTokens(body, string(incoming))),
 		accountID:       identity.AccountID,
 		clientKeyID:     identity.ID,
 		clientName:      identity.Name,
@@ -1423,6 +1424,13 @@ routeDone:
 	}
 	row.resolvedProvider = &selected.Provider.Name
 	row.resolvedModel = &selected.UpstreamModelID
+	if selected.Provider.Type != "" {
+		providerType := selected.Provider.Type
+		row.providerType = &providerType
+	}
+	// Tighten the quota-poll cadence for this provider while it is active. A
+	// no-op when the poller is not configured.
+	s.markProviderActive(row.accountID, selected.Provider.ID)
 	s.inflight.clientResolved(row.accountID, row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
@@ -1486,8 +1494,7 @@ routeDone:
 			inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
 			return
 		}
-		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
-		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+		row.copyUsage(usage)
 		clearSelectedCooldown()
 		return
 	}
@@ -1525,8 +1532,7 @@ routeDone:
 		} else {
 			clearSelectedCooldown()
 		}
-		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
-		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+		row.copyUsage(usage)
 		return
 	}
 	if upstreamStreams {
@@ -1553,8 +1559,7 @@ routeDone:
 		} else {
 			clearSelectedCooldown()
 		}
-		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
-		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+		row.copyUsage(usage)
 		return
 	}
 	// Non-streaming JSON body: read fully to extract usage, then rewrite.
@@ -1573,8 +1578,7 @@ routeDone:
 		return
 	}
 	extractUsage(body, usage)
-	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
-	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+	row.copyUsage(usage)
 	row.httpStatus = resp.StatusCode
 	// ASTRA-008: if the client stream was already committed (ordered-fallback
 	// probing) but the selected target returned a non-streaming body, the JSON

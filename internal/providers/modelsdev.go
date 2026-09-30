@@ -53,10 +53,43 @@ type modelsDevModel struct {
 	StructuredOutput *bool               `json:"structured_output"`
 	Modalities       modelsDevModalities `json:"modalities"`
 	Limit            modelsDevLimit      `json:"limit"`
+	// Cost is the published per-million-token pricing. It is enrichment-only:
+	// these are provider list prices, displayed as *estimated*, and never used
+	// to derive hosted billing.
+	Cost modelsDevCost `json:"cost"`
 	// reasoning_options is the raw options array from models.dev. Each entry
 	// is parsed individually; a malformed entry is skipped while valid siblings
 	// are retained.
 	ReasoningOptions *[]map[string]any `json:"reasoning_options"`
+}
+
+// modelsDevCost is a model's published per-million-token pricing in USD.
+// Fields absent from the source stay nil (unknown), and Tiers holds alternate
+// rates selected by context size — models.dev's own tiering, preserved so a
+// future context-aware estimator can use it. Only the base rates are used for
+// cost estimation today.
+type modelsDevCost struct {
+	Input      *float64            `json:"input"`
+	Output     *float64            `json:"output"`
+	CacheRead  *float64            `json:"cache_read"`
+	CacheWrite *float64            `json:"cache_write"`
+	Reasoning  *float64            `json:"reasoning"`
+	Tiers      []modelsDevCostTier `json:"tiers"`
+}
+
+// modelsDevCostTier is one context-tiered pricing entry.
+type modelsDevCostTier struct {
+	Input      *float64              `json:"input"`
+	Output     *float64              `json:"output"`
+	CacheRead  *float64              `json:"cache_read"`
+	CacheWrite *float64              `json:"cache_write"`
+	Reasoning  *float64              `json:"reasoning"`
+	Tier       modelsDevCostTierSpec `json:"tier"`
+}
+
+type modelsDevCostTierSpec struct {
+	Type string `json:"type"`
+	Size int    `json:"size"`
 }
 
 type modelsDevModalities struct {

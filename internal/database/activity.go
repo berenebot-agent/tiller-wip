@@ -50,6 +50,9 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	output_tokens INTEGER,
 	cache_read_input_tokens INTEGER,
 	cache_creation_input_tokens INTEGER,
+	estimated_cost_micros INTEGER,
+	provider_cost_micros INTEGER,
+	input_tokens_estimated INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens_estimated IN (0,1)),
 	provider_request_id TEXT,
 	client_request_id TEXT NOT NULL,
 	error_text TEXT,
@@ -149,11 +152,86 @@ func OpenActivity(ctx context.Context, path string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	// The monolithic schema above creates the current shape for a fresh
+	// Activity database. An existing database keeps its original columns, so
+	// additive changes are applied here as idempotent versioned steps keyed on
+	// activity_schema_migrations. Activity is best-effort telemetry; a failed
+	// upgrade leaves the column absent and the affected reads degrade rather
+	// than blocking startup.
+	if err := upgradeActivitySchema(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("activity schema upgrade: %w", err)
+	}
 	if err := restrictFileMode(path); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return db, nil
+}
+
+// activityUpgrades are additive changes applied to a pre-existing Activity
+// database after the monolithic schema. Each step adds one column, and is
+// skipped when the column already exists — so a fresh database (whose
+// monolithic schema already contains the column) and a re-run are both no-ops.
+// SQLite has no "ADD COLUMN IF NOT EXISTS", hence the PRAGMA probe. The
+// version row is recorded only when at least one column was actually added, so
+// it is bookkeeping rather than the guard.
+var activityUpgrades = []struct {
+	version string
+	columns []struct{ table, column, ddl string }
+}{
+	{
+		version: "002_cost_and_estimate",
+		columns: []struct{ table, column, ddl string }{
+			{"request_logs", "estimated_cost_micros", `ALTER TABLE request_logs ADD COLUMN estimated_cost_micros INTEGER`},
+			{"request_logs", "provider_cost_micros", `ALTER TABLE request_logs ADD COLUMN provider_cost_micros INTEGER`},
+			{"request_logs", "input_tokens_estimated", `ALTER TABLE request_logs ADD COLUMN input_tokens_estimated INTEGER NOT NULL DEFAULT 0`},
+		},
+	},
+}
+
+func upgradeActivitySchema(ctx context.Context, db *sql.DB) error {
+	for _, up := range activityUpgrades {
+		changed := false
+		for _, col := range up.columns {
+			exists, err := activityColumnExists(ctx, db, col.table, col.column)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			if _, err := db.ExecContext(ctx, col.ddl); err != nil {
+				return fmt.Errorf("activity upgrade %s (%s.%s): %w", up.version, col.table, col.column, err)
+			}
+			changed = true
+		}
+		if changed {
+			if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO activity_schema_migrations(version,applied_at) VALUES(?,?)`, up.version, Now()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// activityColumnExists reports whether table has the named column.
+func activityColumnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // migrateActivity performs the one-time move of the Activity tables out of the
@@ -189,6 +267,9 @@ func (d *DB) migrateActivity(ctx context.Context) error {
 	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO act.request_logs(id,account_id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at)
 		SELECT rl.id,rl.account_id,rl.client_key_id,coalesce(ck.name,''),rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.route_status,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,rl.fallback_used,rl.fallback_reason,rl.created_at
 		FROM main.request_logs rl LEFT JOIN main.client_keys ck ON ck.id=rl.client_key_id`); err != nil {
+		// The pre-split central request_logs table predates the cost columns
+		// (they were added on the Activity side), so its column list above is
+		// intentionally the legacy set; new-column values default on insert.
 		return fmt.Errorf("copy request_logs: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, `INSERT OR REPLACE INTO act.request_attempts(id,account_id,request_log_id,attempt_number,provider,model,result,http_status,failure_class,error_message,error_body,error_body_truncated,latency_ms,created_at)

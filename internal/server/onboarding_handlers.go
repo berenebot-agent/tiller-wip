@@ -184,6 +184,7 @@ func (s *Server) writeAccountActivityCSV(out io.Writer, run func(fn func(store.A
 		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count",
 		"fallback_used", "fallback_reason", "error_message", "provider_request_id",
 		"client_request_id", "route_kind",
+		"estimated_cost_micros", "provider_cost_micros", "input_tokens_estimated",
 	}); err != nil {
 		return err
 	}
@@ -204,6 +205,7 @@ func (s *Server) writeAccountActivityCSV(out io.Writer, run func(fn func(store.A
 			strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
 			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID,
 			strPtrOrEmpty(row.RouteKind),
+			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), boolString(row.InputTokensEstimated),
 		}); err != nil {
 			return err
 		}

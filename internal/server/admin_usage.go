@@ -14,6 +14,8 @@ import (
 // unchanged.
 type usageWindows = store.UsageWindows
 type cacheWindows = store.CacheWindows
+type costWindows = store.CostWindows
+type tokenTypeWindows = store.TokenTypeWindows
 type targetResolutionHealth = store.TargetHealth
 
 // usage returns token totals per client key, virtual model, and real model for
@@ -36,6 +38,13 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		"client_cache":        snap.ClientCache,
 		"virtual_cache":       snap.VirtualCache,
 		"real_cache":          snap.RealCache,
+		"client_cost":         snap.ClientCost,
+		"virtual_cost":        snap.VirtualCost,
+		"real_cost":           snap.RealCost,
+		"client_tokens":       snap.ClientTokens,
+		"virtual_tokens":      snap.VirtualTokens,
+		"real_tokens":         snap.RealTokens,
+		"tokens_estimated":    snap.TokensEstimated,
 		"target_last_outcome": snap.TargetLastOutcome,
 	})
 }
@@ -59,6 +68,15 @@ type usageAggregates struct {
 	VirtualCache  map[string]cacheWindows
 	ClientCache   map[string]cacheWindows
 	RealCache     map[string]cacheWindows
+	ClientCost    map[string]costWindows
+	VirtualCost   map[string]costWindows
+	RealCost      map[string]costWindows
+	ClientTokens  map[string]tokenTypeWindows
+	VirtualTokens map[string]tokenTypeWindows
+	RealTokens    map[string]tokenTypeWindows
+	// TokensEstimated marks client keys with at least one estimated-input row in
+	// the widest window, so the UI can flag estimated totals.
+	TokensEstimated map[string]bool
 }
 
 // buildUsageSnapshot computes the full usage/health envelope shared by the
@@ -83,6 +101,13 @@ func (s *Server) buildUsageSnapshot(ctx context.Context, accountID string) (live
 		VirtualCache:      agg.VirtualCache,
 		ClientCache:       agg.ClientCache,
 		RealCache:         agg.RealCache,
+		ClientCost:        agg.ClientCost,
+		VirtualCost:       agg.VirtualCost,
+		RealCost:          agg.RealCost,
+		ClientTokens:      agg.ClientTokens,
+		VirtualTokens:     agg.VirtualTokens,
+		RealTokens:        agg.RealTokens,
+		TokensEstimated:   agg.TokensEstimated,
 		Modules: map[string]any{
 			"inflight_clients":       s.inflight.clientSnapshot(accountID),
 			"inflight_client_routes": s.inflight.clientRouteSnapshot(accountID),
@@ -168,14 +193,49 @@ func (s *Server) computeUsageAggregates(ctx context.Context, accountID string, n
 	if err != nil {
 		return usageAggregates{}, err
 	}
+	clientCost, err := sc.CostByClient(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	virtualCost, err := sc.CostByVirtual(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	realCost, err := sc.CostByReal(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	clientTokens, err := sc.TokenTypesByClient(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	virtualTokens, err := sc.TokenTypesByVirtual(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	realTokens, err := sc.TokenTypesByReal(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	tokensEstimated, err := sc.EstimatedClients(ctx, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
 	return usageAggregates{
-		TargetHealth:  targetHealth,
-		VirtualModels: virtualModels,
-		ClientKeys:    clientKeys,
-		RealModels:    realModels,
-		VirtualCache:  virtualCache,
-		ClientCache:   clientCache,
-		RealCache:     realCache,
+		TargetHealth:    targetHealth,
+		VirtualModels:   virtualModels,
+		ClientKeys:      clientKeys,
+		RealModels:      realModels,
+		VirtualCache:    virtualCache,
+		ClientCache:     clientCache,
+		RealCache:       realCache,
+		ClientCost:      clientCost,
+		VirtualCost:     virtualCost,
+		RealCost:        realCost,
+		ClientTokens:    clientTokens,
+		VirtualTokens:   virtualTokens,
+		RealTokens:      realTokens,
+		TokensEstimated: tokensEstimated,
 	}, nil
 }
 
