@@ -53,3 +53,12 @@ These test-only tools are not application runtime dependencies.
 No provider SDK is included
 in the application image. Review the upstream notices before redistributing a
 modified build or a test environment.
+
+## Optional Python gateway client
+
+`clients/python` is distributed separately from the router image under AGPL-3.0.
+Its direct runtime dependency is `httpx` (`>=0.28,<1`, BSD-3-Clause), which also
+requires its own declared dependencies. The client does not import a provider
+SDK. The Docker test build installs the client wheel and resolves those Python
+dependencies; consuming projects should pin the resolved dependency set in
+their own lock files. See [HTTPX's license](https://github.com/encode/httpx/blob/master/LICENSE.md).

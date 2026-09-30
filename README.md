@@ -322,6 +322,14 @@ curl http://localhost:8080/v1/chat/completions \
 
 With a Single key, `main` can be redirected from the control panel without changing this request.
 
+### Reusable application clients
+
+Native [Go and Python gateway clients](clients/README.md) provide normalized
+model/capability catalogs, Chat calls, streaming, tool-result continuation,
+structured-output options, usage and safe errors against Tiller or OpenRouter.
+They use only public HTTP and ship with runnable examples and shared contract
+tests. Applications retain their own tool execution and business policy.
+
 ---
 
 ## Design principles

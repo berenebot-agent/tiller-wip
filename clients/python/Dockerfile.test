@@ -1,0 +1,15 @@
+# syntax=docker/dockerfile:1.7
+FROM python:3.13-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /package
+# The build context is clients/, so shared fixtures/examples are available to tests.
+COPY python/ /package/
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m pip wheel --no-deps /package -w /wheels && \
+    python -m pip install /wheels/tiller_gateway-*.whl
+COPY fixtures/ /work/clients/fixtures/
+COPY examples/python/ /work/clients/examples/python/
+COPY python/tests/ /work/clients/python/tests/
+# Test the installed wheel, from outside its source checkout.
+WORKDIR /work
+CMD ["python", "-m", "unittest", "discover", "-s", "clients/python/tests", "-v"]

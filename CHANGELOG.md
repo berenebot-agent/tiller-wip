@@ -8,6 +8,12 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Thin Go and Python gateway clients** under `clients/`, using Tiller's public
+  HTTP interface or an explicit OpenRouter profile. Includes normalized catalogs
+  and tri-state capability filters, native Chat/images/tools/JSON/reasoning
+  requests, streaming with terminal-error detection, usage and safe errors,
+  shared fixtures, runnable examples, installed-wheel tests and real Tiller HTTP
+  integration coverage.
 - **Optional consent-gated hosted analytics.** The platform dashboard can enable
   web analytics for hosted pages (Umami primary; Plausible or a custom https
   script URL). Disabled by default. When enabled, the script is requested only
