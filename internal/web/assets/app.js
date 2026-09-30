@@ -202,8 +202,13 @@ function markUsageReady() {
   state.usageReady = true;
   modelsResortPending = true;
 }
+// usageHasCostKeys reports whether a cached envelope carries the cost/type
+// fields added after the first usage envelope shipped. An envelope missing them
+// (e.g. an older SSE baseline) must not suppress the real fetch, or cost/token
+// breakdowns would stay blank until the next unrelated refresh.
+const usageHasCostKeys = usage => usage && (usage.real_cost !== undefined || usage.client_cost !== undefined || usage.client_tokens !== undefined);
 async function loadUsage() {
-  if (state.usage && Date.now() - state.usageAt < USAGE_REUSE_MS) return state.usage;
+  if (usageHasCostKeys(state.usage) && Date.now() - state.usageAt < USAGE_REUSE_MS) return state.usage;
   if (usageInFlight) return usageInFlight;
   usageInFlight = api('/api/admin/usage').then(usage => {
     state.usage = usage; state.usageAt = Date.now(); markUsageReady();
@@ -3137,7 +3142,7 @@ live.on('outcome', payload => {
 
 live.on('snapshot', payload => {
   if (!state.usage) state.usage = {};
-  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
+  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'tokens_estimated'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
   // The SSE baseline snapshot already carries the usage envelope, so mark it

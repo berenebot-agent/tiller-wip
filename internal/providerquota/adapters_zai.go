@@ -2,6 +2,8 @@ package providerquota
 
 import (
 	"context"
+	"encoding/json"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -102,38 +104,88 @@ func zaiWindowLabel(unit, number int) string {
 }
 
 // fetchOllamaCloud reads Ollama Cloud usage. The endpoint is undocumented but
-// used by several clients; it reports session and weekly usage percentages. A
-// failure is surfaced as unavailable, never fatal.
+// used by several clients. The verified shape is:
+//
+//	{"limits":{"session":{"usage":0.42},"weekly":{"usage":0.55}}}
+//
+// where usage is a fraction (0-1), so it is multiplied by 100. The parser is
+// deliberately tolerant: it also accepts a top-level session/weekly fraction
+// and a legacy array-of-limits form, so a future shape change degrades to
+// "no quota reported" rather than a hard failure. The URL is built from the
+// provider's base URL when set (defaulting to ollama.com) so tests can point
+// it at a mock server.
 func fetchOllamaCloud(ctx context.Context, client *http.Client, cred Credential) (Snapshot, error) {
+	base := strings.TrimRight(cred.BaseURL, "/")
+	if base == "" || strings.Contains(base, "host.docker.internal") {
+		base = "https://ollama.com"
+	}
+	if origin, err := url.Parse(base); err == nil && origin.Host != "" {
+		base = origin.Scheme + "://" + origin.Host
+	}
 	var payload struct {
+		// Top-level fraction form (fallback).
 		Session *float64 `json:"session"`
 		Weekly  *float64 `json:"weekly"`
-		Limits  []struct {
-			Label       string   `json:"label"`
-			Description string   `json:"description"`
-			UsedPercent *float64 `json:"used_percent"`
-		} `json:"limits"`
+		// limits is decoded loosely because the verified shape is an object
+		// ({"session":{"usage":0.42},...}) while older/alternative clients have
+		// seen an array form. Decoding into RawMessage lets both be tried.
+		Limits json.RawMessage `json:"limits"`
 	}
-	url := "https://ollama.com/api/usage"
+	url := base + "/api/usage"
 	if err := getJSON(ctx, client, url, bearer(cred.Credential), &payload); err != nil {
 		return Snapshot{}, err
 	}
 	snap := Snapshot{}
-	if payload.Session != nil {
-		snap.Windows = append(snap.Windows, Window{Label: "session", UsedPercent: percentPtr(*payload.Session)})
-	}
-	if payload.Weekly != nil {
-		snap.Windows = append(snap.Windows, Window{Label: "weekly", UsedPercent: percentPtr(*payload.Weekly)})
-	}
-	for _, l := range payload.Limits {
-		if l.UsedPercent == nil {
-			continue
+	addFraction := func(label string, v *float64) {
+		if v == nil {
+			return
 		}
-		label := l.Label
-		if label == "" {
-			label = l.Description
+		// usage is a fraction of the quota (0-1); scale to a percentage and
+		// round to avoid float noise like 55.00000000000001.
+		pct := math.Round(*v*1000) / 10
+		snap.Windows = append(snap.Windows, Window{Label: label, UsedPercent: percentPtr(pct)})
+	}
+	addFraction("session", payload.Session)
+	addFraction("weekly", payload.Weekly)
+	if len(payload.Limits) > 0 {
+		// Verified object form first.
+		var obj struct {
+			Session *ollamaUsage `json:"session"`
+			Weekly  *ollamaUsage `json:"weekly"`
 		}
-		snap.Windows = append(snap.Windows, Window{Label: label, UsedPercent: percentPtr(*l.UsedPercent)})
+		if err := json.Unmarshal(payload.Limits, &obj); err == nil && (obj.Session != nil || obj.Weekly != nil) {
+			if obj.Session != nil {
+				addFraction("session", obj.Session.Usage)
+			}
+			if obj.Weekly != nil {
+				addFraction("weekly", obj.Weekly.Usage)
+			}
+		} else {
+			// Legacy array form: [{label,description,used_percent}].
+			var arr []struct {
+				Label       string   `json:"label"`
+				Description string   `json:"description"`
+				UsedPercent *float64 `json:"used_percent"`
+			}
+			if err := json.Unmarshal(payload.Limits, &arr); err == nil {
+				for _, l := range arr {
+					if l.UsedPercent == nil {
+						continue
+					}
+					label := l.Label
+					if label == "" {
+						label = l.Description
+					}
+					snap.Windows = append(snap.Windows, Window{Label: label, UsedPercent: percentPtr(*l.UsedPercent)})
+				}
+			}
+		}
 	}
 	return snap, nil
+}
+
+// ollamaUsage is one nested limit entry in the Ollama usage response. usage is
+// a fraction (0-1).
+type ollamaUsage struct {
+	Usage *float64 `json:"usage"`
 }
