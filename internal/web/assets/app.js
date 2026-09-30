@@ -622,6 +622,7 @@ async function loadProviders(search = $('#provider-search').value) {
   ]).values()] : result.data;
   renderProviders(matchingProviders);
   loadQuota();
+  deferUsage();
   if (drawerProviderID && !state.providers.some(provider => provider.id === drawerProviderID)) closeProviderDrawer();
   else if (drawerProviderID) {
     const provider = state.providers.find(item => item.id === drawerProviderID);
@@ -650,30 +651,53 @@ function providerCard(provider) {
   </article>`;
 }
 const metric = (value, label) => `<div class="metric"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
+// subscriptionProviderTypes have a flat-fee subscription: quota is the right
+// signal and a per-token cost would be misleading, so no cost line is shown.
+const subscriptionProviderTypes = ['codex-subscription', 'claude-subscription', 'github-copilot', 'ollama-cloud', 'opencode-go'];
+const isSubscription = provider => subscriptionProviderTypes.includes(provider.type);
+// quotaProviderTypes have a quota endpoint (subscriptions plus plan-tiered
+// pay-as-you-go like Z.ai).
+const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github-copilot', 'zai', 'ollama-cloud'];
+
+// providerQuotaHTML renders the compact quota block: one line per window with
+// the label, an inline bar, the used percentage and a short reset countdown.
+// The plan name and freshness line are deliberately omitted to keep the card
+// short.
 function providerQuotaHTML(provider) {
-  if (!['codex-subscription', 'claude-subscription', 'github-copilot', 'zai', 'ollama-cloud'].includes(provider.type)) return '';
+  if (!quotaProviderTypes.includes(provider.type)) return '';
   const snap = state.providerQuota?.[provider.id];
   if (!snap) return '<p class="provider-quota-status">Quota: loading…</p>';
-  const updated = snap.fetched_at ? `Updated ${date(snap.fetched_at)}` : '';
-  if (!snap.available) return `<p class="provider-quota-status">Quota unavailable · ${h(updated)}</p>`;
-  const bars = (snap.windows || []).map(w => {
+  if (!snap.available) return '<p class="provider-quota-status">Quota unavailable</p>';
+  const windows = snap.windows || [];
+  if (!windows.length) return '<p class="provider-quota-status">No quota reported</p>';
+  const rows = windows.map(w => {
     const pct = w.used_percent == null ? null : Math.max(0, Math.min(100, Number(w.used_percent)));
     const minutes = w.resets_at ? Math.max(0, Math.ceil((new Date(w.resets_at) - Date.now()) / 60000)) : null;
-    const reset = minutes == null ? '' : ` · Resets in ${Math.floor(minutes / 60)}h ${minutes % 60}m`;
-    return `<div class="provider-quota-window"><div><strong>${h(w.label)}</strong><span>${pct == null ? 'Unlimited / not reported' : `${Math.round(pct)}% used`}</span></div>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<small>${w.remaining == null ? '' : `${Number(w.remaining).toLocaleString()} remaining`}${h(reset)}</small></div>`;
+    const reset = minutes == null ? '' : ` · ${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
+    const detail = pct == null ? 'Unlimited' : `${Math.round(pct)}% used`;
+    return `<div class="provider-quota-window"><strong>${h(w.label)}</strong>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<span>${detail}${h(reset)}</span></div>`;
   });
-  return `<div class="provider-quota">${snap.plan ? `<strong>${h(snap.plan)}</strong>` : ''}${bars.slice(0, 2).join('')}${bars.length > 2 ? `<details><summary>Additional limits</summary>${bars.slice(2).join('')}</details>` : ''}<small>${h(updated)}${bars.length ? '' : ' · No quota windows reported'}</small></div>`;
+  return `<div class="provider-quota">${rows.slice(0, 2).join('')}${rows.length > 2 ? `<details><summary>${rows.length - 2} more limits</summary>${rows.slice(2).join('')}</details>` : ''}</div>`;
 }
+
+// providerCostHTML renders the router usage cost for pay-per-token providers
+// across the same 1h/24h/7d windows the token views use. It is omitted for
+// subscriptions, and a window with no costed traffic shows "—".
 function providerCostHTML(provider) {
-  const totals = { '24h': null, '7d': null };
+  if (isSubscription(provider)) return '';
+  const windows = ['1h', '24h', '7d'];
+  const totals = Object.fromEntries(windows.map(w => [w, null]));
+  const estimated = Object.fromEntries(windows.map(w => [w, false]));
   for (const model of state.models.filter(m => m.provider_id === provider.id)) {
     const costs = state.usage?.real_cost?.[model.canonical_model_id];
-    for (const window of Object.keys(totals)) {
+    for (const window of windows) {
       if (costs?.[window] != null) totals[window] = (totals[window] ?? 0) + costs[window];
+      if (costs?.estimated?.[window]) estimated[window] = true;
     }
   }
-  const subscription = ['codex-subscription', 'claude-subscription', 'github-copilot', 'ollama-cloud', 'opencode-go'].includes(provider.type);
-  return `<div class="provider-cost"><strong>${subscription ? 'API-equivalent router usage' : 'Router usage cost'}</strong><span>24h ${totals['24h'] == null ? '—' : `~${fmtCost(totals['24h'])} est.`} · 7d ${totals['7d'] == null ? '—' : `~${fmtCost(totals['7d'])} est.`}</span></div>`;
+  if (windows.every(w => totals[w] == null)) return '';
+  const part = window => totals[window] == null ? `${window} —` : `${window} ${estimated[window] ? '~' : ''}${fmtCost(totals[window])}${estimated[window] ? ' est.' : ''}`;
+  return `<div class="provider-cost"><span>${windows.map(part).join(' · ')}</span></div>`;
 }
 const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="badge badge-${kind}">${h(label)}</span>`;
 const typeLabel = type => state.providerTypes.find(item => item.type === type)?.label || type;
@@ -2415,19 +2439,28 @@ function renderPlanCard(plan) {
   ].join('');
 }
 
-// loadQuota fetches cached subscription/quota snapshots and renders them in the
-// Subscriptions card. The card stays hidden when no provider has a snapshot.
+// renderProviderUsage fills every provider card's usage block from the current
+// quota snapshots (state.providerQuota) and usage envelope (state.usage). It is
+// called both when quota arrives and when the usage envelope arrives, so cost
+// and quota never depend on fetch ordering.
+function renderProviderUsage() {
+  $$('article.provider-card').forEach(card => {
+    const provider = state.providers.find(p => p.id === card.dataset.providerId);
+    const usage = $('.provider-usage', card);
+    if (provider && usage) usage.innerHTML = providerQuotaHTML(provider) + providerCostHTML(provider);
+  });
+}
+
+// loadQuota fetches cached subscription/quota snapshots and re-renders the
+// provider-card usage blocks.
 async function loadQuota() {
   try {
     const payload = await api('/api/admin/quota');
     state.providerQuota = payload?.providers || {};
-    $$('article.provider-card').forEach(card => {
-      const provider = state.providers.find(p => p.id === card.dataset.providerId);
-      const usage = $('.provider-usage', card);
-      if (provider && usage) usage.innerHTML = providerQuotaHTML(provider) + providerCostHTML(provider);
-    });
+    renderProviderUsage();
   } catch {
-    $$('article.provider-card .provider-quota-status').forEach(el => { el.textContent = 'Quota unavailable'; });
+    state.providerQuota = state.providerQuota || {};
+    renderProviderUsage();
   }
 }
 // Viewing Providers keeps the displayed snapshots fresh; the server owns the
@@ -3032,16 +3065,22 @@ function reconcileLive() {
       patchVirtualSpinner(row, routeActivity(model.id));
     });
   }
-  if (liveViewActive('providers') && $('#provider-drawer').classList.contains('open')) {
-    state.models.forEach(model => {
-      const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
-      if (!row) return;
-      const canonical = model.canonical_model_id;
-      ['1h', '24h', '7d'].forEach(window => {
-        const cell = $(`.tok[data-window="${window}"]`, row);
-        if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window], state.usage?.real_cost?.[canonical]?.[window]);
+  if (liveViewActive('providers')) {
+    // Provider-card usage blocks (quota bars + router cost) depend on both the
+    // quota snapshots and the usage envelope; re-render them whenever either
+    // arrives so ordering never leaves a card blank.
+    renderProviderUsage();
+    if ($('#provider-drawer').classList.contains('open')) {
+      state.models.forEach(model => {
+        const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
+        if (!row) return;
+        const canonical = model.canonical_model_id;
+        ['1h', '24h', '7d'].forEach(window => {
+          const cell = $(`.tok[data-window="${window}"]`, row);
+          if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window], state.usage?.real_cost?.[canonical]?.[window]);
+        });
       });
-    });
+    }
   }
   if (liveViewActive('clients')) {
     state.clients.forEach(client => {
