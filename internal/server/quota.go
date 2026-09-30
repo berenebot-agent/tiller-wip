@@ -21,6 +21,7 @@ func quotaProviderTypes() []string {
 		"github-copilot",
 		"zai",
 		"ollama-cloud",
+		"commandcode",
 	}
 }
 
