@@ -114,6 +114,13 @@ type liveSnapshot struct {
 	VirtualCache      map[string]cacheWindows           `json:"virtual_cache"`
 	ClientCache       map[string]cacheWindows           `json:"client_cache"`
 	RealCache         map[string]cacheWindows           `json:"real_cache"`
+	ClientCost        map[string]costWindows            `json:"client_cost"`
+	VirtualCost       map[string]costWindows            `json:"virtual_cost"`
+	RealCost          map[string]costWindows            `json:"real_cost"`
+	ClientTokens      map[string]tokenTypeWindows       `json:"client_tokens"`
+	VirtualTokens     map[string]tokenTypeWindows       `json:"virtual_tokens"`
+	RealTokens        map[string]tokenTypeWindows       `json:"real_tokens"`
+	TokensEstimated   map[string]bool                   `json:"tokens_estimated"`
 	// Modules carries current aggregate state for live UI modules, including
 	// in-flight virtual-model requests.
 	Modules map[string]any `json:"modules"`

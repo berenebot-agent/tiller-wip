@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -230,6 +231,48 @@ func (s *Scope) LoadProvider(ctx context.Context, id string) (ProviderLoad, erro
 	}
 	v.Enabled = enabled != 0
 	return v, nil
+}
+
+// QuotaProviderRef identifies an enabled provider whose type has a
+// subscription/quota endpoint. It carries the base URL needed to build the
+// endpoint. It is platform-level (spans accounts) because quota polling is
+// scheduled globally; each poll then runs with the provider's own account
+// scope.
+type QuotaProviderRef struct {
+	AccountID  string
+	ProviderID string
+	Name       string
+	Type       string
+	BaseURL    string
+}
+
+// QuotaProviders lists enabled providers of the given types across every
+// account. The caller supplies the quota-capable type list so the store does
+// not embed provider knowledge.
+func (s *Store) QuotaProviders(ctx context.Context, types []string) ([]QuotaProviderRef, error) {
+	if len(types) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(types))
+	args := make([]any, 0, len(types))
+	for i, t := range types {
+		placeholders[i] = "?"
+		args = append(args, t)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT account_id,id,name,type,coalesce(base_url,'') FROM providers WHERE enabled=1 AND type IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QuotaProviderRef
+	for rows.Next() {
+		var ref QuotaProviderRef
+		if err := rows.Scan(&ref.AccountID, &ref.ProviderID, &ref.Name, &ref.Type, &ref.BaseURL); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
 }
 
 // ProviderRef identifies a provider due for a scheduled refresh.

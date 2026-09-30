@@ -200,6 +200,65 @@ func TestDeleteClientKeyRetryWithPendingCleanup(t *testing.T) {
 	}
 }
 
+// TestUsageCostAndTokenTypeAggregates proves the new cost and token-type
+// aggregates: per-type sums are exact, and the provider-reported cost is
+// preferred over the estimate per row.
+func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
+	_, st := openActivityStore(t)
+	ctx := context.Background()
+	sc := st.For(database.LocalAccountID)
+	now := database.Now()
+	in, out := int64(100), int64(50)
+	est, prov := int64(2_000_000), int64(5_000_000)
+	cr := int64(10)
+	insert := func(id string, input, output *int64, estCost, provCost *int64, estimated bool, providerType string) {
+		t.Helper()
+		var pt *string
+		if providerType != "" {
+			pt = &providerType
+		}
+		pm := "model-a"
+		if err := sc.InsertRequestLog(ctx, store.RequestLogInsert{
+			ID: id, ClientKeyID: "ck", ClientName: "ck", RequestedModel: "model-a",
+			Protocol: "chat", HTTPStatus: 200, LatencyMs: 1, ClientRequestID: id, CreatedAt: now,
+			ResolvedProvider: pt, ResolvedModel: &pm,
+			InputTokens: input, OutputTokens: output, CacheReadInputTokens: &cr,
+			EstimatedCostMicros: estCost, ProviderCostMicros: provCost, InputTokensEstimated: estimated,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insert("r1", &in, &out, &est, nil, false, "openai")
+	insert("r2", &in, &out, &est, &prov, true, "openai")
+
+	c1 := now
+	types, err := sc.TokenTypesByClient(ctx, c1, c1, c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := types["ck"]
+	if got.Input.D7 != 200 || got.Output.D7 != 100 || got.CacheRead.D7 != 20 {
+		t.Fatalf("token types = %+v", got)
+	}
+
+	costs, err := sc.CostByClient(ctx, c1, c1, c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// r1 uses the estimate (2e6), r2 prefers the provider cost (5e6).
+	if costs["ck"].D7 == nil || *costs["ck"].D7 != 7_000_000 {
+		t.Fatalf("cost total = %v, want 7000000", costs["ck"].D7)
+	}
+
+	estimated, err := sc.EstimatedClients(ctx, c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !estimated["ck"] {
+		t.Fatal("client with an estimated row should be flagged")
+	}
+}
+
 func ids(rows []store.ActivityRow) []string {
 	out := make([]string, 0, len(rows))
 	for _, r := range rows {
