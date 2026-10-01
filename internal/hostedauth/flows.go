@@ -69,7 +69,13 @@ func (s *FlowStore) Take(state string) (Flow, bool) {
 type SignupClaims struct {
 	Subject string
 	Email   string
-	Expires time.Time
+	// Authoritative records whether Google is authoritative for Email (see
+	// GoogleIdentity.AuthoritativeEmail). It is captured when the identity is
+	// validated so the decision cannot drift if Google's claims are re-read
+	// later, and so a non-authoritative email match can never be silently
+	// upgraded to an automatic account link.
+	Authoritative bool
+	Expires       time.Time
 }
 
 // PendingSignupStore retains a validated Google identity until the visitor
@@ -107,6 +113,22 @@ func (s *PendingSignupStore) Put(claims SignupClaims) (string, bool) {
 	claims.Expires = now.Add(FlowTTL)
 	s.entries[key] = claims
 	return token, true
+}
+
+// Peek returns a pending claim without consuming it. A failed or abandoned
+// follow-up action must not destroy the claim: consuming it on an attempt that
+// the user can still retry would force a fresh Google round trip for what looks
+// like a transient error. Take remains the consuming read for the terminal
+// success or refusal paths.
+func (s *PendingSignupStore) Peek(token string) (SignupClaims, bool) {
+	if s == nil || token == "" {
+		return SignupClaims{}, false
+	}
+	key := sha256.Sum256([]byte(token))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	claims, ok := s.entries[key]
+	return claims, ok && time.Now().Before(claims.Expires)
 }
 
 func (s *PendingSignupStore) Take(token string) (SignupClaims, bool) {

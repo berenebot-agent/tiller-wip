@@ -38,6 +38,40 @@ type GoogleIdentity struct {
 	Subject       string
 	Email         string
 	EmailVerified bool
+	// HostedDomain is Google's `hd` claim: set only for a Google Workspace or
+	// Cloud organization account. It is empty for personal Google accounts.
+	HostedDomain string
+}
+
+// gmailSuffixes are the address suffixes Google itself hosts and is therefore
+// authoritative for. googlemail.com is the historical alias of gmail.com and
+// maps to the same mailbox.
+var gmailSuffixes = []string{"@gmail.com", "@googlemail.com"}
+
+// AuthoritativeEmail reports whether Google is authoritative for this identity's
+// email address, per Google's Sign in with Google server-side verification
+// guidance: Google is authoritative when the address is hosted by Google
+// (gmail.com / googlemail.com) or when the account is a Google Workspace
+// account (verified email plus a non-empty `hd` claim).
+//
+// It is NOT authoritative for a third-party address merely because
+// email_verified is true: Google documents that email_verified can remain true
+// after ownership of a third-party mailbox has changed. Callers must not treat
+// a non-authoritative match as proof of current mailbox control.
+func (g GoogleIdentity) AuthoritativeEmail() bool {
+	if !g.EmailVerified {
+		return false
+	}
+	if g.HostedDomain != "" {
+		return true
+	}
+	email := strings.ToLower(strings.TrimSpace(g.Email))
+	for _, suffix := range gmailSuffixes {
+		if strings.HasSuffix(email, suffix) {
+			return true
+		}
+	}
+	return false
 }
 
 type GoogleConfig struct {
@@ -170,6 +204,7 @@ func (v *GoogleVerifier) ValidateIDToken(ctx context.Context, raw, audience, non
 		Nonce         string          `json:"nonce"`
 		Email         string          `json:"email"`
 		EmailVerified bool            `json:"email_verified"`
+		HostedDomain  string          `json:"hd"`
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return GoogleIdentity{}, ErrGoogleToken
@@ -188,7 +223,7 @@ func (v *GoogleVerifier) ValidateIDToken(ctx context.Context, raw, audience, non
 	if (claims.Issuer != "https://accounts.google.com" && claims.Issuer != "accounts.google.com") || claims.Subject == "" || len(claims.Subject) > 255 || !nonceMatches(claims.Nonce, nonce) || !claims.EmailVerified || claims.Email == "" || claims.ExpiresAt <= now.Unix() || claims.IssuedAt > now.Add(2*time.Minute).Unix() || claims.IssuedAt < now.Add(-10*time.Minute).Unix() {
 		return GoogleIdentity{}, ErrGoogleToken
 	}
-	return GoogleIdentity{Subject: claims.Subject, Email: strings.ToLower(strings.TrimSpace(claims.Email)), EmailVerified: claims.EmailVerified}, nil
+	return GoogleIdentity{Subject: claims.Subject, Email: strings.ToLower(strings.TrimSpace(claims.Email)), EmailVerified: claims.EmailVerified, HostedDomain: strings.TrimSpace(claims.HostedDomain)}, nil
 }
 
 // nonceMatches compares the ID token's nonce against the expected value. Google

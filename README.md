@@ -238,9 +238,16 @@ Cloud. Add the redirect URI displayed beside the client ID field in the
 platform dashboard; it is the exact URL
 `https://<your-hostname>/api/auth/google/callback`. Enter the OAuth client ID
 and secret, then enable Google sign-in. Google supplies the verified email and
-stable subject identifier. A Google email that already belongs to a Tiller
-account is never linked automatically: sign in to that account and link Google
-from **Settings → Account**.
+stable subject identifier.
+
+A Google email that already belongs to a Tiller account is linked
+automatically **only when Google is authoritative for that address** — a
+`gmail.com`/`googlemail.com` address, or a Google Workspace account (a verified
+email carrying Google's `hd` claim). For any other address, Google's
+`email_verified` does not prove current ownership of the mailbox (the address
+may since have changed hands), so Tiller does not link it silently: sign in to
+the existing account with your password, and Tiller offers to link Google on
+the spot. You can also link at any time from **Settings → Account**.
 
 For bot protection, create a Cloudflare Turnstile widget and allow your hosted
 hostname in its widget settings. Enter its site key and secret key in the

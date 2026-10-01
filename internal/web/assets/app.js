@@ -268,7 +268,7 @@ function capNotice(kind) {
 function authView(name) {
   hideBoot();
   $('#login-shell').hidden = false;
-  ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form','google-link-confirm-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const loginCard = $('.login-card'); if (loginCard) loginCard.classList.toggle('is-platform', name === 'platform-login-form');
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
@@ -290,7 +290,7 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
 // The signed-in identity in the top bar is the shortcut into Settings →
 // Account. Account is hosted-only, so in self-hosted mode the control stays
 // disabled and renders as plain text rather than as a dead link.
@@ -301,10 +301,10 @@ function renderIdentity(session) {
   identity.disabled = !hosted;
   identity.title = hosted ? 'Account settings' : '';
 }
-function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } }
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } }
 function showAccountDeleteConfirmation({ email, google }) {
   hideBoot();
-  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true;
+  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-google-link-shell').hidden = true;
   $('#account-delete-shell').hidden = false;
   $('#account-delete-confirm-form').hidden = false;
   $('#account-delete-confirm-email').value = '';
@@ -316,6 +316,30 @@ function showAccountDeleteConfirmation({ email, google }) {
   $('#account-delete-confirm-form').dataset.google = google ? '1' : '0';
   $('#account-delete-page-copy').textContent = `This permanently deletes ${email}, including the account, provider credentials, client keys, and activity history. Audit history is retained.`;
   $('#account-delete-confirm-email').focus();
+}
+// showGoogleLinkPrompt offers to attach the Google identity the visitor just
+// proved, now that they have authenticated to the existing account with their
+// password. It deliberately gates the app behind the choice: linking changes
+// how the account authenticates, so it is a decision, not a dismissible toast.
+let pendingGoogleLinkSession = null;
+function showGoogleLinkPrompt(session) {
+  pendingGoogleLinkSession = session;
+  hideBoot();
+  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true;
+  $('#account-google-link-shell').hidden = false;
+  $('#account-google-link-error').textContent = '';
+  const button = $('#account-google-link-confirm');
+  button.disabled = false;
+  button.focus();
+}
+// finishGoogleLinkPrompt is the non-linking exit: the visitor authenticated
+// legitimately, so declining must land them in the app, not back at login.
+function finishGoogleLinkPrompt() {
+  const session = pendingGoogleLinkSession;
+  pendingGoogleLinkSession = null;
+  $('#account-google-link-shell').hidden = true;
+  if (session) showApp(session);
+  else showLogin();
 }
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
@@ -383,11 +407,46 @@ function resetAuthCaptcha(action) {
 $('#login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('#login-error').textContent = '';
   const formElement = event.currentTarget; const form = new FormData(formElement); const button = $('button[type="submit"]', formElement); button.disabled = true;
-  try { const path = runtimeMode === 'hosted' ? '/api/auth/login' : '/api/admin/session'; const body = runtimeMode === 'hosted' ? { email: form.get('username'), password: form.get('password') } : { username: form.get('username'), password: form.get('password') }; const session = await api(path, { method: 'POST', body: JSON.stringify(body) }); formElement.reset(); showApp(session); }
+  try { const path = runtimeMode === 'hosted' ? '/api/auth/login' : '/api/admin/session'; const body = runtimeMode === 'hosted' ? { email: form.get('username'), password: form.get('password') } : { username: form.get('username'), password: form.get('password') }; const session = await api(path, { method: 'POST', body: JSON.stringify(body) }); formElement.reset(); if (session.pending_google_link) { showGoogleLinkPrompt(session); return; } showApp(session); }
   catch (error) { $('#login-error').textContent = errorMessage(error, 'Login failed.'); if (error.code === 'email_not_verified') exposeResend('#resend-login-verification', '#login-form [name="username"]', '#login-error'); }
   finally { button.disabled = false; }
 });
 $('#logout').addEventListener('click', async () => { try { await api(runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
+
+// Interstitial controls. "Link Google and continue" starts the authenticated
+// link flow; the session already carries the short-lived link grant, so no
+// password re-entry is required. "Not now" simply enters the app.
+$('#account-google-link-skip').addEventListener('click', () => finishGoogleLinkPrompt());
+$('#account-google-link-confirm').addEventListener('click', async () => {
+  const button = $('#account-google-link-confirm');
+  $('#account-google-link-error').textContent = '';
+  button.disabled = true;
+  try {
+    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: '' }) });
+    location.assign(result.redirect_url);
+  } catch (error) {
+    button.disabled = false;
+    $('#account-google-link-error').textContent = errorMessage(error, 'Google linking is temporarily unavailable.');
+  }
+});
+// Account settings → Link Google. Reached deliberately, so the password is
+// requested here and the normal start path takes it.
+$('#account-google-link-card-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const button = $('button[type="submit"]', event.currentTarget);
+  const errorEl = $('#account-google-link-card-error');
+  errorEl.textContent = '';
+  button.disabled = true;
+  try {
+    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password') }) });
+    location.assign(result.redirect_url);
+  } catch (error) {
+    errorEl.textContent = errorMessage(error, 'Could not start Google linking.');
+  } finally {
+    button.disabled = false;
+  }
+});
 
 function showAuthError(id, error, fallback) { const el = $('#' + id); if (el) el.textContent = errorMessage(error, fallback); }
 async function resendVerification(email, target) {
@@ -491,6 +550,7 @@ async function handleGoogleCredential(response) {
   try {
     const result = await api('/api/auth/google/gsi', { method: 'POST', body: JSON.stringify({ credential: response.credential }) });
     if (result?.link_required) { $('#google-link-confirm-message').textContent = `A Tiller account already exists for ${result.email}. Link this Google account to sign in to it?`; history.replaceState(null, '', '/login'); authView('google-link-confirm-form'); return; }
+    if (result?.link_challenge_required) { history.replaceState(null, '', '/login'); authView('login-form'); $('#login-error').textContent = `A Tiller account already exists for ${result.email}. Sign in with your password to continue, and we will offer to link Google.`; return; }
     if (result?.signup_required) { history.replaceState(null, '', '/login?google_signup=1'); authView('google-consent-form'); return; }
     history.replaceState(null, '', '/#clients'); showApp(result);
   } catch (error) { showAuthError('login-error', error, 'Google sign-in could not be completed.'); }
@@ -2396,6 +2456,7 @@ async function loadAccount() {
     accountGoogleLinked = googleLinked;
     $('#account-google-card').hidden = !googleLinked;
     $('#account-google-unlink').hidden = !profile.has_password;
+    $('#account-google-link-card').hidden = !googleEnabled || googleLinked;
     $('#account-password-card').hidden = googleLinked;
     $('#account-password-auth-hint').textContent = '';
     $('#account-current-password').required = true;
@@ -2502,7 +2563,7 @@ function renderQuotaProvider(snap) {
 // showFeedback opens the full-width feedback panel inviting users to email us
 // while Tiller Router is in active development.
 function showFeedback() {
-  $('#login-shell').hidden = true; $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true;
+  $('#login-shell').hidden = true; $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true;
   $('#feedback-shell').hidden = false;
   $('#feedback-shell').scrollTop = 0;
 }
@@ -2526,6 +2587,7 @@ $('#feedback-back').addEventListener('click', () => {
 // textContent with preserved whitespace to avoid any injection path.
 async function showLegalDocument(slug) {
   $('#login-shell').hidden = true; $('#app').hidden = true; $('#platform-shell').hidden = true;
+  $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true;
   $('#legal-shell').hidden = false;
   $('#legal-shell').scrollTop = 0;
   const body = $('#legal-body');
@@ -3424,6 +3486,7 @@ function googleAuthErrorMessage(code) {
     google_expired: 'That Google sign-in link expired. Start again.',
     google_unavailable: 'Google sign-in is temporarily unavailable.',
     google_link_required: 'This Google email already has a Tiller account. Sign in to that account first, then try Google sign-in again.',
+    google_link_challenge_required: 'This Google email already has a Tiller account. Sign in with your password to continue, and we will offer to link Google.',
     google_already_linked: 'That Google account is already linked to a Tiller account.',
     google_session_expired: 'Your Tiller session expired. Sign in and try again.',
     signup_unavailable: 'Signup is currently unavailable.',
