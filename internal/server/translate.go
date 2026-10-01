@@ -1070,8 +1070,32 @@ func responsesInstructionText(value any) string {
 	return ""
 }
 
-func translateResponse(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
-	return translateResponseObserved(w, keepalive, r, incoming, target, route, usage, nil)
+// translateNonstreamBody reads and translates a complete non-streaming JSON
+// body WITHOUT writing anything to the client. It exists so the caller can
+// commit the upstream status only after translation succeeds: translating
+// after WriteHeader meant a malformed or non-representable body was delivered
+// as an HTTP success with no error, because the status was already on the wire.
+//
+// It returns ok=false when the body is not a JSON object/array (the caller
+// should treat it as SSE).
+func translateNonstreamBody(r *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) (translated []byte, ok bool, err error) {
+	prefix, err := r.Peek(1)
+	if err != nil {
+		return nil, false, err
+	}
+	if prefix[0] != '{' && prefix[0] != '[' {
+		return nil, false, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r, 64<<20))
+	if err != nil {
+		return nil, true, err
+	}
+	extractUsage(body, usage)
+	translated, err = translateNonstreamResponse(body, incoming, target, model)
+	if err != nil {
+		return nil, true, err
+	}
+	return translated, true, nil
 }
 
 // translateResponseObserved is translateResponse with an optional observer that

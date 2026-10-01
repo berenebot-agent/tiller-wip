@@ -1506,12 +1506,50 @@ routeDone:
 			s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 			ensureStreamKeepalive()
 		}
+		row.httpStatus = resp.StatusCode
+		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
+		// One reader for both paths: the non-stream peek may buffer bytes, and
+		// the SSE fallback must see them rather than the raw body.
+		translatedReader := bufio.NewReader(reader)
+		// A non-streaming translated body is read and translated BEFORE the
+		// upstream status is committed. Committing first meant a malformed or
+		// non-representable body was answered with the upstream's 2xx and no
+		// error at all, because the status was already on the wire.
+		//
+		// This only applies when the client stream is not already committed: an
+		// ordered-fallback probe may have committed a 200 SSE stream before this
+		// target was even tried, and that path must keep writing through the
+		// keepalive writer.
+		if !streamingResponse && streamKeepalive == nil {
+			translated, isJSON, translateErr := translateNonstreamBody(translatedReader, incoming, target, selected.RequestedModel, usage)
+			if isJSON {
+				if translateErr != nil {
+					idle.Stop()
+					class := "translation_error"
+					if attemptTimedOut.Load() {
+						class = "upstream_timeout"
+					}
+					class = clientFailureClass(r.Context(), class)
+					row.httpStatus = 502
+					row.errorText = strPtr(class)
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					markLastAttemptFailed(row, class)
+					inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+					return
+				}
+				row.copyUsage(usage)
+				w.WriteHeader(resp.StatusCode)
+				_, _ = w.Write(translated)
+				clearSelectedCooldown()
+				return
+			}
+			// Not JSON after all: fall through to the streaming translator with
+			// every peeked byte intact.
+		}
 		if streamKeepalive == nil {
 			w.WriteHeader(resp.StatusCode)
 		}
-		row.httpStatus = resp.StatusCode
-		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
-		if err := translateResponseObserved(w, streamKeepalive, reader, incoming, target, selected, usage, outputObs); err != nil {
+		if err := translateResponseObserved(w, streamKeepalive, translatedReader, incoming, target, selected, usage, outputObs); err != nil {
 			idle.Stop()
 			class := "translation_error"
 			if attemptTimedOut.Load() {
