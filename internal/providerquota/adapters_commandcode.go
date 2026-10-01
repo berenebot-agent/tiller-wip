@@ -75,18 +75,20 @@ func fetchCommandCode(ctx context.Context, client *http.Client, cred Credential)
 			snap.Windows = append(snap.Windows, *w)
 		}
 	}
+	// The plan id is display-only and the billing-period end is the monthly
+	// reset. Resolve both best-effort so a subscriptions failure never hides the
+	// windows (the monthly bar then simply has no reset).
+	plan, periodEnd := commandCodeSubscription(ctx, client, base, headers)
 	// Monthly credits are the subscription pool. Show a monthly bar when the
 	// plan reports a remaining balance and a period spend to anchor the cap.
 	// Pay-as-you-go has no subscription detail (nil monthlyCredits), so no
 	// monthly window is surfaced.
 	if payload.Credits != nil && payload.Credits.MonthlyCredits != nil {
-		if w := commandCodeMonthlyWindow(ctx, client, base, headers, *payload.Credits.MonthlyCredits); w != nil {
+		if w := commandCodeMonthlyWindow(ctx, client, base, headers, *payload.Credits.MonthlyCredits, periodEnd); w != nil {
 			snap.Windows = append(snap.Windows, *w)
 		}
 	}
-	// The plan id is display-only; resolve it best-effort so a plan-endpoint
-	// failure never hides the windows.
-	snap.Plan = commandCodePlan(ctx, client, base, headers)
+	snap.Plan = plan
 	return snap, nil
 }
 
@@ -95,7 +97,7 @@ func fetchCommandCode(ctx context.Context, client *http.Client, cred Credential)
 // from the usage summary. The cap is their sum (spend + remaining), so the bar
 // is correct without a hardcoded plan-to-pool table. A usage-summary failure or
 // a zero cap yields nil, so no misleading bar is shown.
-func commandCodeMonthlyWindow(ctx context.Context, client *http.Client, base string, headers map[string]string, remaining float64) *Window {
+func commandCodeMonthlyWindow(ctx context.Context, client *http.Client, base string, headers map[string]string, remaining float64, resetsAt *time.Time) *Window {
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -124,6 +126,7 @@ func commandCodeMonthlyWindow(ctx context.Context, client *http.Client, base str
 		UsedPercent: percentPtr(spend / cap * 100),
 		Remaining:   &rem,
 		Limit:       &limit,
+		ResetsAt:    resetsAt,
 	}
 }
 
@@ -154,19 +157,29 @@ func commandCodeWindowView(label string, w *commandCodeWindow) *Window {
 	return &out
 }
 
-// commandCodePlan fetches the subscription plan id (e.g. "individual-goat").
-// Any failure returns an empty string so the caller still reports the windows.
-func commandCodePlan(ctx context.Context, client *http.Client, base string, headers map[string]string) string {
+// commandCodeSubscription fetches the subscription plan id (e.g.
+// "individual-goat") and the current billing-period end, which is the monthly
+// reset. It is best-effort: any failure returns empty values so the caller
+// still reports the windows.
+func commandCodeSubscription(ctx context.Context, client *http.Client, base string, headers map[string]string) (string, *time.Time) {
 	var payload struct {
 		Data *struct {
-			PlanID string `json:"planId"`
+			PlanID           string `json:"planId"`
+			CurrentPeriodEnd string `json:"currentPeriodEnd"`
 		} `json:"data"`
 	}
 	if err := getJSON(ctx, client, base+"/alpha/billing/subscriptions", headers, &payload); err != nil {
-		return ""
+		return "", nil
 	}
 	if payload.Data == nil {
-		return ""
+		return "", nil
 	}
-	return payload.Data.PlanID
+	var resetsAt *time.Time
+	if payload.Data.CurrentPeriodEnd != "" {
+		if t, err := time.Parse(time.RFC3339, payload.Data.CurrentPeriodEnd); err == nil {
+			u := t.UTC()
+			resetsAt = &u
+		}
+	}
+	return payload.Data.PlanID, resetsAt
 }
