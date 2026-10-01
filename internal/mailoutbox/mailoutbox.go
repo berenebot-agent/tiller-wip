@@ -302,26 +302,20 @@ func (o *Outbox) buildMessage(row dueRow) (mailer.Message, error) {
 		if token == "" {
 			return mailer.Message{}, errors.New("mailoutbox: missing verification token")
 		}
-		return mailer.Message{To: row.recipient, Subject: "Verify your Tiller account",
-			Text: fmt.Sprintf("Verify your Tiller account:\n\n%s/verify-email?token=%s\n\nThis link expires in 24 hours.", o.baseURL, token)}, nil
 	case TypePasswordReset:
 		if token == "" {
 			return mailer.Message{}, errors.New("mailoutbox: missing reset token")
 		}
-		return mailer.Message{To: row.recipient, Subject: "Reset your Tiller password",
-			Text: fmt.Sprintf("Reset your Tiller password:\n\n%s/reset-password?token=%s\n\nThis link expires in 1 hour.", o.baseURL, token)}, nil
 	case TypeEmailChangeConfirm:
 		if token == "" {
 			return mailer.Message{}, errors.New("mailoutbox: missing email-change token")
 		}
-		return mailer.Message{To: row.recipient, Subject: "Confirm your new Tiller email address",
-			Text: fmt.Sprintf("Confirm your new Tiller email address:\n\n%s/confirm-email-change?token=%s\n\nThis link expires in 24 hours. If you did not request this change, you can ignore this message; your current address keeps working until you confirm.", o.baseURL, token)}, nil
-	case TypeEmailChangeWarning:
-		return mailer.Message{To: row.recipient, Subject: "Your Tiller email address is being changed",
-			Text: fmt.Sprintf("A request was made to change the email address on your Tiller account to %s.\n\nIf this was not you, reset your password immediately to cancel the change: %s/forgot-password\n\nThe change does not take effect until the new address is confirmed.", params["new_email"], o.baseURL)}, nil
-	default:
+	}
+	rendered, ok := render(row.msgType, o.baseURL, token, params)
+	if !ok {
 		return mailer.Message{}, errors.New("mailoutbox: unknown message type")
 	}
+	return mailer.Message{To: row.recipient, Subject: rendered.Subject, Text: rendered.Text, HTML: rendered.HTML}, nil
 }
 
 // fail records a delivery failure. The fifth failure dead-letters the row and

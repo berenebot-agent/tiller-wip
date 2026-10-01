@@ -52,11 +52,15 @@ type PublicConfig struct {
 	SecretConfigured bool   `json:"secret_configured"`
 }
 
-// Message is a plain-text transactional message. Body content is never logged.
+// Message is a transactional message. Text is the plain-text body and is always
+// sent; HTML is an optional richer alternative. When HTML is empty the message
+// is plain-text only; otherwise providers send both as alternative parts and
+// the client picks. Body content is never logged.
 type Message struct {
 	To      string
 	Subject string
 	Text    string
+	HTML    string
 }
 
 // SendResult contains provider-assigned delivery metadata. MessageID is an
@@ -204,7 +208,7 @@ func (m *resendMailer) Send(ctx context.Context, message Message) (SendResult, e
 	if strings.ContainsAny(message.To+message.Subject, "\r\n") {
 		return SendResult{}, errors.New("mailer: invalid message headers")
 	}
-	payload, err := json.Marshal(map[string]any{"from": m.from, "to": []string{message.To}, "subject": message.Subject, "text": message.Text})
+	payload, err := json.Marshal(resendPayload(m.from, message))
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -236,12 +240,7 @@ func (m *brevoMailer) Send(ctx context.Context, message Message) (SendResult, er
 	if strings.ContainsAny(message.To+message.Subject, "\r\n") {
 		return SendResult{}, errors.New("mailer: invalid message headers")
 	}
-	payload, err := json.Marshal(map[string]any{
-		"sender":      map[string]string{"email": m.from},
-		"to":          []map[string]string{{"email": message.To}},
-		"subject":     message.Subject,
-		"textContent": message.Text,
-	})
+	payload, err := json.Marshal(brevoPayload(m.from, message))
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -336,7 +335,7 @@ func (m *smtpMailer) Send(ctx context.Context, message Message) (SendResult, err
 	if err != nil {
 		return SendResult{}, fmt.Errorf("SMTP data: %w", err)
 	}
-	body := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", from.String(), to.String(), message.Subject, message.Text)
+	body := buildSMTPBody(from.String(), to.String(), message)
 	if _, err := io.WriteString(writer, body); err != nil {
 		_ = writer.Close()
 		return SendResult{}, fmt.Errorf("SMTP write: %w", err)
@@ -348,4 +347,46 @@ func (m *smtpMailer) Send(ctx context.Context, message Message) (SendResult, err
 		return SendResult{}, err
 	}
 	return SendResult{}, nil
+}
+
+// resendPayload builds the Resend email payload. The html field is omitted when
+// empty so the provider sends a plain-text-only message.
+func resendPayload(from string, message Message) map[string]any {
+	payload := map[string]any{"from": from, "to": []string{message.To}, "subject": message.Subject, "text": message.Text}
+	if message.HTML != "" {
+		payload["html"] = message.HTML
+	}
+	return payload
+}
+
+// brevoPayload builds the Brevo email payload. htmlContent is omitted when empty.
+func brevoPayload(from string, message Message) map[string]any {
+	payload := map[string]any{
+		"sender":      map[string]string{"email": from},
+		"to":          []map[string]string{{"email": message.To}},
+		"subject":     message.Subject,
+		"textContent": message.Text,
+	}
+	if message.HTML != "" {
+		payload["htmlContent"] = message.HTML
+	}
+	return payload
+}
+
+// buildSMTPBody renders the RFC 5322 message. With no HTML body it emits the
+// existing single-part text/plain message; with an HTML body it emits a
+// multipart/alternative message so the client can choose.
+func buildSMTPBody(from, to string, message Message) string {
+	headers := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\nMIME-Version: 1.0\r\n", from, to, message.Subject)
+	if message.HTML == "" {
+		return headers + "Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + message.Text + "\r\n"
+	}
+	boundary := "tiller-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	var b strings.Builder
+	b.WriteString(headers)
+	fmt.Fprintf(&b, "Content-Type: multipart/alternative; boundary=%q\r\n\r\n", boundary)
+	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", boundary, message.Text)
+	fmt.Fprintf(&b, "--%s\r\nContent-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n", boundary, message.HTML)
+	fmt.Fprintf(&b, "--%s--\r\n", boundary)
+	return b.String()
 }
