@@ -290,7 +290,7 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
 // The signed-in identity in the top bar is the shortcut into Settings →
 // Account. Account is hosted-only, so in self-hosted mode the control stays
 // disabled and renders as plain text rather than as a dead link.
@@ -301,10 +301,10 @@ function renderIdentity(session) {
   identity.disabled = !hosted;
   identity.title = hosted ? 'Account settings' : '';
 }
-function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); loadPlanSnapshot(); } }
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } }
 function showAccountDeleteConfirmation({ email, google }) {
   hideBoot();
-  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true;
+  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true;
   $('#account-delete-shell').hidden = false;
   $('#account-delete-confirm-form').hidden = false;
   $('#account-delete-confirm-email').value = '';
@@ -2343,9 +2343,9 @@ async function loadSettings() {
   $('#backup-card').hidden = runtimeMode === 'hosted';
   const hosted = runtimeMode === 'hosted';
   const token = ++state.loadToken;
-  const [health, settings] = await Promise.all([api('/api/admin/health'), api('/api/admin/settings')]);
+  const settings = await api('/api/admin/settings');
   if (token !== state.loadToken) return;
-  $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; applyHostedNotificationPolicy(hosted, nf); await loadGlobalActivity();
+  $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; applyHostedNotificationPolicy(hosted, nf); await loadGlobalActivity();
 }
 async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (runtimeMode !== 'hosted') { body.notifications_event_admin_login = notificationsValues.get('notifications_event_admin_login') === 'on'; } if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
 $('#save-settings-top').addEventListener('click', saveSettings);
@@ -2498,16 +2498,27 @@ function renderQuotaProvider(snap) {
   return `<div class="plan-row quota-row"><span class="plan-label">${plan}</span><span class="quota-windows">${windows}</span></div>`;
 }
 
-// loadFooterVersion shows the deployed version/commit with an AGPL source link.
-async function loadFooterVersion() {
-  try {
-    const info = await fetch('/health/version').then(res => res.json());
-    const commit = info.commit || ''; const version = info.version || '';
-    const label = [version, commit].filter(Boolean).join(' · ') || 'development build';
-    const url = commit ? `https://github.com/dellarb/tiller-router/commit/${encodeURIComponent(commit)}` : 'https://github.com/dellarb/tiller-router';
-    $('#footer-source').innerHTML = `${h(label)} — <a href="${h(url)}" target="_blank" rel="noopener">source</a>`;
-  } catch { /* footer is best-effort */ }
+// showFeedback opens the full-width feedback panel inviting users to email us
+// while Tiller Router is in active development.
+function showFeedback() {
+  $('#login-shell').hidden = true; $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true;
+  $('#feedback-shell').hidden = false;
+  $('#feedback-shell').scrollTop = 0;
 }
+// The footer link is built in JS so the label stays in one place with the panel
+// copy. It opens the same feedback panel as the top-bar button.
+function renderFooterFeedback() {
+  $('#footer-feedback').innerHTML = '<button class="btn-link" id="open-feedback-footer" type="button">Feedback — tiller@hgolabs.com</button>';
+  $('#open-feedback-footer').addEventListener('click', showFeedback);
+}
+// Feedback is reachable from the signed-in top bar and (hosted) footer, so
+// closing it returns to the app. showFeedback is never the entry point for an
+// unauthenticated visitor, so there is no login fallback to handle.
+$('#open-feedback').addEventListener('click', showFeedback);
+$('#feedback-back').addEventListener('click', () => {
+  $('#feedback-shell').hidden = true;
+  $('#app').hidden = false;
+});
 
 // showLegalDocument renders a published legal document in the full-width legal
 // shell. Bodies are plain text (no rich rendering), so they are inserted as

@@ -39,7 +39,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.locator('#clients-body tr.group-toggle')).toHaveCount(1);
 
 await page.locator('#nav-quick').getByRole('link', { name: 'Settings' }).click();
-  await expect(page.locator('#top-status')).toHaveText('READY');
+  await expect(page.locator('#open-feedback')).toBeVisible();
   await expect(page.locator('#fallback-form input[name="fallback_timeout_seconds"]')).toHaveValue('60');
   await expect(page.locator('#fallback-form')).toContainText('at least 60 seconds');
   await page.locator('[data-settings-tab="data"]').click();

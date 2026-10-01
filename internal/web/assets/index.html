@@ -125,6 +125,19 @@
     </section>
   </div>
 
+  <div class="legal-shell" id="feedback-shell" hidden>
+    <section class="legal-card feedback-card" aria-labelledby="feedback-title">
+      <header class="legal-header">
+        <div><p class="eyebrow">FEEDBACK</p><h1 id="feedback-title">Tiller Router is in active development</h1></div>
+        <button class="btn btn-secondary" id="feedback-back" type="button">Back</button>
+      </header>
+      <div class="feedback-body">
+        <p>We are actively building Tiller Router and we would love to hear from you. Bug reports, feature ideas, rough edges, or anything else — your feedback shapes what comes next.</p>
+        <p>Email us any time at <a href="mailto:tiller@hgolabs.com">tiller@hgolabs.com</a> and we will get back to you.</p>
+      </div>
+    </section>
+  </div>
+
   <div class="legal-shell" id="account-delete-shell" hidden>
     <section class="login-card account-delete-card" aria-labelledby="account-delete-page-title">
       <h1 id="account-delete-page-title">Confirm account deletion</h1>
@@ -202,7 +215,7 @@
           <a href="#virtual" data-view="virtual" aria-label="Virtual Models"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-virtual"></use></svg><span class="nav-quick-label">Virtual Models</span></a>
           <a href="#settings" data-view="settings" aria-label="Settings"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span class="nav-quick-label">Settings</span></a>
         </div>
-        <div class="nav-meta"><button class="btn btn-small btn-secondary" id="open-wizard" type="button" hidden>Get started</button><span class="system-state"><i></i><span id="top-status">READY</span></span><button class="btn-link admin-identity" id="admin-name" type="button" title="Account settings"></button><button class="btn-link" id="logout">Logout</button></div>
+        <div class="nav-meta"><button class="btn btn-small btn-secondary" id="open-wizard" type="button" hidden>Get started</button><button class="btn btn-small btn-secondary" id="open-feedback" type="button">Feedback</button><button class="btn-link admin-identity" id="admin-name" type="button" title="Account settings"></button><button class="btn-link" id="logout">Logout</button></div>
       </div>
     </nav>
 
@@ -305,7 +318,7 @@
 
   <dialog id="wizard-dialog" class="wizard-dialog" aria-labelledby="wizard-title"><section><header><div><p class="eyebrow">FIRST-RUN SETUP</p><h2 id="wizard-title">Get routing in minutes</h2></div><button class="dialog-close" id="close-wizard" aria-label="Close setup wizard">×</button></header><div class="wizard-steps" id="wizard-steps"></div><div class="wizard-body" id="wizard-body"></div><p class="form-error" id="wizard-error" role="alert"></p><footer><button class="btn btn-link" id="wizard-dismiss" type="button">Skip setup</button><button class="btn btn-secondary" id="wizard-prev" type="button">Back</button><button class="btn btn-primary" id="wizard-next" type="button">Continue</button></footer></section></dialog>
 
-  <footer class="app-footer" id="app-footer" hidden><span>Tiller Router</span><span id="footer-source"></span></footer>
+  <footer class="app-footer" id="app-footer" hidden><span>Tiller Router</span><span id="footer-feedback"></span></footer>
 
   <section id="analytics-consent" class="analytics-consent" role="region" aria-label="Analytics consent" hidden>
     <p>We use optional analytics to understand how the hosted pages are used. See the <a href="/legal/privacy">Privacy Policy</a>.</p>
