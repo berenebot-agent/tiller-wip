@@ -1705,45 +1705,105 @@ func isStreamingResponse(resp *http.Response) bool {
 
 const maxSSEDetectionPrefix = 64
 
-// sniffAndClassify peeks at a small prefix of a successful headerless response
-// and marks it as SSE when the first complete field line has SSE's shape. The
+// sniffNoProgressReads bounds how many consecutive reads returning no data the
+// sniffer tolerates before giving up and classifying from what it has. A
+// stalled provider is otherwise cut off by the caller's existing idle timer
+// (see the idleReader wrapping applied before this call); this bound only stops
+// a pathological reader that returns (0, nil) forever from spinning here.
+const sniffNoProgressReads = 8
+
+// sniffAndClassify peeks a bounded prefix of a successful headerless response
+// and marks it as SSE when its first complete field line has SSE's shape. The
 // consumed bytes are always restored so the normal preflight and relay paths
 // receive the original body unchanged.
+//
+// It accumulates until the decision is decidable rather than trusting a single
+// Read: a provider whose first TCP segment ends mid-line (for example a lone
+// "e" before "vent: ...") previously classified as non-streaming, which then
+// buffered a real stream as JSON, omitted SSE headers, and skipped stream
+// fallback probing. Classification is only ever made from complete lines.
 func sniffAndClassify(resp *http.Response) {
 	if resp == nil || resp.Body == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || resp.ContentLength == 0 || resp.Header.Get("Content-Type") != "" {
 		return
 	}
-	prefix := make([]byte, maxSSEDetectionPrefix)
 	body := resp.Body
-	n, _ := body.Read(prefix)
-	resp.Body = bufferedReadCloser{
-		Reader: io.MultiReader(bytes.NewReader(prefix[:n]), body),
-		closer: body,
+	buf := make([]byte, 0, maxSSEDetectionPrefix)
+	scratch := make([]byte, 32)
+	noProgress := 0
+	for len(buf) < maxSSEDetectionPrefix {
+		if noProgress >= sniffNoProgressReads {
+			break
+		}
+		read, err := body.Read(scratch)
+		if read > 0 {
+			buf = append(buf, scratch[:read]...)
+			noProgress = 0
+		} else {
+			noProgress++
+		}
+		switch looksLikeSSE(buf) {
+		case sseDetected:
+			resp.Header.Set("Content-Type", "text/event-stream")
+			resp.Body = restoreSniffedBody(buf, body)
+			return
+		case sseNotSSE:
+			resp.Body = restoreSniffedBody(buf, body)
+			return
+		case sseInconclusive:
+			// The current line is not complete yet; keep reading.
+		}
+		if err != nil {
+			break
+		}
 	}
-	if looksLikeSSE(prefix[:n]) {
-		resp.Header.Set("Content-Type", "text/event-stream")
-	}
+	resp.Body = restoreSniffedBody(buf, body)
 }
 
-func looksLikeSSE(prefix []byte) bool {
+func restoreSniffedBody(prefix []byte, body io.ReadCloser) io.ReadCloser {
+	if len(prefix) == 0 {
+		return body
+	}
+	return bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), body), closer: body}
+}
+
+type sseSniff int
+
+const (
+	sseInconclusive sseSniff = iota
+	sseDetected
+	sseNotSSE
+)
+
+// looksLikeSSE classifies an accumulated prefix from its complete lines only.
+// It reports inconclusive while the last line is still unterminated, so a
+// fragmented first record is not mistaken for a non-SSE body.
+func looksLikeSSE(prefix []byte) sseSniff {
 	if len(prefix) >= 3 && bytes.Equal(prefix[:3], []byte{0xef, 0xbb, 0xbf}) {
 		prefix = prefix[3:]
 	}
-	for len(prefix) > 0 {
+	if len(prefix) == 0 {
+		return sseInconclusive
+	}
+	for {
 		lineEnd := bytes.IndexByte(prefix, '\n')
 		if lineEnd < 0 {
-			return false
+			// No complete line yet; the caller keeps reading until the sniff
+			// budget is spent.
+			return sseInconclusive
 		}
 		line := bytes.TrimSuffix(prefix[:lineEnd], []byte{'\r'})
 		if bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("data:")) {
-			return true
+			return sseDetected
 		}
 		if len(line) == 0 || line[0] != ':' {
-			return false
+			return sseNotSSE
 		}
 		prefix = prefix[lineEnd+1:]
+		if len(prefix) == 0 {
+			// Only comments so far; the next complete line decides.
+			return sseInconclusive
+		}
 	}
-	return false
 }
 
 func (r bufferedReadCloser) Close() error { return r.closer.Close() }
