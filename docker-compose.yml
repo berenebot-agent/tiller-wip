@@ -17,6 +17,13 @@ services:
 
     restart: unless-stopped
 
+    # Persist logs in the host's journal so they remain available after Compose
+    # recreates this container. Query with: journalctl -t tiller-router.
+    logging:
+      driver: journald
+      options:
+        tag: tiller-router
+
     # The app allows up to 15s to drain the HTTP server (which now also
     # terminates live SSE streams) and flush the Activity writer. Docker's
     # default stop timeout (10s) is shorter than that budget, so give the
