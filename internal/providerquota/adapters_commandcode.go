@@ -25,6 +25,15 @@ const commandCodeUserAgent = "cli"
 //	   "fiveHour":{"used":0,"cap":14,"exceeded":false,"resetAt":0},
 //	   "weekly":{"used":26.03,"cap":35,"exceeded":false,"resetAt":1790862172858}}}
 //
+// The monthly subscription pool is not reported as a cap; it is derived from
+// the billing-period spend plus the remaining monthly balance reported by:
+//
+//	GET {origin}/alpha/usage/summary
+//	{"totalMonthlyCredits":69.92,"totalCost":69.92,...}
+//
+// so a nearly-spent month (70 - 0.11 of a 70-credit pool) renders as a nearly
+// full bar. This mirrors the CLI, which computes the same used/cap pair.
+//
 // windowLimits is top-level (not nested under credits). used/cap are
 // credit-value units; resetAt is epoch milliseconds, and 0 means the window has
 // no active reset. The plan id comes from /alpha/billing/subscriptions and is
@@ -66,17 +75,56 @@ func fetchCommandCode(ctx context.Context, client *http.Client, cred Credential)
 			snap.Windows = append(snap.Windows, *w)
 		}
 	}
-	// Monthly credits are the subscription pool. Pay-as-you-go has no
-	// subscription detail, so no credits window is shown when the plan reports
-	// no monthly pool.
+	// Monthly credits are the subscription pool. Show a monthly bar when the
+	// plan reports a remaining balance and a period spend to anchor the cap.
+	// Pay-as-you-go has no subscription detail (nil monthlyCredits), so no
+	// monthly window is surfaced.
 	if payload.Credits != nil && payload.Credits.MonthlyCredits != nil {
-		remaining := *payload.Credits.MonthlyCredits
-		snap.Windows = append(snap.Windows, Window{Label: "monthly credits", Remaining: &remaining})
+		if w := commandCodeMonthlyWindow(ctx, client, base, headers, *payload.Credits.MonthlyCredits); w != nil {
+			snap.Windows = append(snap.Windows, *w)
+		}
 	}
 	// The plan id is display-only; resolve it best-effort so a plan-endpoint
 	// failure never hides the windows.
 	snap.Plan = commandCodePlan(ctx, client, base, headers)
 	return snap, nil
+}
+
+// commandCodeMonthlyWindow derives the monthly subscription pool bar. The
+// remaining balance comes from the credits endpoint; the period spend comes
+// from the usage summary. The cap is their sum (spend + remaining), so the bar
+// is correct without a hardcoded plan-to-pool table. A usage-summary failure or
+// a zero cap yields nil, so no misleading bar is shown.
+func commandCodeMonthlyWindow(ctx context.Context, client *http.Client, base string, headers map[string]string, remaining float64) *Window {
+	if remaining < 0 {
+		remaining = 0
+	}
+	var payload struct {
+		TotalMonthlyCredits *float64 `json:"totalMonthlyCredits"`
+	}
+	spend := 0.0
+	haveSpend := false
+	if err := getJSON(ctx, client, base+"/alpha/usage/summary", headers, &payload); err == nil && payload.TotalMonthlyCredits != nil {
+		spend = max(0, *payload.TotalMonthlyCredits)
+		haveSpend = true
+	}
+	// Without the period spend we cannot derive the pool cap, so there is no
+	// meaningful bar; a remaining-only window would mislabel as unlimited.
+	if !haveSpend {
+		return nil
+	}
+	cap := spend + remaining
+	if cap <= 0 {
+		return nil
+	}
+	rem := remaining
+	limit := cap
+	return &Window{
+		Label:       "monthly",
+		UsedPercent: percentPtr(spend / cap * 100),
+		Remaining:   &rem,
+		Limit:       &limit,
+	}
 }
 
 // commandCodeWindow is one rolling usage window. used and cap are credit-value

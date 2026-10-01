@@ -683,7 +683,10 @@ function providerQuotaHTML(provider) {
     const detail = pct == null ? 'Unlimited' : `${Math.round(pct)}% used`;
     return `<div class="provider-quota-window"><strong>${h(w.label)}</strong>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<span>${detail}${h(reset)}</span></div>`;
   });
-  return `<div class="provider-quota">${rows.slice(0, 2).join('')}${rows.length > 2 ? `<details><summary>${rows.length - 2} more limits</summary>${rows.slice(2).join('')}</details>` : ''}</div>`;
+  // Show up to three bars inline (5h/weekly/monthly for plan providers);
+  // collapse anything beyond that (e.g. org spend caps) behind a toggle.
+  const inline = 3;
+  return `<div class="provider-quota">${rows.slice(0, inline).join('')}${rows.length > inline ? `<details><summary>${rows.length - inline} more limits</summary>${rows.slice(inline).join('')}</details>` : ''}</div>`;
 }
 
 // providerCostHTML renders the router usage cost for pay-per-token providers
