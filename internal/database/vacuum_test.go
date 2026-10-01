@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -49,6 +50,45 @@ func TestVacuumCoreReclaimsFreePages(t *testing.T) {
 	}
 	if tables != 1 {
 		t.Fatal("vacuum dropped schema")
+	}
+}
+
+func TestVacuumCoreTruncatesWAL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "router.db")
+	db, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	if _, err := db.SQL.Exec(`CREATE TABLE scratch(id INTEGER PRIMARY KEY, blob TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`PRAGMA wal_autocheckpoint=0`); err != nil {
+		t.Fatal(err)
+	}
+	blob := strings.Repeat("x", 4096)
+	for i := 0; i < 2000; i++ {
+		if _, err := db.SQL.Exec(`INSERT INTO scratch(blob) VALUES(?)`, blob); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fi, err := os.Stat(path + "-wal"); err != nil {
+		t.Fatalf("wal before vacuum: %v", err)
+	} else if fi.Size() == 0 {
+		t.Fatal("expected a non-empty WAL before vacuum")
+	}
+
+	if err := db.VacuumCore(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	if fi, err := os.Stat(path + "-wal"); err != nil {
+		t.Fatalf("wal after vacuum: %v", err)
+	} else if fi.Size() != 0 {
+		t.Fatalf("wal after vacuum = %d bytes, want 0 (truncated)", fi.Size())
 	}
 }
 
