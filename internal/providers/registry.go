@@ -47,6 +47,11 @@ type Descriptor struct {
 	Protocols        []Protocol `json:"protocols"`
 	MinOutputTokens  int        `json:"min_output_tokens,omitempty"`
 	Discovery        string     `json:"-"`
+	// HostedDisabled marks a provider type that hosted Tiller's admin UI must
+	// not offer when adding a provider. It is a presentation-level policy flag
+	// only; see docs/provider_terms_review.md. Existing providers of this type
+	// are unaffected, and the create endpoint does not yet enforce it.
+	HostedDisabled bool `json:"hosted_disabled,omitempty"`
 }
 
 var descriptors = []Descriptor{
@@ -77,7 +82,7 @@ var descriptors = []Descriptor{
 	{Type: "minimax", Label: "MiniMax", DefaultBaseURL: "https://api.minimax.io/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
-	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, MinOutputTokens: 16, Discovery: "opencode"},
+	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, MinOutputTokens: 16, Discovery: "opencode", HostedDisabled: true},
 	{Type: "commandcode", Label: "Command Code", DefaultBaseURL: "https://api.commandcode.ai/provider/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "commandcode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
