@@ -128,6 +128,12 @@ func copilotCostLookup(data modelsDevDataset, id string) modelsDevModel {
 // Anthropic reports uncached input separately. OpenAI-compatible totals already
 // include cache tokens, so those subsets are subtracted before pricing input.
 func (r *Registry) EstimatedCostMicros(providerType, modelID string, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int64) (int64, bool) {
+	// These OAuth-backed providers are billed through subscriptions or request
+	// quotas, not by the published per-token model prices in models.dev.
+	switch providerType {
+	case "codex-subscription", "claude-subscription", "github-copilot":
+		return 0, false
+	}
 	rates, ok := r.lookupCostRates(providerType, modelID)
 	if !ok {
 		return 0, false

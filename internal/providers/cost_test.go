@@ -65,19 +65,29 @@ func TestEstimatedCostMicrosDisabled(t *testing.T) {
 	}
 }
 
-func TestEstimatedCostMicrosCopilotVendorLookup(t *testing.T) {
+func TestEstimatedCostMicrosSuppressesSubscriptionProviders(t *testing.T) {
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
+		"openai": {Models: map[string]modelsDevModel{
+			"gpt-x": {Cost: modelsDevCost{Input: floatPtr(3.0)}},
+		}},
 		"anthropic": {Models: map[string]modelsDevModel{
-			"claude-sonnet-4": {Cost: modelsDevCost{Input: floatPtr(3.0), Output: floatPtr(15.0)}},
+			"claude-x": {Cost: modelsDevCost{Input: floatPtr(3.0)}},
+		}},
+		"github-copilot": {Models: map[string]modelsDevModel{
+			"copilot-model": {Cost: modelsDevCost{Input: floatPtr(3.0)}},
 		}},
 	}
-	got, ok := r.EstimatedCostMicros("github-copilot", "claude-sonnet-4", 1_000_000, 0, 0, 0)
-	if !ok {
-		t.Fatal("expected a cost estimate via a Copilot vendor lab")
-	}
-	if got != 3_000_000 {
-		t.Fatalf("cost micros = %d, want 3000000", got)
+	for _, test := range []struct{ providerType, modelID string }{
+		{"codex-subscription", "gpt-x"},
+		{"claude-subscription", "claude-x"},
+		{"github-copilot", "copilot-model"},
+	} {
+		t.Run(test.providerType, func(t *testing.T) {
+			if _, ok := r.EstimatedCostMicros(test.providerType, test.modelID, 1_000_000, 0, 0, 0); ok {
+				t.Fatal("expected no per-token estimate for subscription provider")
+			}
+		})
 	}
 }
 
