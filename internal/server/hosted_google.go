@@ -368,11 +368,18 @@ func (s *Server) completeGoogleLink(w http.ResponseWriter, r *http.Request, flow
 		return
 	}
 	// Linking revokes the user's sessions (LinkGoogleIdentity -> InvalidateUser)
-	// because it disables password authentication. The initiating session is
-	// among them, so it must be replaced: re-issuing the old token would hand
-	// the browser a cookie whose session row no longer exists, and the next
-	// authenticated request would fail.
-	fresh, sessionErr := s.identity.CreateUserSession(r.Context(), session.User)
+	// because it disables password authentication, and it bumps the auth
+	// generation. The initiating session is among those revoked, so it must be
+	// replaced: re-issuing the old token would hand the browser a cookie whose
+	// session row no longer exists. The user is re-read first because the
+	// snapshot taken before the link carries the pre-link generation, which
+	// CreateUserSession would correctly reject as stale.
+	linked, readErr := s.identity.UserByID(r.Context(), session.User.ID)
+	if readErr != nil {
+		s.googleCallbackError(w, r, "google_unavailable")
+		return
+	}
+	fresh, sessionErr := s.identity.CreateUserSession(r.Context(), linked)
 	if sessionErr != nil {
 		s.googleCallbackError(w, r, "google_session_expired")
 		return
@@ -473,7 +480,14 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		}
 		s.googlePending.Take(cookie.Value)
 		s.clearCookie(w, googleSignupCookie)
-		session, sessionErr := s.identity.CreateUserSession(r.Context(), u)
+		// Re-read after linking: the link bumped the auth generation, so the
+		// pre-link snapshot would be rejected as stale by CreateUserSession.
+		linked, readErr := s.identity.UserByID(r.Context(), u.ID)
+		if readErr != nil {
+			adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
+			return
+		}
+		session, sessionErr := s.identity.CreateUserSession(r.Context(), linked)
 		if sessionErr != nil {
 			adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
 			return

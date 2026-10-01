@@ -1197,6 +1197,15 @@ func (s *Store) userByID(ctx context.Context, userID string) (User, error) {
 	return u, err
 }
 
+// UserByID re-reads a user's current credential state. Callers that mutate a
+// credential and then need to create a session for that user (account linking
+// disables password auth and bumps the auth generation) must use this rather
+// than a snapshot captured before the mutation, which carries the old
+// generation and would be rejected as stale by CreateUserSession.
+func (s *Store) UserByID(ctx context.Context, userID string) (User, error) {
+	return s.userByID(ctx, userID)
+}
+
 func newOpaqueToken(hasher auth.SecretHasher) (raw, selector, hash string, err error) {
 	selectorRaw, err := randomBytes(selectorBytes)
 	if err != nil {
