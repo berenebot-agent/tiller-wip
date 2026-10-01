@@ -13,17 +13,18 @@ import (
 // WS2 — legal handlers. Own this file.
 // Implements the endpoint contract in docs/stage_d_api_contract.md.
 
-// SeedLegalDocuments writes the embedded first-draft legal documents into the
-// database. It is idempotent: store.SeedLegalDoc only overwrites a row whose
-// updated_by IS NULL (the migration placeholder), so an operator edit made
-// through the platform editor is never clobbered by a deploy.
+// SeedLegalDocuments writes the generated placeholder for every registered slug
+// into the database. It is idempotent and safe to run on every boot:
+// store.SeedLegalDoc only writes a row whose updated_by IS NULL, so a document
+// an operator has published is never clobbered by a deploy.
 //
-// The composition root should call this once at startup (see the WS2 report
-// for the exact call site). A failure to seed leaves the migration placeholder
-// in place, which is still served rather than a 404, so callers should log a
-// seed failure rather than treating it as fatal.
+// The placeholder carries no drafted legal prose — it names the publish path and
+// lists the bracketed fields the operator must fill in — so a fresh deploy never
+// serves something that looks like approved text. The composition root calls
+// this once at startup. A seed failure is logged, not fatal: the migration
+// placeholder row is still served rather than a 404.
 func (s *Server) SeedLegalDocuments(ctx context.Context) error {
-	for _, doc := range legal.Documents() {
+	for _, doc := range legal.SeedDocuments() {
 		if err := s.storeHandle().SeedLegalDoc(ctx, store.LegalDoc{Slug: doc.Slug, Title: doc.Title, Body: doc.Body}); err != nil {
 			return err
 		}

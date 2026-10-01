@@ -9,6 +9,10 @@
 -- updated_by is NULL for the migration-seeded placeholder and is set on every
 -- operator save. Startup seeding replaces a row only while updated_by IS NULL,
 -- so an operator edit is never overwritten by a deploy.
+--
+-- The literal placeholder text inserted below is only what a reader sees in the
+-- window between this migration and the startup seed. internal/legal generates
+-- the placeholder body that replaces it, so that text needs no editing here.
 CREATE TABLE legal_documents (
     slug TEXT PRIMARY KEY,
     title TEXT NOT NULL,
