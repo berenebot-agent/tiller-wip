@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -256,6 +257,16 @@ func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
 	}
 	claims, err := s.googleVerifier.ValidateIDToken(r.Context(), input.Credential, config.ClientID, "")
 	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("google id token validation failed", "error_class", fmt.Sprintf("%T", err))
+		}
+		// A signing-key fetch failure is a provider availability problem, not a
+		// bad credential; report it as such so the client retries rather than
+		// concluding the account is unusable.
+		if errors.Is(err, hostedauth.ErrGoogleResponse) {
+			adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+			return
+		}
 		adminError(w, http.StatusUnauthorized, "google_failed", "Google sign-in could not be completed. Try again.")
 		return
 	}
