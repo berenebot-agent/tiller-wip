@@ -441,3 +441,92 @@ func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
 		t.Fatalf("new connection access token = %q, want callback", got.AccessToken)
 	}
 }
+
+// TestPersistableRefreshErrorStoresRotatedCredentials is the regression for the
+// GitHub partial-success case: the provider rotated the durable token pair and
+// then failed on a later derived step. The rotated credentials must be stored
+// even though the refresh reports an error, because the old pair may already be
+// invalidated.
+func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','github-copilot','https://provider.invalid',1,'["chat"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t, db)
+	expired := time.Now().Add(-time.Minute)
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "old-refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store.New(db.SQL), time.Minute)
+	transient := errors.New("copilot endpoint unavailable")
+	refresh := func(context.Context, TokenRecord) (TokenResponse, error) {
+		return TokenResponse{}, &PersistableRefreshError{
+			Token: TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", TokenType: "Bearer", ExpiresIn: 28800},
+			Err:   transient,
+		}
+	}
+	if _, err := manager.Current(context.Background(), database.LocalAccountID, "provider-1", refresh); !errors.Is(err, transient) {
+		t.Fatalf("refresh error = %v, want the wrapped transient error", err)
+	}
+	// The rotated durable credentials must now be stored.
+	record := testToken(t, st, "provider-1")
+	if record.AccessToken != "rotated-access" || record.RefreshToken != "rotated-refresh" {
+		t.Fatalf("rotated credentials not persisted: access=%q refresh=%q", record.AccessToken, record.RefreshToken)
+	}
+	// The refresh is still reported as failed and remains retryable, so auth
+	// state must not have been marked permanently dead.
+	if record.AuthState != AuthConnected {
+		t.Fatalf("auth state = %q, want still connected", record.AuthState)
+	}
+}
+
+// TestPersistableRefreshErrorRespectsDisconnect proves the rotated-token write
+// cannot resurrect a connection that was deliberately disconnected while the
+// refresh was in flight.
+func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','github-copilot','https://provider.invalid',1,'["chat"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t, db)
+	expired := time.Now().Add(-time.Minute)
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "old-refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store.New(db.SQL), time.Minute)
+	refresh := func(ctx context.Context, _ TokenRecord) (TokenResponse, error) {
+		// Simulate the disconnect landing while the refresh is in flight.
+		if _, err := st.AdvanceOAuthGeneration(ctx, "provider-1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.DeleteOAuthToken(ctx, "provider-1"); err != nil {
+			t.Fatal(err)
+		}
+		return TokenResponse{}, &PersistableRefreshError{
+			Token: TokenResponse{AccessToken: "rotated-access", RefreshToken: "rotated-refresh", ExpiresIn: 28800},
+			Err:   errors.New("transient"),
+		}
+	}
+	if _, err := manager.Current(context.Background(), database.LocalAccountID, "provider-1", refresh); err == nil {
+		t.Fatal("expected the refresh to report its error")
+	}
+	if _, err := st.GetOAuthToken(context.Background(), "provider-1"); !errors.Is(err, store.ErrNoOAuthToken) {
+		t.Fatalf("disconnected provider row was recreated: err=%v", err)
+	}
+}

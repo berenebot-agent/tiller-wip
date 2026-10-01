@@ -177,9 +177,39 @@ func refreshGitHubToken(ctx context.Context, client *http.Client, current oauth.
 	}
 	copilot, _, err := FetchCopilotToken(ctx, client, githubToken.AccessToken)
 	if err != nil {
-		return oauth.TokenResponse{}, err
+		// GitHub documents that using a refresh token invalidates both it and
+		// the old access token, so the rotated pair must be persisted even
+		// though this step failed: otherwise the next attempt presents the dead
+		// refresh token and the user is forced to reconnect after what was only
+		// a transient Copilot-endpoint error.
+		return oauth.TokenResponse{}, &oauth.PersistableRefreshError{
+			Token: oauth.TokenResponse{
+				AccessToken:  githubToken.AccessToken,
+				RefreshToken: githubToken.RefreshToken,
+				TokenType:    githubToken.TokenType,
+				ExpiresIn:    githubToken.ExpiresIn,
+				Scope:        githubToken.Scope,
+			},
+			Err: err,
+		}
 	}
-	copilot.AccessToken, copilot.RefreshToken, copilot.TokenType, copilot.ExpiresIn, copilot.Scope = githubToken.AccessToken, githubToken.RefreshToken, githubToken.TokenType, githubToken.ExpiresIn, githubToken.Scope
+	copilot.AccessToken = githubToken.AccessToken
+	if githubToken.RefreshToken != "" {
+		copilot.RefreshToken = githubToken.RefreshToken
+	}
+	if githubToken.TokenType != "" {
+		copilot.TokenType = githubToken.TokenType
+	}
+	if githubToken.Scope != "" {
+		copilot.Scope = githubToken.Scope
+	}
+	// ExpiresIn here is the GitHub OAuth access token's lifetime (8h), not the
+	// derived Copilot token's (~30min). record.ExpiresAt drives RefreshNeeded,
+	// and record.AccessToken is the GitHub token that this refresh rotates, so
+	// tracking the durable token's expiry is correct: the short-lived Copilot
+	// token has its own expiry in ProviderData and is renewed by this same
+	// refresh when it 401s.
+	copilot.ExpiresIn = githubToken.ExpiresIn
 	return copilot, nil
 }
 
