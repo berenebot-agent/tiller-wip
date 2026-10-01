@@ -122,6 +122,47 @@ func TestOnboardingStateBeforeAfterActivityAndDismissal(t *testing.T) {
 	}
 }
 
+// TestOnboardingCompletesWithProviderAndClient verifies the configuration-based
+// completion signal: the wizard stops appearing once the account has at least
+// one provider and at least one client key, independent of Activity. A single
+// provider or a single client alone must not complete onboarding.
+func TestOnboardingCompletesWithProviderAndClient(t *testing.T) {
+	app, api, accountID := hostedServerHarness(t, false)
+	ctx := context.Background()
+	sc := app.storeHandle().For(accountID)
+
+	status, payload, _ := api.request("GET", "/api/auth/onboarding", nil)
+	if status != 200 || payload["configured"] != false || payload["needs_onboarding"] != true {
+		t.Fatalf("fresh account = %d %v, want configured false / needs_onboarding true", status, payload)
+	}
+
+	if err := sc.CreateProvider(ctx, store.CreateProviderInput{ID: "prov-1", Name: "provider-a", Type: "generic-openai", BaseURL: "https://api.example.com/v1", Credential: "cred", Enabled: true, Protocols: "chat"}); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ = api.request("GET", "/api/auth/onboarding", nil)
+	if status != 200 || payload["configured"] != false || payload["needs_onboarding"] != true {
+		t.Fatalf("provider only = %d %v, want configured false / needs_onboarding true", status, payload)
+	}
+
+	if err := sc.CreateClientKey(ctx, store.CreateClientKeyInput{ID: "ck-1", Name: "client", Group: "default", Type: "catalogue", LoggingEnabled: true, RetentionDays: 30}); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ = api.request("GET", "/api/auth/onboarding", nil)
+	if status != 200 || payload["configured"] != true || payload["needs_onboarding"] != false {
+		t.Fatalf("provider + client = %d %v, want configured true / needs_onboarding false", status, payload)
+	}
+
+	// Dismissal remains the permanent off-switch even before configuration.
+	status, _, _ = api.request("POST", "/api/auth/onboarding/dismiss", nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("dismiss status = %d, want 204", status)
+	}
+	status, payload, _ = api.request("GET", "/api/auth/onboarding", nil)
+	if status != 200 || payload["dismissed"] != true || payload["needs_onboarding"] != false {
+		t.Fatalf("dismissal not persisted: %d %v", status, payload)
+	}
+}
+
 func TestOnboardingDismissedBeforeAnyRequest(t *testing.T) {
 	_, api, _ := hostedServerHarness(t, false)
 	status, _, _ := api.request("POST", "/api/auth/onboarding/dismiss", nil)
