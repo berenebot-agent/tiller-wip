@@ -180,6 +180,72 @@ func attemptCount(attempts []requestAttempt) int {
 // is enabled, sends one best-effort webhook POST. Any failure is logged in
 // normal admin diagnostics and never affects the inference request. The payload
 // must already be built (it is a value, so it is immune to further row mutation).
+// Notification delivery admission bounds. Per-event cooldown only throttles
+// repeats of one key, so a burst of distinct events (client-key churn is exempt
+// from cooldown entirely) could otherwise start unbounded concurrent deliveries
+// against a slow endpoint. Saturation drops best-effort notifications rather
+// than queueing them; delivery must never delay the request that triggered it.
+const (
+	maxConcurrentNotificationDeliveries          = 64
+	maxConcurrentNotificationDeliveriesPerTenant = 8
+)
+
+// admitNotification reserves delivery capacity for one notification. It returns
+// false when the process-wide or per-account bound is already reached, in which
+// case the caller drops the notification. Callers must invoke
+// releaseNotification exactly once for every true result.
+func (s *Server) admitNotification(accountID string) bool {
+	s.notifyCooldownMu.Lock()
+	defer s.notifyCooldownMu.Unlock()
+	if s.notifyAdmittedByAccount == nil {
+		s.notifyAdmittedByAccount = map[string]int{}
+	}
+	if s.notifyAdmitted >= maxConcurrentNotificationDeliveries {
+		return false
+	}
+	if s.notifyAdmittedByAccount[accountID] >= maxConcurrentNotificationDeliveriesPerTenant {
+		return false
+	}
+	s.notifyAdmitted++
+	s.notifyAdmittedByAccount[accountID]++
+	return true
+}
+
+func (s *Server) releaseNotification(accountID string) {
+	s.notifyCooldownMu.Lock()
+	if s.notifyAdmitted > 0 {
+		s.notifyAdmitted--
+	}
+	if n := s.notifyAdmittedByAccount[accountID]; n > 1 {
+		s.notifyAdmittedByAccount[accountID] = n - 1
+	} else {
+		delete(s.notifyAdmittedByAccount, accountID)
+	}
+	s.notifyCooldownMu.Unlock()
+}
+
+// pruneNotificationCooldownsLocked drops cooldown entries that can no longer
+// suppress anything (their window has elapsed for every configured cooldown).
+// The map is keyed by account+event+model and would otherwise grow for the
+// process lifetime as accounts and models churn. Caller holds notifyCooldownMu.
+func (s *Server) pruneNotificationCooldownsLocked(now time.Time) {
+	if len(s.notifyLastSent) == 0 {
+		return
+	}
+	// The longest cooldown a tenant can configure is not known here, so use the
+	// hosted floor as the retention window: any entry older than that can no
+	// longer be within a sane cooldown.
+	retention := time.Duration(hostedNotificationCooldownSeconds) * time.Second
+	if retention < time.Minute {
+		retention = time.Minute
+	}
+	for key, last := range s.notifyLastSent {
+		if now.Sub(last) > retention {
+			delete(s.notifyLastSent, key)
+		}
+	}
+}
+
 func (s *Server) deliverNotification(accountID, event string, payload notificationPayload, cfg store.NotificationSettings) {
 	ctx := context.Background()
 	if !cfg.Enabled || cfg.WebhookURL == "" {
@@ -188,6 +254,14 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 	if !notificationEventEnabled(event, cfg) {
 		return
 	}
+	// Bound aggregate outbound work before anything else. A rejection here is a
+	// deliberate best-effort drop: the notification is lost and the triggering
+	// request is unaffected.
+	if !s.admitNotification(accountID) {
+		s.logger.Warn("notification delivery dropped", "event", event, "reason", "delivery_capacity")
+		return
+	}
+	defer s.releaseNotification(accountID)
 	// Throttle repeat notifications for the same event + model within the
 	// cooldown window. Reserve the key before starting delivery so concurrent
 	// requests cannot fan out duplicate notifications. Only routing events are
@@ -203,6 +277,7 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 			s.notifyLastSent = map[string]time.Time{}
 		}
 		now := time.Now()
+		s.pruneNotificationCooldownsLocked(now)
 		if cfg.CooldownSeconds > 0 {
 			if last, ok := s.notifyLastSent[key]; ok && now.Sub(last) < time.Duration(cfg.CooldownSeconds)*time.Second {
 				s.notifyCooldownMu.Unlock()
