@@ -20,49 +20,80 @@ func openLegalStore(t *testing.T) (*database.DB, *store.Store) {
 	return db, store.New(db.SQL)
 }
 
-// TestSeedLegalDocRefreshesPlaceholderButNotOperatorEdit proves the deploy-time
-// seed rule: a row still carrying the migration placeholder (updated_by NULL)
-// is refreshed, while a row an operator has edited is preserved.
+// TestSeedLegalDocRefreshesPlaceholderButNotOperatorEdit proves the re-seed rule
+// the router relies on at every boot: a row still carrying the migration
+// placeholder (updated_by NULL) is refreshed with the generated placeholder,
+// while a row an operator has published is preserved.
 func TestSeedLegalDocRefreshesPlaceholderButNotOperatorEdit(t *testing.T) {
 	_, st := openLegalStore(t)
 	ctx := context.Background()
 
 	// The migration seeds terms/privacy with updated_by NULL. A seed must
 	// replace that placeholder.
-	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "seed draft"}); err != nil {
+	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "generated placeholder"}); err != nil {
 		t.Fatal(err)
 	}
 	seeded, err := st.GetLegalDoc(ctx, "terms")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seeded.Body != "seed draft" || seeded.UpdatedBy != "" {
+	if seeded.Body != "generated placeholder" || seeded.UpdatedBy != "" {
 		t.Fatalf("placeholder not refreshed by seed: %+v", seeded)
 	}
 
 	// An operator edit sets updated_by, so a later deploy seed must not clobber
 	// it.
-	if err := st.UpsertLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "operator edit"}, "platform"); err != nil {
+	if err := st.UpsertLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "operator publish"}, "platform"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "newer deploy draft"}); err != nil {
+	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "newer generated placeholder"}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := st.GetLegalDoc(ctx, "terms")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Body != "operator edit" || after.UpdatedBy != "platform" {
-		t.Fatalf("seed overwrote an operator edit: %+v", after)
+	if after.Body != "operator publish" || after.UpdatedBy != "platform" {
+		t.Fatalf("seed overwrote an operator publish: %+v", after)
 	}
 
-	// A slug with no row at all is inserted by SeedLegalDoc.
-	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "extra-doc", Title: "Extra", Body: "extra draft"}); err != nil {
+	// A slug with no row at all is inserted by the seed.
+	if err := st.SeedLegalDoc(ctx, store.LegalDoc{Slug: "extra-doc", Title: "Extra", Body: "extra placeholder"}); err != nil {
 		t.Fatal(err)
 	}
 	extra, err := st.GetLegalDoc(ctx, "extra-doc")
-	if err != nil || extra.Body != "extra draft" || extra.UpdatedBy != "" {
+	if err != nil || extra.Body != "extra placeholder" || extra.UpdatedBy != "" {
 		t.Fatalf("seed did not insert new slug: %+v err=%v", extra, err)
+	}
+}
+
+// TestUpsertLegalDocAlwaysReplaces proves a publish is unconditional: it
+// replaces whatever was stored and stamps updated_by, with no conditional on the
+// previous row.
+func TestUpsertLegalDocAlwaysReplaces(t *testing.T) {
+	_, st := openLegalStore(t)
+	ctx := context.Background()
+
+	if err := st.UpsertLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "first publish"}, "platform"); err != nil {
+		t.Fatal(err)
+	}
+	published, err := st.GetLegalDoc(ctx, "terms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if published.Body != "first publish" || published.UpdatedBy != "platform" {
+		t.Fatalf("publish did not replace the placeholder: %+v", published)
+	}
+
+	if err := st.UpsertLegalDoc(ctx, store.LegalDoc{Slug: "terms", Title: "Terms of Service", Body: "second publish"}, "platform"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := st.GetLegalDoc(ctx, "terms")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Body != "second publish" || after.UpdatedBy != "platform" {
+		t.Fatalf("later publish did not replace the earlier one: %+v", after)
 	}
 }
 

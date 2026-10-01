@@ -63,10 +63,9 @@ func (s *Store) ListLegalDocs(ctx context.Context) ([]LegalDoc, error) {
 	return out, rows.Err()
 }
 
-// UpsertLegalDoc writes the current document for a slug. It only replaces the
-// body of rows already seeded by a migration (updated_by IS NULL) when seed is
-// true; an operator-edited row is never overwritten by a deploy. updatedBy is
-// the acting platform operator marker.
+// UpsertLegalDoc writes the current document for a slug. It is the operator
+// publish path and is unconditional: a publish always replaces the body and
+// stamps updatedBy as the acting platform operator marker.
 func (s *Store) UpsertLegalDoc(ctx context.Context, d LegalDoc, updatedBy string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO legal_documents(slug,title,body,updated_at,updated_by) VALUES(?,?,?,?,?)
 ON CONFLICT(slug) DO UPDATE SET title=excluded.title,body=excluded.body,updated_at=excluded.updated_at,updated_by=excluded.updated_by`,
@@ -75,8 +74,9 @@ ON CONFLICT(slug) DO UPDATE SET title=excluded.title,body=excluded.body,updated_
 }
 
 // SeedLegalDoc inserts a document only when the slug does not exist, or when it
-// still carries the migration placeholder (updated_by IS NULL). Operator edits
-// are preserved.
+// still carries the migration placeholder (updated_by IS NULL). This is the
+// invariant that lets the router re-seed its generated placeholder on every
+// deploy without ever clobbering an operator's published text.
 func (s *Store) SeedLegalDoc(ctx context.Context, d LegalDoc) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO legal_documents(slug,title,body,updated_at,updated_by) VALUES(?,?,?,?,NULL)
 ON CONFLICT(slug) DO UPDATE SET title=excluded.title,body=excluded.body,updated_at=excluded.updated_at WHERE legal_documents.updated_by IS NULL`,
