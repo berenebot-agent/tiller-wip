@@ -272,7 +272,7 @@ function authView(name) {
   const loginCard = $('.login-card'); if (loginCard) loginCard.classList.toggle('is-platform', name === 'platform-login-form');
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
-  $('#show-signup').hidden = !hosted || !hostedAuthOptions.signup_enabled;
+  $('#show-signup').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.signup_enabled;
   const googleSignIn = hosted && name === 'login-form' && !!hostedAuthOptions.google_enabled;
   $('#google-signin-button').hidden = !googleSignIn;
   $('#google-signin-notice').hidden = !googleSignIn;
