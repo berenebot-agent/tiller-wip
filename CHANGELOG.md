@@ -24,8 +24,12 @@ behavior may still change before a stable `1.0`.
   entitlements (creation limits, concurrent-stream and monthly-request limits,
   Activity retention clamp), all enforced only in hosted mode and operator-
   tunable from the platform dashboard. A first-run setup wizard (provider →
-  target → client key → curl snippet) opens on first hosted login and completion
-  is derived from Activity. Email verification now signs the user straight in.
+  target → client key → curl snippet) opens on first hosted login. Completion is
+  derived from Activity (a successful routed request), from an account being
+  configured with at least one provider and at least one client key, or from the
+  user skipping setup — after which the wizard stops auto-opening and its
+  top-bar "Get started" button is removed. Email verification now signs the user
+  straight in.
 - **Published legal pack.** First-draft Terms of Service and Privacy Policy are
   embedded in the binary, seeded at startup, editable from the platform
   dashboard, and served publicly (e.g. `/legal/terms`). The Terms incorporate

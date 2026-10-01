@@ -776,7 +776,7 @@ function openProvider(provider = null, onSaved = null) {
     const values = new FormData(form), rawName = String(values.get('name') || '').trim(), payload = { name: rawName || String(values.get('type') || '').trim(), base_url: values.get('base_url'), enabled: values.get('enabled') === 'on', protocols: values.getAll('protocol') };
     if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
     else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id, onSaved); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
-    await loadProviders(); await loadClients(); if (onSaved) await onSaved();
+    await loadProviders(); await loadClients(); if (!provider) refreshWizardButton(false); if (onSaved) await onSaved();
   }});
 }
 async function refreshProvider(id) { const button = $('#drawer-refresh'); if (drawerProviderID === id) button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); await loadProviders(); await loadClients(); } finally { button.disabled = false; } }
@@ -1804,6 +1804,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
         loadPlanSnapshot(true);
         showSecret(result.secret);
         if (onSaved) await onSaved(result, payload);
+        refreshWizardButton(false);
       }
       await loadClients();
     }
