@@ -136,6 +136,14 @@ func (v *GoogleVerifier) ValidateIDToken(ctx context.Context, raw, audience, non
 	if err != nil {
 		key, err = v.key(ctx, header.KeyID, true)
 		if err != nil {
+			// Distinguish "we could not fetch Google's signing keys" from "this
+			// token is bad": a response/network failure is a provider
+			// availability problem, so surface it as such instead of masking it
+			// as a token error. A missing kid in a fetched JWKS stays a token
+			// error.
+			if errors.Is(err, ErrGoogleResponse) {
+				return GoogleIdentity{}, err
+			}
 			return GoogleIdentity{}, ErrGoogleToken
 		}
 	}
@@ -177,10 +185,24 @@ func (v *GoogleVerifier) ValidateIDToken(ctx context.Context, raw, audience, non
 		return GoogleIdentity{}, ErrGoogleToken
 	}
 	now := time.Now()
-	if (claims.Issuer != "https://accounts.google.com" && claims.Issuer != "accounts.google.com") || claims.Subject == "" || len(claims.Subject) > 255 || claims.Nonce != nonce || !claims.EmailVerified || claims.Email == "" || claims.ExpiresAt <= now.Unix() || claims.IssuedAt > now.Add(2*time.Minute).Unix() || claims.IssuedAt < now.Add(-10*time.Minute).Unix() {
+	if (claims.Issuer != "https://accounts.google.com" && claims.Issuer != "accounts.google.com") || claims.Subject == "" || len(claims.Subject) > 255 || !nonceMatches(claims.Nonce, nonce) || !claims.EmailVerified || claims.Email == "" || claims.ExpiresAt <= now.Unix() || claims.IssuedAt > now.Add(2*time.Minute).Unix() || claims.IssuedAt < now.Add(-10*time.Minute).Unix() {
 		return GoogleIdentity{}, ErrGoogleToken
 	}
 	return GoogleIdentity{Subject: claims.Subject, Email: strings.ToLower(strings.TrimSpace(claims.Email)), EmailVerified: claims.EmailVerified}, nil
+}
+
+// nonceMatches compares the ID token's nonce against the expected value. Google
+// Identity Services (the rendered button and One Tap) does not go through our
+// PKCE flow, so no nonce is requested and there is nothing to compare. Google
+// signals that with the literal sentinel "not_provided" rather than an empty
+// claim, so when no nonce was requested both the empty string and that sentinel
+// are accepted. Flows that do request a nonce (the redirect callback) still
+// require an exact match, preserving replay protection.
+func nonceMatches(claimNonce, wantNonce string) bool {
+	if wantNonce == "" {
+		return claimNonce == "" || claimNonce == "not_provided"
+	}
+	return claimNonce == wantNonce
 }
 
 func validAudience(raw json.RawMessage, want string) bool {
