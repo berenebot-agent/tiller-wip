@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
@@ -229,7 +230,43 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setUserSessionCookie(w, r, session.Token, session.ExpiresAt)
 	s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.login", ActorType: "user", ActorID: u.ID})
-	writeJSON(w, http.StatusOK, userSessionPayload(session))
+	payload := userSessionPayload(session)
+	// If a Google sign-in just established that this email already belongs to a
+	// Tiller account, the visitor proved the Google factor but not ownership of
+	// the account. Offer to link it now that they have authenticated with the
+	// password: this substitutes for the manual trip to Account settings that
+	// the README describes. The grant authorises startGoogleLink without a
+	// second password entry.
+	if s.pendingGoogleLink(r, session) {
+		s.grantLinkAuth(session.Token)
+		payload["pending_google_link"] = true
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// pendingGoogleLink reports whether a validated Google sign-in is waiting to be
+// attached to this freshly authenticated account. It requires: a live pending
+// claim for this exact email, a Google identity that is not already linked, and
+// a password-enabled account (the user just authenticated with it). The claim
+// is left in place; the link itself happens through the authenticated Google
+// redirect callback.
+func (s *Server) pendingGoogleLink(r *http.Request, session identity.UserSession) bool {
+	cookie, err := r.Cookie(googleSignupCookie)
+	if err != nil {
+		return false
+	}
+	claims, ok := s.googlePending.Peek(cookie.Value)
+	if !ok || claims.Subject == "" {
+		return false
+	}
+	if !strings.EqualFold(identity.NormalizeEmail(claims.Email), identity.NormalizeEmail(session.User.Email)) {
+		return false
+	}
+	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if err != nil || profile.GoogleLinked {
+		return false
+	}
+	return session.User.PasswordEnabled
 }
 
 func (s *Server) requireUser(next http.Handler) http.Handler {
