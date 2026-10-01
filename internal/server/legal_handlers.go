@@ -78,7 +78,7 @@ func (s *Server) writePlatformLegalUpdate(w http.ResponseWriter, r *http.Request
 		Body  string `json:"body"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	title := strings.TrimSpace(input.Title)

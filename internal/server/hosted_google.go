@@ -51,7 +51,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "google_signin") {
@@ -73,7 +73,7 @@ func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword string `json:"current_password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	// A password is the normal proof. A short-lived link grant replaces it when
@@ -260,7 +260,7 @@ func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
 		Credential string `json:"credential"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	config, err := s.googleConfig(r.Context())
@@ -426,7 +426,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		LinkExisting bool `json:"link_existing"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	cookie, err := r.Cookie(googleSignupCookie)

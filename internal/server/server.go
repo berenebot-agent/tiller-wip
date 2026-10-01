@@ -114,6 +114,9 @@ type Server struct {
 	// unbounded deliveries against a slow endpoint.
 	notifyAdmitted          int
 	notifyAdmittedByAccount map[string]int
+	// bodyReads bounds concurrent inbound request-body reads so a slow-upload
+	// flood cannot park unbounded buffers/goroutines before admission applies.
+	bodyReads bodyReadGate
 	// testNotificationLimiter gates the manual test-delivery endpoint
 	// in hosted mode so a tenant cannot hammer arbitrary public HTTPS
 	// webhooks. Keyed by account id.
@@ -635,7 +638,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct{ Username, Password string }
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !auth.EqualCredential(input.Username, s.config.TillerUser) || !auth.EqualCredential(input.Password, s.config.TillerUserPassword) {
@@ -955,19 +958,39 @@ func jsonContentType(value string) bool {
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, maxBytes int64, requireSingleValue bool) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return errors.New("request body must be valid JSON")
-	}
-	if requireSingleValue {
-		var trailing any
-		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-			return errors.New("request body must contain one JSON value")
+	// Bound the body read so an incomplete body cannot hold a connection
+	// indefinitely. This affects every JSON endpoint, including the
+	// unauthenticated auth routes, whose rate limiters are only charged after a
+	// completed decode. The deadline is per read and resets on progress, so a
+	// slow but progressing upload is unaffected.
+	var decodeErr error
+	readErr := withBodyReadDeadline(w, func() error {
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(target); err != nil {
+			// A read-deadline timeout is a stalled upload, not malformed JSON:
+			// surface it so the caller can answer 408 rather than 400.
+			if isTimeoutError(err) {
+				return err
+			}
+			decodeErr = errors.New("request body must be valid JSON")
+			return nil
 		}
+		if requireSingleValue {
+			var trailing any
+			if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+				decodeErr = errors.New("request body must contain one JSON value")
+				return nil
+			}
+		}
+		return nil
+	})
+	if readErr != nil && isTimeoutError(readErr) {
+		return errBodyReadTimeout
 	}
-	return nil
+	return decodeErr
 }
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

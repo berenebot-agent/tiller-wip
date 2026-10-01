@@ -606,8 +606,25 @@ func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
+	// Bound the body phase before it can hold a connection indefinitely, and
+	// admit it through the process-wide gate so a slow-upload flood cannot park
+	// an unbounded number of 32 MiB buffers before plan concurrency applies.
+	if !s.bodyReads.acquire() {
+		inferenceError(w, http.StatusServiceUnavailable, "api_error", "body_read_busy", "The router is busy reading request bodies. Retry shortly.", incoming == providers.ProtocolMessages)
+		return
+	}
+	defer s.bodyReads.release()
+	var body []byte
+	var err error
+	readErr := withBodyReadDeadline(w, func() error {
+		body, err = io.ReadAll(r.Body)
+		return err
+	})
+	if readErr != nil {
+		if isTimeoutError(readErr) {
+			inferenceError(w, 408, "invalid_request_error", "request_timeout", "The request body was not received in time.", incoming == providers.ProtocolMessages)
+			return
+		}
 		inferenceError(w, 400, "invalid_request_error", "request_too_large", "Request JSON exceeds the 32 MiB limit.", incoming == providers.ProtocolMessages)
 		return
 	}
