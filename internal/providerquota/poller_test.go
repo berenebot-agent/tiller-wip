@@ -159,21 +159,36 @@ func TestFetchOllamaCloudLegacyArrayFallback(t *testing.T) {
 	}
 }
 
+// requireCommandCodeHeaders asserts the headers Cloudflare and the API need:
+// a non-default User-Agent and a bearer token.
+func requireCommandCodeHeaders(t *testing.T, r *http.Request) {
+	t.Helper()
+	if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+		t.Errorf("Authorization = %q, want Bearer tok", got)
+	}
+	if got := r.Header.Get("User-Agent"); got != commandCodeUserAgent {
+		t.Errorf("User-Agent = %q, want %q", got, commandCodeUserAgent)
+	}
+}
+
 func TestFetchCommandCode(t *testing.T) {
 	resetAt := time.Now().Add(90 * time.Minute).UnixMilli()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
-			t.Errorf("Authorization = %q, want Bearer tok", got)
-		}
+		requireCommandCodeHeaders(t, r)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"credits":{"windowLimits":{"limited":true,` +
-			`"fiveHour":{"used":3,"cap":10,"resetAt":` + strconv.FormatInt(resetAt, 10) + `},` +
-			`"weekly":{"used":8,"cap":35,"resetAt":` + strconv.FormatInt(resetAt, 10) + `}},` +
-			`"purchasedRemaining":5,"freeRemaining":1}}`))
+		// Verified wire shape: windowLimits is top-level; 5h resetAt is 0 (no
+		// active reset); credit balances use *Credits field names.
+		w.Write([]byte(`{"credits":{"belowThreshold":false,"creditThreshold":0,` +
+			`"monthlyCredits":0.11,"purchasedCredits":5,"freeCredits":1},` +
+			`"windowLimits":{"limited":true,"exceeded":null,` +
+			`"fiveHour":{"used":0,"cap":14,"exceeded":false,"resetAt":0},` +
+			`"weekly":{"used":26.03,"cap":35,"exceeded":false,"resetAt":` + strconv.FormatInt(resetAt, 10) + `}},` +
+			`"sandboxAccess":false,"sandboxMinutes":null}`))
 	})
-	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"data":{"planId":"individual-pro"}}`))
+	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, r *http.Request) {
+		requireCommandCodeHeaders(t, r)
+		w.Write([]byte(`{"success":true,"data":{"planId":"individual-goat"}}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -183,36 +198,40 @@ func TestFetchCommandCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snap.Plan != "individual-pro" {
-		t.Fatalf("plan = %q, want individual-pro", snap.Plan)
+	if snap.Plan != "individual-goat" {
+		t.Fatalf("plan = %q, want individual-goat", snap.Plan)
 	}
 	if len(snap.Windows) != 3 {
 		t.Fatalf("windows = %+v, want 3", snap.Windows)
 	}
 	fiveHour := snap.Windows[0]
-	if fiveHour.Label != "5h" || fiveHour.UsedPercent == nil || *fiveHour.UsedPercent != 30 {
-		t.Fatalf("5h window = %+v, want 30%%", fiveHour)
+	if fiveHour.Label != "5h" || fiveHour.UsedPercent == nil || *fiveHour.UsedPercent != 0 {
+		t.Fatalf("5h window = %+v, want 0%%", fiveHour)
 	}
-	if fiveHour.Limit == nil || *fiveHour.Limit != 10 || fiveHour.Remaining == nil || *fiveHour.Remaining != 7 {
+	if fiveHour.Limit == nil || *fiveHour.Limit != 14 || fiveHour.Remaining == nil || *fiveHour.Remaining != 14 {
 		t.Fatalf("5h window limit/remaining = %+v", fiveHour)
 	}
-	if fiveHour.ResetsAt == nil || !fiveHour.ResetsAt.Equal(time.UnixMilli(resetAt).UTC()) {
-		t.Fatalf("5h resets_at = %v, want %v", fiveHour.ResetsAt, time.UnixMilli(resetAt).UTC())
+	if fiveHour.ResetsAt != nil {
+		t.Fatalf("5h resets_at = %v, want nil for resetAt 0", fiveHour.ResetsAt)
 	}
 	weekly := snap.Windows[1]
 	if weekly.Label != "weekly" || weekly.UsedPercent == nil {
 		t.Fatalf("weekly window = %+v", weekly)
 	}
+	if weekly.ResetsAt == nil || !weekly.ResetsAt.Equal(time.UnixMilli(resetAt).UTC()) {
+		t.Fatalf("weekly resets_at = %v, want %v", weekly.ResetsAt, time.UnixMilli(resetAt).UTC())
+	}
 	credits := snap.Windows[2]
-	if credits.Label != "credits" || credits.Remaining == nil || *credits.Remaining != 6 {
-		t.Fatalf("credits window = %+v, want 6 remaining", credits)
+	if credits.Label != "monthly credits" || credits.Remaining == nil || *credits.Remaining != 0.11 {
+		t.Fatalf("credits window = %+v, want 0.11 monthly remaining", credits)
 	}
 }
 
 func TestFetchCommandCodePlanFailureStillReportsWindows(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"credits":{"windowLimits":{"limited":true,"fiveHour":{"used":1,"cap":10}}}}`))
+		w.Write([]byte(`{"credits":{"monthlyCredits":10},` +
+			`"windowLimits":{"limited":true,"fiveHour":{"used":1,"cap":10}}}`))
 	})
 	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -227,8 +246,39 @@ func TestFetchCommandCodePlanFailureStillReportsWindows(t *testing.T) {
 	if snap.Plan != "" {
 		t.Fatalf("plan = %q, want empty on failure", snap.Plan)
 	}
+	if len(snap.Windows) != 2 || snap.Windows[0].Label != "5h" {
+		t.Fatalf("windows = %+v, want the 5h window plus credits despite plan failure", snap.Windows)
+	}
+}
+
+// TestFetchCommandCodePayGoNoSubscriptionDetail verifies pay-as-you-go (no
+// subscription detail in the response) surfaces windows but no credits window.
+func TestFetchCommandCodePayGoNoSubscriptionDetail(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"credits":{"belowThreshold":false,"creditThreshold":0},` +
+			`"windowLimits":{"limited":false,"fiveHour":{"used":0,"cap":14}}}`))
+	})
+	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"success":true,"data":null}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	snap, err := fetchCommandCode(context.Background(), srv.Client(), Credential{BaseURL: srv.URL, Credential: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Plan != "" {
+		t.Fatalf("plan = %q, want empty", snap.Plan)
+	}
 	if len(snap.Windows) != 1 || snap.Windows[0].Label != "5h" {
-		t.Fatalf("windows = %+v, want the 5h window despite plan failure", snap.Windows)
+		t.Fatalf("windows = %+v, want only the 5h window", snap.Windows)
+	}
+	for _, w := range snap.Windows {
+		if w.Label == "monthly credits" {
+			t.Fatalf("pay-as-you-go should not surface a credits window: %+v", snap.Windows)
+		}
 	}
 }
 

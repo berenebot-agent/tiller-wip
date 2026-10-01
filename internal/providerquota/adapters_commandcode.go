@@ -8,20 +8,27 @@ import (
 	"time"
 )
 
-// fetchCommandCode reads the Command Code plan's rolling usage windows. Like
-// Ollama Cloud and the Codex/Claude adapters, this endpoint is undocumented in
-// the public Provider API docs; it is the internal billing API the official CLI
-// uses to render `/usage`. The verified shape (command-code CLI) is:
+// commandCodeUserAgent is required to reach the Command Code billing API. The
+// host sits behind Cloudflare, which rejects the Go default client signature
+// (default User-Agent) with HTTP 403 "error code: 1010". The official CLI sends
+// "cli"; any non-default browser-like value is accepted.
+const commandCodeUserAgent = "cli"
+
+// fetchCommandCode reads the Command Code plan's rolling usage windows. The
+// endpoint is undocumented in the public Provider API docs; it is the internal
+// billing API the official CLI uses to render `/usage`. The verified shape
+// (command-code CLI, live account) is:
 //
 //	GET {origin}/alpha/billing/credits
-//	{"credits":{"windowLimits":{"limited":true,
-//	  "fiveHour":{"used":3.2,"cap":10,"resetAt":1730000000000},
-//	  "weekly":{"used":8.0,"cap":35,"resetAt":1730000000000}},
-//	  "purchasedRemaining":5,"freeRemaining":1}}
+//	{"credits":{"monthlyCredits":0.11,"purchasedCredits":0,"freeCredits":0},
+//	 "windowLimits":{"limited":true,"exceeded":null,
+//	   "fiveHour":{"used":0,"cap":14,"exceeded":false,"resetAt":0},
+//	   "weekly":{"used":26.03,"cap":35,"exceeded":false,"resetAt":1790862172858}}}
 //
-// resetAt is epoch milliseconds. The plan id is fetched separately from
-// /alpha/billing/subscriptions and is best-effort: a failure there must not
-// discard the windows. All values are credit-value units, not tokens.
+// windowLimits is top-level (not nested under credits). used/cap are
+// credit-value units; resetAt is epoch milliseconds, and 0 means the window has
+// no active reset. The plan id comes from /alpha/billing/subscriptions and is
+// best-effort: a failure there must not discard the windows.
 func fetchCommandCode(ctx context.Context, client *http.Client, cred Credential) (Snapshot, error) {
 	base := strings.TrimRight(cred.BaseURL, "/")
 	if base == "" {
@@ -33,42 +40,38 @@ func fetchCommandCode(ctx context.Context, client *http.Client, cred Credential)
 		base = origin.Scheme + "://" + origin.Host
 	}
 	headers := bearer(cred.Credential)
+	headers["User-Agent"] = commandCodeUserAgent
 	var payload struct {
 		Credits *struct {
-			WindowLimits *struct {
-				Limited  bool               `json:"limited"`
-				FiveHour *commandCodeWindow `json:"fiveHour"`
-				Weekly   *commandCodeWindow `json:"weekly"`
-			} `json:"windowLimits"`
-			PurchasedRemaining *float64 `json:"purchasedRemaining"`
-			FreeRemaining      *float64 `json:"freeRemaining"`
+			MonthlyCredits   *float64 `json:"monthlyCredits"`
+			PurchasedCredits *float64 `json:"purchasedCredits"`
+			FreeCredits      *float64 `json:"freeCredits"`
 		} `json:"credits"`
+		WindowLimits *struct {
+			Limited  bool               `json:"limited"`
+			Exceeded *bool              `json:"exceeded"`
+			FiveHour *commandCodeWindow `json:"fiveHour"`
+			Weekly   *commandCodeWindow `json:"weekly"`
+		} `json:"windowLimits"`
 	}
 	if err := getJSON(ctx, client, base+"/alpha/billing/credits", headers, &payload); err != nil {
 		return Snapshot{}, err
 	}
 	snap := Snapshot{}
-	if payload.Credits != nil {
-		if wl := payload.Credits.WindowLimits; wl != nil {
-			if w := commandCodeWindowView("5h", wl.FiveHour); w != nil {
-				snap.Windows = append(snap.Windows, *w)
-			}
-			if w := commandCodeWindowView("weekly", wl.Weekly); w != nil {
-				snap.Windows = append(snap.Windows, *w)
-			}
+	if wl := payload.WindowLimits; wl != nil {
+		if w := commandCodeWindowView("5h", wl.FiveHour); w != nil {
+			snap.Windows = append(snap.Windows, *w)
 		}
-		// Extra credits (pay-as-you-go + free) are never capped. Surface the
-		// remaining balance the same way the CLI does: purchased + free.
-		if payload.Credits.PurchasedRemaining != nil || payload.Credits.FreeRemaining != nil {
-			remaining := 0.0
-			if payload.Credits.PurchasedRemaining != nil {
-				remaining += *payload.Credits.PurchasedRemaining
-			}
-			if payload.Credits.FreeRemaining != nil {
-				remaining += *payload.Credits.FreeRemaining
-			}
-			snap.Windows = append(snap.Windows, Window{Label: "credits", Remaining: &remaining})
+		if w := commandCodeWindowView("weekly", wl.Weekly); w != nil {
+			snap.Windows = append(snap.Windows, *w)
 		}
+	}
+	// Monthly credits are the subscription pool. Pay-as-you-go has no
+	// subscription detail, so no credits window is shown when the plan reports
+	// no monthly pool.
+	if payload.Credits != nil && payload.Credits.MonthlyCredits != nil {
+		remaining := *payload.Credits.MonthlyCredits
+		snap.Windows = append(snap.Windows, Window{Label: "monthly credits", Remaining: &remaining})
 	}
 	// The plan id is display-only; resolve it best-effort so a plan-endpoint
 	// failure never hides the windows.
@@ -77,7 +80,7 @@ func fetchCommandCode(ctx context.Context, client *http.Client, cred Credential)
 }
 
 // commandCodeWindow is one rolling usage window. used and cap are credit-value
-// units; resetAt is epoch milliseconds.
+// units; resetAt is epoch milliseconds (0 means no active reset).
 type commandCodeWindow struct {
 	Used    float64 `json:"used"`
 	Cap     float64 `json:"cap"`
@@ -103,7 +106,7 @@ func commandCodeWindowView(label string, w *commandCodeWindow) *Window {
 	return &out
 }
 
-// commandCodePlan fetches the subscription plan id (e.g. "individual-pro").
+// commandCodePlan fetches the subscription plan id (e.g. "individual-goat").
 // Any failure returns an empty string so the caller still reports the windows.
 func commandCodePlan(ctx context.Context, client *http.Client, base string, headers map[string]string) string {
 	var payload struct {
