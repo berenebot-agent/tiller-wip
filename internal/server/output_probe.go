@@ -147,11 +147,16 @@ func probeUpstreamOutput(resp *http.Response, target providers.Protocol) (probeO
 
 // probeDeltaHasOutput reports whether a canonical delta carries client-visible
 // assistant output. Reasoning counts: a reasoning-only reply is a valid
-// (non-empty) completion even when no visible text follows.
+// (non-empty) completion even when no visible text follows. Opaque reasoning
+// state counts too: an encrypted-only reasoning item is a real completion whose
+// state the client needs, not an empty response.
 func probeDeltaHasOutput(delta canonicalDelta) bool {
 	switch delta.Kind {
 	case "text", "reasoning":
 		return delta.Text != ""
+	case "reasoning_state":
+		details, _ := delta.Detail["details"].([]any)
+		return len(details) > 0
 	case "tool":
 		return delta.CallID != "" || delta.Name != "" || delta.Arguments != ""
 	}

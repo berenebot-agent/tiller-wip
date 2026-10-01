@@ -13,6 +13,19 @@ _extra_models = []
 _failing_models = []
 
 
+
+# reasoning_details builds the opaque extension a relay emits for a reasoning
+# response. The OpenAI Responses format carries a readable summary plus the
+# encrypted replay blob (real providers emit both); the Anthropic format carries
+# the thinking text plus its signature.
+def reasoning_details(fmt):
+    if fmt == "openai-responses-v1":
+        return [
+            {"type": "reasoning.summary", "summary": "probe thinking", "format": fmt},
+            {"type": "reasoning.encrypted", "data": "probe-encrypted", "format": fmt},
+        ]
+    return [{"type": "reasoning.text", "text": "probe thinking", "signature": "probe-signature", "format": fmt}]
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -59,7 +72,14 @@ class Handler(BaseHTTPRequestHandler):
         if model in _failing_models:
             self.send_json({"error": {"message": "injected upstream failure", "type": "server_error"}}, 500)
             return
-        reasoning_probe = request.get("metadata", {}).get("user_id") == "reasoning-probe"
+        # Two probe flavours so each client protocol receives reasoning state it
+        # can actually represent: a Claude-format signature for the Anthropic
+        # client, and an OpenAI Responses-format encrypted blob for the Responses
+        # client. Feeding the wrong format across protocols is the incompatible
+        # case Tiller rejects by design.
+        probe_user = request.get("metadata", {}).get("user_id")
+        reasoning_probe = probe_user in ("reasoning-probe", "reasoning-probe-openai")
+        reasoning_format = "openai-responses-v1" if probe_user == "reasoning-probe-openai" else "anthropic-claude-v1"
         if request.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -70,7 +90,12 @@ class Handler(BaseHTTPRequestHandler):
                 {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
             ]
             if reasoning_probe:
-                chunks.insert(0, {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{"index": 0, "delta": {"role": "assistant", "reasoning": "probe thinking"}, "finish_reason": None}]})
+                # Emit an OPAQUE reasoning extension, not just readable text: the
+                # previous probe only sent plaintext, which is why the streaming
+                # drop of signatures/encrypted state went unnoticed. This shape
+                # is what OpenRouter relays for Claude (signature) and OpenAI
+                # (encrypted state), and it must survive translation.
+                chunks.insert(0, {"id": "chatcmpl_mock", "object": "chat.completion.chunk", "created": 1, "model": model, "choices": [{"index": 0, "delta": {"role": "assistant", "reasoning": "probe thinking", "reasoning_details": reasoning_details(reasoning_format)}, "finish_reason": None}]})
             for chunk in chunks:
                 self.wfile.write(b"data: " + json.dumps(chunk, separators=(",", ":")).encode() + b"\n\n")
                 self.wfile.flush()
@@ -82,7 +107,7 @@ class Handler(BaseHTTPRequestHandler):
             "object": "chat.completion",
             "created": 1,
             "model": model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello", **({"reasoning": "probe thinking"} if reasoning_probe else {})}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "hello", **(({"reasoning": "probe thinking", "reasoning_details": reasoning_details(reasoning_format)} if reasoning_probe else {}))}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         })
 
