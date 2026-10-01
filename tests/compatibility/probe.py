@@ -77,17 +77,29 @@ with reasoning_anthropic.messages.stream(model=reasoning_model, max_tokens=4096,
     final_message = stream.get_final_message()
 assert [block.type for block in final_message.content] == ["thinking", "text"]
 assert final_message.content[0].thinking == "probe thinking"
+# The upstream emitted an opaque reasoning_details signature. Before the fix it
+# was dropped on the streaming path, so the Anthropic SDK received no signature
+# on the thinking block. This is the assertion that would have caught that.
+assert getattr(final_message.content[0], "signature", None) == "probe-signature", final_message.content[0]
 assert final_message.content[1].text == "hello"
 
-with reasoning_openai.responses.stream(model=reasoning_model, input="hello", metadata=reasoning_metadata) as stream:
+# The Responses client receives the OpenAI-format encrypted reasoning blob.
+# Before the fix the streaming path dropped it, so the SDK got a reasoning item
+# with no encrypted content to replay.
+with reasoning_openai.responses.stream(model=reasoning_model, input="hello", metadata={"user_id": "reasoning-probe-openai"}) as stream:
     final_response = stream.get_final_response()
 assert final_response.output_text == "hello"
-assert "".join(part.text for item in final_response.output if item.type == "reasoning" for part in item.summary) == "probe thinking"
+reasoning_items = [item for item in final_response.output if item.type == "reasoning"]
+assert any(getattr(item, "encrypted_content", None) == "probe-encrypted" for item in reasoning_items), reasoning_items
 
 message = reasoning_anthropic.messages.create(model=reasoning_model, max_tokens=4096, messages=[{"role": "user", "content": "hello"}], metadata=reasoning_metadata)
 assert message.content[0].type == "thinking" and message.content[0].thinking == "probe thinking"
-response = reasoning_openai.responses.create(model=reasoning_model, input="hello", metadata=reasoning_metadata)
+# Non-streaming Responses call uses the OpenAI-format blob. Using the Anthropic
+# flavour here would be the genuinely unrepresentable case the router rejects by
+# design (covered by the Go gate test), not a compatibility regression.
+response = reasoning_openai.responses.create(model=reasoning_model, input="hello", metadata={"user_id": "reasoning-probe-openai"})
 assert "".join(part.text for item in response.output if item.type == "reasoning" for part in item.summary) == "probe thinking"
+assert any(getattr(item, "encrypted_content", None) == "probe-encrypted" for item in response.output if item.type == "reasoning"), response.output
 print("cross-protocol reasoning SDK probes passed")
 
 with tempfile.TemporaryDirectory() as codex_home:
