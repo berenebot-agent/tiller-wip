@@ -543,6 +543,9 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .platform-plan-row:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
 .platform-plan-row>div:first-child{min-width:0}
 .platform-plan-row .platform-list-actions{margin-top:0;flex:none}
+.platform-user-stats{display:grid;gap:2px;margin-top:5px}
+.platform-user-stats small{display:block;color:var(--muted);font:11px var(--mono);overflow-wrap:anywhere}
+.platform-user-usage-unavailable{color:var(--muted);font-style:italic}
 .platform-legal-form{display:grid;gap:8px;padding:12px;border:1px solid var(--line);background:#fbfcfd;margin-bottom:10px}
 .platform-legal-form strong{color:var(--navy);font:700 12px var(--mono)}
 .platform-plan-fields{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}

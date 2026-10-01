@@ -56,14 +56,14 @@ func TestPlatformUsageAggregatesOnlyAccountScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Requests24h != 1 || usage.Tokens24h != 30 || usage.Requests7d != 2 || usage.Tokens7d != 42 {
+	if usage.Requests1h != 1 || usage.Tokens1h != 30 || usage.Requests24h != 1 || usage.Tokens24h != 30 || usage.Requests7d != 2 || usage.Tokens7d != 42 {
 		t.Fatalf("local account usage = %+v", usage)
 	}
 	other, err := st.For("other-account").PlatformUsage(context.Background(), now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if other.Requests24h != 1 || other.Tokens24h != 300 || other.Requests7d != 1 || other.Tokens7d != 300 {
+	if other.Requests1h != 1 || other.Tokens1h != 300 || other.Requests24h != 1 || other.Tokens24h != 300 || other.Requests7d != 1 || other.Tokens7d != 300 {
 		t.Fatalf("other account usage = %+v", other)
 	}
 }
