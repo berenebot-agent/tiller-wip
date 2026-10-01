@@ -49,6 +49,12 @@ type Poller struct {
 	last map[string]time.Time
 	snap map[string]Snapshot
 	refs map[string]ProviderRef
+	// gen increments for a provider on every register/unregister. A poll
+	// captures the generation before its network work and only publishes if the
+	// generation is unchanged, so a poll that was already in flight cannot
+	// resurrect a snapshot for a provider that has since been removed or
+	// changed.
+	gen map[string]uint64
 	// inflight prevents two concurrent polls of the same provider.
 	inflight map[string]bool
 	// active records the last time a provider served a request, so the cadence
@@ -64,6 +70,7 @@ func NewPoller(client *http.Client, hydrate Hydrate) *Poller {
 		last:     map[string]time.Time{},
 		snap:     map[string]Snapshot{},
 		refs:     map[string]ProviderRef{},
+		gen:      map[string]uint64{},
 		inflight: map[string]bool{},
 		active:   map[string]time.Time{},
 	}
@@ -104,12 +111,55 @@ func (p *Poller) SetAccountHeader(accountID, providerID, header string) {
 // server calls Refresh or RefreshIfDue. Type is only registered when an adapter
 // exists.
 func (p *Poller) Register(ref ProviderRef) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.registerLocked(ref)
+}
+
+func (p *Poller) registerLocked(ref ProviderRef) {
 	if !Supports(ref.Type) {
 		return
 	}
+	k := key(ref.AccountID, ref.ProviderID)
+	if existing, ok := p.refs[k]; ok && existing == ref {
+		// An unchanged registration must not invalidate an in-flight poll.
+		return
+	}
+	p.refs[k] = ref
+	p.gen[k]++
+}
+
+// Reconcile replaces the registered set with refs, registering new providers
+// and unregistering any provider no longer present. Without this, a deleted or
+// disabled provider kept its registration and its cached snapshot forever,
+// because registration was add-only. The whole diff runs under one lock so a
+// concurrent poll cannot observe a half-reconciled set.
+func (p *Poller) Reconcile(refs []ProviderRef) {
+	want := make(map[string]ProviderRef, len(refs))
+	for _, ref := range refs {
+		if Supports(ref.Type) {
+			want[key(ref.AccountID, ref.ProviderID)] = ref
+		}
+	}
 	p.mu.Lock()
-	p.refs[key(ref.AccountID, ref.ProviderID)] = ref
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	for k, ref := range want {
+		if existing, ok := p.refs[k]; ok && existing == ref {
+			continue
+		}
+		p.refs[k] = ref
+		p.gen[k]++
+	}
+	for k := range p.refs {
+		if _, ok := want[k]; ok {
+			continue
+		}
+		delete(p.refs, k)
+		delete(p.snap, k)
+		delete(p.last, k)
+		delete(p.inflight, k)
+		p.gen[k]++
+	}
 }
 
 // Unregister drops a provider's registration and cached snapshot.
@@ -119,6 +169,8 @@ func (p *Poller) Unregister(accountID, providerID string) {
 	delete(p.refs, k)
 	delete(p.snap, k)
 	delete(p.last, k)
+	delete(p.inflight, k)
+	p.gen[k]++
 	p.mu.Unlock()
 }
 
@@ -171,14 +223,26 @@ func (p *Poller) RefreshIfDue(ctx context.Context, accountID, providerID string,
 		return cached, false
 	}
 	p.inflight[k] = true
+	// Capture the registration generation. If the provider is unregistered or
+	// re-registered while this poll is in flight, the result must be discarded
+	// rather than republished into snap, which would resurrect a snapshot for a
+	// provider that no longer exists (or publish stale data over a new
+	// registration).
+	generation := p.gen[k]
 	p.mu.Unlock()
 
 	snap := p.poll(ctx, ref, now)
 
 	p.mu.Lock()
 	p.inflight[k] = false
-	p.last[k] = now
-	p.snap[k] = snap
+	if p.gen[k] == generation {
+		p.last[k] = now
+		p.snap[k] = snap
+	} else {
+		// Registration changed mid-poll: drop the result and any cached state
+		// so a subsequent Snapshot call does not serve the obsolete value.
+		snap = p.snap[k]
+	}
 	p.mu.Unlock()
 	return snap, true
 }

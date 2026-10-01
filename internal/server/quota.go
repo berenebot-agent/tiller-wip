@@ -81,14 +81,20 @@ func (s *Server) startQuotaPoller(ctx context.Context) {
 }
 
 // registerQuotaProviders (re)builds the poller's provider registry from the
-// store. Called at startup and on demand; it does not poll.
+// store. Called at startup and on demand; it does not poll. It reconciles
+// rather than adds: a provider that has been deleted or disabled (or whose type
+// no longer has an adapter) is unregistered along with its cached snapshot, so
+// /api/admin/quota cannot keep showing a card for a provider that is gone. A
+// store error returns early and leaves the existing registry untouched — an
+// unavailable database must never be read as "no providers configured".
 func (s *Server) registerQuotaProviders(ctx context.Context) {
 	refs, err := s.storeHandle().QuotaProviders(ctx, quotaProviderTypes())
 	if err != nil {
 		return
 	}
+	out := make([]providerquota.ProviderRef, 0, len(refs))
 	for _, ref := range refs {
-		s.quota.Register(providerquota.ProviderRef{
+		out = append(out, providerquota.ProviderRef{
 			AccountID:  ref.AccountID,
 			ProviderID: ref.ProviderID,
 			Name:       ref.Name,
@@ -96,6 +102,7 @@ func (s *Server) registerQuotaProviders(ctx context.Context) {
 			BaseURL:    ref.BaseURL,
 		})
 	}
+	s.quota.Reconcile(out)
 }
 
 // refreshQuotaProviders polls every registered provider that is due under the

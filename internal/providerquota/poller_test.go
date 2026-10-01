@@ -76,6 +76,99 @@ func TestRefreshIfDueUnknownProvider(t *testing.T) {
 	}
 }
 
+// TestReconcileUnregistersAbsentProviders is the regression for quota cards
+// persisting after a provider was deleted or disabled: registration was
+// add-only and Unregister had no callers.
+func TestReconcileUnregistersAbsentProviders(t *testing.T) {
+	adapters["test-reconcile"] = func(context.Context, *http.Client, Credential) (Snapshot, error) {
+		pct := 10.0
+		return Snapshot{Available: true, Windows: []Window{{Label: "5h", UsedPercent: &pct}}}, nil
+	}
+	defer delete(adapters, "test-reconcile")
+
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	keep := ProviderRef{AccountID: "acct", ProviderID: "keep", Type: "test-reconcile"}
+	drop := ProviderRef{AccountID: "acct", ProviderID: "drop", Type: "test-reconcile"}
+	p.Reconcile([]ProviderRef{keep, drop})
+	if _, polled := p.RefreshIfDue(context.Background(), "acct", "drop", false, time.Now()); !polled {
+		t.Fatal("drop provider should poll")
+	}
+	if _, ok := p.Snapshot("acct", "drop"); !ok {
+		t.Fatal("expected a cached snapshot before reconcile")
+	}
+
+	// drop is no longer configured; keep remains.
+	p.Reconcile([]ProviderRef{keep})
+	if _, ok := p.Snapshot("acct", "drop"); ok {
+		t.Fatal("snapshot for a removed provider survived reconcile")
+	}
+	if _, ok := p.RefreshIfDue(context.Background(), "acct", "drop", false, time.Now()); ok {
+		t.Fatal("removed provider should no longer poll")
+	}
+	if _, ok := p.RefreshIfDue(context.Background(), "acct", "keep", false, time.Now()); !ok {
+		t.Fatal("remaining provider should still poll")
+	}
+}
+
+// TestReconcileDoesNotInvalidateUnchangedRegistration proves the generation
+// only moves when a registration actually changes, so a steady-state reconcile
+// on every tick cannot discard in-flight poll results.
+func TestReconcileDoesNotInvalidateUnchangedRegistration(t *testing.T) {
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	ref := ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "codex-subscription"}
+	p.Register(ref)
+	p.mu.Lock()
+	before := p.gen[key("acct", "prov")]
+	p.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		p.Reconcile([]ProviderRef{ref})
+	}
+	p.mu.Lock()
+	after := p.gen[key("acct", "prov")]
+	p.mu.Unlock()
+	if before != after {
+		t.Fatalf("unchanged reconcile moved generation %d -> %d", before, after)
+	}
+}
+
+// TestUnregisterDiscardsInFlightPoll proves a poll that finishes after the
+// provider was removed cannot republish its snapshot.
+func TestUnregisterDiscardsInFlightPoll(t *testing.T) {
+	release := make(chan struct{})
+	adapters["test-late"] = func(ctx context.Context, _ *http.Client, _ Credential) (Snapshot, error) {
+		<-release
+		pct := 99.0
+		return Snapshot{Available: true, Windows: []Window{{Label: "5h", UsedPercent: &pct}}}, nil
+	}
+	defer delete(adapters, "test-late")
+
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	p.Register(ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "test-late"})
+
+	done := make(chan struct{})
+	go func() {
+		p.RefreshIfDue(context.Background(), "acct", "prov", true, time.Now())
+		close(done)
+	}()
+	// Wait until the adapter is definitely running, then remove the provider.
+	for {
+		p.mu.Lock()
+		running := p.inflight[key("acct", "prov")]
+		p.mu.Unlock()
+		if running {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	p.Unregister("acct", "prov")
+	close(release)
+	<-done
+
+	if _, ok := p.Snapshot("acct", "prov"); ok {
+		t.Fatal("a poll that completed after unregister republished a snapshot")
+	}
+}
+
 func TestPollHydrateFailureIsUnavailable(t *testing.T) {
 	adapters["test-quota2"] = func(context.Context, *http.Client, Credential) (Snapshot, error) {
 		t.Fatal("adapter should not run when hydration fails")

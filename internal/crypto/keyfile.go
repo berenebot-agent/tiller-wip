@@ -120,7 +120,16 @@ func Resolve(dataDir, envKey, envKeyFile string, hasEncryptedRows bool) (key []b
 
 // WriteKeyFile writes a raw key to path as "base64:<value>\n" with 0600
 // permissions, atomically (write to a temp file in the same directory, then
-// rename).
+// rename) and durably: the temp file's contents are fsynced before the rename,
+// and the parent directory is fsynced after it.
+//
+// The durability step matters because the key file and the database are
+// separate persistence domains. SQLite commits ciphertext using its own syncs;
+// a plain close+rename only guarantees the rename is visible to this process,
+// not that the key's bytes and the directory entry survive a power loss. A
+// crash could then leave committed ciphertext whose only key was never
+// durable, which is unrecoverable by design (the key is not stored anywhere
+// else).
 func WriteKeyFile(path string, key []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -140,8 +149,31 @@ func WriteKeyFile(path string, key []byte) error {
 		_ = tmp.Close()
 		return err
 	}
+	// Persist the key bytes before the rename publishes the name.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// Persist the rename itself; otherwise the directory entry can be lost even
+	// though the file's data was written.
+	return syncDir(dir)
+}
+
+// syncDir fsyncs a directory so a rename or create within it is durable. Some
+// filesystems (and some platforms) refuse to open a directory for syncing;
+// those return an error the caller must not ignore for a key file, so it is
+// propagated rather than swallowed.
+func syncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
