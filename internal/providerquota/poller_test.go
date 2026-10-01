@@ -190,6 +190,12 @@ func TestFetchCommandCode(t *testing.T) {
 		requireCommandCodeHeaders(t, r)
 		w.Write([]byte(`{"success":true,"data":{"planId":"individual-goat"}}`))
 	})
+	mux.HandleFunc("/alpha/usage/summary", func(w http.ResponseWriter, r *http.Request) {
+		requireCommandCodeHeaders(t, r)
+		// Period spend; combined with the 0.11 remaining this anchors a
+		// ~70-credit monthly pool (GOAT) at ~99.8% used.
+		w.Write([]byte(`{"totalMonthlyCredits":69.89,"totalCost":69.89,"periodBasis":"billing-period"}`))
+	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
@@ -221,9 +227,15 @@ func TestFetchCommandCode(t *testing.T) {
 	if weekly.ResetsAt == nil || !weekly.ResetsAt.Equal(time.UnixMilli(resetAt).UTC()) {
 		t.Fatalf("weekly resets_at = %v, want %v", weekly.ResetsAt, time.UnixMilli(resetAt).UTC())
 	}
-	credits := snap.Windows[2]
-	if credits.Label != "monthly credits" || credits.Remaining == nil || *credits.Remaining != 0.11 {
-		t.Fatalf("credits window = %+v, want 0.11 monthly remaining", credits)
+	monthly := snap.Windows[2]
+	if monthly.Label != "monthly" {
+		t.Fatalf("monthly window = %+v, want label monthly", monthly)
+	}
+	if monthly.Limit == nil || *monthly.Limit != 70 || monthly.Remaining == nil || *monthly.Remaining != 0.11 {
+		t.Fatalf("monthly limit/remaining = %+v, want cap 70 remaining 0.11", monthly)
+	}
+	if monthly.UsedPercent == nil || *monthly.UsedPercent < 99 || *monthly.UsedPercent > 100 {
+		t.Fatalf("monthly used_percent = %v, want ~99.8", monthly.UsedPercent)
 	}
 }
 
@@ -246,13 +258,15 @@ func TestFetchCommandCodePlanFailureStillReportsWindows(t *testing.T) {
 	if snap.Plan != "" {
 		t.Fatalf("plan = %q, want empty on failure", snap.Plan)
 	}
-	if len(snap.Windows) != 2 || snap.Windows[0].Label != "5h" {
-		t.Fatalf("windows = %+v, want the 5h window plus credits despite plan failure", snap.Windows)
+	// The usage summary is unavailable here, so only the rolling window shows;
+	// a plan-endpoint failure never discards it.
+	if len(snap.Windows) != 1 || snap.Windows[0].Label != "5h" {
+		t.Fatalf("windows = %+v, want only the 5h window", snap.Windows)
 	}
 }
 
 // TestFetchCommandCodePayGoNoSubscriptionDetail verifies pay-as-you-go (no
-// subscription detail in the response) surfaces windows but no credits window.
+// subscription detail in the response) surfaces windows but no monthly window.
 func TestFetchCommandCodePayGoNoSubscriptionDetail(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
@@ -274,11 +288,6 @@ func TestFetchCommandCodePayGoNoSubscriptionDetail(t *testing.T) {
 	}
 	if len(snap.Windows) != 1 || snap.Windows[0].Label != "5h" {
 		t.Fatalf("windows = %+v, want only the 5h window", snap.Windows)
-	}
-	for _, w := range snap.Windows {
-		if w.Label == "monthly credits" {
-			t.Fatalf("pay-as-you-go should not surface a credits window: %+v", snap.Windows)
-		}
 	}
 }
 
