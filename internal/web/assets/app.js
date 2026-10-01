@@ -2509,7 +2509,7 @@ function showFeedback() {
 // The footer link is built in JS so the label stays in one place with the panel
 // copy. It opens the same feedback panel as the top-bar button.
 function renderFooterFeedback() {
-  $('#footer-feedback').innerHTML = '<button class="btn-link" id="open-feedback-footer" type="button">Feedback — tiller@hgolabs.com</button>';
+  $('#footer-feedback').innerHTML = '<button class="btn-link" id="open-feedback-footer" type="button">Feedback — tiller-router@hgolabs.com</button>';
   $('#open-feedback-footer').addEventListener('click', showFeedback);
 }
 // Feedback is reachable from the signed-in top bar and (hosted) footer, so
