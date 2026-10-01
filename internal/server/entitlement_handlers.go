@@ -121,7 +121,7 @@ func writePlanError(w http.ResponseWriter, err error) bool {
 func (s *Server) writePlatformPlanCreate(w http.ResponseWriter, r *http.Request) {
 	var input planRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	name := strings.TrimSpace(input.Name)
@@ -156,7 +156,7 @@ func (s *Server) writePlatformPlanUpdate(w http.ResponseWriter, r *http.Request)
 	}
 	var input planRequest
 	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	name := strings.TrimSpace(input.Name)
@@ -270,7 +270,7 @@ func (s *Server) writeAccountPlanAssign(w http.ResponseWriter, r *http.Request) 
 		Plan string `json:"plan"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	plan := strings.TrimSpace(input.Plan)

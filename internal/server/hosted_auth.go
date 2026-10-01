@@ -136,7 +136,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !validEmail(input.Email) {
@@ -193,7 +193,7 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	emailKey := s.authRateLimitEmailKey(input.Email)
@@ -311,7 +311,7 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConsumeVerification(r.Context(), input.Token)
@@ -355,7 +355,7 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "recovery") {
@@ -385,7 +385,7 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "recovery") {
@@ -410,7 +410,7 @@ func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConsumePasswordReset(r.Context(), input.Token, input.Password)

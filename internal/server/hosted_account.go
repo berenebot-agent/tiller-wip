@@ -46,7 +46,7 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		NewPassword     string `json:"new_password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
@@ -89,7 +89,7 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	profile, profileErr := s.identity.AccountProfile(r.Context(), session.User.ID)
@@ -138,7 +138,7 @@ func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConfirmEmailChange(r.Context(), input.Token)
@@ -178,7 +178,7 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		Confirm  string `json:"confirm"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !strings.EqualFold(identity.NormalizeEmail(input.Confirm), identity.NormalizeEmail(session.User.Email)) {
