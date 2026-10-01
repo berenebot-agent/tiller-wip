@@ -3530,7 +3530,26 @@ async function loadPlatformDashboard(tab = state.platformTab) {
     const users = await api(`/api/platform/users?${params}`);
     if (token !== state.platformUsersLoadToken) return;
     const userRows = users.data || [];
-    $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<span class="plan-assign"><select class="plan-select" data-account-plan="${h(user.account_id)}" aria-label="Plan for ${h(user.email)}">${planOptionList(user.plan)}</select><button class="btn btn-small btn-secondary" data-account-plan-save="${h(user.account_id)}">Save plan</button></span><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
+    const userStats = users.stats || [];
+    $('#platform-users-list').innerHTML = userRows.map((user, index) => {
+      const stats = userStats[index] || {};
+      const usage = stats.usage || {};
+      const usageValues = stats.usage_available === false
+        ? '<span class="platform-user-usage-unavailable">Usage unavailable</span>'
+        : [
+            `1h ${formatCount(usage.requests_1h)} req · ${formatCount(usage.tokens_1h)} tok`,
+            `24h ${formatCount(usage.requests_24h)} req · ${formatCount(usage.tokens_24h)} tok`,
+            `7d ${formatCount(usage.requests_7d)} req · ${formatCount(usage.tokens_7d)} tok`,
+          ].join(' · ');
+      const resourceValues = [
+        `${formatCount(stats.providers)} providers`,
+        `${formatCount(stats.client_keys)} client keys`,
+        `${formatCount(stats.virtual_models)} virtual models`,
+        `${formatCount(stats.models)} models`,
+      ].join(' · ');
+      const statsLine = `<div class="platform-user-stats"><small>${resourceValues}</small><small>${usageValues}</small></div>`;
+      return `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small>${statsLine}<div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<span class="plan-assign"><select class="plan-select" data-account-plan="${h(user.account_id)}" aria-label="Plan for ${h(user.email)}">${planOptionList(user.plan)}</select><button class="btn btn-small btn-secondary" data-account-plan-save="${h(user.account_id)}">Save plan</button></span><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`;
+    }).join('') || '<p class="meta-line">No hosted users.</p>';
     $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
     $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
     $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || !users.has_more;
@@ -3830,6 +3849,11 @@ $('#platform-analytics-form').addEventListener('submit', async event => {
     $('#platform-analytics-error').style.color = '';
     $('#platform-analytics-error').textContent = errorMessage(error, 'Could not save analytics settings.');
   }
+});
+$('#platform-user-search').addEventListener('input', event => {
+  state.platformUsersSearch = event.target.value.trim();
+  state.platformUsersOffset = 0;
+  loadPlatformDashboard('users').catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); });
 });
 $('#platform-users-prev').onclick = () => {
   state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100);

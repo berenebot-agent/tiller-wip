@@ -459,6 +459,18 @@ func hasMailUpdate(input struct {
 	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
 }
 
+// accountUserStats is the operator view of an account's tenant resource counts
+// and recent usage. It is assembled per account through store.Scope so no
+// tenant-table query crosses an account boundary.
+type accountUserStats struct {
+	Providers      int                         `json:"providers"`
+	ClientKeys     int                         `json:"client_keys"`
+	VirtualModels  int                         `json:"virtual_models"`
+	Models         int                         `json:"models"`
+	Usage          *store.PlatformUsageWindows `json:"usage,omitempty"`
+	UsageAvailable bool                        `json:"usage_available"`
+}
+
 func (s *Server) platformUsers(w http.ResponseWriter, r *http.Request) {
 	limit, offset, search := pagination(r)
 	rows, err := s.identity.ListUsers(r.Context(), search, limit, offset)
@@ -466,7 +478,39 @@ func (s *Server) platformUsers(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not list users.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "limit": limit, "offset": offset, "has_more": len(rows) == limit})
+	now := time.Now()
+	st := s.storeHandle()
+	usageAvailable := s.db.Activity != nil
+	stats := make([]accountUserStats, len(rows))
+	for i, row := range rows {
+		sc := st.For(row.AccountID)
+		counts, err := sc.ResourceCounts(r.Context())
+		if err != nil {
+			adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
+			return
+		}
+		health, err := sc.AdminHealth(r.Context())
+		if err != nil {
+			adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
+			return
+		}
+		stats[i] = accountUserStats{
+			Providers:      counts.Providers,
+			ClientKeys:     counts.ClientKeys,
+			VirtualModels:  counts.VirtualModels,
+			Models:         health.AvailableModels + health.RetiredModels,
+			UsageAvailable: usageAvailable,
+		}
+		if usageAvailable {
+			usage, err := sc.PlatformUsage(r.Context(), now)
+			if err != nil {
+				adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
+				return
+			}
+			stats[i].Usage = &usage
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "stats": stats, "limit": limit, "offset": offset, "has_more": len(rows) == limit})
 }
 
 func (s *Server) platformAudit(w http.ResponseWriter, r *http.Request) {

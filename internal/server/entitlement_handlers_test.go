@@ -433,6 +433,96 @@ func TestCreateLimitReturns409LimitExceeded(t *testing.T) {
 	}
 }
 
+func TestPlatformUsersIncludeScopedResourceAndUsageStats(t *testing.T) {
+	app, _, firstAccount := hostedServerHarness(t, false)
+	papi := hostedPlatformAPI(t, app)
+	ctx := context.Background()
+
+	second, err := app.identity.CreateSignup(ctx, "second-users@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondAccount := second.User.AccountID
+
+	// First account gets one provider, one client key, one virtual model and two
+	// provider models (one available, one retired) plus recent activity.
+	sc := app.storeHandle().For(firstAccount)
+	if err := sc.CreateProvider(ctx, store.CreateProviderInput{ID: "pu-provider", Name: "pu-provider", Type: "generic-openai", BaseURL: "https://example.com/v1", Enabled: true, Protocols: "chat"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if _, err := app.db.SQL.Exec(`INSERT INTO provider_models(id,account_id,provider_id,upstream_model_id,origin,available,first_seen_at,last_seen_at,created_at,updated_at) VALUES('pu-model-a',?,'pu-provider','m-a','discovered',1,?,?,?,?),('pu-model-b',?,'pu-provider','m-b','discovered',0,?,?,?,?)`, firstAccount, now, now, now, now, firstAccount, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := sc.CreateVirtualModel(ctx, store.CreateVirtualModelInput{
+		ID: "pu-vm", NewGroupID: "pu-group", GroupName: "pu-group", Name: "pu-vm", RoutingMode: "ordered_fallback",
+		Targets: []store.VirtualTargetInput{{ProviderModelID: "pu-model-a"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sc.CreateClientKey(ctx, store.CreateClientKeyInput{ID: "pu-key", Name: "pu-key", Type: "catalogue", Hash: "hash", Fingerprint: "fp"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Activity.Exec(`INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES('pu-req',?,?,'m','chat',0,200,1,3,5,'pu-req',?)`, firstAccount, "pu-key", now.Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+
+	status, payload, _ := papi.request(http.MethodGet, "/api/platform/users", nil)
+	if status != http.StatusOK {
+		t.Fatalf("platform users: %d %v", status, payload)
+	}
+	data, _ := payload["data"].([]any)
+	stats, _ := payload["stats"].([]any)
+	if len(data) != 2 || len(stats) != 2 {
+		t.Fatalf("users/stats length = %d/%d, want 2/2 (%v)", len(data), len(stats), payload)
+	}
+	byAccount := map[string]map[string]any{}
+	for i, raw := range data {
+		user, _ := raw.(map[string]any)
+		stat, _ := stats[i].(map[string]any)
+		byAccount[user["account_id"].(string)] = stat
+	}
+	first := byAccount[firstAccount]
+	if first["providers"] != float64(1) || first["client_keys"] != float64(1) || first["virtual_models"] != float64(1) || first["models"] != float64(2) {
+		t.Fatalf("first account resource stats = %v", first)
+	}
+	if first["usage_available"] != true {
+		t.Fatalf("usage_available = %v, want true", first["usage_available"])
+	}
+	usage, _ := first["usage"].(map[string]any)
+	if usage["requests_1h"] != float64(1) || usage["requests_24h"] != float64(1) || usage["tokens_24h"] != float64(8) {
+		t.Fatalf("first account usage = %v", usage)
+	}
+	secondStats := byAccount[secondAccount]
+	if secondStats["providers"] != float64(0) || secondStats["client_keys"] != float64(0) || secondStats["virtual_models"] != float64(0) || secondStats["models"] != float64(0) {
+		t.Fatalf("second account stats leaked resources = %v", secondStats)
+	}
+	secondUsage, _ := secondStats["usage"].(map[string]any)
+	if secondUsage["requests_24h"] != float64(0) {
+		t.Fatalf("second account usage leaked activity = %v", secondUsage)
+	}
+}
+
+func TestPlatformUsersReportUsageUnavailable(t *testing.T) {
+	app, _, _ := hostedServerHarness(t, true)
+	papi := hostedPlatformAPI(t, app)
+	status, payload, _ := papi.request(http.MethodGet, "/api/platform/users", nil)
+	if status != http.StatusOK {
+		t.Fatalf("platform users: %d %v", status, payload)
+	}
+	stats, _ := payload["stats"].([]any)
+	if len(stats) == 0 {
+		t.Fatalf("no stats rows: %v", payload)
+	}
+	first, _ := stats[0].(map[string]any)
+	if first["usage_available"] != false {
+		t.Fatalf("usage_available = %v, want false", first["usage_available"])
+	}
+	if _, hasUsage := first["usage"]; hasUsage {
+		t.Fatalf("unavailable usage was reported: %v", first)
+	}
+}
+
 func auditContains(payload map[string]any, event string) bool {
 	data, _ := payload["data"].([]any)
 	for _, raw := range data {
