@@ -300,36 +300,73 @@ VALUES(?,?,?,?,?,?,?) ON CONFLICT(client_key_id) DO UPDATE SET exposed_model_nam
 	return err
 }
 
-// UpdateClientKeyInput is the fully merged field set for an update.
+// UpdateClientKeyInput is the update request. Only fields whose *Set flag is
+// true are written, so a request that omitted a field cannot overwrite a
+// concurrent change to it with a value merged from an earlier read.
 type UpdateClientKeyInput struct {
-	ID          string
-	Name        string
-	Description string
-	Group       string
-	Type        string
-	Enabled     bool
-	// EnabledSet reports whether the caller explicitly supplied an enabled
-	// value. When false the UPDATE does not touch the enabled column, so a
-	// concurrent PATCH that does not mention enabled cannot silently re-enable a
-	// key disabled by another request.
-	EnabledSet     bool
-	LoggingEnabled bool
-	RetentionDays  int
-	WriteBinding   bool
-	ModelName      string
-	TargetType     string
-	TargetID       string
+	ID           string
+	Name         string
+	NameSet      bool
+	Description  string
+	DescSet      bool
+	Group        string
+	GroupSet     bool
+	Type         string
+	TypeSet      bool
+	Enabled      bool
+	EnabledSet   bool
+	Logging      bool
+	LoggingSet   bool
+	Retention    int
+	RetentionSet bool
+	// BindingSet reports whether the request supplied Single-binding fields. The
+	// binding is only written when it is set (or when a Single key needs a
+	// binding that does not exist yet), so a metadata-only PATCH cannot revert a
+	// concurrent route change with a stale binding.
+	BindingSet bool
+	// BindingExists reports whether this key already has a Single binding, so
+	// the store can distinguish "create the binding a Single key needs" from
+	// "rewrite an existing binding the request did not mention".
+	BindingExists bool
+	ModelName     string
+	TargetType    string
+	TargetID      string
 }
 
-// UpdateClientKey writes the merged client-key fields (and optionally the
-// single binding) for the scoped account.
+// UpdateClientKey writes only the supplied client-key fields, and the Single
+// binding only when the request actually touched it (or the key is Single and
+// has no binding yet), for the scoped account.
 func (s *Scope) UpdateClientKey(ctx context.Context, in UpdateClientKeyInput) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
 		now := now()
 		// updated_at is always written so a no-op update still affects one row
 		// and the RowsAffected()==0 → not-found signal stays correct.
-		set := "name=?,description=?,key_group=?,logging_enabled=?,retention_days=?,key_type=?,updated_at=?"
-		args := []any{in.Name, in.Description, in.Group, boolInt(in.LoggingEnabled), in.RetentionDays, in.Type, now}
+		set := "updated_at=?"
+		args := []any{now}
+		if in.NameSet {
+			set += ",name=?"
+			args = append(args, in.Name)
+		}
+		if in.DescSet {
+			set += ",description=?"
+			args = append(args, in.Description)
+		}
+		if in.GroupSet {
+			set += ",key_group=?"
+			args = append(args, in.Group)
+		}
+		if in.LoggingSet {
+			set += ",logging_enabled=?"
+			args = append(args, boolInt(in.Logging))
+		}
+		if in.RetentionSet {
+			set += ",retention_days=?"
+			args = append(args, in.Retention)
+		}
+		if in.TypeSet {
+			set += ",key_type=?"
+			args = append(args, in.Type)
+		}
 		if in.EnabledSet {
 			set += ",enabled=?"
 			args = append(args, boolInt(in.Enabled))
@@ -342,7 +379,8 @@ func (s *Scope) UpdateClientKey(ctx context.Context, in UpdateClientKeyInput) er
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrClientKeyNotFound
 		}
-		if in.WriteBinding {
+		writeBinding := in.BindingSet || (in.TypeSet && in.Type == "single" && !in.BindingExists)
+		if writeBinding {
 			ok, err := tx.singleTargetExists(ctx, in.TargetType, in.TargetID)
 			if err != nil {
 				return err

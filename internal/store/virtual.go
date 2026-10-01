@@ -295,19 +295,28 @@ func (s *Scope) GetVirtualModelEditable(ctx context.Context, id string) (Virtual
 	return v, err
 }
 
-// UpdateVirtualModelInput is the fully merged update request.
+// UpdateVirtualModelInput is the update request. Only fields whose *Set flag is
+// true are written; the legacy primary target columns are derived from the
+// target list when targets are replaced.
 type UpdateVirtualModelInput struct {
 	ID             string
 	Name           string
+	NameSet        bool
 	TargetProvider string
 	TargetModel    string
-	RoutingMode    string
+	// TargetSet reports whether the legacy scalar target fields were supplied.
+	TargetSet   bool
+	RoutingMode string
+	ModeSet     bool
+	// ReplaceTargets reports whether the request supplied a target list.
 	ReplaceTargets bool
 	Targets        []VirtualTargetInput
 }
 
-// UpdateVirtualModel writes the merged virtual-model fields and optionally
-// replaces its ordered target list.
+// UpdateVirtualModel writes only the supplied virtual-model fields and, when a
+// target list was supplied, replaces it. Fields the request omitted are left
+// untouched, so a rename cannot revert a concurrent routing-mode or target
+// change with values merged from an earlier read.
 func (s *Scope) UpdateVirtualModel(ctx context.Context, in UpdateVirtualModelInput) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
 		if in.ReplaceTargets {
@@ -320,8 +329,24 @@ func (s *Scope) UpdateVirtualModel(ctx context.Context, in UpdateVirtualModelInp
 				return err
 			}
 			in.TargetProvider, in.TargetModel = primaryProvider, primary
+			in.TargetSet = true
 		}
-		res, err := tx.q.ExecContext(ctx, `UPDATE virtual_models SET name=?,target_provider_id=?,target_provider_model_id=?,routing_mode=?,updated_at=? WHERE id=? AND account_id=?`, in.Name, in.TargetProvider, in.TargetModel, in.RoutingMode, now(), in.ID, tx.accountID)
+		set := "updated_at=?"
+		args := []any{now()}
+		if in.NameSet {
+			set += ",name=?"
+			args = append(args, in.Name)
+		}
+		if in.TargetSet {
+			set += ",target_provider_id=?,target_provider_model_id=?"
+			args = append(args, in.TargetProvider, in.TargetModel)
+		}
+		if in.ModeSet {
+			set += ",routing_mode=?"
+			args = append(args, in.RoutingMode)
+		}
+		args = append(args, in.ID, tx.accountID)
+		res, err := tx.q.ExecContext(ctx, `UPDATE virtual_models SET `+set+` WHERE id=? AND account_id=?`, args...)
 		if err != nil {
 			return err
 		}

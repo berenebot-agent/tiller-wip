@@ -428,9 +428,12 @@ func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 	err = sc.UpdateVirtualModel(r.Context(), store.UpdateVirtualModelInput{
 		ID:             modelID,
 		Name:           newName,
+		NameSet:        input.Name != nil,
 		TargetProvider: currentProvider,
 		TargetModel:    currentModel,
+		TargetSet:      input.TargetModelID != nil || input.TargetProviderID != nil,
 		RoutingMode:    newMode,
+		ModeSet:        input.RoutingMode != nil,
 		ReplaceTargets: len(input.Targets) > 0,
 		Targets:        toStoreTargets(input.Targets),
 	})
