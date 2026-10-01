@@ -268,7 +268,7 @@ function capNotice(kind) {
 function authView(name) {
   hideBoot();
   $('#login-shell').hidden = false;
-  ['login-form','signup-form','signup-done','forgot-form','verify-panel','reset-form','platform-login-form','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const loginCard = $('.login-card'); if (loginCard) loginCard.classList.toggle('is-platform', name === 'platform-login-form');
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
@@ -407,13 +407,13 @@ $('#show-forgot-password').onclick = () => authView('forgot-form');
 $('#show-login-from-signup').onclick = () => authView('login-form');
 $('#signup-done-login').onclick = () => authView('login-form');
 $('#show-login-from-forgot').onclick = () => authView('login-form');
+$('#forgot-done-login').onclick = () => authView('login-form');
 // exposeSignupResend wires the resend button on the post-signup inbox screen.
 // The address is captured at submit time (signupEmail) because the done panel
 // has no email input of its own.
 function exposeSignupResend() {
   const button = $('#resend-signup-verification'); if (!button) return;
   button.hidden = false;
-  showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : '');
   button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
 }
 $('#signup-form').addEventListener('submit', async event => {
@@ -424,12 +424,12 @@ $('#signup-form').addEventListener('submit', async event => {
     await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) });
     signupEmail = String(form.get('email') || '');
     formElement.reset();
-    $('#signup-done-message').textContent = `If an account can be created for ${signupEmail}, a verification link is on its way. Click the link in the email to activate your account.`;
+    $('#signup-done-message').textContent = 'If the address can receive mail, a verification message will arrive shortly.';
     authView('signup-done');
     exposeSignupResend();
   } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); }
 });
-$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
+$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-done-message').textContent = result.message || 'If the address belongs to an account, a password-reset message will arrive shortly.'; authView('forgot-done'); } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
 // === GOOGLE IDENTITY SERVICES ===
 // The "Sign in with Google" button and the One Tap account chooser are rendered
 // by Google's own script so the branding and in-page account popup are the ones
