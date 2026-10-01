@@ -173,6 +173,7 @@ func requireCommandCodeHeaders(t *testing.T, r *http.Request) {
 
 func TestFetchCommandCode(t *testing.T) {
 	resetAt := time.Now().Add(90 * time.Minute).UnixMilli()
+	periodEnd := time.Now().Add(20 * 24 * time.Hour).UTC().Truncate(time.Second)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, r *http.Request) {
 		requireCommandCodeHeaders(t, r)
@@ -188,7 +189,8 @@ func TestFetchCommandCode(t *testing.T) {
 	})
 	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, r *http.Request) {
 		requireCommandCodeHeaders(t, r)
-		w.Write([]byte(`{"success":true,"data":{"planId":"individual-goat"}}`))
+		// currentPeriodEnd is the monthly reset the adapter surfaces.
+		w.Write([]byte(`{"success":true,"data":{"planId":"individual-goat","currentPeriodEnd":"` + periodEnd.Format(time.RFC3339) + `"}}`))
 	})
 	mux.HandleFunc("/alpha/usage/summary", func(w http.ResponseWriter, r *http.Request) {
 		requireCommandCodeHeaders(t, r)
@@ -236,6 +238,9 @@ func TestFetchCommandCode(t *testing.T) {
 	}
 	if monthly.UsedPercent == nil || *monthly.UsedPercent < 99 || *monthly.UsedPercent > 100 {
 		t.Fatalf("monthly used_percent = %v, want ~99.8", monthly.UsedPercent)
+	}
+	if monthly.ResetsAt == nil || !monthly.ResetsAt.Equal(periodEnd) {
+		t.Fatalf("monthly resets_at = %v, want %v", monthly.ResetsAt, periodEnd)
 	}
 }
 
@@ -288,6 +293,41 @@ func TestFetchCommandCodePayGoNoSubscriptionDetail(t *testing.T) {
 	}
 	if len(snap.Windows) != 1 || snap.Windows[0].Label != "5h" {
 		t.Fatalf("windows = %+v, want only the 5h window", snap.Windows)
+	}
+}
+
+// TestFetchCommandCodeMonthlyNoPeriodEnd verifies a subscriptions response
+// without currentPeriodEnd yields a monthly window with no reset time.
+func TestFetchCommandCodeMonthlyNoPeriodEnd(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"credits":{"monthlyCredits":5},` +
+			`"windowLimits":{"limited":false,"fiveHour":{"used":0,"cap":14}}}`))
+	})
+	mux.HandleFunc("/alpha/billing/subscriptions", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"success":true,"data":{"planId":"individual-goat"}}`))
+	})
+	mux.HandleFunc("/alpha/usage/summary", func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(`{"totalMonthlyCredits":10}`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	snap, err := fetchCommandCode(context.Background(), srv.Client(), Credential{BaseURL: srv.URL, Credential: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var monthly *Window
+	for i := range snap.Windows {
+		if snap.Windows[i].Label == "monthly" {
+			monthly = &snap.Windows[i]
+		}
+	}
+	if monthly == nil {
+		t.Fatalf("windows = %+v, want a monthly window", snap.Windows)
+	}
+	if monthly.ResetsAt != nil {
+		t.Fatalf("monthly resets_at = %v, want nil when currentPeriodEnd is absent", monthly.ResetsAt)
 	}
 }
 

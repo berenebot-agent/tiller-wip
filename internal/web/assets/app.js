@@ -160,7 +160,7 @@ const rowCache = (row) => {
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   const exact = row.provider_cost_micros;
   const cost = exact ?? row.estimated_cost_micros;
-  const costLine = cost == null ? '<small>Cost —</small>' : `<span class="tok-cost">${exact == null ? '~' : ''}${fmtCost(cost)}${exact == null ? ' est.' : ''}</span>`;
+  const costLine = cost == null ? '<small>Cost —</small>' : `<span class="tok-cost"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<small>est.</small>' : ''}</span>`;
   return `<span class="activity-tokens"><b>${row.input_tokens_estimated ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
 };
 const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
@@ -2478,13 +2478,13 @@ async function loadAccount() {
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     const costWindows = usage.client_cost ? Object.values(usage.client_cost) : [];
     const sumCost = windowKey => costWindows.reduce((total, w) => total + ((w?.[windowKey] ?? 0) || 0), 0);
-    const metric = (label, value) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
+    const metric = (label, value, usd = false) => `<div class="metric${usd ? ' metric-usd' : ''}"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
     $('#account-usage').innerHTML = [
       metric('1h tokens', sum('1h')),
       metric('24h tokens', sum('24h')),
       metric('7d tokens', sum('7d')),
-      metric('24h est. USD', (sumCost('24h') / 1e6).toFixed(2)),
-      metric('7d est. USD', (sumCost('7d') / 1e6).toFixed(2)),
+      metric('24h est. USD', (sumCost('24h') / 1e6).toFixed(2), true),
+      metric('7d est. USD', (sumCost('7d') / 1e6).toFixed(2), true),
     ].join('');
     renderPlanCard(plan);
     state.planInfo = plan; state.planInfoAt = Date.now();
