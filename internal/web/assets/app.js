@@ -607,7 +607,6 @@ function filterInput(selector, callback) { $(selector).addEventListener('input',
 filterInput('#provider-search', value => { providerSearchValue = value; loadProviders(value); }); filterInput('#virtual-search', loadVirtual); filterInput('#client-search', loadClients);
 $('#show-retired').addEventListener('change', event => { $('#drawer-show-retired').checked = event.target.checked; renderModels(); });
 $('#drawer-show-retired').addEventListener('change', event => { $('#show-retired').checked = event.target.checked; renderModels(); });
-$('#drawer-sort').addEventListener('change', event => { sortState.column = event.target.value; sortState.direction = SORT_DEFAULTS[sortState.column] || 'asc'; renderModels(); });
 $('#provider-drawer-close').addEventListener('click', closeProviderDrawer);
 $('#drawer-refresh').addEventListener('click', async () => { if (drawerProviderID) await refreshProvider(drawerProviderID); });
 $('#drawer-edit').addEventListener('click', () => { const provider = state.providers.find(item => item.id === drawerProviderID); if (provider) openProvider(provider); });
@@ -643,14 +642,16 @@ function renderProviders(providers = state.providers) {
   const available = state.providers.reduce((sum, item) => sum + item.available_model_count, 0), retired = state.providers.reduce((sum, item) => sum + item.model_count - item.available_model_count, 0), errors = state.providers.filter(item => item.last_refresh_error).length;
   $('#provider-metrics').innerHTML = metric(state.providers.length, 'Provider instances') + metric(available, 'Available models') + metric(retired, 'Retired models') + metric(errors, 'Refresh errors');
   $$('[data-provider-open]').forEach(button => button.onclick = () => openProviderDrawer(button.dataset.providerOpen));
+  $$('#providers-cards .provider-card').forEach(card => card.addEventListener('click', event => { if (!event.target.closest('[data-provider-open], summary, a, button, input, select, details')) openProviderDrawer(card.dataset.providerId); }));
 }
 function providerCard(provider) {
   const healthy = provider.enabled && !provider.last_refresh_error;
   const stateLabel = provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled';
   const retired = provider.model_count - provider.available_model_count;
   const providerLabel = typeLabel(provider.type) || 'Provider';
+  const countLabel = `${provider.available_model_count} ${provider.available_model_count === 1 ? 'model' : 'models'}`;
   return `<article class="provider-card${provider.enabled ? '' : ' provider-card-disabled'}" data-provider-id="${h(provider.id)}" data-provider-name="${h(provider.name.toLowerCase())}" data-provider-type="${h(providerLabel.toLowerCase())}">
-    <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models">${providerMark(provider.type, providerLabel, 'provider-card-mark')}<span class="provider-card-identity"><strong>${h(provider.name)}</strong><small>${h(providerLabel)} · ${(provider.protocols || []).map(h).join(' · ') || 'provider default'}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}<span class="provider-card-counts"><span><b>${provider.available_model_count}</b> available</span><span><b>${retired}</b> retired</span></span><span class="provider-card-refresh">${h(date(provider.last_refresh_at))}</span><span class="provider-card-cta">Browse provider models <b aria-hidden="true">→</b></span></button>
+    <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models">${providerMark(provider.type, providerLabel, 'provider-card-mark')}<span class="provider-card-identity"><strong>${h(provider.name)} · ${h(countLabel)}</strong><small>${h(providerLabel)} · ${(provider.protocols || []).map(h).join(' · ') || 'provider default'}${retired ? ` · ${retired} retired` : ''}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</button>
     ${provider.last_refresh_error ? `<p class="provider-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
     <div class="provider-usage">${providerQuotaHTML(provider)}${providerCostHTML(provider)}</div>
   </article>`;
