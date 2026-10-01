@@ -274,7 +274,11 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		targetType, targetID = *input.SingleTargetType, *input.SingleTargetID
 	}
 	bindingSupplied := input.SingleModelName != nil || input.SingleTargetID != nil
-	writeBinding := false
+	// Only a request that actually supplied binding fields writes the binding.
+	// Previously any PATCH on a Single key rewrote it from values merged out of
+	// an earlier read, which let a metadata-only update silently revert a
+	// concurrent route change.
+	writeBinding := bindingSupplied
 	if keyType == "single" || bindingSupplied {
 		if !validClientModelName(modelName) {
 			adminError(w, 400, "invalid_model_name", "Client-facing model names must use 1-255 model-safe characters.")
@@ -284,22 +288,28 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 409, "breaking_change_confirmation_required", "Changing the client-facing model name may require client reconfiguration. Confirm the breaking change.")
 			return
 		}
-		writeBinding = true
 	}
 	err = sc.UpdateClientKey(r.Context(), store.UpdateClientKeyInput{
-		ID:             clientID,
-		Name:           name,
-		Description:    description,
-		Group:          keyGroup,
-		Type:           keyType,
-		Enabled:        enabled,
-		EnabledSet:     input.Enabled != nil,
-		LoggingEnabled: loggingEnabled,
-		RetentionDays:  retentionDays,
-		WriteBinding:   writeBinding,
-		ModelName:      modelName,
-		TargetType:     targetType,
-		TargetID:       targetID,
+		ID:            clientID,
+		Name:          name,
+		NameSet:       input.Name != nil,
+		Description:   description,
+		DescSet:       input.Description != nil,
+		Group:         keyGroup,
+		GroupSet:      input.Group != nil,
+		Type:          keyType,
+		TypeSet:       input.Type != nil,
+		Enabled:       enabled,
+		EnabledSet:    input.Enabled != nil,
+		Logging:       loggingEnabled,
+		LoggingSet:    input.LoggingEnabled != nil,
+		Retention:     retentionDays,
+		RetentionSet:  input.RetentionDays != nil,
+		BindingSet:    writeBinding,
+		BindingExists: bindFound,
+		ModelName:     modelName,
+		TargetType:    targetType,
+		TargetID:      targetID,
 	})
 	if err != nil {
 		switch {
