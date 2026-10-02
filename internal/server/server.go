@@ -877,10 +877,16 @@ func boolInt(v bool) int {
 
 // requestClientIP returns the client address suitable for forwarding to an
 // anonymous provider. Forwarded headers are accepted only from the configured
-// trusted proxy; otherwise the direct peer address is used. When the direct
-// peer is trusted, the authoritative X-Real-IP header is preferred, and the
-// X-Forwarded-For chain is resolved by the canonical clientIP walker so the
-// two helpers can never drift.
+// trusted proxy; otherwise the direct peer address is used. Resolution always
+// goes through the canonical clientIP walker.
+//
+// X-Real-IP is deliberately NOT consulted. The peer check proves only that the
+// request arrived through the proxy -- it cannot prove the proxy authored the
+// header. A proxy that does not overwrite an inbound X-Real-IP therefore lets a
+// client choose this value, and it keys the client-address authentication
+// limiter in requireClient. The X-Forwarded-For walk is safe because the
+// reference proxy appends to it and the walker discards client-injected
+// leftmost hops.
 func (s *Server) requestClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -892,11 +898,6 @@ func (s *Server) requestClientIP(r *http.Request) string {
 	peer, err := netip.ParseAddr(host)
 	if err != nil || !s.config.TrustedProxy.IsValid() || !s.config.TrustedProxy.Contains(peer) {
 		return host
-	}
-	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); value != "" {
-		if address, err := netip.ParseAddr(value); err == nil {
-			return address.String()
-		}
 	}
 	return clientIP(r, s.config.TrustedProxy)
 }
