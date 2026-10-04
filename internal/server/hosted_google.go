@@ -416,6 +416,11 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
+	key := clientIP(r, s.config.TrustedProxy)
+	if !s.signupLimiter.allowAttempt(key) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
+		return
+	}
 	var input struct {
 		AcceptTerms  bool `json:"accept_terms"`
 		LinkExisting bool `json:"link_existing"`
