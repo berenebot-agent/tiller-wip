@@ -113,3 +113,20 @@ CI (`.github/workflows/ci.yml`) runs on native Go, not the Docker runner, for
 speed. Each step in the `go` job tees its full output to `ci-logs/` and the
 folder is uploaded as the `ci-logs` artifact with `if: always()`, so a failed
 run's full log is downloadable without re-running.
+
+## Writing tests
+
+- Go tests are **in-package**: `internal/<pkg>/<name>_test.go`. There is no
+  `tests/unit/` tree in this repo.
+- Keep tests deterministic and use local mock upstreams (`httptest` servers, or
+  the Python mock in `tests/compatibility/mock_upstream.py`). Never call a real
+  provider or the network.
+- Browser coverage is a spec in `tests/browser/*.spec.js`, added to the matching
+  lane in `tests/browser/run.sh`: the sharded list, the activity lane, or the
+  env-gated first-run lane (`TILLER_BROWSER_FIRST_RUN=1`, a router with no admin
+  credentials that the spec claims through the setup page).
+- Never include provider credentials, client keys, session cookies, prompts,
+  response bodies, or private deployment data in tests or logs. Detailed error
+  logging stays disabled by default in tests.
+- Prefer the smallest tier that catches the regression (see AGENTS.md § "Test
+  tiers").
