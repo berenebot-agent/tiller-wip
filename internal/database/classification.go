@@ -26,6 +26,7 @@ var TableClassification = map[string]TableClass{
 	"platform_settings":         ClassPlatform,
 	"users":                     ClassPlatform,
 	"user_identities":           ClassPlatform,
+	"webauthn_credentials":      ClassPlatform,
 	"user_sessions":             ClassPlatform,
 	"email_verification_tokens": ClassPlatform,
 	"password_reset_tokens":     ClassPlatform,

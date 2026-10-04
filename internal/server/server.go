@@ -334,6 +334,15 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		if err := identityStore.SyncPlatformCredential(cfg.TillerPlatformAdminUser, cfg.TillerPlatformAdminPassword); err != nil {
 			return nil, err
 		}
+		// Passkeys are hosted-only and need a stable public origin. Local mode
+		// has no public HTTPS origin, so it simply has no passkey endpoints.
+		if cfg.PublicURL != "" {
+			if rp, rerr := webauthnConfigFor(cfg.PublicURL); rerr != nil {
+				return nil, fmt.Errorf("hosted webauthn: %w", rerr)
+			} else if err := identityStore.ConfigureWebAuthn(rp); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if cfg.Mail.Configured() {
 		if err := st.SeedPlatformMailSettings(context.Background(), platformMailSettings(cfg.Mail)); err != nil && !errors.Is(err, store.ErrSecretsLocked) {
@@ -503,6 +512,8 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("GET /api/analytics/options", s.analyticsOptions)
 		mux.HandleFunc("POST /api/auth/signup", s.signup)
 		mux.HandleFunc("POST /api/auth/login", s.userLogin)
+		mux.HandleFunc("POST /api/auth/passkey/begin", s.passkeyLoginBegin)
+		mux.HandleFunc("POST /api/auth/passkey/finish", s.passkeyLoginFinish)
 		mux.HandleFunc("POST /api/auth/google/start", s.startGoogleSignIn)
 		mux.HandleFunc("GET /api/auth/google/callback", s.googleCallback)
 		mux.HandleFunc("POST /api/auth/google/gsi", s.completeGoogleGSI)
@@ -522,6 +533,12 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /api/auth/onboarding", s.requireUser(http.HandlerFunc(s.writeOnboardingState)))
 		mux.Handle("POST /api/auth/onboarding/dismiss", s.requireUser(http.HandlerFunc(s.setOnboardingDismissed)))
 		mux.Handle("POST /api/auth/account/password", s.requireUser(http.HandlerFunc(s.changeOwnPassword)))
+		mux.Handle("GET /api/auth/account/passkeys", s.requireUser(http.HandlerFunc(s.passkeyList)))
+		mux.Handle("POST /api/auth/account/passkeys/register/begin", s.requireUser(http.HandlerFunc(s.passkeyRegisterBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/register/finish", s.requireUser(http.HandlerFunc(s.passkeyRegisterFinish)))
+		mux.Handle("POST /api/auth/account/passkeys/rename", s.requireUser(http.HandlerFunc(s.passkeyRename)))
+		mux.Handle("POST /api/auth/account/passkeys/delete", s.requireUser(http.HandlerFunc(s.passkeyDelete)))
+		mux.Handle("POST /api/auth/account/passkeys/password-signin", s.requireUser(http.HandlerFunc(s.setPasswordSignIn)))
 		mux.Handle("POST /api/auth/account/email", s.requireUser(http.HandlerFunc(s.requestOwnEmailChange)))
 		mux.Handle("POST /api/auth/google/link/start", s.requireUser(http.HandlerFunc(s.startGoogleLink)))
 		mux.Handle("POST /api/auth/google/reauth/start", s.requireUser(http.HandlerFunc(s.startGoogleReauth)))
@@ -684,6 +701,21 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	username := s.adminUsername()
 	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", username, clientIP(r, s.config.TrustedProxy)))
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": username, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+}
+
+// webauthnConfigFor derives the relying-party configuration from the public
+// HTTPS origin. The RP id is the host with any port removed (WebAuthn scopes a
+// credential to a registrable domain); the origin is the exact PublicURL.
+func webauthnConfigFor(publicURL string) (identity.WebAuthnConfig, error) {
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Host == "" {
+		return identity.WebAuthnConfig{}, errors.New("invalid public URL")
+	}
+	rpID := u.Hostname()
+	if rpID == "" {
+		return identity.WebAuthnConfig{}, errors.New("public URL has no hostname")
+	}
+	return identity.WebAuthnConfig{RPDisplayName: "Tiller", RPID: rpID, Origins: []string{"https://" + u.Host}}, nil
 }
 
 // adminUsername is the operator identity shown in the UI and login

@@ -82,6 +82,7 @@ func (s *Server) authOptions(w http.ResponseWriter, r *http.Request) {
 		"turnstile_enabled":  settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != "",
 		"turnstile_site_key": settings.TurnstileSiteKey,
 		"signup_enabled":     signup,
+		"passkeys_enabled":   s.identity != nil && s.identity.PasskeysEnabled(),
 	}
 	// The client ID is public (it is embedded in every Google Identity Services
 	// page) and the frontend needs it to initialise GSI. Only expose it when

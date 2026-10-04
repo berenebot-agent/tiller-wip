@@ -21,6 +21,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/mailoutbox"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 const (
@@ -148,6 +150,11 @@ type Store struct {
 	maxEntries         int
 	renewHook          func()
 	mailQueue          MailQueue
+	// webauthn and challenges implement passkeys. Both are nil until
+	// ConfigureWebAuthn installs relying-party configuration, so deployments
+	// without a public origin (and tests) simply have no passkey endpoints.
+	webauthn   *webauthn.WebAuthn
+	challenges *challengeStore
 }
 
 type userSessionCacheEntry struct {
