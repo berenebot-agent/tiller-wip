@@ -186,6 +186,22 @@ docker run --rm -d --name "$run_id-router-activity" --network host \
     -e TILLER_PASSWORD="$password" \
     -e TILLER_LOG_LEVEL=warn \
     "$ROUTER_IMAGE" >/dev/null
+
+# First-run lane: a router started with NO admin credentials, exactly like a
+# fresh `docker compose up`. The first-run spec claims it through the setup
+# page, then exercises the onboarding wizard end to end.
+firstrun_mock_port=$(probe_port)
+firstrun_router_port=$(probe_port)
+docker run --rm -d --name "$run_id-mock-firstrun" --network host \
+    -v "$repo_dir/tests/compatibility/mock_upstream.py:/mock_upstream.py:ro" \
+    -e TILLER_MOCK_PORT="$firstrun_mock_port" \
+    python:3.13-alpine python /mock_upstream.py >/dev/null
+docker run --rm -d --name "$run_id-router-firstrun" --network host \
+    --user 0:0 \
+    -v "$run_dir/firstrun-data:/data" \
+    -e TILLER_LISTEN_ADDR="127.0.0.1:$firstrun_router_port" \
+    -e TILLER_LOG_LEVEL=warn \
+    "$ROUTER_IMAGE" >/dev/null
 phase_timing "containers started"
 
 # Wait for every mock/router to become ready CONCURRENTLY. All containers were
@@ -221,6 +237,8 @@ while read -r i router_port mock_port; do
 done < "$ports_file"
 probe_endpoint "activity-mock" "http://127.0.0.1:$activity_mock_port/v1/models" 60
 probe_endpoint "activity-router" "http://127.0.0.1:$activity_router_port/health/ready" 40
+probe_endpoint "firstrun-mock" "http://127.0.0.1:$firstrun_mock_port/v1/models" 60
+probe_endpoint "firstrun-router" "http://127.0.0.1:$firstrun_router_port/health/ready" 40
 for p in $ready_pids; do
     wait "$p" || true
 done
@@ -274,6 +292,26 @@ docker run --rm --network host \
     "$BROWSER_IMAGE" npx playwright test activity.spec.js activity-graph.spec.js &
 activity_pid=$!
 
+# The first-run lane runs its spec against the credential-free router. The
+# spec performs the setup claim itself, so it starts from storageState: none
+# (Playwright's global setup skips login when /api/runtime reports
+# setup_required). It runs AFTER the parallel shards instead of alongside
+# them: on a memory-constrained host, six concurrent Playwright containers
+# saturate RAM and the extra Node process spins in its startup poll loop
+# without ever launching a browser. Peak concurrency stays at the pre-change
+# level, and the lane's own results subdirectory keeps its artifacts separate.
+firstrun_status=0
+firstrun_lane() {
+    mkdir -p "$run_dir/playwright-results/firstrun"
+    docker run --rm --network host \
+        -e TILLER_BROWSER_BASE_URL="http://127.0.0.1:$firstrun_router_port" \
+        -e TILLER_BROWSER_MOCK_BASE_URL="http://127.0.0.1:$firstrun_mock_port/v1" \
+        -e PLAYWRIGHT_WORKERS=1 \
+        -e TILLER_BROWSER_FIRST_RUN=1 \
+        -v "$run_dir/playwright-results/firstrun:/tests/test-results" \
+        "$BROWSER_IMAGE" npx playwright test first-run.spec.js
+}
+
 playwright_status=0
 shard_rcs=()
 failing_shards=()
@@ -292,6 +330,14 @@ else
     rc=$?
     shard_rcs+=("$rc")
     failing_shards+=("activity")
+fi
+phase_timing "parallel shards done"
+if firstrun_lane; then
+    shard_rcs+=(0)
+else
+    rc=$?
+    shard_rcs+=("$rc")
+    failing_shards+=("firstrun")
 fi
 for rc in "${shard_rcs[@]}"; do
     [ "$rc" -gt "$playwright_status" ] && playwright_status=$rc
@@ -313,7 +359,7 @@ if [ "$playwright_status" -ne 0 ]; then
     err_contexts=()
     while IFS= read -r ctx; do
         err_contexts+=("$ctx")
-    done < <(find "$run_dir/playwright-results" -mindepth 2 -maxdepth 2 -name 'error-context.md' 2>/dev/null | sort)
+    done < <(find "$run_dir/playwright-results" -mindepth 2 -name 'error-context.md' 2>/dev/null | sort)
     if [ "${#err_contexts[@]}" -gt 0 ]; then
         echo "    per-test error contexts (one per failing test):"
         for ctx in "${err_contexts[@]}"; do
@@ -331,6 +377,8 @@ if [ "$playwright_status" -ne 0 ]; then
         for idx in "${failing_shards[@]}"; do
             if [ "$idx" = "activity" ]; then
                 log_name="$run_id-router-activity"
+            elif [ "$idx" = "firstrun" ]; then
+                log_name="$run_id-router-firstrun"
             else
                 log_name="$run_id-router-$idx"
             fi

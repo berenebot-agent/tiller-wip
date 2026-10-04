@@ -6,6 +6,43 @@ import (
 	"time"
 )
 
+func TestLocalAdminCredentialsOptional(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_MODE", "")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_USERNAME", "")
+	t.Setenv("TILLER_PASSWORD", "")
+	t.Setenv("TILLER_ADMIN_USERNAME", "")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "")
+
+	// Neither set: a fresh first-run install loads with empty credentials.
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("local install with no admin credentials should load: %v", err)
+	}
+	if c.TillerUser != "" || c.TillerUserPassword != "" {
+		t.Fatalf("fresh install credentials = %q/%q, want empty", c.TillerUser, c.TillerUserPassword)
+	}
+
+	// Only one set: hard error, so a half-configured .env fails loud.
+	t.Setenv("TILLER_USERNAME", "admin")
+	if _, err := Load(); err == nil {
+		t.Fatal("TILLER_USERNAME without TILLER_PASSWORD should fail")
+	}
+	t.Setenv("TILLER_USERNAME", "")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	if _, err := Load(); err == nil {
+		t.Fatal("TILLER_PASSWORD without TILLER_USERNAME should fail")
+	}
+
+	// Both set: normal env-admin load.
+	t.Setenv("TILLER_USERNAME", "admin")
+	if c, err = Load(); err != nil || c.TillerUser != "admin" || c.TillerUserPassword != "secret" {
+		t.Fatalf("env-admin load = %+v err=%v", c, err)
+	}
+}
+
 func TestModelsDevEnabledFlag(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_USERNAME", "admin")

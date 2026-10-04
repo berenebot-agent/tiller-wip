@@ -64,6 +64,20 @@ database; it is not secure erasure. SQLite pages, WAL files, snapshots, and old
 backups may still contain historic sensitive data, so they must continue to be
 protected as sensitive material.
 
+**First-run admin bootstrap (local mode).** A local instance started with
+neither `TILLER_USERNAME` nor `TILLER_PASSWORD` serves a one-time setup page
+instead of login: its first visitor claims the administrator credential
+(Home Assistant/Jellyfin model). The router logs a warning on every boot until
+the instance is claimed. The claim endpoint (`POST /api/admin/setup`) is
+same-origin checked, per-IP rate-limited (20 attempts/minute), strictly
+validated (8+ byte password), and written through a guarded one-shot
+transaction that can never overwrite an existing credential; once configured
+the route responds 404. The credential is stored hash-only (argon2id) together
+with its plaintext username for display. Environment credentials, when set,
+seed/override the stored credential at boot (rewriting the hash and revoking
+sessions); there is no separate reset path. Do not expose an unclaimed instance
+to an untrusted network — claim it first, or set the environment credentials.
+
 **Secret hashing is entropy-tiered.** Non-recoverable secrets (client API keys,
 admin session tokens, the admin credential fingerprint) are hash-only at rest;
 plaintext is never stored. The admin credential fingerprint is human-chosen and

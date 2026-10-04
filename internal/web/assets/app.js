@@ -39,6 +39,11 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, planInfo: null, planInfoAt: 0, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformTab: 'overview', platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformAuditOffset: 0, platformPlans: [], platformPlanData: [] };
 let runtimeMode = 'local';
 let hostedAuthOptions = {};
+// runtimeSetupRequired is true on a local first-run instance with no admin
+// credential: the setup form replaces the login form. runtimeWizardEnabled is
+// false for env-admin local installs, which skip onboarding entirely.
+let runtimeSetupRequired = false;
+let runtimeWizardEnabled = false;
 // accountEmailForDelete holds the signed-in email for the delete confirmation
 // modal (the modal requires it to be typed exactly). googleReauthConfirmedAt is
 // the time a fresh Google confirmation completed; the backend one-shot token
@@ -268,7 +273,7 @@ function capNotice(kind) {
 function authView(name) {
   hideBoot();
   $('#login-shell').hidden = false;
-  ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form','google-link-confirm-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form','google-link-confirm-form','setup-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
   const loginCard = $('.login-card'); if (loginCard) loginCard.classList.toggle('is-platform', name === 'platform-login-form');
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
@@ -290,7 +295,7 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
 // The signed-in identity in the top bar is the shortcut into Settings →
 // Account. Account is hosted-only, so in self-hosted mode the control stays
 // disabled and renders as plain text rather than as a dead link.
@@ -301,7 +306,7 @@ function renderIdentity(session) {
   identity.disabled = !hosted;
   identity.title = hosted ? 'Account settings' : '';
 }
-function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } }
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } else if (runtimeWizardEnabled) { refreshWizardButton(true); } }
 function showAccountDeleteConfirmation({ email, google }) {
   hideBoot();
   $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-google-link-shell').hidden = true;
@@ -412,6 +417,30 @@ $('#login-form').addEventListener('submit', async event => {
   finally { button.disabled = false; }
 });
 $('#logout').addEventListener('click', async () => { try { await api(runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
+
+// First-run setup: create the local admin credential. The endpoint only exists
+// while the instance is unconfigured; on success it mints a session, so the
+// claimer lands straight in the app and the onboarding wizard takes over.
+$('#setup-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
+  const error = $('#setup-error');
+  const button = $('#setup-submit');
+  error.textContent = '';
+  if (form.get('password') !== form.get('confirm')) { error.textContent = 'Passwords do not match.'; return; }
+  button.disabled = true;
+  try {
+    const session = await api('/api/admin/setup', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) });
+    runtimeSetupRequired = false;
+    formElement.reset();
+    showApp(session);
+  } catch (err) {
+    error.textContent = errorMessage(err, 'Setup failed.');
+  } finally {
+    button.disabled = false;
+  }
+});
 
 // Interstitial controls. "Link Google and continue" starts the authenticated
 // link flow; the session already carries the short-lived link grant, so no
@@ -793,8 +822,14 @@ function providerFields(provider) {
     <label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${provider?.enabled !== false ? 'checked' : ''}> Provider enabled</label>
     ${provider ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm_breaking_change" type="checkbox"> <span>Confirm if the provider name changes; every direct model ID will change.</span></label>' : ''}</div></div>`;
 }
-function openProvider(provider = null, onSaved = null) {
+async function openProvider(provider = null, onSaved = null) {
   if (!provider && capReached('providers')) { flash(capNotice('providers'), 'error'); return; }
+  // The onboarding wizard can open the provider form before any catalogue has
+  // been loaded (it auto-opens over the Clients view on a fresh install), so
+  // populate the provider-type picker and model list first.
+  if (!provider && !state.providerTypes.length) {
+    try { await loadProviders(); } catch { /* open anyway; a later reload retries discovery */ }
+  }
   // The provider-type picker needs a wider canvas than the standard form
   // dialog so the full logo catalogue fits without a cramped scroll box.
   if (!provider) {
@@ -2607,9 +2642,12 @@ $('#legal-back').onclick = () => showLogin();
 
 // refreshWizardButton shows/hides the top-bar Get started button based on
 // whether onboarding is still outstanding, and auto-opens the wizard on the
-// first hosted login when setup is incomplete.
+// first login when setup is incomplete. It applies to hosted and to local
+// installs whose admin came from the first-run wizard; env-admin local installs
+// skip onboarding entirely (runtimeWizardEnabled false).
 async function refreshWizardButton(autoOpen = false) {
-  if (runtimeMode !== 'hosted') { $('#open-wizard').hidden = true; return; }
+  const enabled = runtimeMode === 'hosted' || (runtimeMode === 'local' && runtimeWizardEnabled);
+  if (!enabled) { $('#open-wizard').hidden = true; return; }
   try {
     const status = await api('/api/auth/onboarding');
     const show = Boolean(status.needs_onboarding);
@@ -3384,7 +3422,13 @@ async function setupAnalyticsConsent() {
       $('#login-submit').textContent = 'Sign in';
       try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
       await setupAnalyticsConsent();
+    } else {
+      runtimeSetupRequired = Boolean(runtime.setup_required);
+      runtimeWizardEnabled = Boolean(runtime.wizard_enabled);
     }
+    // A first-run local instance shows the credential page instead of login;
+    // skip the session probe entirely so a stale cookie cannot bounce to login.
+    if (runtimeSetupRequired) { showLogin(); return; }
     const path = location.pathname;
     const query = new URLSearchParams(location.search);
     const token = query.get('token');

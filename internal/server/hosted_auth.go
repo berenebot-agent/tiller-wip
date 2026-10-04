@@ -50,8 +50,19 @@ func parseMailPort(raw string) int {
 	return port
 }
 
+// runtime is the public deployment-mode probe the SPA boots from. In local
+// mode it also reports first-run state: setup_required drives the credential
+// page in place of the login form, and wizard_enabled marks whether the
+// onboarding wizard may be offered (false when environment credentials are
+// set). Hosted keeps its existing payload: hosted auth is a different,
+// pre-existing flow and its onboarding state comes from /api/auth/onboarding.
 func (s *Server) runtime(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"mode": string(s.config.Mode)})
+	payload := map[string]any{"mode": string(s.config.Mode)}
+	if s.config.Mode != config.ModeHosted {
+		payload["setup_required"] = s.setupRequired()
+		payload["wizard_enabled"] = s.wizardEnabled
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) authOptions(w http.ResponseWriter, r *http.Request) {

@@ -284,8 +284,12 @@ func Load() (Config, error) {
 		c.BackupDir = raw
 	}
 	if c.Mode == ModeLocal {
-		if c.TillerUser == "" || c.TillerUserPassword == "" {
-			return Config{}, errors.New("TILLER_USERNAME and TILLER_PASSWORD are required")
+		// Local admin credentials are optional: a fresh install with neither
+		// set starts unconfigured and serves the first-run setup. Setting only
+		// one is always an error, so a half-configured .env fails loud rather
+		// than silently leaving the instance claimable.
+		if (c.TillerUser == "") != (c.TillerUserPassword == "") {
+			return Config{}, errors.New("TILLER_USERNAME and TILLER_PASSWORD must be provided together")
 		}
 	} else {
 		if c.TillerPlatformAdminUser == "" || c.TillerPlatformAdminPassword == "" {

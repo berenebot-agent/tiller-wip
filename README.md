@@ -155,6 +155,7 @@ Provider support varies because upstream APIs vary. The beta should be treated a
        ports:
          - "8080:8080"
        environment:
+         # Optional: omit both to use first-run setup in the browser instead.
          TILLER_USERNAME: admin
          TILLER_PASSWORD: replace-this-with-a-long-random-password
        volumes:
@@ -170,7 +171,9 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
+   Then open `http://localhost:8080`. With no `TILLER_USERNAME` / `TILLER_PASSWORD` set, the first visitor gets a one-time **setup page** to create the administrator credential (8+ characters) and is signed straight in to a guided onboarding wizard. Once configured, the setup page is gone permanently — sign in from the login screen. Setting the environment credentials instead skips setup entirely and the onboarding wizard stays hidden, exactly as before. While an instance is unclaimed the router logs a warning on every boot; claim it (or set the env credentials) before exposing it to an untrusted network. To rotate or recover a wizard-created credential, set `TILLER_USERNAME` / `TILLER_PASSWORD` and restart: the environment values become the new credential and existing sessions are revoked.
+
+   For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
 
 > **Custom hosted landing page:** set `TILLER_CUSTOM_SITE_ENABLED=true` and place your site at `./data/site/index.html` (with optional CSS, JavaScript, and media files alongside it). The custom site replaces only the hosted landing page and its own assets; `/app`, authentication, API, health, and platform routes remain application-owned, and so do the embedded application asset filenames the SPA loads at fixed paths (`app.js`, `live.js`, `activity-graph.js`, `d3.min.js`, `style.css`, `virtual-dialog.css`, `activity-graph.css`, `typography.css`, and the `media/` directory). A custom file at one of those paths is ignored (the embedded asset wins) and logged as a warning, so name your landing-page files distinctly. When disabled or unset, the embedded landing page is used. Enabling it requires `data/site/index.html` to exist at startup.
 
@@ -183,7 +186,7 @@ Provider support varies because upstream APIs vary. The beta should be treated a
 ```bash
 git clone https://github.com/dellarb/tiller-router.git
 cd tiller-router
-cp .env.example .env   # set TILLER_USERNAME / TILLER_PASSWORD
+cp .env.example .env   # optionally set TILLER_USERNAME / TILLER_PASSWORD
 docker compose up -d --build
 ```
 
@@ -267,10 +270,11 @@ value and save; leave it blank to keep the stored value. Use the explicit
 
 The repo's `docker-compose.yml` plus `.env` cover the most common local
 customisations without editing any Go code. The full list of local variables is
-in `.env.example`. The hosted override additionally requires the platform
-credentials below. `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated
-`TILLER_ADMIN_*` aliases) are only needed there when converting an existing
-local installation:
+in `.env.example`. `TILLER_USERNAME` / `TILLER_PASSWORD` are optional in local
+mode: omit both for first-run setup, set both to skip it. The hosted override
+additionally requires the platform credentials below. `TILLER_USERNAME` /
+`TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) are only needed
+there when converting an existing local installation:
 
 ```bash
 TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
