@@ -6,7 +6,7 @@
 //	enc:v1:<base64 nonce>:<base64 ciphertext+tag>
 //
 // The "v1" token is the storage-format version, fixed for now by the design of
-// record (docs/roadmap_credential_encryption.md). AES-256-GCM is used with a
+// record (docs/archive/roadmap_credential_encryption.md). AES-256-GCM is used with a
 // fresh random nonce per value, so encrypting the same plaintext twice yields
 // different ciphertext, and any tampering fails authentication.
 //
