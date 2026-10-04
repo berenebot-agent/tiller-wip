@@ -159,6 +159,13 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
 		return
 	}
+	// Per-address budget: a successful signup also consumes it, so one mailbox
+	// cannot be enrolled and re-mailed repeatedly faster than the IP limiter's
+	// blind spot (rotating IPs) allows. The external response stays generic.
+	if !s.signupEmailLimiter.allowAttempt(s.authRateLimitEmailKey(input.Email)) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
+		return
+	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "signup") {
 		return
 	}

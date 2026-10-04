@@ -388,6 +388,72 @@ func (s *Store) invalidateOtherUserSessions(userID, keepSelector string) {
 	s.mu.Unlock()
 }
 
+// pendingAccountMaxAge is how long a never-verified signup is retained before
+// the scheduled sweep reclaims it. Verification tokens expire after 24 h
+// anyway, so 30 days (docs/pre_saas_release_review.md TR-005) is a generous
+// grace period; without a sweep, abandoned signups would accumulate
+// indefinitely on a public service, holding their unique email and acceptance
+// record forever.
+const pendingAccountMaxAge = 30 * 24 * time.Hour
+
+// PrunePendingAccounts reclaims signup rows whose account never left the
+// `pending` state within pendingAccountMaxAge. A pending signup has no tenant
+// resources (client keys/providers only come later), so the sweep is user-row
+// work: the abandoned user plus its acceptance record, its queued-but-unsent
+// mail, and the pending account itself. A verified, active, suspended, or
+// deleting account is never touched: the guard is accounts.status='pending'
+// combined with the created_at cutoff, re-checked at delete time.
+func (s *Store) PrunePendingAccounts(ctx context.Context, now time.Time) (int64, error) {
+	cutoff := formatTime(now.Add(-pendingAccountMaxAge))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Collect the stale pending rows first and mutate after, so no query
+	// cursor races the deletes.
+	rows, err := tx.QueryContext(ctx, `SELECT a.id,a.owner_user_id FROM accounts a WHERE a.status='pending' AND a.created_at < ? AND a.owner_user_id IS NOT NULL`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	type stalePending struct{ accountID, userID string }
+	var stale []stalePending
+	for rows.Next() {
+		var row stalePending
+		if err := rows.Scan(&row.accountID, &row.userID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		stale = append(stale, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, row := range stale {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM legal_acceptances WHERE user_id=?`, row.userID); err != nil {
+			return total, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM mail_outbox WHERE user_id=? AND sent_at IS NULL`, row.userID); err != nil {
+			return total, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id=?`, row.userID); err != nil {
+			return total, err
+		}
+		// accounts.owner_user_id is ON DELETE SET NULL, so the account row is
+		// removed explicitly and only while still pending.
+		res, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id=? AND status='pending'`, row.accountID)
+		if err != nil {
+			return total, err
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 1 {
+			total++
+		}
+	}
+	return total, tx.Commit()
+}
+
 // PruneExpiredTokens removes used or expired one-time identity tokens. The rows
 // are hash-only, so this is a size-control measure, not a security one. It is
 // run by the scheduled maintenance pass.

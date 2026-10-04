@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,7 +25,15 @@ import (
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
-const maxUpstreamNonStreamBytes int64 = 64 << 20
+const maxUpstreamNonStreamBytes int64 = 16 << 20
+
+// maxInferenceBodyBytes bounds one inference request body. 8 MiB is roughly two
+// million tokens of plain text — beyond every model's context window — so no
+// legitimate request is lost, while the product of the body-read gate
+// (maxConcurrentBodyReads) and this constant is the process's worst-case
+// inbound buffer budget: 64 x 8 MiB = 512 MiB
+// (docs/pre_saas_release_review.md TR-002).
+const maxInferenceBodyBytes int64 = 8 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
 // read for the sanitized client error. When detailed error logging is
@@ -35,6 +44,9 @@ const maxUpstreamNonStreamBytes int64 = 64 << 20
 // chain hostage.
 const maxUpstreamErrorBytes int64 = 1 << 20
 
+// errUpstreamResponseTooLarge marks a non-streaming upstream response that
+// exceeded the buffer limit (or the global admission gate, which reports the
+// same condition).
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
@@ -605,10 +617,16 @@ func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
+	// maxInferenceBodyBytes bounds one request body. 8 MiB is roughly two
+	// million tokens of text — beyond every model's context window — so no
+	// legitimate request is lost, while the process-wide product of the
+	// body-read gate and this cap stays inside a small container's memory
+	// (docs/pre_saas_release_review.md TR-002).
+	r.Body = http.MaxBytesReader(w, r.Body, maxInferenceBodyBytes)
 	// Bound the body phase before it can hold a connection indefinitely, and
 	// admit it through the process-wide gate so a slow-upload flood cannot park
-	// an unbounded number of 32 MiB buffers before plan concurrency applies.
+	// an unbounded number of buffers before plan concurrency applies. The gate
+	// and maxInferenceBodyBytes together bound the aggregate (TR-002).
 	if !s.bodyReads.acquire() {
 		inferenceError(w, http.StatusServiceUnavailable, "api_error", "body_read_busy", "The router is busy reading request bodies. Retry shortly.", incoming == providers.ProtocolMessages)
 		return
@@ -625,7 +643,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			inferenceError(w, 408, "invalid_request_error", "request_timeout", "The request body was not received in time.", incoming == providers.ProtocolMessages)
 			return
 		}
-		inferenceError(w, 400, "invalid_request_error", "request_too_large", "Request JSON exceeds the 32 MiB limit.", incoming == providers.ProtocolMessages)
+		inferenceError(w, 400, "invalid_request_error", "request_too_large", fmt.Sprintf("Request JSON exceeds the %d MiB limit.", maxInferenceBodyBytes>>20), incoming == providers.ProtocolMessages)
 		return
 	}
 	var raw map[string]json.RawMessage
@@ -1867,6 +1885,33 @@ func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 // data before Tiller commits anything to the client. This preserves the
 // no-splice rule while allowing a different virtual target after a pre-output
 // failure.
+// nonStreamBufferGate bounds how many non-streaming upstream responses may be
+// buffered at once, process-wide. The product of this gate and
+// maxUpstreamNonStreamBytes is the worst-case outbound buffer budget:
+// 32 x 16 MiB = 512 MiB (docs/pre_saas_release_review.md TR-002). Plan
+// concurrency bounds each account, but plans are per-account data, so a global
+// gate is the only aggregate bound. Streaming responses take the 1-byte-peek
+// path and are never gated. The slot is held until the buffered body is closed
+// (relay finished), closing the same window: release at read completion would
+// let slow-client relays hold unbounded steady-state buffers past the gate.
+var nonStreamBufferGate = make(chan struct{}, 32)
+
+// bufferedGateBody is a fully buffered response body that returns its
+// nonStreamBufferGate slot on Close. Close is safe to call once; the body is
+// either consumed by the relay (closed by the deferred resp.Body.Close()) or
+// closed on every failure path after buffering succeeded.
+type bufferedGateBody struct {
+	io.Reader
+	closer  io.Closer
+	release func()
+	once    sync.Once
+}
+
+func (b *bufferedGateBody) Close() error {
+	b.once.Do(b.release)
+	return b.closer.Close()
+}
+
 func preflightResponseLimit(resp *http.Response, limit int64) error {
 	if isStreamingResponse(resp) {
 		first := make([]byte, 1)
@@ -1877,19 +1922,30 @@ func preflightResponseLimit(resp *http.Response, limit int64) error {
 		resp.Body = bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(first[:n]), resp.Body), closer: resp.Body}
 		return nil
 	}
-	// Fail fast on a declared over-limit body without buffering up to 64MiB
+	// Fail fast on a declared over-limit body without buffering up to the cap
 	// first. Unknown-length bodies still fall through to the bounded read.
 	if resp.ContentLength > limit {
 		return errUpstreamResponseTooLarge
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(body)) > limit {
+	// A full body is read into memory before any client byte is committed, so
+	// the aggregate of concurrent non-streaming responses must stay bounded.
+	// Non-blocking admission: under saturation this attempt fails like any
+	// upstream read error and the fallback chain (or the client) proceeds.
+	select {
+	case nonStreamBufferGate <- struct{}{}:
+	default:
 		return errUpstreamResponseTooLarge
 	}
-	resp.Body = bufferedReadCloser{Reader: bytes.NewReader(body), closer: resp.Body}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil || int64(len(body)) > limit {
+		<-nonStreamBufferGate
+		if err == nil {
+			err = errUpstreamResponseTooLarge
+		}
+		return err
+	}
+	underlying := resp.Body
+	resp.Body = &bufferedGateBody{Reader: bytes.NewReader(body), closer: underlying, release: func() { <-nonStreamBufferGate }}
 	return nil
 }
 

@@ -416,11 +416,6 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
-	if !s.signupLimiter.allowAttempt(key) {
-		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
-		return
-	}
 	var input struct {
 		AcceptTerms  bool `json:"accept_terms"`
 		LinkExisting bool `json:"link_existing"`
@@ -501,6 +496,12 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	if !input.AcceptTerms {
 		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
+		return
+	}
+	// Per-address budget: the Google identity's proved email is charged like a
+	// password signup, so rotating IPs cannot re-run the enrollment mail fast.
+	if !s.signupEmailLimiter.allowAttempt(s.authRateLimitEmailKey(claims.Email)) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
 	}
 	enabled, err := s.storeHandle().HostedSignupEnabled(r.Context())
