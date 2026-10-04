@@ -8,6 +8,25 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Local first-run setup.** A local instance started without
+  `TILLER_USERNAME`/`TILLER_PASSWORD` now boots instead of failing: the first
+  visitor gets a one-time setup page to create the administrator credential
+  (8+ characters, argon2id hash-only) and is signed straight into a guided
+  onboarding wizard. With no admin configured, `GET /api/runtime` reports
+  `setup_required` and the router logs a warning each boot until the instance
+  is claimed. The setup endpoint is same-origin checked, per-IP rate-limited,
+  and one-shot (404 after the claim). After setup, the reused hosted onboarding
+  wizard (provider → client key → optional virtual route → connect snippet)
+  auto-opens with the same completion semantics as hosted. Environment
+  credentials still skip setup entirely and now hide the wizard, matching the
+  previous env-admin experience.
+- **DB-backed local admin credential.** Local login verifies the stored
+  credential (argon2id) instead of comparing environment strings. Environment
+  values seed/override it at boot (rewriting the hash and revoking sessions);
+  the wizard writes it directly, so a wizard-created credential survives
+  restarts with no environment set. The administrator username is persisted
+  for display (`platform_settings.admin_username`).
+
 - **Thin Go and Python gateway clients** under `clients/`, using Tiller's public
   HTTP interface or an explicit OpenRouter profile. Includes normalized catalogs
   and tri-state capability filters, native Chat/images/tools/JSON/reasoning

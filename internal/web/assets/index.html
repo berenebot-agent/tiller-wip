@@ -42,6 +42,16 @@
       <div id="hosted-auth-links" class="auth-links" hidden>
         <button class="btn-link" id="show-forgot-password" type="button">Forgot password?</button>
       </div>
+      <form id="setup-form" class="stack-form" hidden>
+        <p class="eyebrow">FIRST-RUN SETUP</p>
+        <h2>Set up Tiller</h2>
+        <p>Choose the administrator credentials for this instance. Tiller has no administrator configured yet, so this page is shown once and then permanently disabled.</p>
+        <label>Admin username <input name="username" autocomplete="username" maxlength="64" required autofocus></label>
+        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+        <label>Confirm password <input name="confirm" type="password" autocomplete="new-password" minlength="8" required></label>
+        <p class="form-error" id="setup-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" id="setup-submit" type="submit">Create admin and continue</button>
+      </form>
       <div id="auth-captcha-wrap" class="auth-captcha" hidden><div id="auth-captcha"></div><p class="meta-line">Complete the security check to continue. Cloudflare processes browser signals for abuse prevention; see the <a href="/legal/privacy">Privacy Policy</a>.</p></div>
       <form id="signup-form" class="stack-form" hidden>
         <p class="eyebrow">CREATE ACCOUNT</p>

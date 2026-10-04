@@ -122,7 +122,15 @@ type Server struct {
 	// webhooks. Keyed by account id.
 	testNotificationLimiter *loginLimiter
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
-	loginLimiter          *loginLimiter
+	loginLimiter *loginLimiter
+	// setupLimiter throttles the unauthenticated first-run setup endpoint so a
+	// flood cannot force unbounded argon2id hashing before an admin exists.
+	setupLimiter *loginLimiter
+	// wizardEnabled reports whether the local-mode onboarding wizard may be
+	// offered. It is false when environment credentials are set: those
+	// installs skip onboarding entirely, preserving the pre-first-run
+	// experience.
+	wizardEnabled         bool
 	userLoginIPLimiter    *loginLimiter
 	userLoginEmailLimiter *loginLimiter
 	signupLimiter         *loginLimiter
@@ -381,10 +389,13 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			}
 		}
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
+	if s.setupRequired() && logger != nil {
+		logger.Warn("local instance is unconfigured: the first visitor can claim it as administrator; set TILLER_USERNAME and TILLER_PASSWORD, or complete the setup page before exposing this instance")
+	}
 	if cfg.Mode == config.ModeHosted {
 		if err := s.SeedLegalDocuments(context.Background()); err != nil && logger != nil {
 			logger.Warn("legal document seed failed", "error_class", fmt.Sprintf("%T", err))
@@ -541,6 +552,15 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/admin/session", s.login)
 		mux.Handle("GET /api/admin/session", s.requireAdmin(http.HandlerFunc(s.sessionStatus)))
 		mux.Handle("DELETE /api/admin/session", s.requireAdmin(http.HandlerFunc(s.logout)))
+		// First-run bootstrap: the route exists only while the instance has no
+		// credential at all. Once configured it 404s, so it can never act as a
+		// backdoor. It owns its own same-origin/rate-limit/one-shot write.
+		mux.HandleFunc("POST /api/admin/setup", s.setup)
+		// First-run onboarding wizard state. Unlike hosted, these are behind
+		// requireAdmin because local mode is single-operator; the wizard
+		// itself is the same dialog as hosted.
+		mux.Handle("GET /api/auth/onboarding", s.requireAdmin(http.HandlerFunc(s.writeOnboardingState)))
+		mux.Handle("POST /api/auth/onboarding/dismiss", s.requireAdmin(http.HandlerFunc(s.setOnboardingDismissed)))
 	}
 	if s.config.Mode == config.ModeHosted {
 		mux.Handle("GET /api/admin/audit", s.requireUser(http.HandlerFunc(s.accountAudit)))
@@ -641,7 +661,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		respondDecodeError(w, err)
 		return
 	}
-	if !auth.EqualCredential(input.Username, s.config.TillerUser) || !auth.EqualCredential(input.Password, s.config.TillerUserPassword) {
+	// The stored credential is the single source of truth: environment
+	// credentials are synced into it at boot (env wins, invalidating
+	// sessions), and the first-run wizard writes it directly. The env values
+	// are never compared here, so a wizard-created credential authenticates
+	// across restarts with no environment set.
+	if !s.sessions.VerifyCredential(input.Username, input.Password) {
 		if s.loginLimiter.recordFailure(key) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 			return
@@ -656,8 +681,25 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.TillerUser, clientIP(r, s.config.TrustedProxy)))
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.TillerUser, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+	username := s.adminUsername()
+	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", username, clientIP(r, s.config.TrustedProxy)))
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": username, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+}
+
+// adminUsername is the operator identity shown in the UI and login
+// notifications. Environment credentials win while they are set; otherwise the
+// username persisted by the first-run wizard is used, so identity survives a
+// restart with no environment configured.
+func (s *Server) adminUsername() string {
+	if s.config.TillerUser != "" {
+		return s.config.TillerUser
+	}
+	if s.sessions != nil {
+		if stored := s.sessions.AdminUsername(); stored != "" {
+			return stored
+		}
+	}
+	return "admin"
 }
 
 // setSessionCookie writes the admin session cookie. Refreshing it on every
@@ -670,7 +712,7 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 
 func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(adminSessionKey).(auth.Session)
-	writeJSON(w, 200, map[string]any{"authenticated": true, "username": s.config.TillerUser, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+	writeJSON(w, 200, map[string]any{"authenticated": true, "username": s.adminUsername(), "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
