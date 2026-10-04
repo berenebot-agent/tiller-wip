@@ -354,65 +354,91 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
+// HostedBootstrapOutcome reports what BootstrapHostedCustomer did, so the
+// caller can log the branches that leave no other trace: a fresh hosted install
+// deliberately creates no customer, and a migration that succeeds is otherwise
+// silent.
+type HostedBootstrapOutcome int
+
+const (
+	// HostedBootstrapSkipped means a previous bootstrap already ran.
+	HostedBootstrapSkipped HostedBootstrapOutcome = iota
+	// HostedBootstrapFresh means a fresh hosted install created no customer by
+	// design; the TILLER_USERNAME/TILLER_PASSWORD values are not provisioning
+	// input and were ignored.
+	HostedBootstrapFresh
+	// HostedBootstrapMigrated means the existing local account was converted
+	// into a verified hosted customer.
+	HostedBootstrapMigrated
+)
+
 // BootstrapHostedCustomer converts the local account into a normal hosted
 // customer exactly once. freshInstall comes from the database migration state;
 // it prevents an existing local database from being mistaken for a new hosted
 // install when the legacy credentials are omitted. The caller must run this
 // before syncing the hosted platform credential.
-func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password string, freshInstall bool) error {
+//
+// On a fresh hosted install it creates NOTHING, even when email and password are
+// set: TILLER_USERNAME/TILLER_PASSWORD are one-time migration input for an
+// existing local database, not provisioning input for a new one. It reports
+// which branch it took so the caller can say so out loud.
+func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password string, freshInstall bool) (HostedBootstrapOutcome, error) {
 	var complete string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&complete)
 	if err == nil {
-		return nil
+		return HostedBootstrapSkipped, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	email = NormalizeEmail(email)
 	if email == "" && password == "" && freshInstall {
-		return s.markHostedBootstrapComplete(ctx)
+		return HostedBootstrapFresh, s.markHostedBootstrapComplete(ctx)
 	}
 	if email == "" && password == "" {
-		return ErrBootstrapRequired
+		return HostedBootstrapSkipped, ErrBootstrapRequired
 	}
 	if !validBootstrapEmail(email) || ValidatePassword(password) != nil {
-		return ErrBootstrapInvalid
+		return HostedBootstrapSkipped, ErrBootstrapInvalid
 	}
 	if _, err := s.userByEmail(ctx, email); err == nil {
-		return ErrBootstrapCollision
+		return HostedBootstrapSkipped, ErrBootstrapCollision
 	} else if !errors.Is(err, ErrNotFound) {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	passwordHash, err := s.passwordHasher.Hash(password)
 	if err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	userID, err := id.New()
 	if err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,'active',?,?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now), formatTime(now)); err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE accounts SET owner_user_id=?,updated_at=? WHERE id=? AND owner_user_id IS NULL`, userID, formatTime(now), database.LocalAccountID)
 	if err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	if count, err := result.RowsAffected(); err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	} else if count != 1 {
-		return ErrBootstrapCollision
+		return HostedBootstrapSkipped, ErrBootstrapCollision
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO platform_settings(key,value,updated_at) VALUES('hosted_bootstrap_complete','1',?)`, formatTime(now)); err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return HostedBootstrapSkipped, err
+	}
+	return HostedBootstrapMigrated, nil
 }
 
 func (s *Store) markHostedBootstrapComplete(ctx context.Context) error {

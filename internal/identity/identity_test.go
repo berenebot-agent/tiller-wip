@@ -176,8 +176,12 @@ func TestPlatformCounts(t *testing.T) {
 func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 	st, db := newTestStore(t)
 	ctx := context.Background()
-	if err := st.BootstrapHostedCustomer(ctx, "Owner@Example.COM", "correct horse battery staple", true); err != nil {
+	outcome, err := st.BootstrapHostedCustomer(ctx, "Owner@Example.COM", "correct horse battery staple", true)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if outcome != HostedBootstrapMigrated {
+		t.Fatalf("first bootstrap outcome = %v, want HostedBootstrapMigrated", outcome)
 	}
 	var userID, email, ownerID string
 	if err := db.QueryRow(`SELECT u.id,u.email,a.owner_user_id FROM users u JOIN accounts a ON a.id=?`, database.LocalAccountID).Scan(&userID, &email, &ownerID); err != nil {
@@ -186,8 +190,12 @@ func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 	if userID == "" || email != "owner@example.com" || ownerID != userID {
 		t.Fatalf("migrated local account = user=%q email=%q owner=%q", userID, email, ownerID)
 	}
-	if err := st.BootstrapHostedCustomer(ctx, "other@example.com", "another correct horse battery staple", false); err != nil {
+	outcome, err = st.BootstrapHostedCustomer(ctx, "other@example.com", "another correct horse battery staple", false)
+	if err != nil {
 		t.Fatalf("repeat bootstrap: %v", err)
+	}
+	if outcome != HostedBootstrapSkipped {
+		t.Fatalf("repeat bootstrap outcome = %v, want HostedBootstrapSkipped", outcome)
 	}
 	var count int
 	if err := db.QueryRow(`SELECT count(*) FROM users`).Scan(&count); err != nil {
@@ -200,8 +208,14 @@ func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 
 func TestBootstrapHostedFreshInstallCreatesNoCustomer(t *testing.T) {
 	st, db := newTestStore(t)
-	if err := st.BootstrapHostedCustomer(context.Background(), "", "", true); err != nil {
+	outcome, err := st.BootstrapHostedCustomer(context.Background(), "", "", true)
+	if err != nil {
 		t.Fatal(err)
+	}
+	// The outcome is what lets the caller warn that supplied credentials were
+	// ignored, which is the only signal an operator gets for this branch.
+	if outcome != HostedBootstrapFresh {
+		t.Fatalf("fresh hosted outcome = %v, want HostedBootstrapFresh", outcome)
 	}
 	var count int
 	if err := db.QueryRow(`SELECT count(*) FROM users`).Scan(&count); err != nil {
@@ -212,9 +226,96 @@ func TestBootstrapHostedFreshInstallCreatesNoCustomer(t *testing.T) {
 	}
 }
 
+// The store does NOT refuse supplied credentials, and that is load-bearing: on a
+// fresh hosted install the completed-bootstrap marker is inserted by
+// database.Open (only under WithHostedMode), which short-circuits this call
+// before it is reached. A caller that invokes the store directly therefore DOES
+// migrate. The server is what refuses to treat the environment as provisioning
+// input on a fresh install, by keying its warning on db.FreshInstall. Pinned here
+// so a future "fix" does not relocate that refusal somewhere it would never run.
+func TestBootstrapHostedStoreMigratesWhenInvokedDirectly(t *testing.T) {
+	st, db := newTestStore(t)
+	outcome, err := st.BootstrapHostedCustomer(context.Background(), "owner@example.com", "correct horse battery staple", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != HostedBootstrapMigrated {
+		t.Fatalf("direct invocation outcome = %v, want HostedBootstrapMigrated "+
+			"(the fresh-install refusal lives in the server, keyed on db.FreshInstall)", outcome)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM users`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("direct invocation user count = %d, want 1", count)
+	}
+}
+
+// The production composition: database.Open records the completed bootstrap for
+// a fresh hosted install, so the store reports Skipped and creates nothing —
+// which is why the server cannot rely on the Fresh outcome to detect it.
+func TestBootstrapHostedFreshHostedDatabaseCreatesNoCustomer(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), database.WithHostedMode(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if !db.FreshInstall {
+		t.Fatal("expected a fresh install")
+	}
+	st, err := New(db.SQL, fastsecret.Hasher{}, fastsecret.Hasher{}, fastsecret.Hasher{}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := st.BootstrapHostedCustomer(context.Background(), "owner@example.com", "correct horse battery staple", db.FreshInstall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != HostedBootstrapSkipped {
+		t.Fatalf("fresh hosted database outcome = %v, want HostedBootstrapSkipped "+
+			"(database.Open pre-records the marker)", outcome)
+	}
+	var count int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM users`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("fresh hosted user count = %d, want 0", count)
+	}
+}
+
+// An existing local database (not a fresh install) with valid credentials
+// migrates, and only once.
+func TestBootstrapHostedExistingDatabaseMigratesOnce(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st, err := New(db.SQL, fastsecret.Hasher{}, fastsecret.Hasher{}, fastsecret.Hasher{}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := st.BootstrapHostedCustomer(context.Background(), "owner@example.com", "correct horse battery staple", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome != HostedBootstrapMigrated {
+		t.Fatalf("existing-database outcome = %v, want HostedBootstrapMigrated", outcome)
+	}
+	again, err := st.BootstrapHostedCustomer(context.Background(), "other@example.com", "another correct horse battery staple", false)
+	if err != nil {
+		t.Fatalf("repeat bootstrap: %v", err)
+	}
+	if again != HostedBootstrapSkipped {
+		t.Fatalf("repeat outcome = %v, want HostedBootstrapSkipped", again)
+	}
+}
+
 func TestBootstrapHostedInvalidCredentialsDoNotMutate(t *testing.T) {
 	st, db := newTestStore(t)
-	if err := st.BootstrapHostedCustomer(context.Background(), "not-an-email", "short", false); !errors.Is(err, ErrBootstrapInvalid) {
+	if _, err := st.BootstrapHostedCustomer(context.Background(), "not-an-email", "short", false); !errors.Is(err, ErrBootstrapInvalid) {
 		t.Fatalf("invalid bootstrap error = %v", err)
 	}
 	var count int
