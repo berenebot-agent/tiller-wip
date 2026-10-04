@@ -21,22 +21,37 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Each step tees its full output to ci-logs/ so the exact failure text is
+      # downloadable as a build artifact (uploaded even on failure below). This
+      # keeps CI on native Go and setup-go caching, while giving the same
+      # "never re-run to see the full log" guarantee as ./tests/run.sh locally.
       - name: Check formatting
         shell: bash
         run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt found unformatted files:"
-            echo "$unformatted"
-            echo "Fix locally with: ./tiller-go.sh fmt ./... (then re-run ./tests/scripts/check-fmt.sh)"
-            exit 1
-          fi
+          mkdir -p ci-logs
+          {
+            echo "== gofmt =="
+            unformatted="$(gofmt -l .)"
+            if [ -n "$unformatted" ]; then
+              echo "gofmt found unformatted files:"
+              echo "$unformatted"
+              echo "Fix locally with: ./tiller-go.sh fmt ./... (then re-run ./tests/scripts/check-fmt.sh)"
+              exit 1
+            fi
+          } 2>&1 | tee ci-logs/gofmt.log
       - name: Test
-        run: go test ./...
+        run: go test ./... 2>&1 | tee ci-logs/test.log
       - name: Vet
-        run: go vet ./...
+        run: go vet ./... 2>&1 | tee ci-logs/vet.log
       - name: Build
-        run: go build ./cmd/tiller-router
+        run: go build ./cmd/tiller-router 2>&1 | tee ci-logs/build.log
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: ci-logs/
+          if-no-files-found: ignore
 
   compose:
     name: Compose config
