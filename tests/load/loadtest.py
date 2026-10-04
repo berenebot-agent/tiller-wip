@@ -30,9 +30,15 @@ RESULTS = []
 RESULTS_LOCK = threading.Lock()
 
 
-def one_request(base_url, api_key, model, stream, timeout):
+def one_request(base_url, api_key, model, stream, timeout, body_bytes):
     url = base_url.rstrip("/") + "/v1/chat/completions"
-    body = {"model": model, "messages": [{"role": "user", "content": "load probe"}]}
+    content = "load probe"
+    if body_bytes > 0 and body_bytes > len(content):
+        # Pad the prompt so the request body is roughly body_bytes. Used to
+        # exercise the inbound body-read gate and large-body path (pre-SaaS
+        # review TR-002); the router's own per-request cap still applies.
+        content = content + " " + ("x" * (body_bytes - len(content) - 1))
+    body = {"model": model, "messages": [{"role": "user", "content": content}]}
     if stream:
         body["stream"] = True
     data = json.dumps(body).encode()
@@ -73,9 +79,11 @@ def main():
     parser.add_argument("--requests", type=int, default=200)
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--body-bytes", type=int, default=0,
+                        help="pad each request body to roughly this many bytes, to probe the body-read gate and large-body path")
     args = parser.parse_args()
 
-    print(f"load test: {args.requests} requests, concurrency {args.concurrency}, stream={args.stream}")
+    print(f"load test: {args.requests} requests, concurrency {args.concurrency}, stream={args.stream}, body_bytes={args.body_bytes}")
     wall_start = time.monotonic()
     produced = 0
     lock = threading.Lock()
@@ -87,7 +95,7 @@ def main():
                 if produced >= args.requests:
                     return
                 produced += 1
-            one_request(args.base_url, args.api_key, args.model, args.stream, args.timeout)
+            one_request(args.base_url, args.api_key, args.model, args.stream, args.timeout, args.body_bytes)
 
     threads = [threading.Thread(target=worker) for _ in range(args.concurrency)]
     for thread in threads:

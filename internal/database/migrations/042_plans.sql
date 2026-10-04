@@ -22,13 +22,14 @@ CREATE TABLE plans (
 
 INSERT INTO plans(name, max_providers, max_client_keys, max_virtual_models, max_concurrent_streams, activity_retention_days, monthly_requests, updated_at)
 VALUES ('free', 3, 5, 5, 5, 7, -1, '2026-09-21T00:00:00.000000000Z');
--- TR-003 (docs/pre_saas_release_review.md): the free plan is seeded with an
--- UNLIMITED monthly request allowance by deliberate decision — the tier is
--- BYOK, so the operator's marginal request cost is bandwidth/CPU only. A
--- public free launch MUST set a finite monthly_requests for the free plan
--- first (platform dashboard, data-only change, no restart needed; the
--- enforcement code is unconditional when a cap is set). The engine, counter,
--- and 429 semantics are implemented and tested in Stage D.
+-- TR-003 (docs/pre_saas_release_review.md): the free plan is seeded here with
+-- an UNLIMITED monthly request allowance for the private alpha — the tier is
+-- BYOK, so the operator's marginal request cost is bandwidth/CPU only.
+-- Migration 050 then gives the public free beta a finite 20,000/month default
+-- (conditionally, so an operator-set cap is never clobbered). Operators can
+-- change it at any time from the platform dashboard (data-only change,
+-- effective immediately). The engine, counter, and 429 semantics are
+-- implemented and tested in Stage D.
 
 CREATE TABLE accounts_new (
     id TEXT PRIMARY KEY,
