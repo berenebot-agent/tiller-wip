@@ -109,6 +109,16 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Silent mismatch between hosted customer bootstrap and the environment.**
+  `TILLER_USERNAME`/`TILLER_PASSWORD` on a fresh hosted install are ignored by
+  design (they are one-time migration input for an existing local database, and
+  `database.Open` records the completed bootstrap before the store is asked), but
+  nothing said so: the operator saw only `Invalid email or password` at the login
+  screen, which points at the password rather than the configuration. The router
+  now warns when those variables are set on a fresh hosted install, and logs an
+  info line when an existing local account is converted into a verified hosted
+  customer, so both branches of the decision are observable at startup. No
+  behavior changed in either case.
 - **Hosted Codex subscription sign-in.** Codex now connects with OpenAI's
   device authorization flow (the flow `codex login --device-auth` uses for
   remote/headless clients) instead of the browser PKCE flow. The PKCE flow's

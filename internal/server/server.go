@@ -341,8 +341,23 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		return nil, err
 	}
 	if cfg.Mode == config.ModeHosted {
-		if err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.TillerUser, cfg.TillerUserPassword, db.FreshInstall); err != nil {
+		outcome, err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.TillerUser, cfg.TillerUserPassword, db.FreshInstall)
+		if err != nil {
 			return nil, fmt.Errorf("hosted bootstrap: %w", err)
+		}
+		// A fresh hosted install never creates a customer from the environment,
+		// so the customer credentials are not provisioning input. Two ways to
+		// arrive here: normally database.Open has already recorded the completed
+		// bootstrap (so the store reports "skipped"), and any other composition
+		// reports "fresh". Warn on both. Without this an operator who set those
+		// variables sees only "Invalid email or password" at the login screen,
+		// which points at the password rather than the configuration.
+		fresh := db.FreshInstall || outcome == identity.HostedBootstrapFresh
+		if fresh && (cfg.TillerUser != "" || cfg.TillerUserPassword != "") && logger != nil {
+			logger.Warn("ignoring TILLER_USERNAME/TILLER_PASSWORD: a fresh hosted install creates no customer; create one through signup or an invitation. These variables are one-time migration input for an existing local database only")
+		}
+		if outcome == identity.HostedBootstrapMigrated && logger != nil {
+			logger.Info("converted the existing local account into a verified hosted customer")
 		}
 		if err := identityStore.SyncPlatformCredential(cfg.TillerPlatformAdminUser, cfg.TillerPlatformAdminPassword); err != nil {
 			return nil, err
