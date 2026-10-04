@@ -160,12 +160,10 @@ logging.
 entitlements (provider/client-key/virtual-model creation, concurrent streams,
 monthly routed requests, and Activity retention). Quota rejections are `429`
 with `Retry-After` and occur after authentication and model resolution but
-before any upstream request. Local/self-hosted mode is exempt. The seeded
-`free` plan ships with an **unlimited monthly request allowance by deliberate
-decision** (the tier is BYOK, so the operator's marginal cost is bandwidth/CPU
-only); before a public free launch the operator must set a finite
-`monthly_requests` for the free plan from the platform dashboard — a data-only
-change that takes effect immediately, no restart needed.
+before any upstream request. Local/self-hosted mode is exempt. The `free` plan
+defaults to a finite **20,000 requests/month** per account (migration 050);
+operators can raise, lower, or remove the cap at any time from the platform
+dashboard (a data-only change, effective immediately; `-1` means unlimited).
 
 **Account data export.** Hosted customers can export their own account as a ZIP
 (configuration JSON, Activity CSV, audit CSV). The export is account-scoped from

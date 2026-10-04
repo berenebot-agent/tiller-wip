@@ -159,6 +159,15 @@ behavior may still change before a stable `1.0`.
 - **Shorter platform-operator session lifetime (TR-010).** The hosted
   platform console session now defaults to a 12 h sliding window instead of
   the 30-day customer default, configurable via `TILLER_PLATFORM_SESSION_TTL`.
+- **Free-plan monthly default (TR-003).** The `free` plan now defaults to a
+  finite 20,000 requests/month (migration 050, applied conditionally so an
+  operator-set cap is preserved). The cap remains operator-adjustable from the
+  platform dashboard, effective immediately; `-1` still means unlimited.
+- **Load harness large-body probe (TR-011).** `tests/load/loadtest.py` gained
+  `--body-bytes`, and `docs/load_test.md` now carries public-beta pass criteria
+  plus probes for the review's admission controls (body-read gate, concurrent-
+  stream cap, live-SSE cap, multi-account isolation). Regression tests pin the
+  hosted `HostedDisabled` provider rejection and the inference buffer budget.
 
 ### Fixed
 
