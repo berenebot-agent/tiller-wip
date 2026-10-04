@@ -13,15 +13,17 @@ import (
 // Byte limits (MaxBytesReader) bound how much a request may send but not how
 // long it may take. Without a read deadline, a peer can trickle a body
 // indefinitely: the handler goroutine, its connection, and (for inference) the
-// up-to-32 MiB buffer are all held with no admission check, because plan
+// up-to-8 MiB buffer are all held with no admission check, because plan
 // concurrency is only applied after the body is parsed. The deadline below
 // bounds one request; the gate bounds how many may be mid-body at once.
 const (
 	// maxConcurrentBodyReads caps how many requests may be reading a body at
-	// once process-wide. It is deliberately well above the aggregate plan
-	// concurrency any single deployment expects, so it only engages under a
-	// deliberate slow-upload flood. The cap is a safety valve, not a quota.
-	maxConcurrentBodyReads = 256
+	// once process-wide. The product of the gate and the largest body cap is
+	// the process's worst-case body-buffer budget: 64 x 8 MiB = 512 MiB. The
+	// pre-release review (docs/pre_saas_release_review.md TR-002) sized both
+	// constants so the aggregate fits well inside a small container; a single
+	// flood cannot hold gigabytes in unread request bodies.
+	maxConcurrentBodyReads = 64
 )
 
 // bodyReadDeadline is an inactivity deadline per read, not a total upload

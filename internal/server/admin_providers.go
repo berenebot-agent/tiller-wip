@@ -96,6 +96,13 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_provider_type", "Unknown provider type.")
 		return
 	}
+	// Hosted mode honours the provider-terms decision recorded on the
+	// descriptor. The admin UI hides these types; this is the authoritative
+	// backstop for a direct API call (docs/provider_terms_review.md).
+	if s.config.Mode == config.ModeHosted && descriptor.HostedDisabled {
+		adminError(w, 400, "provider_type_disabled", "This provider type is not available in hosted mode.")
+		return
+	}
 	if input.Name == "" {
 		input.Name = descriptor.Type
 		if input.Type == "codex-subscription" {

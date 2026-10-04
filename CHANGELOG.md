@@ -107,6 +107,40 @@ behavior may still change before a stable `1.0`.
   (commonly used types first) with auth/protocol context, then advances to the
   existing configuration fields; editing an existing provider is unchanged.
 
+### Hardened (pre-SaaS release review: docs/pre_saas_release_review.md)
+
+- **Server-side enforcement of hosted provider-terms decisions (TR-001).**
+  Provider types marked `HostedDisabled` (today: `opencode-free`) are rejected
+  by the provider-create endpoint in hosted mode, not just hidden in the hosted
+  add-provider UI — a direct API call can no longer create a type an
+  operator's provider-terms review has disabled. Local mode is unchanged.
+- **Bounded request/response buffering (TR-002).** The inference body cap
+  drops from 32 MiB to 8 MiB (≈2 M tokens of text — beyond every model's
+  context window, so no legitimate request is affected), the process-wide
+  body-read gate from 256 to 64 concurrent reads, the non-streaming upstream
+  response cap from 64 MiB to 16 MiB, and a new global gate admits at most 32
+  concurrently buffered non-streaming responses (holding each slot until the
+  buffered body is closed). Worst-case aggregate buffering is now ~1 GiB
+  instead of unbounded, so a single client-key flood can no longer OOM the
+  container. Oversized requests get the same `request_too_large` 400 as
+  before, with the limit named in the message.
+- **Hourly hosted notification budget (TR-004).** In hosted mode one account
+  may deliver at most 30 webhook notifications per rolling hour across all
+  events. The per-event cooldown for routing events is unchanged; this closes
+  the unbounded-rate relay through client-key create/delete cycles (whose
+  events are deliberately cooldown-exempt). Local mode keeps unthrottled
+  admin events. Excess deliveries are dropped best-effort and logged.
+- **Signup mail bound per address (TR-005).** The signup endpoint (password
+  and Google paths) now also charges a 5/hour per-address fixed window,
+  HMAC-keyed like the login limiter, so rotating source IPs cannot turn
+  signup verification mail into a mail cannon against a single mailbox.
+- **Abandoned-signup reclamation (TR-005).** Never-verified (`pending`)
+  accounts older than 30 days are swept by the hourly maintenance pass:
+  the pending account, its user row, its legal acceptance record, and its
+  unsent mail are removed. Verified/active/suspended/deleting accounts are
+  never touched. Without this, a public service would accumulate abandoned
+  signups (and their unique-email hold) indefinitely.
+
 ### Fixed
 
 - **Silent mismatch between hosted customer bootstrap and the environment.**

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
@@ -185,10 +186,80 @@ func attemptCount(attempts []requestAttempt) int {
 // from cooldown entirely) could otherwise start unbounded concurrent deliveries
 // against a slow endpoint. Saturation drops best-effort notifications rather
 // than queueing them; delivery must never delay the request that triggered it.
+// budgetFor installs the hourly budget only in hosted mode: local mode is a
+// single trusted operator whose discrete admin events stay unthrottled.
+func budgetFor(mode config.Mode) *notificationBudget {
+	if mode != config.ModeHosted {
+		return nil
+	}
+	return newNotificationBudget(hostedHourlyNotificationBudget, hourWindow)
+}
+
 const (
 	maxConcurrentNotificationDeliveries          = 64
 	maxConcurrentNotificationDeliveriesPerTenant = 8
 )
+
+// hostedHourlyNotificationBudget caps the total deliveries one hosted account
+// may consume per rolling hour, across all events. The per-event cooldown
+// throttles routing events, but client-key created/deleted events are
+// deliberately exempt (unthrottled, each delivery fires) — which pre-release
+// review TR-004 turns into an unbounded relay: create/delete cycles against
+// any validated public HTTPS URL, with user-controlled body text. Concurrency
+// admission bounds parallelism, not rate. A rolling-rate budget closes it while
+// leaving legitimate key management (a handful of events per hour) untouched
+// and without changing the cooldown semantics documented for routing events.
+const hostedHourlyNotificationBudget = 30
+
+// hourWindows is the sliding-hour budget window.
+const hourWindow = time.Hour
+
+// notificationBudget is a bounded sliding-window per-account delivery budget.
+// Keys are account ids; entries age out entirely when no delivery is admitted
+// for a full window, so the map cannot grow for the process lifetime.
+type notificationBudget struct {
+	mu      sync.Mutex
+	budget  int
+	window  time.Duration
+	entries map[string]*budgetEntry
+}
+
+type budgetEntry struct {
+	stamps []time.Time
+}
+
+func newNotificationBudget(budget int, window time.Duration) *notificationBudget {
+	return &notificationBudget{budget: budget, window: window, entries: map[string]*budgetEntry{}}
+}
+
+// admit charges one delivery against the account's budget and reports whether
+// it was admitted.
+func (b *notificationBudget) admit(accountID string, now time.Time) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.entries) > 0 {
+		for key, entry := range b.entries {
+			if now.Sub(entry.stamps[len(entry.stamps)-1]) > b.window {
+				delete(b.entries, key)
+			}
+		}
+	}
+	entry := b.entries[accountID]
+	pruned := entry.stamps[:0]
+	for _, stamp := range entry.stamps {
+		if now.Sub(stamp) <= b.window {
+			pruned = append(pruned, stamp)
+		}
+	}
+	entry.stamps = pruned
+	if len(entry.stamps) >= b.budget {
+		b.entries[accountID] = entry
+		return false
+	}
+	entry.stamps = append(entry.stamps, now)
+	b.entries[accountID] = entry
+	return true
+}
 
 // admitNotification reserves delivery capacity for one notification. It returns
 // false when the process-wide or per-account bound is already reached, in which
@@ -204,6 +275,15 @@ func (s *Server) admitNotification(accountID string) bool {
 		return false
 	}
 	if s.notifyAdmittedByAccount[accountID] >= maxConcurrentNotificationDeliveriesPerTenant {
+		return false
+	}
+	// Hosted: rate as well as parallelism. Every event — including the
+	// cooldown-exempt client-key events — is charged against the account's
+	// rolling-hourly budget (TR-004).
+	if s.notifBudget != nil && !s.notifBudget.admit(accountID, time.Now()) {
+		if s.logger != nil {
+			s.logger.Warn("notification delivery dropped", "event", "budget_exceeded", "reason", "hourly_notification_budget")
+		}
 		return false
 	}
 	s.notifyAdmitted++

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"time"
 
@@ -65,6 +66,13 @@ func (s *Server) startAuditMaintenance(ctx context.Context) {
 		if s.identity != nil {
 			if err := s.identity.PruneExpiredTokens(ctx, time.Now()); err != nil {
 				s.warnBackup("scheduled token prune failed", err)
+			}
+			// Reclaim abandoned hosted signups (docs/pre_saas_release_review.md
+			// TR-005): never-verified pending accounts older than 30 days.
+			if pruned, err := s.identity.PrunePendingAccounts(ctx, time.Now()); err != nil {
+				s.warnBackup("pending account prune failed", err)
+			} else if pruned > 0 {
+				slog.Info("pending account prune completed", "reclaimed", pruned)
 			}
 		}
 		if s.outbox != nil {
