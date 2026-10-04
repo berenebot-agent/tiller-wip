@@ -51,6 +51,11 @@ type Config struct {
 	PublicURL string
 	// UserSessionTTL is the sliding lifetime of a hosted customer session.
 	UserSessionTTL time.Duration
+	// PlatformSessionTTL is the sliding lifetime of a hosted platform-operator
+	// session. It is deliberately shorter than the customer default: the
+	// operator console is the highest-privilege surface, so a stolen session
+	// cookie has a bounded window (docs/pre_saas_release_review.md TR-010).
+	PlatformSessionTTL time.Duration
 	// Mail is the optional bootstrap seed for mail delivery.
 	Mail MailBootstrap
 	// TillerUser and TillerUserPassword are the local operator credential
@@ -122,6 +127,7 @@ func Load() (Config, error) {
 		AdminCookieSecure:           false,
 		AdminSessionTTL:             30 * 24 * time.Hour,
 		UserSessionTTL:              30 * 24 * time.Hour,
+		PlatformSessionTTL:          12 * time.Hour,
 		// Verified keys/sessions are cached in memory and renewed on use, so a
 		// longer window cuts hash-verification CPU with no revocation penalty:
 		// explicit invalidation is independent of the TTL.
@@ -168,6 +174,16 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_USER_SESSION_TTL must be positive, got %q", raw)
 		}
 		c.UserSessionTTL = v
+	}
+	if raw := os.Getenv("TILLER_PLATFORM_SESSION_TTL"); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_PLATFORM_SESSION_TTL: %w", err)
+		}
+		if v <= 0 {
+			return Config{}, fmt.Errorf("TILLER_PLATFORM_SESSION_TTL must be positive, got %q", raw)
+		}
+		c.PlatformSessionTTL = v
 	}
 	mail, err := loadMailBootstrap()
 	if err != nil {

@@ -140,6 +140,25 @@ behavior may still change before a stable `1.0`.
   unsent mail are removed. Verified/active/suspended/deleting accounts are
   never touched. Without this, a public service would accumulate abandoned
   signups (and their unique-email hold) indefinitely.
+- **Tenant-configuration audit trail (TR-014).** Provider create/update/
+  delete/credential-replace/refresh and OAuth connect/disconnect, client-key
+  create/update/rotate/delete/permission changes, virtual group/model
+  create/update/delete, manual model add/delete, and settings updates now
+  write account-scoped audit events with actor, target, and field names —
+  never secret values (credentials, client-key plaintext, webhook URLs, or
+  the notification auth header). The `http request` log line also carries the
+  pseudonymous `account_id` and authenticated principal kind, so an operator
+  can correlate a request with the account it served.
+- **Per-account live-SSE cap (TR-007).** The dashboard live stream admits at
+  most 8 concurrent connections per account (a constant DoS bound, not a plan
+  entitlement); the 9th is refused with a `429` before any SSE headers are
+  written, and a freed slot is reusable.
+- **HSTS on hosted deployments (TR-008).** Hosted responses send
+  `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`).
+  Local mode, which serves plain HTTP on the LAN by design, never sends it.
+- **Shorter platform-operator session lifetime (TR-010).** The hosted
+  platform console session now defaults to a 12 h sliding window instead of
+  the 30-day customer default, configurable via `TILLER_PLATFORM_SESSION_TTL`.
 
 ### Fixed
 

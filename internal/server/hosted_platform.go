@@ -68,6 +68,7 @@ func (s *Server) requirePlatform(next http.Handler) http.Handler {
 			adminError(w, http.StatusForbidden, "csrf_failed", "A valid CSRF token is required.")
 			return
 		}
+		stampRequestPrincipal(r, "platform", "")
 		ctx := contextWithPlatformSession(r.Context(), session)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

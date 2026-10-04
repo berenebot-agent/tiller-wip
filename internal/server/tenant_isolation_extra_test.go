@@ -22,8 +22,11 @@ func TestLiveAccountIsolation(t *testing.T) {
 
 	local := database.LocalAccountID
 	other := otherAccountID
-	chLocal := h.subscribe(local)
-	chOther := h.subscribe(other)
+	chLocal, okLocal := h.subscribe(local)
+	chOther, okOther := h.subscribe(other)
+	if !okLocal || !okOther {
+		t.Fatal("expected both subscriptions to be admitted")
+	}
 	defer h.unsubscribe(local, chLocal)
 	defer h.unsubscribe(other, chOther)
 

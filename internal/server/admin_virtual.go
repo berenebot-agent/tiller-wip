@@ -101,6 +101,12 @@ func (s *Server) createVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "virtual_group.created",
+		TargetType: "virtual_group",
+		TargetID:   groupID,
+		Metadata:   map[string]string{"name": name},
+	})
 	writeJSON(w, 201, map[string]any{"id": groupID, "name": name})
 }
 
@@ -141,6 +147,12 @@ func (s *Server) updateVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+		Event:      "virtual_group.updated",
+		TargetType: "virtual_group",
+		TargetID:   groupID,
+		Metadata:   map[string]string{"name": name, "previous_name": oldName},
+	})
 	w.WriteHeader(204)
 }
 
@@ -157,6 +169,11 @@ func (s *Server) deleteVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not delete virtual group.")
 		return
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "virtual_group.deleted",
+		TargetType: "virtual_group",
+		TargetID:   r.PathValue("id"),
+	})
 	w.WriteHeader(204)
 }
 
@@ -359,6 +376,11 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not create virtual model.")
 		return
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "virtual_model.created",
+		TargetType: "virtual_model",
+		TargetID:   virtualID,
+	})
 	writeJSON(w, 201, map[string]any{"id": virtualID})
 }
 
@@ -451,6 +473,11 @@ func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not update virtual model.")
 		return
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "virtual_model.updated",
+		TargetType: "virtual_model",
+		TargetID:   r.PathValue("id"),
+	})
 	w.WriteHeader(204)
 }
 
@@ -467,5 +494,10 @@ func (s *Server) deleteVirtualModel(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not delete virtual model.")
 		return
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "virtual_model.deleted",
+		TargetType: "virtual_model",
+		TargetID:   r.PathValue("id"),
+	})
 	w.WriteHeader(204)
 }

@@ -35,6 +35,12 @@ const (
 	// Production debounce/idle intervals for the live dispatcher.
 	liveDebounceInterval = 2 * time.Second
 	liveIdleInterval     = 5 * time.Second
+	// maxLiveSubscribersPerAccount bounds dashboard live-SSE connections per
+	// account. The SPA opens one stream per tab, so 8 covers heavy multi-tab
+	// use while preventing one authenticated account from parking unbounded
+	// connections, goroutines, and broadcast fan-out (pre-SaaS review TR-007).
+	// Not plan-configurable: it is a DoS guard, not a sellable capacity.
+	maxLiveSubscribersPerAccount = 8
 )
 
 var liveSessionCheckInterval = time.Minute
@@ -127,9 +133,11 @@ type liveSnapshot struct {
 }
 
 // subscribe registers a new subscriber for one account and lazily starts the
-// dispatcher if this is the first one. The returned channel receives
+// dispatcher if this is the first one. It reports false when the account is
+// already at maxLiveSubscribersPerAccount, so the caller can refuse with a
+// 429 instead of opening another connection. The returned channel receives
 // pre-marshalled SSE messages.
-func (h *liveHub) subscribe(accountID string) chan []byte {
+func (h *liveHub) subscribe(accountID string) (chan []byte, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.subs == nil {
@@ -138,6 +146,9 @@ func (h *liveHub) subscribe(accountID string) chan []byte {
 	if h.subs[accountID] == nil {
 		h.subs[accountID] = make(map[chan []byte]struct{})
 	}
+	if len(h.subs[accountID]) >= maxLiveSubscribersPerAccount {
+		return nil, false
+	}
 	ch := make(chan []byte, 8)
 	h.subs[accountID][ch] = struct{}{}
 	if h.cancel == nil {
@@ -145,7 +156,7 @@ func (h *liveHub) subscribe(accountID string) chan []byte {
 		h.cancel = cancel
 		go h.dispatcher(ctx)
 	}
-	return ch
+	return ch, true
 }
 
 // unsubscribe removes a subscriber and stops the dispatcher when the last one
@@ -258,15 +269,24 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "streaming_unsupported", "Streaming is not supported.")
 		return
 	}
+	// Claim a subscriber slot BEFORE committing SSE headers: a capped account
+	// must get a normal 429 JSON error, not a 200 stream that immediately
+	// closes (docs/pre_saas_release_review.md TR-007).
+	accountID := s.scope(r).AccountID()
+	ch, admitted := s.liveHub.subscribe(accountID)
+	if !admitted {
+		w.Header().Set("Retry-After", "5")
+		adminError(w, http.StatusTooManyRequests, "live_limit_exceeded", "Too many live dashboard connections for this account. Close another tab and retry.")
+		return
+	}
+	defer s.liveHub.unsubscribe(accountID, ch)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	accountID := s.scope(r).AccountID()
-	ch := s.liveHub.subscribe(accountID)
-	defer s.liveHub.unsubscribe(accountID, ch)
 	cookieName := sessionCookie
 	if s.config.Mode == config.ModeHosted {
 		cookieName = userSessionCookie

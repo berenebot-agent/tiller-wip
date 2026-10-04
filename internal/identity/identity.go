@@ -208,6 +208,19 @@ func (s *Store) SetCacheTTL(d time.Duration) {
 	s.mu.Unlock()
 }
 
+// SetPlatformSessionTTL overrides the platform-operator session lifetime. It is
+// called once at construction time; the platform console is the
+// highest-privilege session and gets a shorter window than customer sessions
+// (docs/pre_saas_release_review.md TR-010).
+func (s *Store) SetPlatformSessionTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.platformSessionTTL = d
+	s.mu.Unlock()
+}
+
 func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int) ([]PlatformUserRow, error) {
 	pattern := "%" + strings.TrimSpace(search) + "%"
 	rows, err := s.db.QueryContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,a.plan,u.created_at FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email LIKE ? OR u.id LIKE ? OR a.id LIKE ? ORDER BY u.created_at DESC LIMIT ? OFFSET ?`, pattern, pattern, pattern, limit, offset)

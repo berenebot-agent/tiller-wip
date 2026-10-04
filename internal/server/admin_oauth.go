@@ -134,7 +134,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if providerType == "github-copilot" {
-		prompt, startErr := s.startGitHubDeviceFlow(r.Context(), s.scope(r).AccountID(), id)
+		prompt, startErr := s.startGitHubDeviceFlow(r.Context(), s.scope(r).AccountID(), id, s.auditActorFor(r))
 		if startErr != nil {
 			adminError(w, 502, "oauth_start_failed", "Could not start GitHub OAuth.")
 			return
@@ -143,7 +143,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if providerType == "codex-subscription" {
-		prompt, startErr := s.startCodexDeviceFlow(r.Context(), s.scope(r).AccountID(), id)
+		prompt, startErr := s.startCodexDeviceFlow(r.Context(), s.scope(r).AccountID(), id, s.auditActorFor(r))
 		if errors.Is(startErr, codex.ErrDeviceCodeUnsupported) {
 			adminError(w, 502, "oauth_device_code_unsupported", "OpenAI has device sign-in disabled for this account. Try again later.")
 			return
@@ -288,6 +288,11 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.oauthCallbackLimiter.success(clientIP(r, s.config.TrustedProxy))
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "provider.oauth_connected",
+		TargetType: "provider",
+		TargetID:   id,
+	})
 	writeJSON(w, 200, map[string]any{"status": "connected", "account_email": record.AccountEmail, "account_plan": record.AccountPlan})
 }
 
@@ -430,7 +435,7 @@ func (s *Server) setDeviceConnected(accountID, id string, generation int64, reco
 	s.oauthDeviceMu.Unlock()
 }
 
-func (s *Server) storeDeviceToken(ctx context.Context, accountID, id string, generation int64, tokens oauth.TokenResponse) {
+func (s *Server) storeDeviceToken(ctx context.Context, accountID, id string, generation int64, tokens oauth.TokenResponse, actor auditActor) {
 	record, err := oauth.MergeToken(oauth.TokenRecord{ProviderID: id}, tokens, time.Now().UTC())
 	if err != nil {
 		s.finishDevice(accountID, id, generation, "failed", err)
@@ -440,6 +445,12 @@ func (s *Server) storeDeviceToken(ctx context.Context, accountID, id string, gen
 	if err := s.scopeFor(accountID).PutOAuthTokenIfGeneration(ctx, oauth.TokenToStore(record), generation); err != nil {
 		s.finishDevice(accountID, id, generation, "failed", err)
 		return
+	}
+	// The device flow completes in a background goroutine, so the actor is the
+	// authenticated principal that started the flow (captured at start),
+	// audit-logged best-effort on the account stream (TR-014).
+	if actor.id != "" {
+		s.recordAccountAudit(ctx, accountID, store.AuditEvent{Event: "provider.oauth_connected", ActorType: actor.actorType, ActorID: actor.id, TargetType: "provider", TargetID: id})
 	}
 	// The provider's catalogue was discovered before OAuth connected and failed
 	// for lack of a credential, leaving a stale refresh error. Re-discover now
@@ -469,7 +480,7 @@ func (s *Server) refreshProviderCatalogueAsync(accountID, providerID string) {
 	}()
 }
 
-func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string) (devicePrompt, error) {
+func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string, actor auditActor) (devicePrompt, error) {
 	flowCtx, _, generation, prompt, reused, err := s.beginDeviceFlow(ctx, accountID, id)
 	if err != nil || reused {
 		return prompt, err
@@ -503,7 +514,7 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 		}
 		tokens.ExpiresIn = copilot.ExpiresIn
 		tokens.AccountEmail, tokens.AccountPlan = user.Email, user.Login
-		s.storeDeviceToken(flowCtx, accountID, id, generation, tokens)
+		s.storeDeviceToken(flowCtx, accountID, id, generation, tokens, actor)
 	}()
 	return prompt, nil
 }
@@ -512,7 +523,7 @@ func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string
 // flow. It is the hosted-safe equivalent of the Codex CLI's
 // `codex login --device-auth`: the token exchange uses OpenAI's own registered
 // device callback, so no client-supplied redirect URI is involved.
-func (s *Server) startCodexDeviceFlow(ctx context.Context, accountID, id string) (devicePrompt, error) {
+func (s *Server) startCodexDeviceFlow(ctx context.Context, accountID, id string, actor auditActor) (devicePrompt, error) {
 	flowCtx, _, generation, prompt, reused, err := s.beginDeviceFlow(ctx, accountID, id)
 	if err != nil || reused {
 		return prompt, err
@@ -532,7 +543,7 @@ func (s *Server) startCodexDeviceFlow(ctx context.Context, accountID, id string)
 			}
 			return
 		}
-		s.storeDeviceToken(flowCtx, accountID, id, generation, tokens)
+		s.storeDeviceToken(flowCtx, accountID, id, generation, tokens, actor)
 	}()
 	return prompt, nil
 }
@@ -626,5 +637,10 @@ func (s *Server) disconnectProviderOAuth(w http.ResponseWriter, r *http.Request)
 	delete(s.oauthPending, tenantKey(scope.AccountID(), id))
 	s.oauthDeviceMu.Unlock()
 	s.oauthFlows.Cancel(s.scope(r).AccountID(), id)
+	s.recordResourceAudit(r, scope.AccountID(), store.AuditEvent{
+		Event:      "provider.oauth_disconnected",
+		TargetType: "provider",
+		TargetID:   id,
+	})
 	writeJSON(w, 200, map[string]any{"status": "disconnected"})
 }

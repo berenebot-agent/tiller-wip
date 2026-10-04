@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostedauth"
 	"github.com/tiller-router/tiller-router/internal/identity"
@@ -308,6 +309,7 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), userSessionKey, session)
 		ctx = context.WithValue(ctx, userKey, session.User)
 		ctx = context.WithValue(ctx, accountKey, session.User.AccountID)
+		stampRequestPrincipal(r, "user", session.User.AccountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -473,6 +475,44 @@ func userSessionPayload(session identity.UserSession) map[string]any {
 
 func validEmail(value string) bool {
 	return identity.ValidateEmail(identity.NormalizeEmail(value))
+}
+
+// auditActor resolves the principal who performed a tenant-config mutation.
+// Hosted requests carry the user session (requireAdmin == requireUser); local
+// requests carry the admin session over the single implicit account. The
+// actor id is the user id (hosted) or the admin username (local, which has no
+// user row). Zero value means the caller is not an authenticated tenant
+// principal and must not record an account audit event.
+type auditActor struct {
+	id        string
+	actorType string
+}
+
+func (s *Server) auditActorFor(r *http.Request) auditActor {
+	if s.config.Mode == config.ModeHosted {
+		if user, ok := r.Context().Value(userKey).(identity.User); ok {
+			return auditActor{id: user.ID, actorType: "user"}
+		}
+		return auditActor{}
+	}
+	if _, ok := r.Context().Value(adminSessionKey).(auth.Session); ok {
+		return auditActor{id: s.adminUsername(), actorType: "admin"}
+	}
+	return auditActor{}
+}
+
+// recordResourceAudit writes the account-scoped audit event for a
+// tenant-config mutation, best-effort (a failed write never fails the
+// operation), skipping silently when there is no authenticated principal.
+// (docs/pre_saas_release_review.md TR-014.)
+func (s *Server) recordResourceAudit(r *http.Request, accountID string, event store.AuditEvent) {
+	actor := s.auditActorFor(r)
+	if actor.id == "" {
+		return
+	}
+	event.ActorType = actor.actorType
+	event.ActorID = actor.id
+	s.recordAccountAudit(r.Context(), accountID, event)
 }
 
 // recordAccountAudit writes an account-scoped audit event best-effort. Audit is

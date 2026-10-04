@@ -348,6 +348,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if err != nil {
 		return nil, err
 	}
+	identityStore.SetPlatformSessionTTL(cfg.PlatformSessionTTL)
 	if cfg.Mode == config.ModeHosted {
 		outcome, err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.TillerUser, cfg.TillerUserPassword, db.FreshInstall)
 		if err != nil {
@@ -822,6 +823,7 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), adminSessionKey, session)
 		ctx = context.WithValue(ctx, accountKey, accountID)
+		stampRequestPrincipal(r, "admin", accountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -901,6 +903,7 @@ func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
 		s.clientAddressLimiter.success(address)
 		ctx := context.WithValue(r.Context(), clientKey, identity)
 		ctx = context.WithValue(ctx, accountKey, identity.AccountID)
+		stampRequestPrincipal(r, "client", identity.AccountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1021,6 +1024,12 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		csp := "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		if s.config.Mode == config.ModeHosted {
+			// HSTS is hosted-only: the local appliance serves plain HTTP on the
+			// LAN by design, so it must never advertise an HTTPS-only policy.
+			// No includeSubDomains — an operator may run unrelated services on
+			// sibling subdomains and this app cannot vouch for them.
+			// (docs/pre_saas_release_review.md TR-008.)
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://challenges.cloudflare.com https://accounts.google.com; frame-src https://challenges.cloudflare.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 			// The analytics origin is operator-configured and only extends the
 			// hosted policy. Its presence in the header does not load a script;
@@ -1036,14 +1045,58 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// requestInfo carries per-request authenticated attribution from the auth
+// middleware out to the request log line. requestLog wraps the mux OUTSIDE the
+// auth middleware, so the log line cannot see the context values the
+// middleware sets; a pointer stashed in the context closes that gap (the
+// middleware mutates, the tail reads). The account id is the pseudonymous
+// account UUID — never an email, client key name, or credential.
+// (docs/pre_saas_release_review.md TR-014.)
+type requestInfo struct {
+	// AccountID is the verified principal's account, set by the auth
+	// middleware. Empty for unauthenticated paths.
+	accountID string
+	// principalKind names the authenticated plane for the log line:
+	// "admin", "user", "platform", or "client".
+	principalKind string
+}
+
+// requestInfoKey is a value-type context key so requests can carry their own
+// info struct without colliding with package-level identity keys.
+type requestInfoKey struct{}
+
+// requestInfoContext installs the requestInfo the middleware can mutate and
+// the request log can read after the handler returns.
+func requestInfoContext(ctx context.Context) (context.Context, *requestInfo) {
+	info := &requestInfo{}
+	return context.WithValue(ctx, requestInfoKey{}, info), info
+}
+
+// stampRequestInfo resolves the caller's requestInfo and records the
+// principal. The first stamp wins: only one auth middleware wraps a given
+// route (requireAdmin delegates to requireUser in hosted mode, but then
+// requireUser is the one that runs).
+func stampRequestPrincipal(r *http.Request, kind, accountID string) {
+	if info, ok := r.Context().Value(requestInfoKey{}).(*requestInfo); ok && info.accountID == "" {
+		info.accountID, info.principalKind = accountID, kind
+	}
+}
+
 func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		with, info := requestInfoContext(r.Context())
+		next.ServeHTTP(w, r.WithContext(with))
 		if strings.HasPrefix(r.URL.Path, "/health/") {
 			return
 		}
-		s.logger.Info("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+		// The account id is a generated UUID, not user-identifying by itself;
+		// it exists to correlate a request line with the account it served.
+		args := []any{"method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds()}
+		if info.accountID != "" {
+			args = append(args, "account_id", info.accountID, "principal", info.principalKind)
+		}
+		s.logger.Info("http request", args...)
 	})
 }
 
