@@ -653,6 +653,12 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 
 // IssuePasswordReset replaces prior reset tokens for a known user. Missing
 // users return no token without an error for enumeration-resistant handlers.
+//
+// A passkey-only account (password sign-in disabled, no Google link) is
+// deliberately eligible: the reset flow is the account-recovery path when every
+// registered passkey is lost, and it restores password sign-in alongside the
+// new password. Google-linked accounts are not eligible — Google disables
+// password auth by design and is its own recovery route.
 func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, string, error) {
 	u, err := s.userByEmail(ctx, NormalizeEmail(email))
 	if errors.Is(err, ErrNotFound) {
@@ -661,7 +667,11 @@ func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, str
 	if err != nil {
 		return User{}, "", err
 	}
-	if !u.PasswordEnabled {
+	var googleLinked bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider='google')`, u.ID).Scan(&googleLinked); err != nil {
+		return User{}, "", err
+	}
+	if googleLinked {
 		return User{}, "", nil
 	}
 	raw, selector, hash, err := newOpaqueToken(s.tokenHasher)
@@ -702,7 +712,11 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 	}
 	var userID, hash, expires string
 	var tokenGeneration, currentGeneration int64
-	if err := s.db.QueryRowContext(ctx, `SELECT t.user_id,t.token_hash,t.expires_at,t.auth_generation,u.auth_generation FROM password_reset_tokens t JOIN users u ON u.id=t.user_id AND u.password_auth_enabled=1 WHERE t.id=? AND t.used_at IS NULL`, selector).Scan(&userID, &hash, &expires, &tokenGeneration, &currentGeneration); err != nil {
+	// The token is not conditional on password_auth_enabled: a passkey-only
+	// account is issued a reset token precisely to restore password sign-in,
+	// so requiring the flag to already be set would make that recovery
+	// impossible. Eligibility is enforced at issue time.
+	if err := s.db.QueryRowContext(ctx, `SELECT t.user_id,t.token_hash,t.expires_at,t.auth_generation,u.auth_generation FROM password_reset_tokens t JOIN users u ON u.id=t.user_id WHERE t.id=? AND t.used_at IS NULL`, selector).Scan(&userID, &hash, &expires, &tokenGeneration, &currentGeneration); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrInvalidToken
 		}
@@ -737,8 +751,17 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=?,auth_generation=auth_generation+1 WHERE id=? AND NOT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider='google')`, newHash, formatTime(now), userID, userID); err != nil {
+	// The Google guard is enforced here as the authoritative race backstop:
+	// if a Google identity was linked after the token was issued, the reset
+	// must not resurrect password auth. A zero-row update means the guard
+	// fired; fail the whole reset rather than deleting sessions and reporting
+	// success for a password that was never changed.
+	updated, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=?,auth_generation=auth_generation+1 WHERE id=? AND NOT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider='google')`, newHash, formatTime(now), userID, userID)
+	if err != nil {
 		return User{}, err
+	}
+	if n, _ := updated.RowsAffected(); n != 1 {
+		return User{}, ErrInvalidToken
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
 		return User{}, err

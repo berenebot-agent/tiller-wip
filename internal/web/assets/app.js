@@ -281,9 +281,9 @@ function authView(name) {
   const googleSignIn = hosted && name === 'login-form' && !!hostedAuthOptions.google_enabled;
   $('#google-signin-button').hidden = !googleSignIn;
   $('#google-signin-notice').hidden = !googleSignIn;
-  const passkeySignIn = hosted && name === 'login-form' && !!hostedAuthOptions.passkeys_enabled;
+  const passkeySignIn = hosted && name === 'login-form' && !!hostedAuthOptions.passkeys_enabled && !!window.__passkeySupported;
   const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
-  const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) passkeyStatus.textContent = '';
+  const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) { passkeyStatus.textContent = ''; passkeyStatus.className = 'setting-tip'; }
   if (googleSignIn) setupGoogleSignIn();
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
@@ -310,18 +310,20 @@ function renderIdentity(session) {
   identity.title = hosted ? 'Account settings' : '';
 }
 function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } else if (runtimeWizardEnabled) { refreshWizardButton(true); } }
-function showAccountDeleteConfirmation({ email, google }) {
+function showAccountDeleteConfirmation({ email, google, passkey = false }) {
   hideBoot();
   $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-google-link-shell').hidden = true;
   $('#account-delete-shell').hidden = false;
   $('#account-delete-confirm-form').hidden = false;
   $('#account-delete-confirm-email').value = '';
   $('#account-delete-confirm-password').value = '';
-  $('#account-delete-confirm-password-row').hidden = google;
-  $('#account-delete-confirm-password').required = !google;
+  const passwordNeeded = !google && !passkey;
+  $('#account-delete-confirm-password-row').hidden = !passwordNeeded;
+  $('#account-delete-confirm-password').required = passwordNeeded;
   $('#account-delete-confirm-error').textContent = '';
   $('#account-delete-confirm-form').dataset.email = email;
   $('#account-delete-confirm-form').dataset.google = google ? '1' : '0';
+  $('#account-delete-confirm-form').dataset.passkey = passkey ? '1' : '0';
   $('#account-delete-page-copy').textContent = `This permanently deletes ${email}, including the account, provider credentials, client keys, and activity history. Audit history is retained.`;
   $('#account-delete-confirm-email').focus();
 }
@@ -2495,23 +2497,33 @@ async function loadAccount() {
     $('#account-google-card').hidden = !googleLinked;
     $('#account-google-unlink').hidden = !profile.has_password;
     $('#account-google-link-card').hidden = !googleEnabled || googleLinked;
+    // Accounts without a usable password (Google-only, passkey-only) cannot
+    // type a password to confirm sensitive changes. Google-only accounts get
+    // the Google reauth row; a passkey-only account gets a passkey-confirm row.
+    const noPassword = !profile.password_enabled;
+    const googleOnlyDelete = noPassword && googleLinked;
+    const hasPasskey = (profile.passkeys || []).length > 0 && !!profile.passkeys_enabled;
+    const passkeyOnly = noPassword && hasPasskey && !googleLinked;
     $('#account-password-card').hidden = googleLinked;
     $('#account-password-auth-hint').textContent = '';
-    $('#account-current-password').required = true;
-    $('#account-email-password').required = !googleLinked;
-    $('#account-email-password').disabled = googleLinked;
-    $('#account-email-password-row').hidden = googleLinked;
-    // Google-only accounts have no password: replace the password row with a
-    // "Confirm with Google" action that grants the one-shot reauth token the
-    // delete endpoint accepts in place of a password.
-    const googleOnlyDelete = !profile.password_enabled && googleLinked;
-    $('#account-delete-password-row').hidden = googleOnlyDelete;
+    $('#account-current-password-row').hidden = passkeyOnly;
+    $('#account-current-password').required = !passkeyOnly;
+    $('#account-passkey-reauth-row').hidden = !passkeyOnly;
+    $('#account-email-passkey-row').hidden = !passkeyOnly;
+    $('#account-email-password-row').hidden = googleLinked || passkeyOnly;
+    $('#account-email-password').required = !noPassword;
+    $('#account-email-password').disabled = noPassword;
+    $('#account-delete-password-row').hidden = noPassword;
     $('#account-delete-password').required = profile.password_enabled;
-    $('#account-delete-password').disabled = googleOnlyDelete;
+    $('#account-delete-password').disabled = noPassword;
     $('#account-delete-google-row').hidden = !googleOnlyDelete;
     $('#account-delete-google-status').textContent = googleReauthValid()
       ? 'Google confirmed your identity. Click Delete my account to continue.'
       : 'Click Delete my account to confirm with Google, then return here to complete deletion.';
+    // Google-linked accounts confirm via Google; a non-Google passkey-only
+    // account confirms with an assertion.
+    $('#account-delete-passkey-row').hidden = !passkeyOnly;
+    $('#account-delete-passkey-status').textContent = 'Click Delete my account, then confirm with your passkey.';
     const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     const costWindows = usage.client_cost ? Object.values(usage.client_cost) : [];
@@ -2761,7 +2773,13 @@ $('#legal-back').addEventListener('click', () => { history.replaceState(null, ''
 
 $('#account-password-form').addEventListener('submit', async event => {
   event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); $('#account-password-error').textContent = '';
-  try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); formElement.reset(); flash('Password updated. Other sessions were signed out.'); }
+  try {
+    // A passkey-only account confirms with an assertion instead of a password;
+    // the one-use grant is spent by the password endpoint server-side.
+    const currentPassword = $('#account-current-password-row').hidden ? '' : form.get('current_password');
+    if ($('#account-current-password-row').hidden) await window.__confirmWithPasskey();
+    await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: form.get('new_password') }) }); formElement.reset(); flash('Password updated. Other sessions were signed out.');
+  }
   catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
 });
 $('#account-google-unlink').addEventListener('click', async () => {
@@ -2782,6 +2800,8 @@ $('#account-email-form').addEventListener('submit', async event => {
       location.assign(reauth.redirect_url);
       return;
     }
+    // Passkey-only accounts confirm with an assertion instead of a password.
+    if (!$('#account-email-passkey-row').hidden) await window.__confirmWithPasskey();
     const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); formElement.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.';
   }
   catch (error) { sessionStorage.removeItem('googleReauthAction'); sessionStorage.removeItem('googleReauthEmail'); note.textContent = errorMessage(error, 'Could not start the email change.'); }
@@ -2819,7 +2839,8 @@ $('#account-delete-form').addEventListener('submit', async event => {
     showAccountDeleteConfirmation({ email: accountEmailForDelete, google: true });
     return;
   }
-  showAccountDeleteConfirmation({ email: accountEmailForDelete, google: false });
+  const passkeyConfirm = !$('#account-delete-passkey-row').hidden;
+  showAccountDeleteConfirmation({ email: accountEmailForDelete, google: false, passkey: passkeyConfirm });
 });
 
 $('#account-delete-cancel').addEventListener('click', () => {
@@ -2837,6 +2858,7 @@ $('#account-delete-confirm-form').addEventListener('submit', async event => {
   const formElement = event.currentTarget;
   const email = formElement.dataset.email || '';
   const google = formElement.dataset.google === '1';
+  const passkey = formElement.dataset.passkey === '1';
   const button = $('button[type="submit"]', formElement);
   const typedEmail = String(form.get('confirm') || '').trim();
   $('#account-delete-confirm-error').textContent = '';
@@ -2846,7 +2868,8 @@ $('#account-delete-confirm-form').addEventListener('submit', async event => {
   }
   button.disabled = true;
   try {
-    const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: email, password: google ? '' : form.get('password') || '' }) });
+    if (passkey) await window.__confirmWithPasskey();
+    const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: email, password: google || passkey ? '' : form.get('password') || '' }) });
     sessionStorage.removeItem('googleReauthAction');
     flash(result.message || 'Account deleted.');
     showLogin();
@@ -3937,7 +3960,12 @@ $('#platform-users-list').addEventListener('click', async event => {
    the hosted account settings card. All policy lives on the server; this is only
    the browser ceremony glue. */
 (function () {
-  if (!window.PublicKeyCredential || !navigator.credentials) return;
+  // Set up front so the login view can tell a browser without WebAuthn to keep
+  // the passkey button hidden rather than rendering a dead control. The IIFE
+  // still runs on unsupported browsers so the account card can list existing
+  // passkeys and remove them (management is plain HTTP); only the ceremonies
+  // are gated.
+  window.__passkeySupported = !!(window.PublicKeyCredential && navigator.credentials);
 
   const b64urlToBuf = value => {
     const pad = value.length % 4 === 0 ? '' : '='.repeat(4 - (value.length % 4));
@@ -3975,45 +4003,106 @@ $('#platform-users-list').addEventListener('click', async event => {
   };
   const postJSON = (url, body, token) => fetch(url, {
     method: 'POST', credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json', 'X-WebAuthn-Challenge': token || '' },
+    headers: { 'Content-Type': 'application/json', 'X-WebAuthn-Challenge': token || '', ...(state.csrf ? { 'X-CSRF-Token': state.csrf } : {}) },
     body: JSON.stringify(body),
   }).then(async res => {
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) { const err = new Error(data?.error?.message || data?.message || 'Request failed.'); err.code = data?.error?.code; throw err; }
+    if (!res.ok) { const err = new Error(data?.error?.message || data?.message || 'Request failed.'); err.code = data?.error?.code; err.status = res.status; throw err; }
     return data;
   });
+  if (window.__passkeySupported) {
+    // A passkey assertion used as re-authentication before a sensitive account
+    // operation. It returns a one-use grant the subsequent operation spends.
+    window.__confirmWithPasskey = async function (statusEl) {
+      const begin = await api('/api/auth/account/passkeys/reauth/begin', { method: 'POST', body: '{}' });
+      const publicKey = prepGet(begin.options.publicKey || begin.options);
+      const cred = await navigator.credentials.get({ publicKey });
+      if (!cred) throw new Error('No credential returned.');
+      if (statusEl) statusEl.textContent = 'Confirming…';
+      await postJSON('/api/auth/account/passkeys/reauth/finish', credentialToJSON(cred), begin.challenge_token);
+      return true;
+    };
 
-  // Sign-in.
-  const signin = $('#passkey-signin');
-  if (signin) {
-    signin.addEventListener('click', async () => {
-      const status = $('#passkey-signin-status'); status.textContent = 'Waiting for your device…';
-      signin.disabled = true;
-      try {
-        const begin = await api('/api/auth/passkey/begin', { method: 'POST', body: '{}' });
-        const publicKey = prepGet(begin.options.publicKey || begin.options);
-        const cred = await navigator.credentials.get({ publicKey });
-        if (!cred) throw new Error('No credential returned.');
-        const session = await postJSON('/api/auth/passkey/finish', credentialToJSON(cred), begin.challenge_token);
-        if (session.pending_google_link) { showGoogleLinkPrompt(session); return; }
-        showApp(session);
-      } catch (error) {
-        status.textContent = errorMessage(error, 'Passkey sign-in failed.');
-        signin.disabled = false;
-      }
-    });
+    // Sign-in.
+    const signin = $('#passkey-signin');
+    if (signin) {
+      signin.addEventListener('click', async () => {
+        const status = $('#passkey-signin-status'); status.textContent = 'Waiting for your device…'; status.className = 'setting-tip';
+        signin.disabled = true;
+        try {
+          const begin = await api('/api/auth/passkey/begin', { method: 'POST', body: '{}' });
+          const publicKey = prepGet(begin.options.publicKey || begin.options);
+          const cred = await navigator.credentials.get({ publicKey });
+          if (!cred) throw new Error('No credential returned.');
+          const session = await postJSON('/api/auth/passkey/finish', credentialToJSON(cred), begin.challenge_token);
+          if (session.pending_google_link) { showGoogleLinkPrompt(session); return; }
+          showApp(session);
+        } catch (error) {
+          status.textContent = errorMessage(error, 'Passkey sign-in failed.');
+          status.className = 'form-error';
+          signin.disabled = false;
+        }
+      });
+    }
+    // Account management for a supported browser.
+    const add = $('#account-passkey-add');
+    if (add) {
+      add.addEventListener('click', async () => {
+        const status = $('#account-passkeys-status');
+        // Prompt first; a cancel should not leave a "Waiting for your device…"
+        // message behind.
+        const name = prompt('Name this passkey', 'Passkey');
+        if (name == null) return;
+        status.textContent = 'Waiting for your device…'; status.className = 'setting-tip';
+        add.disabled = true;
+        let makeOnly = false;
+        // Offer to make it the only sign-in method only when password sign-in
+        // is actually enabled (and not Google-linked, which hides the card).
+        const passwordEnabled = !!lastAccountProfile?.password_enabled && !lastAccountProfile?.google_linked;
+        if (passwordEnabled) makeOnly = confirm('Use this passkey as your only sign-in method? Your password will be disabled.');
+        try {
+          const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: '{}' });
+          const publicKey = prepCreate(begin.options.publicKey || begin.options);
+          const cred = await navigator.credentials.create({ publicKey });
+          if (!cred) throw new Error('No credential returned.');
+          const url = '/api/auth/account/passkeys/register/finish?name=' + encodeURIComponent(name) + (makeOnly ? '&only=1' : '');
+          const result = await postJSON(url, credentialToJSON(cred), begin.challenge_token);
+          flash(result.password_only ? 'Passkey added; password sign-in disabled.' : 'Passkey added.', 'success');
+          status.textContent = '';
+          await loadAccount();
+        } catch (error) {
+          status.textContent = errorMessage(error, 'Passkey setup failed.');
+          status.className = 'form-error';
+        } finally {
+          add.disabled = false;
+        }
+      });
+    }
   }
 
   // Account management.
+  const fmtPasskeyDate = value => value ? new Date(value).toLocaleString() : '—';
+  let lastAccountProfile = null;
   function renderPasskeysCard(profile) {
     const card = $('#account-passkeys-card'); if (!card) return;
     const enabled = !!profile.passkeys_enabled;
     card.hidden = !enabled;
-    if (!enabled) return;
+    if (!enabled) { lastAccountProfile = null; return; }
+    lastAccountProfile = profile;
+    // A browser without WebAuthn cannot run any ceremony: hide Add and the
+    // re-enable toggle rather than leaving controls that would fail, and say
+    // why. Existing passkeys can still be listed and removed (plain HTTP).
+    const addButton = $('#account-passkey-add');
+    if (addButton) addButton.hidden = !window.__passkeySupported;
+    if (!window.__passkeySupported) {
+      const status = $('#account-passkeys-status');
+      status.textContent = 'This browser does not support passkey setup. You can still manage passkeys created elsewhere.';
+      status.className = 'setting-tip';
+    }
     const passkeys = profile.passkeys || [];
     const list = $('#account-passkeys-list');
     list.innerHTML = passkeys.length
-      ? passkeys.map(p => `<div class="setting-row" data-passkey="${h(p.id)}"><span class="setting-label">${h(p.name)}</span><div class="setting-control"><button class="btn btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button> <button class="btn btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
+      ? passkeys.map(p => `<div class="setting-row" data-passkey="${h(p.id)}"><span class="setting-label">${h(p.name)}<small class="meta-line">Added ${h(fmtPasskeyDate(p.created_at))} · Last used ${h(fmtPasskeyDate(p.last_used_at))}</small></span><div class="setting-control"><button class="btn btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button> <button class="btn btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
       : '<p class="meta-line">No passkeys yet.</p>';
     list.querySelectorAll('[data-passkey-rename]').forEach(btn => btn.addEventListener('click', async () => {
       const name = prompt('Name this passkey', btn.dataset.passkeyName || 'Passkey');
@@ -4026,43 +4115,19 @@ $('#platform-users-list').addEventListener('click', async event => {
       try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
       catch (error) { flash(errorMessage(error, 'Could not remove the passkey.'), 'error'); }
     }));
-    // Password sign-in toggle: offer to turn it back on when disabled.
+    // Password sign-in toggle: offer to turn it back on when disabled. Hidden
+    // for Google-linked accounts: linking Google disables password sign-in by
+    // design and the server refuses to re-enable it, so the control would only
+    // produce an error.
     const toggle = $('#account-password-signin-toggle');
     const passwordEnabled = !!profile.password_enabled;
-    toggle.hidden = passwordEnabled;
+    const googleLinked = !!profile.google_linked;
+    toggle.hidden = passwordEnabled || googleLinked;
     toggle.textContent = 'Re-enable password sign-in';
     toggle.onclick = async () => {
       try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }
       catch (error) { flash(errorMessage(error, 'Could not update password sign-in.'), 'error'); }
     };
-  }
-
-  const add = $('#account-passkey-add');
-  if (add) {
-    add.addEventListener('click', async () => {
-      const status = $('#account-passkeys-status'); status.textContent = 'Waiting for your device…';
-      add.disabled = true;
-      const name = prompt('Name this passkey', 'Passkey') || 'Passkey';
-      let makeOnly = false;
-      // Offer to make it the only sign-in method only when a password exists.
-      const profileCard = $('#account-password-card');
-      const passwordEnabled = profileCard ? !profileCard.hidden : true;
-      if (passwordEnabled) makeOnly = confirm('Use this passkey as your only sign-in method? Your password will be disabled.');
-      try {
-        const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: '{}' });
-        const publicKey = prepCreate(begin.options.publicKey || begin.options);
-        const cred = await navigator.credentials.create({ publicKey });
-        if (!cred) throw new Error('No credential returned.');
-        const url = '/api/auth/account/passkeys/register/finish?name=' + encodeURIComponent(name) + (makeOnly ? '&only=1' : '');
-        const result = await postJSON(url, credentialToJSON(cred), begin.challenge_token);
-        flash(result.password_only ? 'Passkey added; password sign-in disabled.' : 'Passkey added.', 'success');
-        await loadAccount();
-      } catch (error) {
-        status.textContent = errorMessage(error, 'Passkey setup failed.');
-      } finally {
-        add.disabled = false;
-      }
-    });
   }
 
   // Expose for loadAccount.

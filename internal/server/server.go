@@ -71,7 +71,14 @@ type Server struct {
 	// reauthentication happens, matching reauthenticateSensitive's behaviour.
 	linkAuthMu sync.Mutex
 	linkAuth   map[[32]byte]time.Time
-	mailer     *mailer.Manager
+	// passkeyReauth is the passkey analogue of googleReauth: a short-lived,
+	// single-use grant that this session completed a passkey assertion
+	// recently. It lets a passkey-only (or password-less-at-the-moment)
+	// account confirm sensitive operations without a password. Keyed by
+	// sha256(raw session token).
+	passkeyReauthMu sync.Mutex
+	passkeyReauth   map[[32]byte]time.Time
+	mailer          *mailer.Manager
 	// outbox is the durable transactional-mail queue. It is nil in local mode,
 	// where identity flows never enqueue.
 	outbox *mailoutbox.Outbox
@@ -136,6 +143,12 @@ type Server struct {
 	signupLimiter         *loginLimiter
 	recoveryIPLimiter     *loginLimiter
 	recoveryEmailLimiter  *loginLimiter
+	// passkeyBeginLimiter charges every (unauthenticated) passkey ceremony
+	// begin against a per-IP fixed window so a ceremony flood cannot churn the
+	// process-wide challenge store. It is separate from the login-failure
+	// limiter because begins are expected events, not failures: sharing the
+	// 8-failure lockout would sign a legitimate user out of their own retries.
+	passkeyBeginLimiter   *loginLimiter
 	authRateLimitHashKey  [32]byte
 	clientSelectorLimiter *loginLimiter
 	clientAddressLimiter  *loginLimiter
@@ -398,7 +411,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			}
 		}
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
@@ -539,6 +552,8 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST /api/auth/account/passkeys/rename", s.requireUser(http.HandlerFunc(s.passkeyRename)))
 		mux.Handle("POST /api/auth/account/passkeys/delete", s.requireUser(http.HandlerFunc(s.passkeyDelete)))
 		mux.Handle("POST /api/auth/account/passkeys/password-signin", s.requireUser(http.HandlerFunc(s.setPasswordSignIn)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/begin", s.requireUser(http.HandlerFunc(s.passkeyReauthBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/finish", s.requireUser(http.HandlerFunc(s.passkeyReauthFinish)))
 		mux.Handle("POST /api/auth/account/email", s.requireUser(http.HandlerFunc(s.requestOwnEmailChange)))
 		mux.Handle("POST /api/auth/google/link/start", s.requireUser(http.HandlerFunc(s.startGoogleLink)))
 		mux.Handle("POST /api/auth/google/reauth/start", s.requireUser(http.HandlerFunc(s.startGoogleReauth)))
