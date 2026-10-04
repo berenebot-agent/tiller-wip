@@ -239,12 +239,18 @@ func (b *notificationBudget) admit(accountID string, now time.Time) bool {
 	defer b.mu.Unlock()
 	if len(b.entries) > 0 {
 		for key, entry := range b.entries {
-			if now.Sub(entry.stamps[len(entry.stamps)-1]) > b.window {
+			if len(entry.stamps) == 0 || now.Sub(entry.stamps[len(entry.stamps)-1]) > b.window {
 				delete(b.entries, key)
 			}
 		}
 	}
+	// A first-time (or just-aged-out) account has no entry yet: allocate one
+	// rather than dereferencing a nil pointer. This is the pre-SaaS review
+	// TR-004 regression guard.
 	entry := b.entries[accountID]
+	if entry == nil {
+		entry = &budgetEntry{}
+	}
 	pruned := entry.stamps[:0]
 	for _, stamp := range entry.stamps {
 		if now.Sub(stamp) <= b.window {

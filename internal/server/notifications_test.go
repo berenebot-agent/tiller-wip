@@ -907,6 +907,53 @@ func TestNotificationCooldownPruning(t *testing.T) {
 	}
 }
 
+// TestNotificationBudgetFirstDeliveryAdmitted is the regression guard for the
+// pre-SaaS review TR-004 fix: the first delivery for an account (whose budget
+// entry does not yet exist) must be admitted, not panic on a nil entry.
+func TestNotificationBudgetFirstDeliveryAdmitted(t *testing.T) {
+	b := newNotificationBudget(30, time.Hour)
+	if !b.admit("account-a", time.Now()) {
+		t.Fatal("first delivery for a new account was not admitted")
+	}
+}
+
+// TestNotificationBudgetExhaustsAndExpires pins the rolling-window semantics:
+// an account is admitted exactly `budget` times within the window, rejected
+// after, and admitted again once the window has passed.
+func TestNotificationBudgetExhaustsAndExpires(t *testing.T) {
+	const budget = 3
+	b := newNotificationBudget(budget, time.Hour)
+	now := time.Now()
+	for i := 0; i < budget; i++ {
+		if !b.admit("account-a", now.Add(time.Duration(i)*time.Second)) {
+			t.Fatalf("delivery %d within the budget was rejected", i+1)
+		}
+	}
+	if b.admit("account-a", now.Add(10*time.Second)) {
+		t.Fatal("delivery over the budget was admitted")
+	}
+	// A full window later the earlier stamps age out and admission resumes.
+	if !b.admit("account-a", now.Add(2*time.Hour)) {
+		t.Fatal("delivery after the window expired was rejected")
+	}
+}
+
+// TestNotificationBudgetIsPerAccount confirms one account's exhausted budget
+// does not throttle another account.
+func TestNotificationBudgetIsPerAccount(t *testing.T) {
+	b := newNotificationBudget(1, time.Hour)
+	now := time.Now()
+	if !b.admit("account-a", now) {
+		t.Fatal("account-a first delivery rejected")
+	}
+	if b.admit("account-a", now) {
+		t.Fatal("account-a second delivery admitted over budget")
+	}
+	if !b.admit("account-b", now) {
+		t.Fatal("account-b delivery rejected by account-a's budget")
+	}
+}
+
 // openTestDB opens a throwaway database for notification unit tests that need a
 // Server but not the full HTTP harness.
 func openTestDB(t *testing.T) *database.DB {

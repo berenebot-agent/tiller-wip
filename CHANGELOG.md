@@ -171,6 +171,18 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Notification budget panic on first delivery (TR-004 follow-up).** The
+  per-account hourly notification budget dereferenced a nil entry for an
+  account's first delivery — and again after its entry aged out of the window —
+  panicking the fire-and-forget delivery goroutine. That panic is unrecovered
+  and would have terminated the whole process, so any hosted account that
+  enabled notifications and triggered a webhook event could crash the service.
+  The budget now allocates the entry on first use. Unit tests cover first
+  delivery, budget exhaustion and window expiry, and per-account isolation.
+- **Restored the Google signup per-IP throttle.** `completeGoogleSignup` lost
+  its per-IP signup limiter when the per-address budget was added; it now
+  charges both the IP and the proved-email budgets, matching the password
+  signup path.
 - **Silent mismatch between hosted customer bootstrap and the environment.**
   `TILLER_USERNAME`/`TILLER_PASSWORD` on a fresh hosted install are ignored by
   design (they are one-time migration input for an existing local database, and
