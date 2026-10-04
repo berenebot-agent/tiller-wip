@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostednet"
@@ -131,6 +132,19 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		value any // *bool / *int / *string; nil skips the write
 		key   string
 	}
+
+	// updatedSettingFields lists the setting keys a PATCH actually wrote, in
+	// call order, so the audit event names fields — never their values.
+	updatedSettingFields := func(updates []settingUpdate) []string {
+		names := make([]string, 0, len(updates))
+		for _, u := range updates {
+			if u.value == nil || reflect.ValueOf(u.value).IsNil() {
+				continue
+			}
+			names = append(names, u.key)
+		}
+		return names
+	}
 	updates := []settingUpdate{
 		{key: store.SettingDefaultLoggingEnabled, value: input.DefaultLoggingEnabled},
 		{key: store.SettingDefaultRetentionDays, value: input.DefaultRetentionDays},
@@ -167,6 +181,16 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		if u.key == store.SettingFallbackCooldownSeconds && *input.FallbackCooldownSeconds == 0 {
 			s.cooldown.clearFor(sc.AccountID())
 		}
+	}
+	// TR-014: settings mutations are audited by field name only — webhook URLs
+	// and the auth header are never recorded as values.
+	if fields := updatedSettingFields(updates); len(fields) > 0 {
+		s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+			Event:      "settings.updated",
+			TargetType: "settings",
+			TargetID:   sc.AccountID(),
+			Metadata:   map[string]string{"fields": strings.Join(fields, ",")},
+		})
 	}
 	w.WriteHeader(204)
 }

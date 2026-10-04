@@ -173,6 +173,14 @@ the verified session and never contains provider credentials, OAuth tokens, or
 client-key secrets or hashes. It is distinct from the administrator-only
 whole-database backup export, which remains restricted to local mode.
 
+**Local-mode `opencode-free` client-IP forwarding.** The anonymous OpenCode
+free-tier compatibility path (local/self-hosted mode only; `opencode-free` is
+disabled in hosted mode) mirrors the genuine OpenCode client's wire shape,
+which includes forwarding the resolved client IP as `X-Real-IP` to the
+upstream. An operator running that path is therefore choosing to disclose
+their clients' source IPs to OpenCode; it exists solely to match the
+first-party client behaviour and is never done for any other provider.
+
 **Published legal documents.** The Terms of Service (which incorporate the
 acceptable-use rules) and the Privacy Policy (which documents the subprocessors
 and security/data-handling posture) are operator-editable and served publicly so
