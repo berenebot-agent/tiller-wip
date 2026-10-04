@@ -54,6 +54,10 @@ type AccountProfile struct {
 	HasPassword     bool   `json:"has_password"`
 	GoogleLinked    bool   `json:"google_linked"`
 	CreatedAt       string `json:"created_at"`
+	// Passkeys lists registered passkeys and whether the deployment supports
+	// them. Populated by AccountProfile when WebAuthn is configured.
+	Passkeys        []PasskeyInfo `json:"passkeys,omitempty"`
+	PasskeysEnabled bool          `json:"passkeys_enabled"`
 }
 
 // sessionSelector extracts the selector from a raw session token. The selector
@@ -99,6 +103,12 @@ func (s *Store) AccountProfile(ctx context.Context, userID string) (AccountProfi
 		return AccountProfile{}, err
 	}
 	p.Verified = verified.Valid && verified.String != ""
+	p.PasskeysEnabled = s.passkeysEnabled()
+	if p.PasskeysEnabled {
+		if keys, kerr := s.ListPasskeys(ctx, userID); kerr == nil {
+			p.Passkeys = keys
+		}
+	}
 	return p, nil
 }
 

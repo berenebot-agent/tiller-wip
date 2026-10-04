@@ -11,14 +11,23 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     mkdir -p /out/licenses && \
     cp LICENSE /out/licenses/TILLER-LICENSE && \
     cp THIRD_PARTY_NOTICES.md /out/licenses/THIRD_PARTY_NOTICES.md && \
-    cp /go/pkg/mod/golang.org/x/crypto@v0.55.0/LICENSE /out/licenses/golang.org-x-crypto-LICENSE && \
+    cp /go/pkg/mod/golang.org/x/crypto@v0.57.0/LICENSE /out/licenses/golang.org-x-crypto-LICENSE && \
+    cp /go/pkg/mod/github.com/go-webauthn/webauthn@v0.18.2/LICENSE /out/licenses/github.com-go-webauthn-webauthn-LICENSE && \
+    cp /go/pkg/mod/github.com/go-webauthn/x@v0.3.1/LICENSE /out/licenses/github.com-go-webauthn-x-LICENSE && \
+    cp /go/pkg/mod/github.com/fxamacker/cbor/v2@v2.9.4/LICENSE /out/licenses/github.com-fxamacker-cbor-LICENSE && \
+    cp /go/pkg/mod/github.com/go-viper/mapstructure/v2@v2.5.0/LICENSE /out/licenses/github.com-go-viper-mapstructure-LICENSE && \
+    cp /go/pkg/mod/github.com/golang-jwt/jwt/v5@v5.3.1/LICENSE /out/licenses/github.com-golang-jwt-jwt-LICENSE && \
+    cp /go/pkg/mod/github.com/google/go-tpm@v0.9.8/LICENSE /out/licenses/github.com-google-go-tpm-LICENSE && \
+    cp /go/pkg/mod/github.com/tinylib/msgp@v1.6.4/LICENSE /out/licenses/github.com-tinylib-msgp-LICENSE && \
+    cp /go/pkg/mod/github.com/philhofer/fwd@v1.2.0/LICENSE.md /out/licenses/github.com-philhofer-fwd-LICENSE && \
+    cp /go/pkg/mod/github.com/x448/float16@v0.8.4/LICENSE /out/licenses/github.com-x448-float16-LICENSE && \
     cp /go/pkg/mod/github.com/dustin/go-humanize@v1.0.1/LICENSE /out/licenses/github.com-dustin-go-humanize-LICENSE && \
     cp /go/pkg/mod/github.com/google/uuid@v1.6.0/LICENSE /out/licenses/github.com-google-uuid-LICENSE && \
     cp /go/pkg/mod/github.com/mattn/go-isatty@v0.0.20/LICENSE /out/licenses/github.com-mattn-go-isatty-LICENSE && \
     cp /go/pkg/mod/github.com/ncruces/go-strftime@v0.1.9/LICENSE /out/licenses/github.com-ncruces-go-strftime-LICENSE && \
     cp /go/pkg/mod/github.com/remyoudompheng/bigfft@v0.0.0-20230129092748-24d4a6f8daec/LICENSE /out/licenses/github.com-remyoudompheng-bigfft-LICENSE && \
     cp /go/pkg/mod/golang.org/x/exp@v0.0.0-20250620022241-b7579e27df2b/LICENSE /out/licenses/golang.org-x-exp-LICENSE && \
-    cp /go/pkg/mod/golang.org/x/sys@v0.47.0/LICENSE /out/licenses/golang.org-x-sys-LICENSE && \
+    cp /go/pkg/mod/golang.org/x/sys@v0.48.0/LICENSE /out/licenses/golang.org-x-sys-LICENSE && \
     cp /go/pkg/mod/modernc.org/sqlite@v1.39.1/LICENSE /out/licenses/modernc.org-sqlite-LICENSE && \
     cp /go/pkg/mod/modernc.org/libc@v1.66.10/LICENSE /out/licenses/modernc.org-libc-LICENSE && \
     cp /go/pkg/mod/modernc.org/libc@v1.66.10/LICENSE-GO /out/licenses/modernc.org-libc-LICENSE-GO && \

@@ -281,6 +281,9 @@ function authView(name) {
   const googleSignIn = hosted && name === 'login-form' && !!hostedAuthOptions.google_enabled;
   $('#google-signin-button').hidden = !googleSignIn;
   $('#google-signin-notice').hidden = !googleSignIn;
+  const passkeySignIn = hosted && name === 'login-form' && !!hostedAuthOptions.passkeys_enabled;
+  const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
+  const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) passkeyStatus.textContent = '';
   if (googleSignIn) setupGoogleSignIn();
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
@@ -2523,6 +2526,7 @@ async function loadAccount() {
     ].join('');
     renderPlanCard(plan);
     state.planInfo = plan; state.planInfoAt = Date.now();
+    if (window.__renderPasskeysCard) window.__renderPasskeysCard(profile);
   } catch (error) {
     flash(errorMessage(error, 'Could not load account details.'), 'error');
   }
@@ -3926,3 +3930,141 @@ $('#platform-users-list').addEventListener('click', async event => {
     if (status || deletion || planSave) await loadPlatformDashboard('users');
   } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); }
 });
+
+/* ---- Passkeys (WebAuthn) ----
+   Two flows share this module: passkey sign-in on the login card and passkey
+   management (add/list/rename/delete, plus making a passkey the only method) on
+   the hosted account settings card. All policy lives on the server; this is only
+   the browser ceremony glue. */
+(function () {
+  if (!window.PublicKeyCredential || !navigator.credentials) return;
+
+  const b64urlToBuf = value => {
+    const pad = value.length % 4 === 0 ? '' : '='.repeat(4 - (value.length % 4));
+    const raw = atob((value + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    return buf.buffer;
+  };
+  const bufToB64url = buf => {
+    const bytes = new Uint8Array(buf);
+    let str = '';
+    for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+    return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  };
+  const prepCreate = options => {
+    options.challenge = b64urlToBuf(options.challenge);
+    options.user.id = b64urlToBuf(options.user.id);
+    (options.excludeCredentials || []).forEach(c => { c.id = b64urlToBuf(c.id); });
+    return options;
+  };
+  const prepGet = options => {
+    options.challenge = b64urlToBuf(options.challenge);
+    (options.allowCredentials || []).forEach(c => { c.id = b64urlToBuf(c.id); });
+    return options;
+  };
+  const credentialToJSON = cred => {
+    const r = cred.response;
+    const out = { id: cred.id, rawId: bufToB64url(cred.rawId), type: cred.type, response: {}, clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {} };
+    out.response.clientDataJSON = bufToB64url(r.clientDataJSON);
+    if (r.attestationObject !== undefined) out.response.attestationObject = bufToB64url(r.attestationObject);
+    if (r.authenticatorData !== undefined) out.response.authenticatorData = bufToB64url(r.authenticatorData);
+    if (r.signature !== undefined) out.response.signature = bufToB64url(r.signature);
+    if (r.userHandle !== undefined && r.userHandle !== null) out.response.userHandle = bufToB64url(r.userHandle);
+    return out;
+  };
+  const postJSON = (url, body, token) => fetch(url, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-WebAuthn-Challenge': token || '' },
+    body: JSON.stringify(body),
+  }).then(async res => {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { const err = new Error(data?.error?.message || data?.message || 'Request failed.'); err.code = data?.error?.code; throw err; }
+    return data;
+  });
+
+  // Sign-in.
+  const signin = $('#passkey-signin');
+  if (signin) {
+    signin.addEventListener('click', async () => {
+      const status = $('#passkey-signin-status'); status.textContent = 'Waiting for your device…';
+      signin.disabled = true;
+      try {
+        const begin = await api('/api/auth/passkey/begin', { method: 'POST', body: '{}' });
+        const publicKey = prepGet(begin.options.publicKey || begin.options);
+        const cred = await navigator.credentials.get({ publicKey });
+        if (!cred) throw new Error('No credential returned.');
+        const session = await postJSON('/api/auth/passkey/finish', credentialToJSON(cred), begin.challenge_token);
+        if (session.pending_google_link) { showGoogleLinkPrompt(session); return; }
+        showApp(session);
+      } catch (error) {
+        status.textContent = errorMessage(error, 'Passkey sign-in failed.');
+        signin.disabled = false;
+      }
+    });
+  }
+
+  // Account management.
+  function renderPasskeysCard(profile) {
+    const card = $('#account-passkeys-card'); if (!card) return;
+    const enabled = !!profile.passkeys_enabled;
+    card.hidden = !enabled;
+    if (!enabled) return;
+    const passkeys = profile.passkeys || [];
+    const list = $('#account-passkeys-list');
+    list.innerHTML = passkeys.length
+      ? passkeys.map(p => `<div class="setting-row" data-passkey="${h(p.id)}"><span class="setting-label">${h(p.name)}</span><div class="setting-control"><button class="btn btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button> <button class="btn btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
+      : '<p class="meta-line">No passkeys yet.</p>';
+    list.querySelectorAll('[data-passkey-rename]').forEach(btn => btn.addEventListener('click', async () => {
+      const name = prompt('Name this passkey', btn.dataset.passkeyName || 'Passkey');
+      if (name == null) return;
+      try { await api('/api/auth/account/passkeys/rename', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRename, name }) }); flash('Passkey renamed.', 'success'); await loadAccount(); }
+      catch (error) { flash(errorMessage(error, 'Could not rename the passkey.'), 'error'); }
+    }));
+    list.querySelectorAll('[data-passkey-remove]').forEach(btn => btn.addEventListener('click', async () => {
+      if (!confirm('Remove this passkey?')) return;
+      try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
+      catch (error) { flash(errorMessage(error, 'Could not remove the passkey.'), 'error'); }
+    }));
+    // Password sign-in toggle: offer to turn it back on when disabled.
+    const toggle = $('#account-password-signin-toggle');
+    const passwordEnabled = !!profile.password_enabled;
+    toggle.hidden = passwordEnabled;
+    toggle.textContent = 'Re-enable password sign-in';
+    toggle.onclick = async () => {
+      try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }
+      catch (error) { flash(errorMessage(error, 'Could not update password sign-in.'), 'error'); }
+    };
+  }
+
+  const add = $('#account-passkey-add');
+  if (add) {
+    add.addEventListener('click', async () => {
+      const status = $('#account-passkeys-status'); status.textContent = 'Waiting for your device…';
+      add.disabled = true;
+      const name = prompt('Name this passkey', 'Passkey') || 'Passkey';
+      let makeOnly = false;
+      // Offer to make it the only sign-in method only when a password exists.
+      const profileCard = $('#account-password-card');
+      const passwordEnabled = profileCard ? !profileCard.hidden : true;
+      if (passwordEnabled) makeOnly = confirm('Use this passkey as your only sign-in method? Your password will be disabled.');
+      try {
+        const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: '{}' });
+        const publicKey = prepCreate(begin.options.publicKey || begin.options);
+        const cred = await navigator.credentials.create({ publicKey });
+        if (!cred) throw new Error('No credential returned.');
+        const url = '/api/auth/account/passkeys/register/finish?name=' + encodeURIComponent(name) + (makeOnly ? '&only=1' : '');
+        const result = await postJSON(url, credentialToJSON(cred), begin.challenge_token);
+        flash(result.password_only ? 'Passkey added; password sign-in disabled.' : 'Passkey added.', 'success');
+        await loadAccount();
+      } catch (error) {
+        status.textContent = errorMessage(error, 'Passkey setup failed.');
+      } finally {
+        add.disabled = false;
+      }
+    });
+  }
+
+  // Expose for loadAccount.
+  window.__renderPasskeysCard = renderPasskeysCard;
+})();
