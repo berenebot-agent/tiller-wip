@@ -105,9 +105,11 @@ func (s *Store) AccountProfile(ctx context.Context, userID string) (AccountProfi
 	p.Verified = verified.Valid && verified.String != ""
 	p.PasskeysEnabled = s.passkeysEnabled()
 	if p.PasskeysEnabled {
-		if keys, kerr := s.ListPasskeys(ctx, userID); kerr == nil {
-			p.Passkeys = keys
+		keys, kerr := s.ListPasskeys(ctx, userID)
+		if kerr != nil {
+			return AccountProfile{}, kerr
 		}
+		p.Passkeys = keys
 	}
 	return p, nil
 }

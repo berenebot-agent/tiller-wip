@@ -60,7 +60,7 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	_, authErr := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword)
 	if authErr != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your password.")
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing your password.")
 		return
 	}
 	if _, err := s.identity.ChangePasswordAfterReauthentication(r.Context(), session.User.ID, rawUserSessionToken(r), input.NewPassword); err != nil {
@@ -98,12 +98,12 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if profile.GoogleLinked && !profile.PasswordEnabled {
-		if !s.consumeGoogleReauth(rawUserSessionToken(r)) {
-			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google before changing your email.")
+		if !s.consumeGoogleReauth(rawUserSessionToken(r)) && !s.consumePasskeyReauth(rawUserSessionToken(r)) {
+			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google or a passkey before changing your email.")
 			return
 		}
 	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your email.")
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing your email.")
 		return
 	}
 	if !validEmail(input.NewEmail) {
@@ -191,12 +191,12 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if profile.GoogleLinked && !profile.PasswordEnabled {
-		if !s.consumeGoogleReauth(rawUserSessionToken(r)) {
-			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google before deleting your account.")
+		if !s.consumeGoogleReauth(rawUserSessionToken(r)) && !s.consumePasskeyReauth(rawUserSessionToken(r)) {
+			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google or a passkey before deleting your account.")
 			return
 		}
 	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before deleting your account.")
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before deleting your account.")
 		return
 	}
 	accountID := session.User.AccountID

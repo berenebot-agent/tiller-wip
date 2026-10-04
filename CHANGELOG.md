@@ -66,7 +66,24 @@ behavior may still change before a stable `1.0`.
 - **Hosted Account page.** A hosted-only Account tab in Settings lets customers
   view their identity, change password, change email (verify-new-first with a
   warning to the current address), sign out everywhere, and delete their account
-  instantly. All sensitive actions re-authenticate with the current password.
+  instantly. All sensitive actions re-authenticate with the current password,
+  passkey assertion, or Google proof.
+- **Hosted passkeys (WebAuthn).** Passwordless-capable passkey sign-in and
+  registration on hosted deployments with a `TILLER_PUBLIC_URL` (RPID is its
+  hostname, origin is the public origin; local mode has no passkey endpoints).
+  Users can register multiple discoverable passkeys, rename and remove them from
+  the Account page, and make a passkey their only sign-in method (refused when
+  removing the last method would lock the account out). Passkey-only accounts
+  re-authenticate sensitive operations (change password, change email, delete
+  account) with an assertion instead of a password, and can still recover via
+  email password reset if every device is lost. Synced passkeys (iCloud
+  Keychain, Google Password Manager, Windows Hello) are supported: the
+  backup-eligible/backup-state flags and transports round-trip through storage.
+  Attestation is not requested and no extensions are used. The login and
+  account ceremony endpoints are rate-limited, body-bounded, same-origin, and
+  (for the authenticated half) CSRF-protected; the management endpoints refuse
+  when passkeys are not configured. Notices and license copies updated
+  (go-webauthn v0.18.2 and its transitive set).
 - **Durable transactional mail outbox.** Signup, verification, password-reset,
   and email-change messages are queued in the same transaction that creates the
   one-time token and delivered by a retrying background worker. The one-time

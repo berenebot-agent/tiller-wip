@@ -43,6 +43,7 @@ type challengeKind int
 const (
 	challengeRegister challengeKind = iota
 	challengeLogin
+	challengeReauth
 )
 
 type pendingChallenge struct {
@@ -73,13 +74,30 @@ func (s *challengeStore) put(kind challengeKind, userID string, session webauthn
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	var oldestKey [32]byte
+	var oldest time.Time
+	foundOldest := false
 	for k, v := range s.entries {
 		if !now.Before(v.expires) {
 			delete(s.entries, k)
+			continue
+		}
+		if !foundOldest || v.expires.Before(oldest) {
+			oldestKey, oldest, foundOldest = k, v.expires, true
 		}
 	}
 	if len(s.entries) >= maxPendingChallenges {
-		return "", false
+		// Evict the entry closest to expiry instead of refusing the new
+		// ceremony. Refusing here would let an attacker who can start
+		// (unauthenticated) login ceremonies fill the store and permanently
+		// deny every legitimate ceremony; eviction bounds the store without
+		// handing the attacker a veto. The evicted entry can only be an
+		// unfinished begin whose owner will retry.
+		if foundOldest {
+			delete(s.entries, oldestKey)
+		} else {
+			return "", false
+		}
 	}
 	s.entries[key] = pendingChallenge{kind: kind, userID: userID, session: session, expires: now.Add(challengeTTL)}
 	return raw, true
@@ -203,7 +221,7 @@ func (s *Store) PasskeyCount(ctx context.Context, userID string) (int, error) {
 }
 
 func (s *Store) credentialsForUser(ctx context.Context, userID string) ([]webauthn.Credential, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT credential_id,public_key,sign_count,backup_state FROM webauthn_credentials WHERE user_id=?`, userID)
+	rows, err := s.db.QueryContext(ctx, `SELECT credential_id,public_key,sign_count,transports,backup_eligible,backup_state FROM webauthn_credentials WHERE user_id=?`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,20 +229,42 @@ func (s *Store) credentialsForUser(ctx context.Context, userID string) ([]webaut
 	var out []webauthn.Credential
 	for rows.Next() {
 		var idb, pk []byte
-		var signCount, backupState int
-		if err := rows.Scan(&idb, &pk, &signCount, &backupState); err != nil {
+		var transports string
+		var signCount, backupEligible, backupState int
+		if err := rows.Scan(&idb, &pk, &signCount, &transports, &backupEligible, &backupState); err != nil {
 			return nil, err
 		}
 		out = append(out, webauthn.Credential{
 			ID:        idb,
 			PublicKey: pk,
-			Flags:     webauthn.CredentialFlags{BackupState: backupState != 0},
+			// BackupEligible is load-bearing: the library rejects an assertion
+			// whose BE flag differs from the stored one. Omitting it would make
+			// every synced passkey (BE=1) impossible to sign in with, so the
+			// column must be restored alongside BackupState.
+			Flags: webauthn.CredentialFlags{BackupEligible: backupEligible != 0, BackupState: backupState != 0},
 			Authenticator: webauthn.Authenticator{
 				SignCount: uint32(signCount),
 			},
+			Transport: storedTransports(transports),
 		})
 	}
 	return out, rows.Err()
+}
+
+// storedTransports decodes the comma-joined transports column back into the
+// library's type. An empty value yields nil rather than a one-element slice.
+func storedTransports(value string) []protocol.AuthenticatorTransport {
+	if value == "" {
+		return nil
+	}
+	parts := strings.Split(value, ",")
+	out := make([]protocol.AuthenticatorTransport, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			out = append(out, protocol.AuthenticatorTransport(p))
+		}
+	}
+	return out
 }
 
 func (s *Store) credentialByCredentialID(ctx context.Context, credentialID []byte) (storedCredential, error) {
@@ -244,6 +284,10 @@ func (s *Store) credentialByCredentialID(ctx context.Context, credentialID []byt
 	return c, nil
 }
 
+// maxPasskeyName bounds the stored label so a registration cannot persist an
+// arbitrarily large name through the query string; it matches RenamePasskey.
+const maxPasskeyName = 80
+
 // addPasskey persists a finished registration. A duplicate credential id is a
 // conflict, never a silent overwrite.
 func (s *Store) addPasskey(ctx context.Context, userID string, cred webauthn.Credential, name string) error {
@@ -253,6 +297,9 @@ func (s *Store) addPasskey(ctx context.Context, userID string, cred webauthn.Cre
 	name = strings.TrimSpace(name)
 	if name == "" {
 		name = "Passkey"
+	}
+	if len([]rune(name)) > maxPasskeyName {
+		return errors.New("identity: passkey name must be 80 characters or fewer")
 	}
 	rowID, err := id.New()
 	if err != nil {
@@ -273,21 +320,41 @@ func (s *Store) addPasskey(ctx context.Context, userID string, cred webauthn.Cre
 	return nil
 }
 
-// recordPasskeyUse updates the signature counter, backup state and last-used
-// time after a successful assertion. It returns true when the counter did not
-// advance (a possible cloned-authenticator signal).
+// recordPasskeyUse advances the stored signature counter and backup state. The
+// counter update is a single conditional statement so two concurrent
+// assertions cannot interleave a stale read and regress the stored counter: the
+// write only lands when the new count is greater, or either side is zero (the
+// spec's "counter not enforced" case). It reports whether this assertion did
+// not advance the counter (a possible cloned-authenticator signal), which the
+// caller must log.
 func (s *Store) recordPasskeyUse(ctx context.Context, credentialID []byte, signCount uint32, backupState bool) (bool, error) {
-	var current int
-	if err := s.db.QueryRowContext(ctx, `SELECT sign_count FROM webauthn_credentials WHERE credential_id=?`, credentialID).Scan(&current); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, ErrPasskeyNotFound
-		}
+	now := formatTime(time.Now().UTC())
+	res, err := s.db.ExecContext(ctx, `UPDATE webauthn_credentials SET sign_count=?,backup_state=?,last_used_at=?
+		WHERE credential_id=? AND (sign_count < ? OR (? = 0 AND sign_count = 0))`,
+		signCount, boolInt(backupState), now, credentialID, signCount, signCount)
+	if err != nil {
 		return false, err
 	}
-	cloneWarning := signCount != 0 && current != 0 && signCount <= uint32(current)
-	_, err := s.db.ExecContext(ctx, `UPDATE webauthn_credentials SET sign_count=?,backup_state=?,last_used_at=? WHERE credential_id=?`,
-		signCount, boolInt(backupState), formatTime(time.Now().UTC()), credentialID)
-	return cloneWarning, err
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n == 1 {
+		return false, nil
+	}
+	// Zero rows means either the credential is gone or the counter did not
+	// advance. Distinguish the two so a deleted credential is not reported as
+	// a clone warning.
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM webauthn_credentials WHERE credential_id=?`, credentialID).Scan(&exists); err != nil {
+		return false, err
+	}
+	if exists == 0 {
+		return false, ErrPasskeyNotFound
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE webauthn_credentials SET backup_state=?,last_used_at=? WHERE credential_id=?`,
+		boolInt(backupState), now, credentialID)
+	return true, err
 }
 
 // RenamePasskey changes a passkey's label, scoped to the owning user.
@@ -296,7 +363,7 @@ func (s *Store) RenamePasskey(ctx context.Context, userID, rowID, name string) e
 	if name == "" {
 		return errors.New("identity: passkey name is required")
 	}
-	if len(name) > 80 {
+	if len([]rune(name)) > maxPasskeyName {
 		return errors.New("identity: passkey name must be 80 characters or fewer")
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE webauthn_credentials SET name=? WHERE id=? AND user_id=?`, name, rowID, userID)
@@ -309,16 +376,18 @@ func (s *Store) RenamePasskey(ctx context.Context, userID, rowID, name string) e
 	return nil
 }
 
-// DeletePasskey removes a passkey, refusing when it is the user's only remaining
-// sign-in method (no password and no other passkey).
+// DeletePasskey removes a passkey. It refuses when doing so would leave the
+// account with no sign-in method at all: no password, no Google identity, and
+// no other passkey. The check and the delete run in one transaction so two
+// concurrent deletes of the last two passkeys can never both pass the guard.
 func (s *Store) DeletePasskey(ctx context.Context, userID, rowID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var passwordEnabled bool
-	if err := tx.QueryRowContext(ctx, `SELECT password_auth_enabled FROM users WHERE id=?`, userID).Scan(&passwordEnabled); err != nil {
+	var passwordEnabled, googleLinked bool
+	if err := tx.QueryRowContext(ctx, `SELECT password_auth_enabled, EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=u.id AND i.provider='google') FROM users u WHERE u.id=?`, userID).Scan(&passwordEnabled, &googleLinked); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -328,7 +397,7 @@ func (s *Store) DeletePasskey(ctx context.Context, userID, rowID string) error {
 	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM webauthn_credentials WHERE user_id=?`, userID).Scan(&count); err != nil {
 		return err
 	}
-	if !passwordEnabled && count <= 1 {
+	if !passwordEnabled && !googleLinked && count <= 1 {
 		return ErrLastAuthMethod
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM webauthn_credentials WHERE id=? AND user_id=?`, rowID, userID)
@@ -338,22 +407,29 @@ func (s *Store) DeletePasskey(ctx context.Context, userID, rowID string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrPasskeyNotFound
 	}
+	// No session revocation: passkey rows are not part of the cached session
+	// snapshot, and removing one credential (of several) is not a sign-out.
 	return tx.Commit()
 }
 
 // SetPasswordSignInEnabled enables or disables password sign-in for a user.
 // Disabling makes the account passkey-only and is refused when the user has no
-// passkey, so an account is never left with no way to sign in. Enabling is
-// always allowed. It backs the "use this passkey as your only sign-in method"
-// flow and the inverse.
-func (s *Store) SetPasswordSignInEnabled(ctx context.Context, userID string, enabled bool) error {
-	if !enabled {
-		var passkeys int
-		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM webauthn_credentials WHERE user_id=?`, userID).Scan(&passkeys); err != nil {
-			return err
-		}
-		if passkeys == 0 {
-			return ErrLastAuthMethod
+// passkey. Enabling is refused while a Google identity is linked, because
+// linking Google disables password auth by design and re-enabling it would
+// break that invariant (and silently break password reset). It backs the "use
+// this passkey as your only sign-in method" flow and the inverse.
+//
+// keepSession is the selector of the session making the change (may be empty).
+// It is retained when disabling/enabling so the user is not signed out of the
+// tab they are using; all other sessions are revoked.
+func (s *Store) SetPasswordSignInEnabled(ctx context.Context, userID, keepSession string, enabled bool) error {
+	// keepSession is a raw session token; the session row's primary key is its
+	// selector, so extract it here. A malformed token is ignored (revoke
+	// everything) rather than failing the credential change.
+	keepSelector := ""
+	if keepSession != "" {
+		if selector, err := sessionSelector(keepSession); err == nil {
+			keepSelector = selector
 		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -361,6 +437,22 @@ func (s *Store) SetPasswordSignInEnabled(ctx context.Context, userID string, ena
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var googleLinked bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider='google')`, userID).Scan(&googleLinked); err != nil {
+		return err
+	}
+	if enabled && googleLinked {
+		return ErrPasswordDisabled
+	}
+	if !enabled {
+		var passkeys int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM webauthn_credentials WHERE user_id=?`, userID).Scan(&passkeys); err != nil {
+			return err
+		}
+		if passkeys == 0 {
+			return ErrLastAuthMethod
+		}
+	}
 	// Bump the auth generation so any in-flight password login that
 	// authenticated against the previous state cannot mint a session after the
 	// change commits, mirroring a password change.
@@ -371,10 +463,27 @@ func (s *Store) SetPasswordSignInEnabled(ctx context.Context, userID string, ena
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	// A sign-in method change revokes every other session; the initiating
+	// session is retained so the caller's UI keeps working. An empty selector
+	// revokes everything, matching RevokeAllUserSessions.
+	if keepSelector != "" {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=? AND id<>?`, userID, keepSelector); err != nil {
+			return err
+		}
+	} else if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.InvalidateUser(userID)
+	if keepSelector != "" {
+		// The retained session row survives; dropping its cache entry (rather
+		// than leaving it) makes the next request reload the fresh
+		// password_auth_enabled value instead of a stale snapshot.
+		s.invalidateUserCache(userID)
+	} else {
+		s.InvalidateUser(userID)
+	}
 	return nil
 }
 
@@ -479,6 +588,69 @@ func (s *Store) FinishPasskeyRegistration(ctx context.Context, u User, challenge
 	return s.addPasskey(ctx, u.ID, *cred, name)
 }
 
+// BeginPasskeyReauth starts an assertion ceremony scoped to one already
+// signed-in user. It backs the re-authentication step of sensitive account
+// operations for passkey-only accounts (and for anyone who prefers not to
+// re-type their password). It uses allowCredentials rather than discoverable
+// login because the user is known.
+func (s *Store) BeginPasskeyReauth(ctx context.Context, u User) (LoginOptions, error) {
+	s.mu.Lock()
+	wa := s.webauthn
+	ch := s.challenges
+	s.mu.Unlock()
+	if wa == nil {
+		return LoginOptions{}, ErrWebAuthnUnavailable
+	}
+	creds, err := s.credentialsForUser(ctx, u.ID)
+	if err != nil {
+		return LoginOptions{}, err
+	}
+	if len(creds) == 0 {
+		return LoginOptions{}, ErrPasskeyNotFound
+	}
+	wu := &webAuthnUser{u: u, creds: creds}
+	assertion, session, err := wa.BeginLogin(wu)
+	if err != nil {
+		return LoginOptions{}, err
+	}
+	token, ok := ch.put(challengeReauth, u.ID, *session)
+	if !ok {
+		return LoginOptions{}, errors.New("identity: too many pending passkey ceremonies")
+	}
+	return LoginOptions{ChallengeToken: token, Options: assertion}, nil
+}
+
+// FinishPasskeyReauth validates a re-auth assertion for exactly the signed-in
+// user and records the credential use. Unlike FinishPasskeyLogin it performs no
+// account-state checks: the session that called it is already authenticated,
+// and the caller only needs proof that the same person is still present.
+func (s *Store) FinishPasskeyReauth(ctx context.Context, u User, challengeToken string, r *http.Request) error {
+	s.mu.Lock()
+	wa := s.webauthn
+	ch := s.challenges
+	s.mu.Unlock()
+	if wa == nil {
+		return ErrWebAuthnUnavailable
+	}
+	userID, session, ok := ch.take(challengeToken, challengeReauth)
+	if !ok || userID != u.ID {
+		return ErrInvalidToken
+	}
+	creds, err := s.credentialsForUser(ctx, u.ID)
+	if err != nil {
+		return err
+	}
+	wu := &webAuthnUser{u: u, creds: creds}
+	cred, err := wa.FinishLogin(wu, session, r)
+	if err != nil {
+		return err
+	}
+	// The assertion is valid; a counter-bookkeeping failure must not deny the
+	// re-authentication, matching FinishPasskeyLogin's contract.
+	_, _ = s.recordPasskeyUse(ctx, cred.ID, cred.Authenticator.SignCount, cred.Flags.BackupState)
+	return nil
+}
+
 // LoginOptions is handed to the browser for navigator.credentials.get.
 type LoginOptions struct {
 	ChallengeToken string                        `json:"challenge_token"`
@@ -505,19 +677,28 @@ func (s *Store) BeginPasskeyLogin() (LoginOptions, error) {
 	return LoginOptions{ChallengeToken: token, Options: assertion}, nil
 }
 
+// PasskeyAssertion is the outcome of a successful passkey login. CloneWarning
+// and RecordErr are diagnostics: the assertion is valid and the caller should
+// log them without denying the login.
+type PasskeyAssertion struct {
+	User         User
+	CloneWarning bool
+	RecordErr    error
+}
+
 // FinishPasskeyLogin validates an assertion, resolves the owning user, records
 // the use, and returns the authenticated user. The caller mints the session.
-func (s *Store) FinishPasskeyLogin(ctx context.Context, challengeToken string, r *http.Request) (User, error) {
+func (s *Store) FinishPasskeyLogin(ctx context.Context, challengeToken string, r *http.Request) (PasskeyAssertion, error) {
 	s.mu.Lock()
 	wa := s.webauthn
 	ch := s.challenges
 	s.mu.Unlock()
 	if wa == nil {
-		return User{}, ErrWebAuthnUnavailable
+		return PasskeyAssertion{}, ErrWebAuthnUnavailable
 	}
 	_, session, ok := ch.take(challengeToken, challengeLogin)
 	if !ok {
-		return User{}, ErrInvalidToken
+		return PasskeyAssertion{}, ErrInvalidToken
 	}
 	var resolved User
 	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
@@ -538,18 +719,17 @@ func (s *Store) FinishPasskeyLogin(ctx context.Context, challengeToken string, r
 	}
 	_, cred, err := wa.FinishPasskeyLogin(handler, session, r)
 	if err != nil {
-		return User{}, err
+		return PasskeyAssertion{}, err
 	}
 	if resolved.Status != "active" || !resolved.Verified() {
-		return User{}, ErrNotVerified
+		return PasskeyAssertion{}, ErrNotVerified
 	}
 	if resolved.AccountStatus != "active" {
-		return User{}, ErrAccountInactive
+		return PasskeyAssertion{}, ErrAccountInactive
 	}
-	if cloneWarning, uerr := s.recordPasskeyUse(ctx, cred.ID, cred.Authenticator.SignCount, cred.Flags.BackupState); uerr == nil && cloneWarning {
-		// Logged by the caller; a non-advancing counter is a known WebAuthn
-		// signal, not a hard failure.
-		_ = cloneWarning
-	}
-	return resolved, nil
+	// The assertion is valid; counter bookkeeping is diagnostic only. A
+	// non-advancing counter is the spec's cloned-authenticator signal, and a
+	// write failure means the counter may drift. Neither denies the login.
+	cloneWarning, recordErr := s.recordPasskeyUse(ctx, cred.ID, cred.Authenticator.SignCount, cred.Flags.BackupState)
+	return PasskeyAssertion{User: resolved, CloneWarning: cloneWarning, RecordErr: recordErr}, nil
 }

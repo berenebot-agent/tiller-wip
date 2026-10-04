@@ -599,10 +599,17 @@ func (s *Server) reauthenticateSensitive(r *http.Request, userID, password strin
 	err := s.identity.VerifyPassword(r.Context(), userID, password)
 	if err == nil {
 		s.consumeGoogleReauth(rawUserSessionToken(r))
+		s.consumePasskeyReauth(rawUserSessionToken(r))
 		s.clearLinkAuth(rawUserSessionToken(r))
 		return false, nil
 	}
-	if s.consumeGoogleReauth(rawUserSessionToken(r)) {
+	sessionToken := rawUserSessionToken(r)
+	// A passkey assertion or a Google re-auth completed earlier in this session
+	// stands in for the password. Each grant is single-use and short-lived.
+	if s.consumePasskeyReauth(sessionToken) {
+		return false, nil
+	}
+	if s.consumeGoogleReauth(sessionToken) {
 		return true, nil
 	}
 	return false, err
