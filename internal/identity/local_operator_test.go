@@ -115,25 +115,58 @@ func TestAuthenticateLocalOperatorWithoutRow(t *testing.T) {
 	}
 }
 
-func TestUpdateLocalOperatorPassword(t *testing.T) {
+func TestSyncLocalOperatorCredentialsUpdatesUsernameAndPassword(t *testing.T) {
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 
-	if _, err := st.EnsureLocalOperator(ctx, "operator", "correct horse battery staple", ""); err != nil {
-		t.Fatal(err)
-	}
-	newHash, err := st.passwordHasher.Hash("operator\x00a completely new password")
+	first, err := st.EnsureLocalOperator(ctx, "operator", "correct horse battery staple", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.UpdateLocalOperatorPassword(ctx, newHash); err != nil {
+	// Simulate the boot-time credential sync after TILLER_USERNAME and
+	// TILLER_PASSWORD both changed: the synthetic email must move with the
+	// username or AuthenticateLocalOperator rejects the new name before the
+	// password is ever checked.
+	newHash, err := st.passwordHasher.Hash("new-operator\x00a completely new password")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AuthenticateLocalOperator(ctx, "operator", "a completely new password"); err != nil {
-		t.Fatalf("new password did not authenticate: %v", err)
+	if err := st.SyncLocalOperatorCredentials(ctx, "new-operator", newHash); err != nil {
+		t.Fatal(err)
+	}
+	u, err := st.AuthenticateLocalOperator(ctx, "new-operator", "a completely new password")
+	if err != nil {
+		t.Fatalf("new username/password did not authenticate: %v", err)
+	}
+	if u.ID != first.ID {
+		t.Fatalf("credential sync changed the user id: %q, want %q", u.ID, first.ID)
+	}
+	if u.Email != LocalOperatorEmail("new-operator") {
+		t.Fatalf("synced email = %q, want %q", u.Email, LocalOperatorEmail("new-operator"))
 	}
 	if _, err := st.AuthenticateLocalOperator(ctx, "operator", "correct horse battery staple"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("old password still authenticates: %v", err)
+		t.Fatalf("old username/password still authenticates: %v", err)
+	}
+	// A no-op sync must not churn the auth generation, so an unchanged boot
+	// leaves live sessions alone.
+	if err := st.SyncLocalOperatorCredentials(ctx, "new-operator", newHash); err != nil {
+		t.Fatal(err)
+	}
+	var generation int64
+	if err := st.db.QueryRow(`SELECT auth_generation FROM users WHERE id=?`, first.ID).Scan(&generation); err != nil {
+		t.Fatal(err)
+	}
+	if generation != u.AuthGeneration {
+		t.Fatalf("no-op sync bumped generation: got %d, want %d", generation, u.AuthGeneration)
+	}
+}
+
+func TestSyncLocalOperatorCredentialsNoRowIsNoop(t *testing.T) {
+	st, _ := newTestStore(t)
+	// No operator row exists yet; the boot sync must not error (the row is
+	// materialised later by EnsureLocalOperator).
+	if err := st.SyncLocalOperatorCredentials(context.Background(), "operator", "some-hash"); err != nil {
+		t.Fatalf("sync without a row = %v, want nil", err)
 	}
 }
 

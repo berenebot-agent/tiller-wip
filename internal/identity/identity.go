@@ -392,10 +392,13 @@ const (
 // before syncing the hosted platform credential.
 //
 // ONE-TIME UPGRADE GUARD (see docs/back_compat.md): the
-// 'hosted_bootstrap_complete' marker and the owner_user_id IS NULL condition
-// are deliberate one-time migration gates, not recurring compat. They stay
-// permanently so an install started before hosted identity existed can convert
-// exactly once.
+// 'hosted_bootstrap_complete' marker is a deliberate one-time migration gate,
+// not recurring compat. It stays permanently so an install started before
+// hosted identity existed can convert exactly once. It recognises two subjects:
+// a pre-tenancy account with owner_user_id IS NULL (claim the account by
+// inserting a user), and a unified local operator row (convert that user in
+// place so its users.id — and any passkeys bound to it — survives the switch to
+// hosted).
 //
 // On a fresh hosted install it creates NOTHING, even when email and password are
 // set: TILLER_USERNAME/TILLER_PASSWORD are one-time migration input for an
@@ -425,11 +428,19 @@ func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password str
 	} else if !errors.Is(err, ErrNotFound) {
 		return HostedBootstrapSkipped, err
 	}
-	passwordHash, err := s.passwordHasher.Hash(password)
+	// A local install that has already booted on the unified credential model
+	// owns LocalAccountID through the local operator users row. That row is the
+	// migration subject: convert it in place (same users.id, so any passkeys
+	// bound to it survive) instead of inserting a second user, which the
+	// owner_user_id IS NULL gate would then reject as a collision.
+	localUserID, err := s.LocalOperatorUserID(ctx)
 	if err != nil {
 		return HostedBootstrapSkipped, err
 	}
-	userID, err := id.New()
+	// Hosted accounts authenticate with a bare-password hash (no username-bound
+	// material), so the migrated row is re-hashed with the supplied hosted
+	// password rather than reusing the local username+password fingerprint.
+	passwordHash, err := s.passwordHasher.Hash(password)
 	if err != nil {
 		return HostedBootstrapSkipped, err
 	}
@@ -439,23 +450,54 @@ func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password str
 		return HostedBootstrapSkipped, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,'active',?,?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now), formatTime(now)); err != nil {
-		return HostedBootstrapSkipped, err
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE accounts SET owner_user_id=?,updated_at=? WHERE id=? AND owner_user_id IS NULL`, userID, formatTime(now), database.LocalAccountID)
-	if err != nil {
-		return HostedBootstrapSkipped, err
-	}
-	if count, err := result.RowsAffected(); err != nil {
-		return HostedBootstrapSkipped, err
-	} else if count != 1 {
-		return HostedBootstrapSkipped, ErrBootstrapCollision
+	migratedExisting := false
+	if localUserID != "" {
+		var owner string
+		if err := tx.QueryRowContext(ctx, `SELECT owner_user_id FROM accounts WHERE id=?`, database.LocalAccountID).Scan(&owner); err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if owner != localUserID {
+			// The marker names a user that does not own the local account;
+			// refuse rather than rewriting an unrelated identity.
+			return HostedBootstrapSkipped, ErrBootstrapCollision
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE users SET email=?,password_hash=?,password_auth_enabled=1,status='active',email_verified_at=?,auth_generation=auth_generation+1,updated_at=? WHERE id=?`,
+			email, passwordHash, formatTime(now), formatTime(now), localUserID)
+		if err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			return HostedBootstrapSkipped, err
+		} else if count != 1 {
+			return HostedBootstrapSkipped, ErrBootstrapCollision
+		}
+		migratedExisting = true
+	} else {
+		userID, err := id.New()
+		if err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,'active',?,?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now), formatTime(now)); err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE accounts SET owner_user_id=?,updated_at=? WHERE id=? AND owner_user_id IS NULL`, userID, formatTime(now), database.LocalAccountID)
+		if err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			return HostedBootstrapSkipped, err
+		} else if count != 1 {
+			return HostedBootstrapSkipped, ErrBootstrapCollision
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO platform_settings(key,value,updated_at) VALUES('hosted_bootstrap_complete','1',?)`, formatTime(now)); err != nil {
 		return HostedBootstrapSkipped, err
 	}
 	if err := tx.Commit(); err != nil {
 		return HostedBootstrapSkipped, err
+	}
+	if migratedExisting {
+		s.InvalidateAccount(database.LocalAccountID)
 	}
 	return HostedBootstrapMigrated, nil
 }
