@@ -136,6 +136,7 @@ func TestDebugPprofFlag(t *testing.T) {
 }
 
 func TestHostedDebugPprofRequiresPlatformCredentials(t *testing.T) {
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
 	t.Setenv("TILLER_MODE", "hosted")
 	t.Setenv("TILLER_PUBLIC_URL", "https://tiller.example.com")
 	t.Setenv("TILLER_TRUSTED_PROXY", "127.0.0.1/32")
