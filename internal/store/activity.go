@@ -11,17 +11,24 @@ import (
 // drift.
 
 // virtualAttribution returns the predicate + args that match request_logs rows
-// attributable to a virtual model, handling both new rows (route_model_id) and
-// legacy rows (route_kind NULL, matched by canonical name).
-func virtualAttribution(virtualID, canonical string) (string, []any) {
-	return `((rl.route_kind='virtual' AND rl.route_model_id=?) OR (rl.route_status='legacy' AND rl.route_kind IS NULL AND rl.requested_model=?) OR (rl.route_status='legacy' AND rl.route_kind IS NULL AND rl.route_model=?))`,
-		[]any{virtualID, canonical, canonical}
+// attributable to a virtual model. Rows are matched by the canonical
+// route_model_id captured at resolution time. Pre-migration-010 rows that
+// carried no route_kind were reclassified to route_status='unresolved' by the
+// one-time Activity data upgrade (003_legacy_route_unresolved), so no legacy
+// disjunct remains here. The canonical-name argument is retained in the
+// signature because callers still pass it; it is no longer part of the match.
+func virtualAttribution(virtualID, _ string) (string, []any) {
+	return `(rl.route_kind='virtual' AND rl.route_model_id=?)`,
+		[]any{virtualID}
 }
 
 // realAttribution returns the predicate + args that match rows resolved to a
-// real model. Callers must alias request_logs as "rl".
+// real model. Callers must alias request_logs as "rl". Attribution is by the
+// stored route_model_id, the virtual target's resolved provider/model, or a
+// failed attempt against the target; the legacy route_kind-NULL branch is gone
+// (see virtualAttribution).
 func realAttribution(modelID, provider, upstream string) (string, []any) {
-	return `((rl.route_kind='real' AND rl.route_model_id=?) OR (rl.route_kind='virtual' AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_status='legacy' AND rl.route_kind IS NULL AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_kind='virtual' AND EXISTS (SELECT 1 FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.provider=? AND ra.model=? AND ra.result='failed')))`, []any{modelID, provider, upstream, provider, upstream, provider, upstream}
+	return `((rl.route_kind='real' AND rl.route_model_id=?) OR (rl.route_kind='virtual' AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_kind='virtual' AND EXISTS (SELECT 1 FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.provider=? AND ra.model=? AND ra.result='failed')))`, []any{modelID, provider, upstream, provider, upstream}
 }
 
 func activitySearchClause(alias, pattern string) (string, []any) {

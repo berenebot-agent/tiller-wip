@@ -364,12 +364,13 @@ func TestRealModelActivityListScopedToModel(t *testing.T) {
 // TestRealModelActivityIncludesLegacyAndVirtualRoutedRows verifies that a row
 // with NULL route_kind (legacy) or a virtual route that resolved to a real model
 // still appears in that real model's activity.
-func TestRealModelActivityIncludesLegacyAndVirtualRoutedRows(t *testing.T) {
+func TestRealModelActivityIncludesVirtualRoutedRows(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	modelID := realModelID(t, api)
-	// Legacy row: route_kind NULL, resolved to model-a.
-	insertLogRow(t, db, "row-legacy", clientID, "main/hermes-daily", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-legacy", nil, "2026-01-01T00:00:01Z")
-	// Virtual-routed row: route_kind='virtual', resolved to model-a.
+	// Virtual-routed row: route_kind='virtual', resolved to model-a. Historical
+	// route_kind-NULL rows are normalised to route_status='unresolved' at boot
+	// (see database upgrade 003_legacy_route_unresolved) and are deliberately
+	// not guess-attributed by the query path anymore.
 	insertVirtualLogRow(t, db, "row-virtual", clientID, "some-virtual-id", "main/hermes-daily", "provider-a", "model-a", "2026-01-01T00:00:02Z")
 
 	status, payload, _ := api.request("GET", "/api/admin/models/"+modelID+"/activity", nil)
@@ -377,8 +378,8 @@ func TestRealModelActivityIncludesLegacyAndVirtualRoutedRows(t *testing.T) {
 		t.Fatalf("list: %d %v", status, payload)
 	}
 	data := payload["data"].([]any)
-	if len(data) != 2 {
-		t.Fatalf("expected 2 rows (legacy + virtual-routed), got %d: %v", len(data), data)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-virtual" {
+		t.Fatalf("expected the virtual-routed row, got %d: %v", len(data), data)
 	}
 }
 
@@ -436,9 +437,11 @@ func TestRealModelActivityIncludesFailedAttempts(t *testing.T) {
 	}
 }
 
-// TestVirtualModelActivityIncludesLegacyRows verifies a legacy row (route_kind
-// NULL) that requested the virtual model by canonical name still appears.
-func TestVirtualModelActivityIncludesLegacyRows(t *testing.T) {
+// TestVirtualModelActivityAttributesRoutedRows verifies a virtual-routed row
+// (route_kind='virtual' with the model id captured at resolution time) appears
+// under the virtual model. Historical route_kind-NULL rows are normalised to
+// route_status='unresolved' at boot and are not guess-attributed here.
+func TestVirtualModelActivityAttributesRoutedRows(t *testing.T) {
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	status, payload, _ := api.request("GET", "/api/admin/providers", nil)
 	if status != 200 {
@@ -473,16 +476,15 @@ func TestVirtualModelActivityIncludesLegacyRows(t *testing.T) {
 	}
 	virtualID := payload["id"].(string)
 
-	// Legacy row: route_kind NULL, requested the virtual model by canonical name.
-	insertLogRow(t, db, "row-legacy", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-legacy", nil, "2026-01-01T00:00:01Z")
+	insertVirtualLogRow(t, db, "row-virtual", clientID, virtualID, "virtual/coding", "provider-a", "model-a", "2026-01-01T00:00:01Z")
 
 	status, payload, _ = api.request("GET", "/api/admin/virtual-models/"+virtualID+"/activity", nil)
 	if status != 200 {
 		t.Fatalf("list: %d %v", status, payload)
 	}
 	data := payload["data"].([]any)
-	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-legacy" {
-		t.Fatalf("legacy virtual row not found: %v", data)
+	if len(data) != 1 || data[0].(map[string]any)["id"] != "row-virtual" {
+		t.Fatalf("virtual-routed row not found: %v", data)
 	}
 }
 
@@ -616,18 +618,11 @@ func TestAttributionHelperConsistency(t *testing.T) {
 	virtualID := payload["id"].(string)
 
 	now := time.Now().UTC()
-	// One new row (route_kind='virtual') and two legacy rows (route_kind NULL,
-	// requested by canonical) attributable to virtual/coding; one row for a
-	// different virtual model that must be excluded everywhere.
+	// One routed row (route_kind='virtual') attributable to virtual/coding; one
+	// row for a different virtual model that must be excluded everywhere.
+	// Historical route_kind-NULL rows are normalised at boot and not
+	// guess-attributed, so they are not part of this consistency check.
 	insertVirtualLogRow(t, db, "row-new", clientID, virtualID, "virtual/coding", "provider-a", "model-a", now.Add(-time.Minute).Format(time.RFC3339Nano))
-	insertLogRow(t, db, "row-legacy-1", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(100), int64Ptr(0), "up-a", "req-l1", nil, now.Add(-2*time.Minute).Format(time.RFC3339Nano))
-	insertLogRow(t, db, "row-legacy-2", clientID, "virtual/coding", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(200), int64Ptr(0), "up-b", "req-l2", nil, now.Add(-3*time.Minute).Format(time.RFC3339Nano))
-	// Legacy (route_kind NULL) rows carry their canonical in route_model after
-	// migration 014; usage aggregation now groups on that denormalized column
-	// rather than joining the control plane.
-	if _, err := activityDB(t, db).Exec(`UPDATE request_logs SET route_model='virtual/coding' WHERE id IN ('row-legacy-1','row-legacy-2')`); err != nil {
-		t.Fatal(err)
-	}
 	insertVirtualLogRow(t, db, "row-other", clientID, "some-other-id", "virtual/other", "provider-a", "model-a", now.Add(-4*time.Minute).Format(time.RFC3339Nano))
 
 	// List.
@@ -635,8 +630,8 @@ func TestAttributionHelperConsistency(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("list: %d %v", status, payload)
 	}
-	if rows := payload["data"].([]any); len(rows) != 3 {
-		t.Fatalf("list: expected 3 rows, got %d: %v", len(rows), rows)
+	if rows := payload["data"].([]any); len(rows) != 1 {
+		t.Fatalf("list: expected 1 row, got %d: %v", len(rows), rows)
 	}
 
 	// CSV export.
@@ -648,18 +643,23 @@ func TestAttributionHelperConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 4 { // header + 3 rows
-		t.Fatalf("export: expected header + 3 rows, got %d", len(records))
+	if len(records) != 2 { // header + 1 row
+		t.Fatalf("export: expected header + 1 row, got %d", len(records))
 	}
 
-	// Usage: virtual/coding totals 300 tokens (100+200) in the 1h window.
+	// Usage: the same routed row must be visible under virtual/coding, proving
+	// the list/export/usage predicates stay aligned. Tokens are unset on the
+	// inserted row, so the model's window is present with a zero total.
 	status, payload, _ = api.request("GET", "/api/admin/usage", nil)
 	if status != 200 {
 		t.Fatalf("usage: %d %v", status, payload)
 	}
-	vm := payload["virtual_models"].(map[string]any)["virtual/coding"].(map[string]any)
-	if vm["1h"] != float64(300) {
-		t.Fatalf("usage 1h: expected 300, got %v", vm["1h"])
+	vm, ok := payload["virtual_models"].(map[string]any)["virtual/coding"].(map[string]any)
+	if !ok {
+		t.Fatalf("virtual/coding missing from usage: %v", payload["virtual_models"])
+	}
+	if vm["1h"] != float64(0) {
+		t.Fatalf("usage 1h: expected 0 (tokens unset), got %v", vm["1h"])
 	}
 }
 

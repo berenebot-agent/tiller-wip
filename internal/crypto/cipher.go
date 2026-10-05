@@ -107,10 +107,16 @@ func (c *Cipher) Encrypt(aad []byte, plaintext string) (string, error) {
 	return prefix + base64.StdEncoding.EncodeToString(nonce) + ":" + base64.StdEncoding.EncodeToString(sealed), nil
 }
 
-// Decrypt opens a stored value. A value without the encrypted prefix is legacy
-// plaintext and is returned unchanged. An encrypted value that no key can
+// Decrypt opens a stored value. An encrypted value that no key can
 // authenticate returns ErrLocked; a structurally invalid value returns
 // ErrMalformed.
+//
+// PERMANENT COMPAT (see docs/back_compat.md): a value without the encrypted
+// prefix is returned unchanged as legacy plaintext. This is retained because a
+// ciphertext-vs-plaintext decision made at this boundary cannot be safely
+// removed without first proving every stored secret was re-encrypted; the
+// cipher stays tolerant so a partially-migrated or restored-from-backup
+// database still reads.
 func (c *Cipher) Decrypt(aad []byte, stored string) (string, error) {
 	if !Encrypted(stored) {
 		return stored, nil

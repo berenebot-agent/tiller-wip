@@ -391,6 +391,12 @@ const (
 // install when the legacy credentials are omitted. The caller must run this
 // before syncing the hosted platform credential.
 //
+// ONE-TIME UPGRADE GUARD (see docs/back_compat.md): the
+// 'hosted_bootstrap_complete' marker and the owner_user_id IS NULL condition
+// are deliberate one-time migration gates, not recurring compat. They stay
+// permanently so an install started before hosted identity existed can convert
+// exactly once.
+//
 // On a fresh hosted install it creates NOTHING, even when email and password are
 // set: TILLER_USERNAME/TILLER_PASSWORD are one-time migration input for an
 // existing local database, not provisioning input for a new one. It reports
