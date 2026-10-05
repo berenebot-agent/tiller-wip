@@ -92,7 +92,7 @@ type DeadLetterFunc func(ctx context.Context, row DeadLetter)
 // Outbox owns the mail_outbox table and its delivery worker.
 type Outbox struct {
 	db         *sql.DB
-	mailer     *mailer.Manager
+	mailer     messageSender
 	baseURL    string
 	cipher     Cipher
 	logger     *slog.Logger
@@ -102,9 +102,13 @@ type Outbox struct {
 	batchLimit int
 }
 
+type messageSender interface {
+	Send(context.Context, mailer.Message) (mailer.SendResult, error)
+}
+
 // New constructs an Outbox. baseURL is the public origin used to build links;
 // onDead may be nil.
-func New(db *sql.DB, m *mailer.Manager, baseURL string, c Cipher, logger *slog.Logger, onDead DeadLetterFunc) *Outbox {
+func New(db *sql.DB, m messageSender, baseURL string, c Cipher, logger *slog.Logger, onDead DeadLetterFunc) *Outbox {
 	return &Outbox{
 		db: db, mailer: m, baseURL: baseURL, cipher: c, logger: logger, onDead: onDead,
 		nudge: make(chan struct{}, 1), interval: 30 * time.Second, batchLimit: 50,
@@ -269,7 +273,8 @@ func (o *Outbox) processDue(ctx context.Context) {
 			o.fail(ctx, row, err)
 			continue
 		}
-		if err := o.mailer.Send(ctx, message); err != nil {
+		result, err := o.mailer.Send(ctx, message)
+		if err != nil {
 			if errors.Is(err, mailer.ErrNotConfigured) {
 				// Provider unavailable: defer the whole pass, consume no attempt.
 				return
@@ -277,7 +282,7 @@ func (o *Outbox) processDue(ctx context.Context) {
 			o.fail(ctx, row, err)
 			continue
 		}
-		if _, err := o.db.ExecContext(ctx, `UPDATE mail_outbox SET sent_at=?,token_ciphertext=NULL,last_error=NULL WHERE id=?`, formatTime(time.Now()), row.id); err != nil {
+		if _, err := o.db.ExecContext(ctx, `UPDATE mail_outbox SET sent_at=?,provider_message_id=?,token_ciphertext=NULL,last_error=NULL WHERE id=?`, formatTime(time.Now()), nullableText(result.MessageID), row.id); err != nil {
 			o.warn("mail outbox completion write failed", err)
 		}
 	}
@@ -297,26 +302,20 @@ func (o *Outbox) buildMessage(row dueRow) (mailer.Message, error) {
 		if token == "" {
 			return mailer.Message{}, errors.New("mailoutbox: missing verification token")
 		}
-		return mailer.Message{To: row.recipient, Subject: "Verify your Tiller account",
-			Text: fmt.Sprintf("Verify your Tiller account:\n\n%s/verify-email?token=%s\n\nThis link expires in 24 hours.", o.baseURL, token)}, nil
 	case TypePasswordReset:
 		if token == "" {
 			return mailer.Message{}, errors.New("mailoutbox: missing reset token")
 		}
-		return mailer.Message{To: row.recipient, Subject: "Reset your Tiller password",
-			Text: fmt.Sprintf("Reset your Tiller password:\n\n%s/reset-password?token=%s\n\nThis link expires in 1 hour.", o.baseURL, token)}, nil
 	case TypeEmailChangeConfirm:
 		if token == "" {
 			return mailer.Message{}, errors.New("mailoutbox: missing email-change token")
 		}
-		return mailer.Message{To: row.recipient, Subject: "Confirm your new Tiller email address",
-			Text: fmt.Sprintf("Confirm your new Tiller email address:\n\n%s/confirm-email-change?token=%s\n\nThis link expires in 24 hours. If you did not request this change, you can ignore this message; your current address keeps working until you confirm.", o.baseURL, token)}, nil
-	case TypeEmailChangeWarning:
-		return mailer.Message{To: row.recipient, Subject: "Your Tiller email address is being changed",
-			Text: fmt.Sprintf("A request was made to change the email address on your Tiller account to %s.\n\nIf this was not you, reset your password immediately to cancel the change: %s/forgot-password\n\nThe change does not take effect until the new address is confirmed.", params["new_email"], o.baseURL)}, nil
-	default:
+	}
+	rendered, ok := render(row.msgType, o.baseURL, token, params)
+	if !ok {
 		return mailer.Message{}, errors.New("mailoutbox: unknown message type")
 	}
+	return mailer.Message{To: row.recipient, Subject: rendered.Subject, Text: rendered.Text, HTML: rendered.HTML}, nil
 }
 
 // fail records a delivery failure. The fifth failure dead-letters the row and
@@ -369,6 +368,71 @@ func (o *Outbox) DueCounts(ctx context.Context, deadWindow time.Duration) (queue
 		return 0, 0, err
 	}
 	return queued, dead, nil
+}
+
+// MailLogEntry is one recent mail-outbox row for the operator dashboard. It
+// carries delivery metadata only: never the encrypted one-time token and never
+// the message body.
+type MailLogEntry struct {
+	ID                string `json:"id"`
+	Type              string `json:"type"`
+	Recipient         string `json:"recipient"`
+	Attempts          int    `json:"attempts"`
+	Status            string `json:"status"`
+	CreatedAt         string `json:"created_at"`
+	SentAt            string `json:"sent_at,omitempty"`
+	DeadAt            string `json:"dead_at,omitempty"`
+	ProviderMessageID string `json:"provider_message_id,omitempty"`
+}
+
+// SentCount reports messages delivered within the window.
+func (o *Outbox) SentCount(ctx context.Context, window time.Duration) (int, error) {
+	if o == nil || o.db == nil {
+		return 0, nil
+	}
+	cutoff := formatTime(time.Now().Add(-window))
+	var sent int
+	if err := o.db.QueryRowContext(ctx, `SELECT count(*) FROM mail_outbox WHERE sent_at IS NOT NULL AND sent_at >= ?`, cutoff).Scan(&sent); err != nil {
+		return 0, err
+	}
+	return sent, nil
+}
+
+// Recent returns the most recently created rows, newest first, for operator
+// triage. Token material is never selected. limit is clamped to a small bound
+// so a hostile caller cannot ask for the whole table.
+func (o *Outbox) Recent(ctx context.Context, limit int) ([]MailLogEntry, error) {
+	if o == nil || o.db == nil {
+		return []MailLogEntry{}, nil
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 25
+	}
+	rows, err := o.db.QueryContext(ctx, `SELECT id,type,recipient,attempts,created_at,coalesce(sent_at,''),coalesce(dead_at,''),coalesce(provider_message_id,'') FROM mail_outbox ORDER BY created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MailLogEntry{}
+	for rows.Next() {
+		var e MailLogEntry
+		if err := rows.Scan(&e.ID, &e.Type, &e.Recipient, &e.Attempts, &e.CreatedAt, &e.SentAt, &e.DeadAt, &e.ProviderMessageID); err != nil {
+			return nil, err
+		}
+		switch {
+		case e.SentAt != "":
+			e.Status = "sent"
+			// attempts stores failed sends for retry/backoff. A completed row
+			// also had one successful send, so include it in the operator count.
+			e.Attempts++
+		case e.DeadAt != "":
+			e.Status = "dead"
+		default:
+			e.Status = "queued"
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 func classify(err error) string {

@@ -8,6 +8,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"path/filepath"
 	"testing"
 
@@ -156,6 +157,108 @@ func TestHostedSelfDeletePurgesAccountAndRevokesSession(t *testing.T) {
 	}
 }
 
+func TestHostedSelfDeleteConsumesGoogleReauthOnlyAfterEmailConfirmation(t *testing.T) {
+	app, api, accountID := hostedAccountServer(t)
+	var userID string
+	if err := app.db.SQL.QueryRow(`SELECT owner_user_id FROM accounts WHERE id=?`, accountID).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SQL.Exec(`INSERT INTO user_identities(id,user_id,provider,subject,email,created_at) VALUES('google-id',?,'google','google-subject','owner@example.com','now')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SQL.Exec(`UPDATE users SET password_auth_enabled=0 WHERE id=?`, userID); err != nil {
+		t.Fatal(err)
+	}
+	baseURL, err := url.Parse(api.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessionToken string
+	for _, cookie := range api.client.Jar.Cookies(baseURL) {
+		if cookie.Name == userSessionCookie {
+			sessionToken = cookie.Value
+		}
+	}
+	if sessionToken == "" {
+		t.Fatal("user session cookie missing")
+	}
+	app.grantGoogleReauth(sessionToken)
+	status, _, _ := api.request("DELETE", "/api/auth/account", map[string]any{"confirm": "wrong@example.com", "password": ""})
+	if status != http.StatusBadRequest {
+		t.Fatalf("wrong email confirmation status = %d", status)
+	}
+	status, _, _ = api.request("DELETE", "/api/auth/account", map[string]any{"confirm": "owner@example.com", "password": ""})
+	if status != http.StatusOK {
+		t.Fatalf("self delete after valid email confirmation: %d", status)
+	}
+}
+
+func TestHostedGoogleUnlinkRequiresGoogleReauthAndRestoresPassword(t *testing.T) {
+	app, api, accountID := hostedAccountServer(t)
+	var userID string
+	if err := app.db.SQL.QueryRow(`SELECT owner_user_id FROM accounts WHERE id=?`, accountID).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SQL.Exec(`INSERT INTO user_identities(id,user_id,provider,subject,email,created_at) VALUES('google-id',?,'google','google-subject','owner@example.com','now')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SQL.Exec(`UPDATE users SET password_auth_enabled=0 WHERE id=?`, userID); err != nil {
+		t.Fatal(err)
+	}
+	status, _, _ := api.request("DELETE", "/api/auth/account/google", map[string]any{})
+	if status != http.StatusUnauthorized {
+		t.Fatalf("unlink without Google reauth = %d, want 401", status)
+	}
+	baseURL, err := url.Parse(api.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessionToken string
+	for _, cookie := range api.client.Jar.Cookies(baseURL) {
+		if cookie.Name == userSessionCookie {
+			sessionToken = cookie.Value
+		}
+	}
+	app.grantGoogleReauth(sessionToken)
+	status, _, _ = api.request("DELETE", "/api/auth/account/google", nil)
+	if status != http.StatusNoContent {
+		t.Fatalf("Google unlink = %d, want 204", status)
+	}
+	status, _, _ = api.request("POST", "/api/auth/login", map[string]any{"email": "owner@example.com", "password": "correct horse battery staple"})
+	if status != http.StatusOK {
+		t.Fatalf("password login after unlink = %d, want 200", status)
+	}
+}
+
+func TestHostedGoogleOnlyUserCannotUnlinkLastSignInMethod(t *testing.T) {
+	app, api, accountID := hostedAccountServer(t)
+	var userID string
+	if err := app.db.SQL.QueryRow(`SELECT owner_user_id FROM accounts WHERE id=?`, accountID).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SQL.Exec(`INSERT INTO user_identities(id,user_id,provider,subject,email,created_at) VALUES('google-id',?,'google','google-subject','owner@example.com','now')`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.SQL.Exec(`UPDATE users SET password_auth_enabled=0,password_hash='' WHERE id=?`, userID); err != nil {
+		t.Fatal(err)
+	}
+	baseURL, err := url.Parse(api.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sessionToken string
+	for _, cookie := range api.client.Jar.Cookies(baseURL) {
+		if cookie.Name == userSessionCookie {
+			sessionToken = cookie.Value
+		}
+	}
+	app.grantGoogleReauth(sessionToken)
+	status, payload, _ := api.request("DELETE", "/api/auth/account/google", nil)
+	if status != http.StatusConflict || payload["error"] == nil {
+		t.Fatalf("unlink with no fallback auth = %d %v", status, payload)
+	}
+}
+
 func TestHostedRevokeAllSessions(t *testing.T) {
 	_, api, _ := hostedAccountServer(t)
 	status, _, _ := api.request("POST", "/api/auth/account/sessions/revoke-all", map[string]any{})
@@ -216,5 +319,11 @@ func TestPlatformMailQueueEndpoint(t *testing.T) {
 	}
 	if _, ok := queue["queued"]; !ok {
 		t.Fatalf("mail queue payload missing queued: %v", queue)
+	}
+	if _, ok := queue["sent_recent"]; !ok {
+		t.Fatalf("mail queue payload missing sent_recent: %v", queue)
+	}
+	if _, ok := queue["log"]; !ok {
+		t.Fatalf("mail queue payload missing log: %v", queue)
 	}
 }

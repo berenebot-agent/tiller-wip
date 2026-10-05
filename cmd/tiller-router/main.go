@@ -162,14 +162,20 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	case <-runCtx.Done():
 		shutdownCtx, stop := context.WithTimeout(context.Background(), 15*time.Second)
 		defer stop()
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			return err
+		// Attempt both shutdown steps even if the HTTP drain errors, so the
+		// Activity writer is always flushed (StopBackground) and the database is
+		// always closed. Return the first error after both are attempted.
+		shutdownErr := httpServer.Shutdown(shutdownCtx)
+		stopErr := app.StopBackground(shutdownCtx)
+		closeErr := db.Close()
+		if shutdownErr != nil {
+			return shutdownErr
 		}
-		if err := app.StopBackground(shutdownCtx); err != nil {
-			return err
+		if stopErr != nil {
+			return stopErr
 		}
-		if err := db.Close(); err != nil {
-			return err
+		if closeErr != nil {
+			return closeErr
 		}
 	}
 	return nil
@@ -209,6 +215,19 @@ func prepareSecrets(ctx context.Context, cfg config.Config, db *database.DB, log
 		"key_source", string(source),
 		"migrated", migrated,
 	)
+	// A retained pre-rotation key sidecar means a previous `rotate-master-key`
+	// ran. It is kept by default so old ciphertext and backups stay
+	// recoverable; surface it so an operator knows it is there and how to
+	// recover from an interrupted rotation. Never log key material.
+	sidecar := filepath.Join(cfg.DataDir, cryptosecret.PreviousMasterKeyFileName)
+	if _, statErr := os.Stat(sidecar); statErr == nil {
+		logger.Warn("retained pre-rotation master key found",
+			"sidecar", sidecar,
+			"note", "this is the key used before the last rotation; it is retained so old ciphertext and backups remain recoverable",
+			"recover", fmt.Sprintf("if a rotation was interrupted, copy %s over %s and restart", sidecar, filepath.Join(cfg.DataDir, cryptosecret.MasterKeyFileName)),
+			"remove", "delete it deliberately once no stored ciphertext or backup still needs the old key",
+		)
+	}
 	return cipher, nil
 }
 
@@ -243,16 +262,33 @@ func rotateMasterKey(ctx context.Context, cfg config.Config, db *database.DB, lo
 	if err != nil {
 		return err
 	}
-	// When the active key is the data-directory file, stage the new key file
-	// before rotating so a rotation failure can restore it. When the active key
-	// comes from env/file, that source shadows the data file, so only warn.
+	// When the active key is the data-directory file, durably preserve the old
+	// key before overwriting it, then write the new key atomically, then
+	// rotate. Preserving the old key as a sidecar means a crash or kill after
+	// the overwrite (but before RotateSecrets commits) no longer loses the only
+	// copy of the old key: the operator can copy master.key.previous back over
+	// master.key. When the active key comes from env/file, that source shadows
+	// the data file, so only warn.
 	keyPath := filepath.Join(cfg.DataDir, cryptosecret.MasterKeyFileName)
 	writeDataKey := source == cryptosecret.SourceDataFile || source == cryptosecret.SourceGenerated
-	var previousKeyFile []byte
-	hadPreviousKeyFile := false
+	var previousKey []byte
+	hadPreviousKey := false
 	if writeDataKey {
 		if raw, rerr := os.ReadFile(keyPath); rerr == nil {
-			previousKeyFile, hadPreviousKeyFile = raw, true
+			parsed, perr := cryptosecret.ParseKey(string(raw))
+			if perr != nil {
+				return fmt.Errorf("parse current master key: %w", perr)
+			}
+			previousKey, hadPreviousKey = parsed, true
+		}
+		if hadPreviousKey {
+			// Durable, atomic preservation of the old key before the new one
+			// replaces it. Reuses WriteKeyFile so the 0600 + temp+rename
+			// guarantees match the active key file.
+			sidecar := filepath.Join(cfg.DataDir, cryptosecret.PreviousMasterKeyFileName)
+			if err := cryptosecret.WriteKeyFile(sidecar, previousKey); err != nil {
+				return fmt.Errorf("preserve previous master key: %w", err)
+			}
 		}
 		if err := cryptosecret.WriteKeyFile(keyPath, newKey); err != nil {
 			return fmt.Errorf("write new master key: %w", err)
@@ -261,8 +297,12 @@ func rotateMasterKey(ctx context.Context, cfg config.Config, db *database.DB, lo
 	rotated, err := store.RotateSecrets(ctx, db.SQL, oldCipher, newCipher)
 	if err != nil {
 		if writeDataKey {
-			if hadPreviousKeyFile {
-				_ = os.WriteFile(keyPath, previousKeyFile, 0o600)
+			if hadPreviousKey {
+				// Restore in place; the sidecar also survives so a failed
+				// in-process restore is still recoverable after a crash.
+				if werr := cryptosecret.WriteKeyFile(keyPath, previousKey); werr != nil {
+					logger.Error("failed to restore previous master key after rotation error; recover from the sidecar", "sidecar", filepath.Join(cfg.DataDir, cryptosecret.PreviousMasterKeyFileName), "error", werr.Error())
+				}
 			} else {
 				_ = os.Remove(keyPath)
 			}
@@ -272,6 +312,7 @@ func rotateMasterKey(ctx context.Context, cfg config.Config, db *database.DB, lo
 	logger.Info("master key rotated", "rotated", rotated, "previous_source", string(source))
 	if writeDataKey {
 		logger.Info("new master key written", "key_file", keyPath)
+		logger.Info("previous master key retained for recovery", "sidecar", filepath.Join(cfg.DataDir, cryptosecret.PreviousMasterKeyFileName), "note", "kept by default so old ciphertext and backups remain recoverable; remove it deliberately once it is no longer needed")
 	}
 	if strings.TrimSpace(cfg.MasterKey) != "" {
 		logger.Warn("TILLER_MASTER_KEY is set and takes precedence over the data-directory key file; update it to the new key before restarting")

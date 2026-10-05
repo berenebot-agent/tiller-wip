@@ -28,9 +28,12 @@ Provider-protocol, SDK/CLI compatibility, or restart changes should also run
 `./tests/compatibility/run.sh`. Deployment and filesystem-security changes
 should run `./tests/runtime-readonly.sh`.
 
-Keep tests deterministic and use local mock upstreams. Run the smallest relevant
-set while iterating, then report the exact commands and results in the pull
-request. Format Go changes with `./tiller-go.sh fmt ./...`.
+Keep tests deterministic and use local mock upstreams. Go tests are in-package
+(`internal/<pkg>/<name>_test.go`); browser specs live in `tests/browser/*.spec.js`
+and must be wired into the matching lane in `tests/browser/run.sh`. Run the
+smallest relevant set while iterating, then report the exact commands and results
+in the pull request. Format Go changes with `./tiller-go.sh fmt ./...`. See
+`docs/TESTING.md` for the runner and log layout.
 
 ## Pull requests
 

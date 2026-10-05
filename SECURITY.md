@@ -64,6 +64,20 @@ database; it is not secure erasure. SQLite pages, WAL files, snapshots, and old
 backups may still contain historic sensitive data, so they must continue to be
 protected as sensitive material.
 
+**First-run admin bootstrap (local mode).** A local instance started with
+neither `TILLER_USERNAME` nor `TILLER_PASSWORD` serves a one-time setup page
+instead of login: its first visitor claims the administrator credential
+(Home Assistant/Jellyfin model). The router logs a warning on every boot until
+the instance is claimed. The claim endpoint (`POST /api/admin/setup`) is
+same-origin checked, per-IP rate-limited (20 attempts/minute), strictly
+validated (8+ byte password), and written through a guarded one-shot
+transaction that can never overwrite an existing credential; once configured
+the route responds 404. The credential is stored hash-only (argon2id) together
+with its plaintext username for display. Environment credentials, when set,
+seed/override the stored credential at boot (rewriting the hash and revoking
+sessions); there is no separate reset path. Do not expose an unclaimed instance
+to an untrusted network — claim it first, or set the environment credentials.
+
 **Secret hashing is entropy-tiered.** Non-recoverable secrets (client API keys,
 admin session tokens, the admin credential fingerprint) are hash-only at rest;
 plaintext is never stored. The admin credential fingerprint is human-chosen and
@@ -146,7 +160,10 @@ logging.
 entitlements (provider/client-key/virtual-model creation, concurrent streams,
 monthly routed requests, and Activity retention). Quota rejections are `429`
 with `Retry-After` and occur after authentication and model resolution but
-before any upstream request. Local/self-hosted mode is exempt.
+before any upstream request. Local/self-hosted mode is exempt. The `free` plan
+defaults to a finite **20,000 requests/month** per account (migration 050);
+operators can raise, lower, or remove the cap at any time from the platform
+dashboard (a data-only change, effective immediately; `-1` means unlimited).
 
 **Account data export.** Hosted customers can export their own account as a ZIP
 (configuration JSON, Activity CSV, audit CSV). The export is account-scoped from
@@ -154,9 +171,18 @@ the verified session and never contains provider credentials, OAuth tokens, or
 client-key secrets or hashes. It is distinct from the administrator-only
 whole-database backup export, which remains restricted to local mode.
 
-**Published legal documents.** Terms, Privacy, AUP, Subprocessor List, and the
-Security/Data Handling page are operator-editable and served publicly so signup
-can link them before authentication. Signup records the accepted document
+**Local-mode `opencode-free` client-IP forwarding.** The anonymous OpenCode
+free-tier compatibility path (local/self-hosted mode only; `opencode-free` is
+disabled in hosted mode) mirrors the genuine OpenCode client's wire shape,
+which includes forwarding the resolved client IP as `X-Real-IP` to the
+upstream. An operator running that path is therefore choosing to disclose
+their clients' source IPs to OpenCode; it exists solely to match the
+first-party client behaviour and is never done for any other provider.
+
+**Published legal documents.** The Terms of Service (which incorporate the
+acceptable-use rules) and the Privacy Policy (which documents the subprocessors
+and security/data-handling posture) are operator-editable and served publicly so
+signup can link them before authentication. Signup records the accepted document
 timestamps in `legal_acceptances`.
 
 For questions that are not security reports, please use the project's normal

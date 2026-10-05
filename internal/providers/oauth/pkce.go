@@ -74,6 +74,7 @@ func ParseCallback(raw string) (Callback, error) {
 }
 
 type Flow struct {
+	AccountID   string
 	ProviderID  string
 	RedirectURI string
 	PKCE        PKCE
@@ -85,7 +86,12 @@ type FlowStore struct {
 	mu         sync.Mutex
 	now        func() time.Time
 	byProvider map[string]Flow
+	byState    map[string]string
 	path       string
+}
+
+func flowKey(accountID, providerID string) string {
+	return accountID + "\x00" + providerID
 }
 
 func NewFlowStore(now func() time.Time) *FlowStore {
@@ -96,7 +102,7 @@ func NewPersistentFlowStore(now func() time.Time, path string) *FlowStore {
 	if now == nil {
 		now = time.Now
 	}
-	store := &FlowStore{now: now, byProvider: make(map[string]Flow), path: path}
+	store := &FlowStore{now: now, byProvider: make(map[string]Flow), byState: make(map[string]string), path: path}
 	store.load()
 	return store
 }
@@ -110,6 +116,12 @@ func (s *FlowStore) load() {
 		return
 	}
 	_ = json.Unmarshal(body, &s.byProvider)
+	s.byState = make(map[string]string, len(s.byProvider))
+	for key, flow := range s.byProvider {
+		if flow.PKCE.State != "" {
+			s.byState[flow.PKCE.State] = key
+		}
+	}
 }
 
 func (s *FlowStore) save() {
@@ -131,19 +143,23 @@ func (s *FlowStore) Begin(accountID, providerID, redirectURI string) (Flow, erro
 }
 
 func (s *FlowStore) BeginWithGeneration(accountID, providerID, redirectURI string, generation int64) (Flow, error) {
-	key := accountID + "\x00" + providerID
+	key := flowKey(accountID, providerID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
-	if flow, ok := s.byProvider[key]; ok && now.Sub(flow.CreatedAt) < flowLifetime {
-		return Flow{}, ErrFlowActive
+	if flow, ok := s.byProvider[key]; ok {
+		if now.Sub(flow.CreatedAt) < flowLifetime {
+			return Flow{}, ErrFlowActive
+		}
+		delete(s.byState, flow.PKCE.State)
 	}
 	pkce, err := NewPKCE()
 	if err != nil {
 		return Flow{}, err
 	}
-	flow := Flow{ProviderID: providerID, RedirectURI: redirectURI, PKCE: pkce, Generation: generation, CreatedAt: now}
+	flow := Flow{AccountID: accountID, ProviderID: providerID, RedirectURI: redirectURI, PKCE: pkce, Generation: generation, CreatedAt: now}
 	s.byProvider[key] = flow
+	s.byState[flow.PKCE.State] = key
 	s.save()
 	return flow, nil
 }
@@ -151,7 +167,7 @@ func (s *FlowStore) BeginWithGeneration(accountID, providerID, redirectURI strin
 // Consume validates and removes a flow before the token exchange. This makes
 // callbacks single-use even when the provider exchange fails.
 func (s *FlowStore) Consume(accountID, providerID, state string) (Flow, error) {
-	key := accountID + "\x00" + providerID
+	key := flowKey(accountID, providerID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	flow, ok := s.byProvider[key]
@@ -163,6 +179,7 @@ func (s *FlowStore) Consume(accountID, providerID, state string) (Flow, error) {
 		return Flow{}, ErrFlowInvalid
 	}
 	delete(s.byProvider, key)
+	delete(s.byState, flow.PKCE.State)
 	s.save()
 	if s.now().UTC().Sub(flow.CreatedAt) >= flowLifetime {
 		return Flow{}, ErrFlowExpired
@@ -173,9 +190,45 @@ func (s *FlowStore) Consume(accountID, providerID, state string) (Flow, error) {
 	return flow, nil
 }
 
-func (s *FlowStore) Cancel(accountID, providerID string) {
+// TakeByState resolves a flow from its OAuth state alone and removes it. This is
+// the redirect-callback counterpart to Consume: the browser returns from the
+// provider without the account session cookie (SameSite=Strict), so the
+// single-use state is the only correlation key. The account and provider
+// bindings come from the server-side flow, never from the request.
+func (s *FlowStore) TakeByState(state string) (Flow, error) {
+	if state == "" {
+		return Flow{}, ErrFlowInvalid
+	}
 	s.mu.Lock()
-	delete(s.byProvider, accountID+"\x00"+providerID)
+	defer s.mu.Unlock()
+	key, ok := s.byState[state]
+	if !ok && s.path != "" {
+		s.load()
+		key, ok = s.byState[state]
+	}
+	if !ok {
+		return Flow{}, ErrFlowInvalid
+	}
+	flow, ok := s.byProvider[key]
+	delete(s.byState, state)
+	delete(s.byProvider, key)
+	s.save()
+	if !ok || state != flow.PKCE.State {
+		return Flow{}, ErrFlowInvalid
+	}
+	if s.now().UTC().Sub(flow.CreatedAt) >= flowLifetime {
+		return Flow{}, ErrFlowExpired
+	}
+	return flow, nil
+}
+
+func (s *FlowStore) Cancel(accountID, providerID string) {
+	key := flowKey(accountID, providerID)
+	s.mu.Lock()
+	if flow, ok := s.byProvider[key]; ok {
+		delete(s.byState, flow.PKCE.State)
+	}
+	delete(s.byProvider, key)
 	s.save()
 	s.mu.Unlock()
 }

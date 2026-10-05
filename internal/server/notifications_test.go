@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -808,4 +809,159 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 	if got := requests.Load(); got != 2 {
 		t.Fatalf("requests = %d, want timeout retry", got)
 	}
+}
+
+// TestNotificationAdmissionBoundsConcurrency proves the aggregate bound: with
+// the per-tenant cap reduced, the extra deliveries are dropped rather than
+// admitted, so key churn against a slow endpoint cannot accumulate unbounded
+// concurrent work.
+func TestNotificationAdmissionBoundsConcurrency(t *testing.T) {
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
+
+	// Track every successful admission so the release count is exact.
+	releases := map[string]int{}
+	admit := func(account, label string) bool {
+		ok := app.admitNotification(account)
+		if ok {
+			releases[account]++
+		}
+		_ = label
+		return ok
+	}
+
+	// Fill the per-account budget by hand and confirm admission refuses.
+	for i := 0; i < maxConcurrentNotificationDeliveriesPerTenant; i++ {
+		if !admit("acct-1", "fill") {
+			t.Fatalf("admission refused at %d, before the bound", i)
+		}
+	}
+	if admit("acct-1", "over") {
+		t.Fatal("admission permitted work beyond the per-account bound")
+	}
+	// A different account has its own budget.
+	if !admit("acct-2", "other") {
+		t.Fatal("one tenant's saturation blocked another tenant")
+	}
+	// Releasing frees the slot.
+	app.releaseNotification("acct-1")
+	releases["acct-1"]--
+	if !admit("acct-1", "reuse") {
+		t.Fatal("released capacity was not reusable")
+	}
+	// Every admitted slot must release cleanly.
+	for account, n := range releases {
+		for i := 0; i < n; i++ {
+			app.releaseNotification(account)
+		}
+	}
+	app.notifyCooldownMu.Lock()
+	defer app.notifyCooldownMu.Unlock()
+	if app.notifyAdmitted != 0 {
+		t.Fatalf("admitted counter = %d after releasing everything, want 0", app.notifyAdmitted)
+	}
+	if len(app.notifyAdmittedByAccount) != 0 {
+		t.Fatalf("per-account counters not drained: %v", app.notifyAdmittedByAccount)
+	}
+}
+
+// TestNotificationProcessWideBound proves the global cap applies across
+// tenants.
+func TestNotificationProcessWideBound(t *testing.T) {
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
+
+	admitted := 0
+	for i := 0; admitted < maxConcurrentNotificationDeliveries; i++ {
+		acct := "acct-" + strconv.Itoa(i/maxConcurrentNotificationDeliveriesPerTenant)
+		if app.admitNotification(acct) {
+			admitted++
+		}
+	}
+	if admitted != maxConcurrentNotificationDeliveries {
+		t.Fatalf("admitted = %d, want %d", admitted, maxConcurrentNotificationDeliveries)
+	}
+	// The global cap is reached even though each account is under its own cap.
+	next := "acct-" + strconv.Itoa(1000)
+	if app.admitNotification(next) {
+		t.Fatal("global admission permitted work beyond the process bound")
+	}
+}
+
+// TestNotificationCooldownPruning proves the cooldown map does not grow without
+// bound: entries older than the retention window are dropped.
+func TestNotificationCooldownPruning(t *testing.T) {
+	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
+
+	now := time.Now()
+	app.notifyCooldownMu.Lock()
+	app.notifyLastSent["fresh|fallback|vm"] = now
+	app.notifyLastSent["stale|fallback|vm"] = now.Add(-2 * time.Hour)
+	app.pruneNotificationCooldownsLocked(now)
+	_, freshOK := app.notifyLastSent["fresh|fallback|vm"]
+	_, staleGone := app.notifyLastSent["stale|fallback|vm"]
+	app.notifyCooldownMu.Unlock()
+	if !freshOK {
+		t.Fatal("pruning removed a recent cooldown entry")
+	}
+	if staleGone {
+		t.Fatal("pruning kept a stale cooldown entry")
+	}
+}
+
+// TestNotificationBudgetFirstDeliveryAdmitted is the regression guard for the
+// pre-SaaS review TR-004 fix: the first delivery for an account (whose budget
+// entry does not yet exist) must be admitted, not panic on a nil entry.
+func TestNotificationBudgetFirstDeliveryAdmitted(t *testing.T) {
+	b := newNotificationBudget(30, time.Hour)
+	if !b.admit("account-a", time.Now()) {
+		t.Fatal("first delivery for a new account was not admitted")
+	}
+}
+
+// TestNotificationBudgetExhaustsAndExpires pins the rolling-window semantics:
+// an account is admitted exactly `budget` times within the window, rejected
+// after, and admitted again once the window has passed.
+func TestNotificationBudgetExhaustsAndExpires(t *testing.T) {
+	const budget = 3
+	b := newNotificationBudget(budget, time.Hour)
+	now := time.Now()
+	for i := 0; i < budget; i++ {
+		if !b.admit("account-a", now.Add(time.Duration(i)*time.Second)) {
+			t.Fatalf("delivery %d within the budget was rejected", i+1)
+		}
+	}
+	if b.admit("account-a", now.Add(10*time.Second)) {
+		t.Fatal("delivery over the budget was admitted")
+	}
+	// A full window later the earlier stamps age out and admission resumes.
+	if !b.admit("account-a", now.Add(2*time.Hour)) {
+		t.Fatal("delivery after the window expired was rejected")
+	}
+}
+
+// TestNotificationBudgetIsPerAccount confirms one account's exhausted budget
+// does not throttle another account.
+func TestNotificationBudgetIsPerAccount(t *testing.T) {
+	b := newNotificationBudget(1, time.Hour)
+	now := time.Now()
+	if !b.admit("account-a", now) {
+		t.Fatal("account-a first delivery rejected")
+	}
+	if b.admit("account-a", now) {
+		t.Fatal("account-a second delivery admitted over budget")
+	}
+	if !b.admit("account-b", now) {
+		t.Fatal("account-b delivery rejected by account-a's budget")
+	}
+}
+
+// openTestDB opens a throwaway database for notification unit tests that need a
+// Server but not the full HTTP harness.
+func openTestDB(t *testing.T) *database.DB {
+	t.Helper()
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
 }

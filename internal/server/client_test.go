@@ -96,3 +96,90 @@ func TestSniffAndClassifyPreservesResponseBytes(t *testing.T) {
 		})
 	}
 }
+
+// dribbleReader returns one byte per Read so the sniffer sees the stream
+// fragmented across many small reads, as a real TCP segment boundary can.
+type dribbleReader struct {
+	data []byte
+	pos  int
+}
+
+func (d *dribbleReader) Read(p []byte) (int, error) {
+	if d.pos >= len(d.data) {
+		return 0, io.EOF
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+	p[0] = d.data[d.pos]
+	d.pos++
+	return 1, nil
+}
+
+// TestSniffAndClassifyHandlesFragmentedSSE is the regression for a headerless
+// stream whose first read ends mid-line: the old single-Read sniffer classified
+// it as non-streaming, which buffered the whole stream as JSON and dropped the
+// SSE content type.
+func TestSniffAndClassifyHandlesFragmentedSSE(t *testing.T) {
+	const body = "event: response.created\ndata: {}\n\n"
+	resp := &http.Response{
+		StatusCode:    http.StatusOK,
+		ContentLength: -1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(&dribbleReader{data: []byte(body)}),
+	}
+	defer resp.Body.Close()
+	sniffAndClassify(resp)
+	if got := resp.Header.Get("Content-Type"); got != "text/event-stream" {
+		t.Fatalf("fragmented headerless SSE content type = %q, want text/event-stream", got)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != body {
+		t.Fatalf("body changed after fragmented sniff: got %q, want %q", got, body)
+	}
+}
+
+// TestSniffAndClassifyFragmentedJSONStaysNonStreaming is the counterpart: a
+// fragmented JSON body must not be mistaken for a stream.
+func TestSniffAndClassifyFragmentedJSONStaysNonStreaming(t *testing.T) {
+	resp := &http.Response{
+		StatusCode:    http.StatusOK,
+		ContentLength: -1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(&dribbleReader{data: []byte(`{"choices":[]}`)}),
+	}
+	defer resp.Body.Close()
+	sniffAndClassify(resp)
+	if got := resp.Header.Get("Content-Type"); got != "" {
+		t.Fatalf("fragmented JSON content type = %q, want empty", got)
+	}
+}
+
+// TestSniffAndClassifyStopsAtBudget proves the sniffer cannot buffer without
+// bound when a headerless body never yields a complete line.
+func TestSniffAndClassifyStopsAtBudget(t *testing.T) {
+	// A single 4 KiB line with no newline: the sniffer must stop at the sniff
+	// budget rather than consuming the whole body.
+	body := bytes.Repeat([]byte("x"), 4096)
+	resp := &http.Response{
+		StatusCode:    http.StatusOK,
+		ContentLength: -1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(bytes.NewReader(body)),
+	}
+	defer resp.Body.Close()
+	sniffAndClassify(resp)
+	if got := resp.Header.Get("Content-Type"); got != "" {
+		t.Fatalf("unterminated line content type = %q, want empty", got)
+	}
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(body) {
+		t.Fatalf("body length after sniff = %d, want %d", len(got), len(body))
+	}
+}

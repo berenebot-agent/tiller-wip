@@ -1,0 +1,24 @@
+:root {
+  --mono: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --body: "Manrope", system-ui, sans-serif;
+  --display: "Space Grotesk", "Manrope", system-ui, sans-serif;
+}
+
+body {
+  font-family: var(--body);
+}
+
+.brand,
+.dashboard-header h1,
+.activity-mobile-head h1,
+.platform-header h1,
+.provider-catalogue-head h2,
+.system-card h2,
+.login-card h1,
+.login-brand,
+.boot-mark,
+.legal-header h1,
+.dialog-close + h2,
+dialog h2 {
+  font-family: var(--display);
+}

@@ -40,15 +40,15 @@ func planClientInput(id string) store.CreateClientKeyInput {
 }
 
 // assertLimitKind fails unless err is a *store.LimitExceededError of the wanted
-// kind and cap.
-func assertLimitKind(t *testing.T, err error, kind string, limit int) {
+// kind, cap and current count.
+func assertLimitKind(t *testing.T, err error, kind string, limit, used int) {
 	t.Helper()
 	var exceeded *store.LimitExceededError
 	if !errors.As(err, &exceeded) {
 		t.Fatalf("error = %v, want *store.LimitExceededError", err)
 	}
-	if exceeded.Kind != kind || exceeded.Limit != limit {
-		t.Fatalf("limit error = %+v, want kind %q limit %d", exceeded, kind, limit)
+	if exceeded.Kind != kind || exceeded.Limit != limit || exceeded.Used != used {
+		t.Fatalf("limit error = %+v, want kind %q limit %d used %d", exceeded, kind, limit, used)
 	}
 }
 
@@ -67,7 +67,7 @@ func TestProviderCreationLimitRejectsAtCapAndAllowsUnder(t *testing.T) {
 	if err := sc.CreateProvider(ctx, planProviderInput("p2")); err != nil {
 		t.Fatalf("second provider at cap-1: %v", err)
 	}
-	assertLimitKind(t, sc.CreateProvider(ctx, planProviderInput("p3")), "providers", 2)
+	assertLimitKind(t, sc.CreateProvider(ctx, planProviderInput("p3")), "providers", 2, 2)
 
 	// The rejected create rolled back: no provider row and no namespace leaked.
 	var providers, namespaces int
@@ -93,7 +93,7 @@ func TestClientKeyAndVirtualModelCreationLimits(t *testing.T) {
 	if err := sc.CreateClientKey(ctx, planClientInput("k1")); err != nil {
 		t.Fatalf("client key under cap: %v", err)
 	}
-	assertLimitKind(t, sc.CreateClientKey(ctx, planClientInput("k2")), "client_keys", 1)
+	assertLimitKind(t, sc.CreateClientKey(ctx, planClientInput("k2")), "client_keys", 1, 1)
 
 	// A virtual model limit check runs before any target validation, so a cap
 	// of 1 is rejected on the second call. Build one real target and one
@@ -118,7 +118,7 @@ func TestClientKeyAndVirtualModelCreationLimits(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := sc.CreateVirtualModel(ctx, store.CreateVirtualModelInput{ID: "v2", GroupID: "g1", Name: "v2", RoutingMode: "fixed", Targets: []store.VirtualTargetInput{{ProviderModelID: "pm1", Enabled: true}}})
-	assertLimitKind(t, err, "virtual_models", 1)
+	assertLimitKind(t, err, "virtual_models", 1, 1)
 }
 
 func TestUnlimitedPlanAllowsCreation(t *testing.T) {
@@ -265,7 +265,7 @@ func TestPlanEnforcementIsAccountScoped(t *testing.T) {
 	if err := a.CreateProvider(ctx, planProviderInput("a-p1")); err != nil {
 		t.Fatal(err)
 	}
-	assertLimitKind(t, a.CreateProvider(ctx, planProviderInput("a-p2")), "providers", 1)
+	assertLimitKind(t, a.CreateProvider(ctx, planProviderInput("a-p2")), "providers", 1, 1)
 
 	// The other account still has its own full allowance.
 	if err := b.CreateProvider(ctx, planProviderInput("b-p1")); err != nil {

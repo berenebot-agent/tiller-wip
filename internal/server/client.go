@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -24,7 +25,15 @@ import (
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
-const maxUpstreamNonStreamBytes int64 = 64 << 20
+const maxUpstreamNonStreamBytes int64 = 16 << 20
+
+// maxInferenceBodyBytes bounds one inference request body. 8 MiB is roughly two
+// million tokens of plain text — beyond every model's context window — so no
+// legitimate request is lost, while the product of the body-read gate
+// (maxConcurrentBodyReads) and this constant is the process's worst-case
+// inbound buffer budget: 64 x 8 MiB = 512 MiB
+// (docs/pre_saas_release_review.md TR-002).
+const maxInferenceBodyBytes int64 = 8 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
 // read for the sanitized client error. When detailed error logging is
@@ -35,6 +44,9 @@ const maxUpstreamNonStreamBytes int64 = 64 << 20
 // chain hostage.
 const maxUpstreamErrorBytes int64 = 1 << 20
 
+// errUpstreamResponseTooLarge marks a non-streaming upstream response that
+// exceeded the buffer limit (or the global admission gate, which reports the
+// same condition).
 var errUpstreamResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
 
 func (s *Server) clientModels(w http.ResponseWriter, r *http.Request) {
@@ -167,6 +179,7 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	if rc == nil {
 		return
 	}
+	catalogueEffortValues, hasCatalogueEffort := catalogueEfforts(rc)
 	if anthropic {
 		caps := map[string]any{}
 		var thinking map[string]any
@@ -175,7 +188,7 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 			case providers.ReasoningOptionEffort:
 				effort := map[string]any{"supported": true}
 				for _, level := range providers.CanonicalEffortOrder() {
-					for _, value := range opt.Values {
+					for _, value := range catalogueEffortValues {
 						if value == level {
 							effort[level] = map[string]any{"supported": true}
 							break
@@ -211,15 +224,17 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 		return
 	}
 
-	var effortValues []string
 	var hasEffort bool
 	var options []map[string]any
+	effortAdded := false
 	for _, opt := range rc.Options {
 		switch opt.Type {
 		case providers.ReasoningOptionEffort:
-			hasEffort = true
-			effortValues = opt.Values
-			options = append(options, map[string]any{"type": "effort", "values": opt.Values})
+			if !effortAdded {
+				hasEffort = hasCatalogueEffort
+				options = append(options, map[string]any{"type": "effort", "values": catalogueEffortValues})
+				effortAdded = true
+			}
 		case providers.ReasoningOptionToggle:
 			options = append(options, map[string]any{"type": "toggle"})
 		case providers.ReasoningOptionBudgetTokens:
@@ -236,9 +251,78 @@ func addReasoningToCatalogueEntry(entry map[string]any, rc *providers.ReasoningC
 	if len(options) > 0 {
 		entry["reasoning_options"] = options
 	}
-	if hasEffort {
-		entry["reasoning"] = map[string]any{"supported_efforts": effortValues}
+	if hasEffort || rc.Mandatory != nil || rc.DefaultEffort != "" || rc.DefaultEnabled != nil || len(rc.Parameters) > 0 {
+		reasoning := map[string]any{}
+		if hasEffort {
+			reasoning["supported_efforts"] = catalogueEffortValues
+		}
+		if rc.Mandatory != nil {
+			reasoning["mandatory"] = *rc.Mandatory
+		}
+		if rc.DefaultEffort != "" {
+			reasoning["default_effort"] = rc.DefaultEffort
+		}
+		if rc.DefaultEnabled != nil {
+			reasoning["default_enabled"] = *rc.DefaultEnabled
+		}
+		if len(rc.Parameters) > 0 {
+			reasoning["supported_parameters"] = rc.Parameters
+		}
+		if hasBudgetOption(rc) {
+			reasoning["supports_max_tokens"] = true
+		}
+		entry["reasoning"] = reasoning
 	}
+}
+
+// hasBudgetOption reports whether the target advertises a numeric token budget
+// selector, so the Tiller-compatible catalogue can round-trip
+// `supports_max_tokens` to a downstream Tiller.
+func hasBudgetOption(rc *providers.ReasoningCapabilities) bool {
+	if rc == nil {
+		return false
+	}
+	for _, option := range rc.Options {
+		if option.Type == providers.ReasoningOptionBudgetTokens {
+			return true
+		}
+	}
+	return false
+}
+
+// catalogueEfforts returns client-selectable effort values when the provider
+// distinguishes them from its upstream wire values. Otherwise it derives the
+// list from the normalized effort options. An empty list remains meaningful for
+// providers that report unrestricted effort support.
+func catalogueEfforts(rc *providers.ReasoningCapabilities) ([]string, bool) {
+	if rc == nil {
+		return nil, false
+	}
+	if rc.ClientEfforts != nil {
+		return *rc.ClientEfforts, true
+	}
+	var values []string
+	seen := make(map[string]bool)
+	hasEffort, unrestricted := false, false
+	for _, option := range rc.Options {
+		if option.Type != providers.ReasoningOptionEffort {
+			continue
+		}
+		hasEffort = true
+		if len(option.Values) == 0 {
+			unrestricted = true
+		}
+		for _, value := range option.Values {
+			if !seen[value] {
+				seen[value] = true
+				values = append(values, value)
+			}
+		}
+	}
+	if unrestricted || !hasEffort {
+		return nil, hasEffort
+	}
+	return providers.SortEfforts(values), true
 }
 
 func (s *Server) loadVirtualCapabilities(ctx context.Context, accountID string, virtualModelIDs []string) (map[string]aggregatedVirtualCapabilities, error) {
@@ -533,10 +617,33 @@ func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<20)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		inferenceError(w, 400, "invalid_request_error", "request_too_large", "Request JSON exceeds the 32 MiB limit.", incoming == providers.ProtocolMessages)
+	// maxInferenceBodyBytes bounds one request body. 8 MiB is roughly two
+	// million tokens of text — beyond every model's context window — so no
+	// legitimate request is lost, while the process-wide product of the
+	// body-read gate and this cap stays inside a small container's memory
+	// (docs/pre_saas_release_review.md TR-002).
+	r.Body = http.MaxBytesReader(w, r.Body, maxInferenceBodyBytes)
+	// Bound the body phase before it can hold a connection indefinitely, and
+	// admit it through the process-wide gate so a slow-upload flood cannot park
+	// an unbounded number of buffers before plan concurrency applies. The gate
+	// and maxInferenceBodyBytes together bound the aggregate (TR-002).
+	if !s.bodyReads.acquire() {
+		inferenceError(w, http.StatusServiceUnavailable, "api_error", "body_read_busy", "The router is busy reading request bodies. Retry shortly.", incoming == providers.ProtocolMessages)
+		return
+	}
+	defer s.bodyReads.release()
+	var body []byte
+	var err error
+	readErr := withBodyReadDeadline(w, func() error {
+		body, err = io.ReadAll(r.Body)
+		return err
+	})
+	if readErr != nil {
+		if isTimeoutError(readErr) {
+			inferenceError(w, 408, "invalid_request_error", "request_timeout", "The request body was not received in time.", incoming == providers.ProtocolMessages)
+			return
+		}
+		inferenceError(w, 400, "invalid_request_error", "request_too_large", fmt.Sprintf("Request JSON exceeds the %d MiB limit.", maxInferenceBodyBytes>>20), incoming == providers.ProtocolMessages)
 		return
 	}
 	var raw map[string]json.RawMessage
@@ -553,6 +660,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// built up as the request progresses and written once, synchronously, in a
 	// deferred best-effort insert that never fails the request.
 	row := &logRow{
+		inputEstimate:   int64(EstimateTokens(body, string(incoming))),
 		accountID:       identity.AccountID,
 		clientKeyID:     identity.ID,
 		clientName:      identity.Name,
@@ -570,6 +678,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// Extract the canonical reasoning selector once from the original request.
 	// It is recomputed for each candidate against that target's capabilities.
 	canonicalSelector := extractReasoningSelector(originalBody, incoming)
+	// clientNonStreaming is true only when the client explicitly sent
+	// `"stream": false`. A Codex target always streams upstream, so such a
+	// client must receive a single aggregated JSON response instead of SSE.
+	// An omitted `stream` is NOT treated as false: a target whose native
+	// protocol is SSE (notably Codex Responses) keeps its incremental relay
+	// for clients that did not explicitly opt out.
+	clientNonStreaming := clientExplicitlyNonStreaming(originalBody, incoming)
 	start := time.Now()
 	streamed := false
 	clientTracked := false
@@ -674,6 +789,20 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			streamKeepalive.Close()
 		}
 	}()
+	// failAfterCommit emits a terminal error. Once the client stream has been
+	// committed (streamKeepalive != nil), all later writes MUST use SSE framing
+	// through the single synchronized keepalive writer — never inferenceError's
+	// JSON on an already-started 200 stream. It reports whether it handled the
+	// error (true) so the caller returns; false means no stream was committed
+	// and the caller should use the normal JSON error path.
+	failAfterCommit := func(code string) bool {
+		if streamKeepalive == nil {
+			return false
+		}
+		writeStreamFailure(streamKeepalive, incoming, code, "tiller_"+row.clientRequestID, "")
+		streamKeepalive.Flush()
+		return true
+	}
 	for pass := 0; pass < 2 && !success; pass++ {
 		bypass := pass == 1
 		if bypass && (!skippedCooled || !allAttemptedFailed) {
@@ -762,20 +891,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// reasoning selector gets an explicit disable when the Chat
 				// target advertises one, so a reasoning-default upstream cannot
 				// return a reasoning-only response with empty content.
-				// Mandatory-reasoning targets cannot serve plain chat: skip on
-				// virtual routes (fallback), fail loud on direct routes.
+				// Mandatory-reasoning targets advertise no disable; the request
+				// is forwarded unchanged so the provider applies its default
+				// reasoning. OpenRouter's `mandatory: true` forbids
+				// `reasoning_effort: "none"`, not a plain request, so rejecting
+				// one would refuse traffic the provider serves.
 				if !canonicalSelector.Present && incoming == providers.ProtocolChat && target == providers.ProtocolChat {
-					if isMandatoryReasoning(candidate.ReasoningCapabilities) {
-						if !route.Virtual {
-							row.httpStatus = 400
-							row.errorText = strPtr("unsupported_feature")
-							row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
-							inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The model requires reasoning and cannot serve a plain non-reasoning request.", incoming == providers.ProtocolMessages)
-							return
-						}
-						s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
-						continue
-					}
 					if disabled, ok := injectChatDisable(attemptBody, candidate.ReasoningCapabilities); ok {
 						attemptBody = disabled
 					}
@@ -928,6 +1049,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.fallbackReason = strPtr(class)
+					if failAfterCommit(class) {
+						return
+					}
 					inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 					return
 				}
@@ -938,6 +1062,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					if failAfterCommit(class) {
+						return
+					}
 					inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
 					return
 				}
@@ -1103,6 +1230,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if logErrorBodies && upstreamErrorReadErr == nil && len(upstreamErrorBody) > 0 {
 						row.errorBody, row.errorBodyTruncated = loggedBody(upstreamErrorBody)
 					}
+					if failAfterCommit(errorCode) {
+						return
+					}
 					inferenceError(w, row.httpStatus, "api_error", errorCode, message, incoming == providers.ProtocolMessages)
 					return
 				}
@@ -1122,7 +1252,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// Only router-owned transport headers are committed before target selection;
 			// provider-specific request IDs / rate-limit headers are omitted because
 			// the serving provider isn't known yet.
-			if route.Virtual && route.RoutingMode == "ordered_fallback" && streaming && streamKeepalive == nil {
+			//
+			// The early commit is gated off only for a client that explicitly asked
+			// for stream:false: such a request must never have SSE committed on its
+			// behalf and instead takes the aggregation path below. An omitted stream
+			// keeps the historical early-commit behaviour.
+			if route.Virtual && route.RoutingMode == "ordered_fallback" && streaming && !clientNonStreaming && streamKeepalive == nil {
 				w.Header().Set("Content-Type", "text/event-stream")
 				w.Header().Set("X-Accel-Buffering", "no")
 				w.WriteHeader(response.StatusCode)
@@ -1165,6 +1300,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					if failAfterCommit(class) {
+						return
+					}
 					inferenceError(w, 502, "api_error", class, message, incoming == providers.ProtocolMessages)
 					return
 				}
@@ -1242,6 +1380,9 @@ routeDone:
 			row.httpStatus = 502
 			row.errorText = strPtr(terminalPreflightClass)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(terminalPreflightClass))
+			if failAfterCommit(terminalPreflightClass) {
+				return
+			}
 			inferenceError(w, 502, "api_error", terminalPreflightClass, "The upstream provider response exceeded Tiller's non-streaming response limit.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1249,6 +1390,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr(translationFailureClass)
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(translationFailureClass))
+			if failAfterCommit(translationFailureClass) {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", translationFailureClass, "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1256,6 +1400,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr("protocol_unavailable")
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("protocol_unavailable"))
+			if failAfterCommit("protocol_unavailable") {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", "protocol_unavailable", "The selected model does not support this client protocol.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1263,6 +1410,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr("context_limit_exceeded")
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("context_limit_exceeded"))
+			if failAfterCommit("context_limit_exceeded") {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", "context_limit_exceeded", fixedUpstreamErrorMessage("context_limit_exceeded"), incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1270,6 +1420,9 @@ routeDone:
 			row.httpStatus = 400
 			row.errorText = strPtr("unsupported_feature")
 			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature"))
+			if failAfterCommit("unsupported_feature") {
+				return
+			}
 			inferenceError(w, 400, "invalid_request_error", "unsupported_feature", "The request could not be represented by any configured target.", incoming == providers.ProtocolMessages)
 			return
 		}
@@ -1282,17 +1435,18 @@ routeDone:
 		}
 		if route.Virtual {
 			row.errorText = strPtr("virtual_model_unavailable")
-			if streamKeepalive != nil {
+			if failAfterCommit("virtual_model_unavailable") {
 				// The client stream was already committed while probing; surface
 				// the exhausted chain as an SSE failure frame instead of a JSON
 				// body on a 200 stream.
-				writeStreamFailure(streamKeepalive, incoming, "virtual_model_unavailable", "tiller_"+row.clientRequestID, "")
-				streamKeepalive.Flush()
 				return
 			}
 			inferenceError(w, 503, "service_unavailable_error", "virtual_model_unavailable", exhaustedRouteMessage(row.attempts), incoming == providers.ProtocolMessages)
 		} else {
 			row.errorText = strPtr("model_unavailable")
+			if failAfterCommit("model_unavailable") {
+				return
+			}
 			inferenceError(w, 503, "service_unavailable_error", "model_unavailable", "The configured model is unavailable.", incoming == providers.ProtocolMessages)
 		}
 		return
@@ -1305,6 +1459,13 @@ routeDone:
 	}
 	row.resolvedProvider = &selected.Provider.Name
 	row.resolvedModel = &selected.UpstreamModelID
+	if selected.Provider.Type != "" {
+		providerType := selected.Provider.Type
+		row.providerType = &providerType
+	}
+	// Tighten the quota-poll cadence for this provider while it is active. A
+	// no-op when the poller is not configured.
+	s.markProviderActive(row.accountID, selected.Provider.ID)
 	s.inflight.clientResolved(row.accountID, row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
@@ -1337,25 +1498,93 @@ routeDone:
 		}
 		return w
 	}
-	if isStreamingResponse(resp) {
+	upstreamStreams := isStreamingResponse(resp)
+	if upstreamStreams {
 		// Prevent common reverse proxies from buffering the live response until
 		// the model has finished generating it.
 		w.Header().Set("X-Accel-Buffering", "no")
 	}
+	// ASTRA-007: an upstream SSE stream must not be relayed to a client that
+	// asked for a non-streaming response (e.g. Codex forces stream:true
+	// upstream). Aggregate one JSON object and write it as application/json.
+	// No keepalive is ever committed on this path, so the normal JSON error
+	// handling above remains valid.
+	if upstreamStreams && clientNonStreaming {
+		w.Header().Set("Content-Type", "application/json")
+		row.httpStatus = resp.StatusCode
+		if err := relayNonstreamFromSSE(w, reader, incoming, target, selected.RequestedModel, usage); err != nil {
+			idle.Stop()
+			class := "upstream_read_error"
+			if attemptTimedOut.Load() {
+				class = "upstream_timeout"
+			}
+			class = clientFailureClass(r.Context(), class)
+			markLastAttemptFailed(row, class)
+			if errors.Is(err, errUpstreamStreamError) {
+				class = "upstream_stream_error"
+			}
+			row.httpStatus = 502
+			row.errorText = strPtr(class)
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+			inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+			return
+		}
+		row.copyUsage(usage)
+		clearSelectedCooldown()
+		return
+	}
 	if translated {
-		streamingResponse := isStreamingResponse(resp)
+		streamingResponse := upstreamStreams
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
 			s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 			ensureStreamKeepalive()
 		}
+		row.httpStatus = resp.StatusCode
+		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
+		// One reader for both paths: the non-stream peek may buffer bytes, and
+		// the SSE fallback must see them rather than the raw body.
+		translatedReader := bufio.NewReader(reader)
+		// A non-streaming translated body is read and translated BEFORE the
+		// upstream status is committed. Committing first meant a malformed or
+		// non-representable body was answered with the upstream's 2xx and no
+		// error at all, because the status was already on the wire.
+		//
+		// This only applies when the client stream is not already committed: an
+		// ordered-fallback probe may have committed a 200 SSE stream before this
+		// target was even tried, and that path must keep writing through the
+		// keepalive writer.
+		if !streamingResponse && streamKeepalive == nil {
+			translated, isJSON, translateErr := translateNonstreamBody(translatedReader, incoming, target, selected.RequestedModel, usage)
+			if isJSON {
+				if translateErr != nil {
+					idle.Stop()
+					class := "translation_error"
+					if attemptTimedOut.Load() {
+						class = "upstream_timeout"
+					}
+					class = clientFailureClass(r.Context(), class)
+					row.httpStatus = 502
+					row.errorText = strPtr(class)
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
+					markLastAttemptFailed(row, class)
+					inferenceError(w, 502, "api_error", class, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+					return
+				}
+				row.copyUsage(usage)
+				w.WriteHeader(resp.StatusCode)
+				_, _ = w.Write(translated)
+				clearSelectedCooldown()
+				return
+			}
+			// Not JSON after all: fall through to the streaming translator with
+			// every peeked byte intact.
+		}
 		if streamKeepalive == nil {
 			w.WriteHeader(resp.StatusCode)
 		}
-		row.httpStatus = resp.StatusCode
-		outputObs := s.newOutputObserver(selectedAttemptStart, row, selected, selectedHeaderLatencyMs)
-		if err := translateResponseObserved(w, streamKeepalive, reader, incoming, target, selected, usage, outputObs); err != nil {
+		if err := translateResponseObserved(w, streamKeepalive, translatedReader, incoming, target, selected, usage, outputObs); err != nil {
 			idle.Stop()
 			class := "translation_error"
 			if attemptTimedOut.Load() {
@@ -1376,11 +1605,10 @@ routeDone:
 		} else {
 			clearSelectedCooldown()
 		}
-		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
-		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+		row.copyUsage(usage)
 		return
 	}
-	if isStreamingResponse(resp) {
+	if upstreamStreams {
 		streamed = true
 		row.streaming = true
 		s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
@@ -1404,8 +1632,7 @@ routeDone:
 		} else {
 			clearSelectedCooldown()
 		}
-		row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
-		row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+		row.copyUsage(usage)
 		return
 	}
 	// Non-streaming JSON body: read fully to extract usage, then rewrite.
@@ -1420,13 +1647,23 @@ routeDone:
 		row.errorText = strPtr(class)
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 		markLastAttemptFailed(row, class)
+		failAfterCommit(class)
 		return
 	}
 	extractUsage(body, usage)
-	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
-	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
-	w.WriteHeader(resp.StatusCode)
+	row.copyUsage(usage)
 	row.httpStatus = resp.StatusCode
+	// ASTRA-008: if the client stream was already committed (ordered-fallback
+	// probing) but the selected target returned a non-streaming body, the JSON
+	// must be delivered as synthesized SSE through the single keepalive writer,
+	// never as raw JSON on the committed 200 stream.
+	if streamKeepalive != nil {
+		writeNonstreamAsSSE(streamKeepalive, incoming, selected.RequestedModel, rewriteModelBytes(body, selected.UpstreamModelID, selected.RequestedModel))
+		streamKeepalive.Flush()
+		clearSelectedCooldown()
+		return
+	}
+	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(rewriteModelBytes(body, selected.UpstreamModelID, selected.RequestedModel))
 	clearSelectedCooldown()
 }
@@ -1541,45 +1778,105 @@ func isStreamingResponse(resp *http.Response) bool {
 
 const maxSSEDetectionPrefix = 64
 
-// sniffAndClassify peeks at a small prefix of a successful headerless response
-// and marks it as SSE when the first complete field line has SSE's shape. The
+// sniffNoProgressReads bounds how many consecutive reads returning no data the
+// sniffer tolerates before giving up and classifying from what it has. A
+// stalled provider is otherwise cut off by the caller's existing idle timer
+// (see the idleReader wrapping applied before this call); this bound only stops
+// a pathological reader that returns (0, nil) forever from spinning here.
+const sniffNoProgressReads = 8
+
+// sniffAndClassify peeks a bounded prefix of a successful headerless response
+// and marks it as SSE when its first complete field line has SSE's shape. The
 // consumed bytes are always restored so the normal preflight and relay paths
 // receive the original body unchanged.
+//
+// It accumulates until the decision is decidable rather than trusting a single
+// Read: a provider whose first TCP segment ends mid-line (for example a lone
+// "e" before "vent: ...") previously classified as non-streaming, which then
+// buffered a real stream as JSON, omitted SSE headers, and skipped stream
+// fallback probing. Classification is only ever made from complete lines.
 func sniffAndClassify(resp *http.Response) {
 	if resp == nil || resp.Body == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 || resp.ContentLength == 0 || resp.Header.Get("Content-Type") != "" {
 		return
 	}
-	prefix := make([]byte, maxSSEDetectionPrefix)
 	body := resp.Body
-	n, _ := body.Read(prefix)
-	resp.Body = bufferedReadCloser{
-		Reader: io.MultiReader(bytes.NewReader(prefix[:n]), body),
-		closer: body,
+	buf := make([]byte, 0, maxSSEDetectionPrefix)
+	scratch := make([]byte, 32)
+	noProgress := 0
+	for len(buf) < maxSSEDetectionPrefix {
+		if noProgress >= sniffNoProgressReads {
+			break
+		}
+		read, err := body.Read(scratch)
+		if read > 0 {
+			buf = append(buf, scratch[:read]...)
+			noProgress = 0
+		} else {
+			noProgress++
+		}
+		switch looksLikeSSE(buf) {
+		case sseDetected:
+			resp.Header.Set("Content-Type", "text/event-stream")
+			resp.Body = restoreSniffedBody(buf, body)
+			return
+		case sseNotSSE:
+			resp.Body = restoreSniffedBody(buf, body)
+			return
+		case sseInconclusive:
+			// The current line is not complete yet; keep reading.
+		}
+		if err != nil {
+			break
+		}
 	}
-	if looksLikeSSE(prefix[:n]) {
-		resp.Header.Set("Content-Type", "text/event-stream")
-	}
+	resp.Body = restoreSniffedBody(buf, body)
 }
 
-func looksLikeSSE(prefix []byte) bool {
+func restoreSniffedBody(prefix []byte, body io.ReadCloser) io.ReadCloser {
+	if len(prefix) == 0 {
+		return body
+	}
+	return bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(prefix), body), closer: body}
+}
+
+type sseSniff int
+
+const (
+	sseInconclusive sseSniff = iota
+	sseDetected
+	sseNotSSE
+)
+
+// looksLikeSSE classifies an accumulated prefix from its complete lines only.
+// It reports inconclusive while the last line is still unterminated, so a
+// fragmented first record is not mistaken for a non-SSE body.
+func looksLikeSSE(prefix []byte) sseSniff {
 	if len(prefix) >= 3 && bytes.Equal(prefix[:3], []byte{0xef, 0xbb, 0xbf}) {
 		prefix = prefix[3:]
 	}
-	for len(prefix) > 0 {
+	if len(prefix) == 0 {
+		return sseInconclusive
+	}
+	for {
 		lineEnd := bytes.IndexByte(prefix, '\n')
 		if lineEnd < 0 {
-			return false
+			// No complete line yet; the caller keeps reading until the sniff
+			// budget is spent.
+			return sseInconclusive
 		}
 		line := bytes.TrimSuffix(prefix[:lineEnd], []byte{'\r'})
 		if bytes.HasPrefix(line, []byte("event:")) || bytes.HasPrefix(line, []byte("data:")) {
-			return true
+			return sseDetected
 		}
 		if len(line) == 0 || line[0] != ':' {
-			return false
+			return sseNotSSE
 		}
 		prefix = prefix[lineEnd+1:]
+		if len(prefix) == 0 {
+			// Only comments so far; the next complete line decides.
+			return sseInconclusive
+		}
 	}
-	return false
 }
 
 func (r bufferedReadCloser) Close() error { return r.closer.Close() }
@@ -1588,6 +1885,33 @@ func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 // data before Tiller commits anything to the client. This preserves the
 // no-splice rule while allowing a different virtual target after a pre-output
 // failure.
+// nonStreamBufferGate bounds how many non-streaming upstream responses may be
+// buffered at once, process-wide. The product of this gate and
+// maxUpstreamNonStreamBytes is the worst-case outbound buffer budget:
+// 32 x 16 MiB = 512 MiB (docs/pre_saas_release_review.md TR-002). Plan
+// concurrency bounds each account, but plans are per-account data, so a global
+// gate is the only aggregate bound. Streaming responses take the 1-byte-peek
+// path and are never gated. The slot is held until the buffered body is closed
+// (relay finished), closing the same window: release at read completion would
+// let slow-client relays hold unbounded steady-state buffers past the gate.
+var nonStreamBufferGate = make(chan struct{}, 32)
+
+// bufferedGateBody is a fully buffered response body that returns its
+// nonStreamBufferGate slot on Close. Close is safe to call once; the body is
+// either consumed by the relay (closed by the deferred resp.Body.Close()) or
+// closed on every failure path after buffering succeeded.
+type bufferedGateBody struct {
+	io.Reader
+	closer  io.Closer
+	release func()
+	once    sync.Once
+}
+
+func (b *bufferedGateBody) Close() error {
+	b.once.Do(b.release)
+	return b.closer.Close()
+}
+
 func preflightResponseLimit(resp *http.Response, limit int64) error {
 	if isStreamingResponse(resp) {
 		first := make([]byte, 1)
@@ -1598,19 +1922,30 @@ func preflightResponseLimit(resp *http.Response, limit int64) error {
 		resp.Body = bufferedReadCloser{Reader: io.MultiReader(bytes.NewReader(first[:n]), resp.Body), closer: resp.Body}
 		return nil
 	}
-	// Fail fast on a declared over-limit body without buffering up to 64MiB
+	// Fail fast on a declared over-limit body without buffering up to the cap
 	// first. Unknown-length bodies still fall through to the bounded read.
 	if resp.ContentLength > limit {
 		return errUpstreamResponseTooLarge
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(body)) > limit {
+	// A full body is read into memory before any client byte is committed, so
+	// the aggregate of concurrent non-streaming responses must stay bounded.
+	// Non-blocking admission: under saturation this attempt fails like any
+	// upstream read error and the fallback chain (or the client) proceeds.
+	select {
+	case nonStreamBufferGate <- struct{}{}:
+	default:
 		return errUpstreamResponseTooLarge
 	}
-	resp.Body = bufferedReadCloser{Reader: bytes.NewReader(body), closer: resp.Body}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil || int64(len(body)) > limit {
+		<-nonStreamBufferGate
+		if err == nil {
+			err = errUpstreamResponseTooLarge
+		}
+		return err
+	}
+	underlying := resp.Body
+	resp.Body = &bufferedGateBody{Reader: bytes.NewReader(body), closer: underlying, release: func() { <-nonStreamBufferGate }}
 	return nil
 }
 

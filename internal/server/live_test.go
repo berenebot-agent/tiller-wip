@@ -169,8 +169,11 @@ func TestLiveBroadcastFanout(t *testing.T) {
 	h := api.server.liveHub
 
 	acct := database.LocalAccountID
-	ch1 := h.subscribe(acct)
-	ch2 := h.subscribe(acct)
+	ch1, ok1 := h.subscribe(acct)
+	ch2, ok2 := h.subscribe(acct)
+	if !ok1 || !ok2 {
+		t.Fatal("expected both subscriptions to be admitted")
+	}
 	defer h.unsubscribe(acct, ch1)
 	defer h.unsubscribe(acct, ch2)
 
@@ -198,7 +201,10 @@ func TestLiveOutcomeIsDroppedWithoutSubscribers(t *testing.T) {
 	default:
 	}
 
-	ch := h.subscribe(database.LocalAccountID)
+	ch, admitted := h.subscribe(database.LocalAccountID)
+	if !admitted {
+		t.Fatal("expected first subscription to be admitted")
+	}
 	defer h.unsubscribe(database.LocalAccountID, ch)
 	h.emitOutcome(database.LocalAccountID, map[string]lastOutcome{"pm": {IsSuccess: true}})
 	select {

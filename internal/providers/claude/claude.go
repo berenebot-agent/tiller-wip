@@ -20,6 +20,14 @@ const (
 	BetaHeader     = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
 )
 
+// RedirectCallbackSupported reports whether the provider returns the
+// authorization code as a browser redirect the server can observe. Claude's
+// flow is designed for manual copy (the code is shown to the user, possibly as
+// a code#state fragment), and a URL fragment is never sent to the server, so
+// hosted deployments keep paste-back for claude-subscription. This is a
+// provider-scoped compatibility fact, not a model-ID guess.
+const RedirectCallbackSupported = false
+
 var Scopes = []string{"org:create_api_key", "user:profile", "user:inference"}
 
 func AuthorizationURL(redirectURI, state, challenge string) (string, error) {

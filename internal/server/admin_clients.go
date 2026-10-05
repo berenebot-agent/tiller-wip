@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
@@ -177,6 +178,14 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clients.Invalidate(clientID)
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "client_key.created",
+		TargetType: "client_key",
+		TargetID:   clientID,
+		Metadata:   map[string]string{"name": input.Name, "type": input.Type},
+	})
+	// The plaintext secret is never recorded; the webhook notification exists
+	// for that event and carries only the name and type.
 	writeJSON(w, 201, map[string]any{"id": clientID, "name": input.Name, "type": input.Type, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. It cannot be displayed again."})
 	s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyCreated, fmt.Sprintf("Client: %s\nType: %s", input.Name, input.Type))
 }
@@ -274,7 +283,11 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		targetType, targetID = *input.SingleTargetType, *input.SingleTargetID
 	}
 	bindingSupplied := input.SingleModelName != nil || input.SingleTargetID != nil
-	writeBinding := false
+	// Only a request that actually supplied binding fields writes the binding.
+	// Previously any PATCH on a Single key rewrote it from values merged out of
+	// an earlier read, which let a metadata-only update silently revert a
+	// concurrent route change.
+	writeBinding := bindingSupplied
 	if keyType == "single" || bindingSupplied {
 		if !validClientModelName(modelName) {
 			adminError(w, 400, "invalid_model_name", "Client-facing model names must use 1-255 model-safe characters.")
@@ -284,21 +297,28 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 409, "breaking_change_confirmation_required", "Changing the client-facing model name may require client reconfiguration. Confirm the breaking change.")
 			return
 		}
-		writeBinding = true
 	}
 	err = sc.UpdateClientKey(r.Context(), store.UpdateClientKeyInput{
-		ID:             clientID,
-		Name:           name,
-		Description:    description,
-		Group:          keyGroup,
-		Type:           keyType,
-		Enabled:        enabled,
-		LoggingEnabled: loggingEnabled,
-		RetentionDays:  retentionDays,
-		WriteBinding:   writeBinding,
-		ModelName:      modelName,
-		TargetType:     targetType,
-		TargetID:       targetID,
+		ID:            clientID,
+		Name:          name,
+		NameSet:       input.Name != nil,
+		Description:   description,
+		DescSet:       input.Description != nil,
+		Group:         keyGroup,
+		GroupSet:      input.Group != nil,
+		Type:          keyType,
+		TypeSet:       input.Type != nil,
+		Enabled:       enabled,
+		EnabledSet:    input.Enabled != nil,
+		Logging:       loggingEnabled,
+		LoggingSet:    input.LoggingEnabled != nil,
+		Retention:     retentionDays,
+		RetentionSet:  input.RetentionDays != nil,
+		BindingSet:    writeBinding,
+		BindingExists: bindFound,
+		ModelName:     modelName,
+		TargetType:    targetType,
+		TargetID:      targetID,
 	})
 	if err != nil {
 		switch {
@@ -314,6 +334,40 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clients.Invalidate(clientID)
+	changed := make([]string, 0, 6)
+	if input.Name != nil {
+		changed = append(changed, "name")
+	}
+	if input.Description != nil {
+		changed = append(changed, "description")
+	}
+	if input.Group != nil {
+		changed = append(changed, "group")
+	}
+	if input.Enabled != nil {
+		changed = append(changed, "enabled")
+	}
+	if input.LoggingEnabled != nil {
+		changed = append(changed, "logging_enabled")
+	}
+	if input.RetentionDays != nil {
+		changed = append(changed, "retention_days")
+	}
+	if input.Type != nil {
+		changed = append(changed, "type")
+	}
+	if input.SingleModelName != nil {
+		changed = append(changed, "single_model_name")
+	}
+	if input.SingleTargetType != nil {
+		changed = append(changed, "single_target")
+	}
+	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+		Event:      "client_key.updated",
+		TargetType: "client_key",
+		TargetID:   clientID,
+		Metadata:   map[string]string{"fields": strings.Join(changed, ",")},
+	})
 	w.WriteHeader(204)
 }
 
@@ -334,6 +388,11 @@ func (s *Server) rotateClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clients.Invalidate(clientID)
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "client_key.rotated",
+		TargetType: "client_key",
+		TargetID:   clientID,
+	})
 	writeJSON(w, 200, map[string]any{"id": clientID, "secret": generated.Plaintext, "fingerprint": generated.Fingerprint, "warning": "Copy this key now. The previous key is already invalid and this one cannot be displayed again."})
 }
 
@@ -365,6 +424,12 @@ func (s *Server) deleteClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clients.Invalidate(clientID)
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "client_key.deleted",
+		TargetType: "client_key",
+		TargetID:   clientID,
+		Metadata:   map[string]string{"name": name},
+	})
 	w.WriteHeader(204)
 	if name != "" {
 		s.notifyAdminEvent(s.scope(r).AccountID(), eventClientKeyDeleted, fmt.Sprintf("Client: %s", name))
@@ -460,5 +525,11 @@ func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.clients.Invalidate(clientID)
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "client_key.permissions_updated",
+		TargetType: "client_key",
+		TargetID:   clientID,
+		Metadata:   map[string]string{"defaults": strconv.Itoa(len(defaults)), "permissions": strconv.Itoa(len(permissions))},
+	})
 	w.WriteHeader(204)
 }

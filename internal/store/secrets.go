@@ -57,8 +57,16 @@ func secretSettingKeys() []string {
 	return []string{SettingNotificationsAuthHeader}
 }
 
+// platformSecretSettingKeys returns the keys of platformSecretSettings so the
+// encrypt/decrypt map and the list used by migration/rotation cannot drift. The
+// result is sorted for deterministic SQL argument order.
 func platformSecretSettingKeys() []string {
-	return []string{PlatformSettingMailResendAPIKey, PlatformSettingMailBrevoAPIKey, PlatformSettingMailSMTPPassword}
+	keys := make([]string, 0, len(platformSecretSettings))
+	for key := range platformSecretSettings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // secretAAD builds the associated data binding a secret to its account, record

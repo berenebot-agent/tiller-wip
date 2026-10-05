@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -385,6 +386,67 @@ func TestApplyReasoningSelector_NoSelectorPreservesBytes(t *testing.T) {
 	result := applyReasoningSelector(body, reasoningSelector{}, providers.ProtocolChat, &providers.ReasoningCapabilities{})
 	if string(result) != string(body) {
 		t.Fatalf("body changed without a selector: got %q, want %q", result, body)
+	}
+}
+
+// TestTranslatePlainRequestNeverRejectsOrInventsReasoning covers the
+// translated-target path for a client that supplies no reasoning control. A
+// plain request across any protocol pair must translate cleanly (no
+// unsupported_feature) and must not gain an invented reasoning selector; the
+// target's provider default applies.
+func TestTranslatePlainRequestNeverRejectsOrInventsReasoning(t *testing.T) {
+	bodies := map[providers.Protocol][]byte{
+		providers.ProtocolChat:      []byte(`{"model":"client-x","messages":[{"role":"user","content":"hi"}]}`),
+		providers.ProtocolResponses: []byte(`{"model":"client-x","input":"hi"}`),
+		providers.ProtocolMessages:  []byte(`{"model":"client-x","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`),
+	}
+	protocols := []providers.Protocol{providers.ProtocolChat, providers.ProtocolResponses, providers.ProtocolMessages}
+	for _, from := range protocols {
+		for _, to := range protocols {
+			if from == to {
+				continue
+			}
+			t.Run(string(from)+"->"+string(to), func(t *testing.T) {
+				body := bodies[from]
+				translated, err := translateRequest(body, from, to, "upstream-model")
+				if err != nil {
+					t.Fatalf("plain %s->%s request was rejected: %v", from, to, err)
+				}
+				for _, key := range []string{"reasoning", "reasoning_effort", "thinking", "reasoning_details"} {
+					if containsString(translated, `"`+key+`"`) {
+						t.Fatalf("plain translation invented %q: %s", key, translated)
+					}
+				}
+				// The caller re-applies the (absent) canonical selector; it must
+				// be a no-op rather than a rejection or an injection.
+				selector := extractReasoningSelector(body, from)
+				if selector.Present {
+					t.Fatalf("plain request extracted a selector: %+v", selector)
+				}
+				mapped := applyReasoningSelector(translated, selector, to, &providers.ReasoningCapabilities{
+					Options:   []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "high"}}},
+					Mandatory: boolPtr(true),
+				})
+				if string(mapped) != string(translated) {
+					t.Fatalf("absent selector changed the translated body: got %s, want %s", mapped, translated)
+				}
+			})
+		}
+	}
+}
+
+// TestTranslateResponsesPlainStatefulFieldStillRejects documents the boundary
+// of the reasoning fix: rejection on the translated path is limited to
+// genuinely unrepresentable Responses state, never to a missing reasoning
+// selector.
+func TestTranslateResponsesPlainStatefulFieldStillRejects(t *testing.T) {
+	for _, field := range []string{"conversation", "previous_response_id", "store", "background"} {
+		body := []byte(`{"model":"client-x","input":"hi","` + field + `":"value"}`)
+		_, err := translateRequest(body, providers.ProtocolResponses, providers.ProtocolChat, "upstream-model")
+		var unsupported unsupportedFeature
+		if !errors.As(err, &unsupported) {
+			t.Fatalf("%s: expected unsupportedFeature, got %v", field, err)
+		}
 	}
 }
 

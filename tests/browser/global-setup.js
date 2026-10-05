@@ -1,6 +1,11 @@
 // global-setup.js — authenticate once per Playwright process and save the
 // resulting cookie state to a fixed path. Each shard runs in its own container
 // (see run.sh), so /tmp/tiller-admin-storage.json is isolated per shard.
+//
+// The first-run lane starts against a credential-free router and performs its
+// own setup claim, so global setup writes an empty storage state instead of
+// logging in (TILLER_BROWSER_FIRST_RUN=1).
+const fs = require('fs');
 const { request } = require('@playwright/test');
 
 const STORAGE_PATH = '/tmp/tiller-admin-storage.json';
@@ -9,6 +14,11 @@ module.exports = async function globalSetup() {
   const baseUrl = process.env.TILLER_BROWSER_BASE_URL || 'http://127.0.0.1:18080';
   const username = process.env.TILLER_BROWSER_ADMIN_USERNAME || 'admin';
   const password = process.env.TILLER_BROWSER_ADMIN_PASSWORD || 'browser-test-password';
+
+  if (process.env.TILLER_BROWSER_FIRST_RUN === '1') {
+    fs.writeFileSync(STORAGE_PATH, JSON.stringify({ cookies: [], origins: [] }));
+    return;
+  }
 
   const ctx = await request.newContext({ baseURL: baseUrl });
   try {

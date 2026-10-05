@@ -53,7 +53,8 @@ func TestRequestClientIPTrustBoundary(t *testing.T) {
 		{name: "trust disabled ignores headers", remote: "172.18.0.4:8080", forwarded: "198.51.100.7", realIP: "198.51.100.7", trusted: netip.Prefix{}, want: "172.18.0.4"},
 		{name: "untrusted peer ignores fake XFF", remote: "192.0.2.8:8080", forwarded: "198.51.100.7", trusted: trusted, want: "192.0.2.8"},
 		{name: "untrusted peer ignores fake X-Real-IP", remote: "192.0.2.8:8080", realIP: "198.51.100.7", trusted: trusted, want: "192.0.2.8"},
-		{name: "trusted proxy prefers X-Real-IP", remote: "172.18.0.4:8080", realIP: "198.51.100.7", forwarded: "203.0.113.55", trusted: trusted, want: "198.51.100.7"},
+		{name: "trusted proxy IGNORES X-Real-IP in favour of the XFF walk", remote: "172.18.0.4:8080", realIP: "198.51.100.7", forwarded: "203.0.113.55", trusted: trusted, want: "203.0.113.55"},
+		{name: "spoofed X-Real-IP alone never becomes the client address", remote: "172.18.0.4:8080", realIP: "203.0.113.7", trusted: trusted, want: "172.18.0.4"},
 		{name: "trusted proxy ignores malicious leftmost XFF", remote: "172.18.0.4:8080", forwarded: "1.2.3.4, 203.0.113.55", trusted: trusted, want: "203.0.113.55"},
 		{name: "trusted chain walks right to left", remote: "172.18.0.4:8080", forwarded: "198.51.100.7, 172.18.0.9, 172.18.0.10", trusted: trusted, want: "198.51.100.7"},
 		{name: "malformed XFF falls back direct", remote: "172.18.0.4:8080", forwarded: "198.51.100.7, not-an-ip", trusted: trusted, want: "172.18.0.4"},
@@ -109,6 +110,27 @@ func TestEveryAdministrativeRouteRequiresAuthentication(t *testing.T) {
 				t.Fatalf("status = %d, want 401", response.Code)
 			}
 		})
+	}
+}
+
+func TestPlatformStatsRequireAuthentication(t *testing.T) {
+	app, _ := newSecurityTestServer(t, config.Config{
+		Mode: config.ModeHosted, TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
+		DataDir: t.TempDir(), ListenAddr: ":8080", PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/platform/stats", nil)
+	response := httptest.NewRecorder()
+	app.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated platform stats status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPlatformStatsRequirePlatformAuthentication(t *testing.T) {
+	_, userAPI, _ := hostedServerHarness(t, false)
+	status, payload, _ := userAPI.request(http.MethodGet, "/api/platform/stats", nil)
+	if status != http.StatusUnauthorized {
+		t.Fatalf("customer-authenticated platform stats status = %d, payload %v, want %d", status, payload, http.StatusUnauthorized)
 	}
 }
 

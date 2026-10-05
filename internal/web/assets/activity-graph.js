@@ -5,11 +5,14 @@
 // model, labelled "provider/model".
 //
 // Legs are cubic Béziers, not straight lines. Edges that share an endpoint get
-// a symmetric vertical fan so several resolutions from one key stay separate.
-// Active legs are drawn in a front layer; idle legs absorb a best-effort bow
-// to route around them, and a bounded barycenter pass reorders lanes only when
-// independent chains are inverted. An orphan leg is never rendered: a route
-// requires a client ingress and a target requires a fed route or direct client.
+// a symmetric fan so several resolutions from one key stay separate; the fan is
+// applied perpendicular to each leg's own chord, because legs from one node
+// have different horizontal spans and a fixed vertical offset makes the short
+// leg dive early and graze its longer sibling. Active legs are drawn in a front
+// layer; idle legs absorb a best-effort bow to route around them, and a bounded
+// barycenter pass reorders lanes only when independent chains are inverted. An
+// orphan leg is never rendered: a route requires a client ingress and a target
+// requires a fed route or direct client.
 //
 // Animation is a single activity signal: packets flow client → target while an
 // `activity` delta reports the leg hot. The target roundel (node ring) owns the
@@ -42,8 +45,11 @@ const FADE_MS = 30000;
 const SNAPSHOT_EVICT_AFTER = 2;
 
 // Fan/bow geometry for curved legs. Shared-endpoint legs get symmetric
-// vertical offsets; idle legs may additionally bow to avoid active legs.
-const FAN_STEP = 16;
+// offsets; idle legs may additionally bow to avoid active legs. A step of 28
+// (was 16) is what keeps a node's own legs apart once three or more share it:
+// the offset is applied perpendicular to the chord, so the visible mid-span gap
+// is close to the step rather than compressed by the control-point geometry.
+const FAN_STEP = 28;
 const FAN_MAX = 56;
 const ROUTE_BOWS = [0, 22, -22, 44, -44];
 const ROUTE_SAMPLES = 12;
@@ -157,14 +163,26 @@ function setNodeState(node, state) {
 // ---------------------------------------------------------------------------
 
 // controlPoints builds the cubic control points for an edge at a given bow.
-// Both control points share the horizontal midpoint, so a leg with no fan/bow
-// is a visually straight (or very nearly straight) curve.
+// The fan/bow offset is applied PERPENDICULAR to the leg's own chord, not as a
+// fixed vertical offset at the span midpoint. Legs sharing a node routinely
+// have very different horizontal spans (a target can sit anywhere in the right
+// lane), and a vertical offset then produces differently-shaped curves: the
+// short leg dives early and grazes the longer one, which is what collapsed
+// leg separation to sub-pixel at 6+ targets. A perpendicular offset of the
+// chord is self-similar, so legs fanned in angular order stay in angular order
+// and the mid-span gap stays close to the requested step.
 function controlPoints(e, bow) {
-  const dx = (e.b.x - e.a.x) * 0.5;
+  const cx = e.b.x - e.a.x;
+  const cy = e.b.y - e.a.y;
+  const len = Math.hypot(cx, cy) || 1;
+  const nx = -cy / len;
+  const ny = cx / len;
+  const fA = (e.fanA || 0) + bow;
+  const fB = (e.fanB || 0) + bow;
   return [
     { x: e.a.x, y: e.a.y },
-    { x: e.a.x + dx, y: e.a.y + (e.fanA || 0) + bow },
-    { x: e.b.x - dx, y: e.b.y + (e.fanB || 0) + bow },
+    { x: e.a.x + cx / 3 + nx * fA, y: e.a.y + cy / 3 + ny * fA },
+    { x: e.a.x + (cx * 2) / 3 + nx * fB, y: e.a.y + (cy * 2) / 3 + ny * fB },
     { x: e.b.x, y: e.b.y },
   ];
 }

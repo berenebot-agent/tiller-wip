@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 var (
@@ -135,11 +136,16 @@ func (s *Scope) GetProviderEditable(ctx context.Context, id string) (ProviderEdi
 
 // UpdateProviderInput is the fully merged provider field set.
 type UpdateProviderInput struct {
-	ID        string
-	Name      string
-	BaseURL   string
-	Enabled   bool
-	Protocols string
+	ID      string
+	Name    string
+	BaseURL string
+	Enabled bool
+	// EnabledSet reports whether the caller explicitly supplied an enabled
+	// value. When false the UPDATE does not touch the enabled column, so a
+	// concurrent PATCH that does not mention enabled cannot silently re-enable a
+	// provider disabled by another request.
+	EnabledSet bool
+	Protocols  string
 }
 
 func (s *Scope) UpdateProvider(ctx context.Context, in UpdateProviderInput) error {
@@ -147,7 +153,16 @@ func (s *Scope) UpdateProvider(ctx context.Context, in UpdateProviderInput) erro
 		if _, err := tx.q.ExecContext(ctx, `UPDATE namespaces SET name=? WHERE entity_id=? AND kind='real' AND account_id=?`, in.Name, in.ID, tx.accountID); err != nil {
 			return err
 		}
-		res, err := tx.q.ExecContext(ctx, `UPDATE providers SET name=?,base_url=?,enabled=?,protocols=?,updated_at=? WHERE id=? AND account_id=?`, in.Name, in.BaseURL, boolInt(in.Enabled), in.Protocols, now(), in.ID, tx.accountID)
+		// updated_at is always written so a no-op update still affects one row
+		// and the RowsAffected()==0 → not-found signal stays correct.
+		set := "name=?,base_url=?,protocols=?,updated_at=?"
+		args := []any{in.Name, in.BaseURL, in.Protocols, now()}
+		if in.EnabledSet {
+			set += ",enabled=?"
+			args = append(args, boolInt(in.Enabled))
+		}
+		args = append(args, in.ID, tx.accountID)
+		res, err := tx.q.ExecContext(ctx, `UPDATE providers SET `+set+` WHERE id=? AND account_id=?`, args...)
 		if err != nil {
 			return err
 		}
@@ -216,6 +231,48 @@ func (s *Scope) LoadProvider(ctx context.Context, id string) (ProviderLoad, erro
 	}
 	v.Enabled = enabled != 0
 	return v, nil
+}
+
+// QuotaProviderRef identifies an enabled provider whose type has a
+// subscription/quota endpoint. It carries the base URL needed to build the
+// endpoint. It is platform-level (spans accounts) because quota polling is
+// scheduled globally; each poll then runs with the provider's own account
+// scope.
+type QuotaProviderRef struct {
+	AccountID  string
+	ProviderID string
+	Name       string
+	Type       string
+	BaseURL    string
+}
+
+// QuotaProviders lists enabled providers of the given types across every
+// account. The caller supplies the quota-capable type list so the store does
+// not embed provider knowledge.
+func (s *Store) QuotaProviders(ctx context.Context, types []string) ([]QuotaProviderRef, error) {
+	if len(types) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(types))
+	args := make([]any, 0, len(types))
+	for i, t := range types {
+		placeholders[i] = "?"
+		args = append(args, t)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT account_id,id,name,type,coalesce(base_url,'') FROM providers WHERE enabled=1 AND type IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []QuotaProviderRef
+	for rows.Next() {
+		var ref QuotaProviderRef
+		if err := rows.Scan(&ref.AccountID, &ref.ProviderID, &ref.Name, &ref.Type, &ref.BaseURL); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
 }
 
 // ProviderRef identifies a provider due for a scheduled refresh.

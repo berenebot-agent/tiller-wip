@@ -1,5 +1,4 @@
 data/*
-!data/.gitkeep
 tests/browser/node_modules/
 tests/browser/test-results/
 tests/browser/playwright-report/
@@ -9,10 +8,7 @@ tests/browser/playwright-report/
 # Strip the homelab-specific deployment context (URLs, RAM tuning, wrapper
 # internals) before any external publish.
 AGENTS.md
-# docs/ is local planning material; keep the whole tree out of git.
-docs/
 tests/hermes_test/
-docs/todo_enc_keys.md
 tests/logs/
 # Local build artifacts and data backups — never commit. Zip archives here are
 # release bundles or ./data backups (large, and backups contain database

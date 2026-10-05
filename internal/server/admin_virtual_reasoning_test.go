@@ -30,6 +30,35 @@ func TestDecodeReasoningCapabilitiesHandlesStoredJSON(t *testing.T) {
 	}
 }
 
+func TestAddReasoningToCataloguePreservesTillerMetadata(t *testing.T) {
+	entry := map[string]any{}
+	caps := &providers.ReasoningCapabilities{
+		Options:        []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"high"}}, {Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionBudgetTokens}},
+		DefaultEffort:  "high",
+		Mandatory:      boolPtr(true),
+		DefaultEnabled: boolPtr(true),
+		Parameters:     []string{"reasoning_effort"},
+	}
+	addReasoningToCatalogueEntry(entry, caps, false)
+	reasoning, ok := entry["reasoning"].(map[string]any)
+	if !ok {
+		t.Fatalf("reasoning object missing: %#v", entry)
+	}
+	if reasoning["mandatory"] != true || reasoning["default_effort"] != "high" || reasoning["default_enabled"] != true {
+		t.Fatalf("reasoning defaults/flags = %#v", reasoning)
+	}
+	if reasoning["supports_max_tokens"] != true || !equalStrings(reasoning["supported_parameters"].([]string), []string{"reasoning_effort"}) {
+		t.Fatalf("reasoning parameter metadata = %#v", reasoning)
+	}
+	if !equalStrings(reasoning["supported_efforts"].([]string), []string{"high"}) {
+		t.Fatalf("supported_efforts = %#v", reasoning["supported_efforts"])
+	}
+	options, ok := entry["reasoning_options"].([]map[string]any)
+	if !ok || len(options) != 3 || options[1]["type"] != "toggle" || options[2]["type"] != "budget_tokens" {
+		t.Fatalf("reasoning options = %#v", entry["reasoning_options"])
+	}
+}
+
 func nullableReasoningTestString(raw string) (v sql.NullString) {
 	if raw != "" {
 		v.Valid = true
@@ -78,8 +107,27 @@ func TestMergeReasoningCapabilitiesBuildsStableSuperset(t *testing.T) {
 	if got, want := merged.Parameters, []string{"reasoning", "reasoning_effort", "include_reasoning"}; !equalStrings(got, want) {
 		t.Fatalf("parameters = %v, want %v", got, want)
 	}
-	if merged.DefaultEffort != "low" || merged.Mandatory == nil || !*merged.Mandatory || merged.DefaultEnabled == nil || !*merged.DefaultEnabled {
+	// Mandatory is a conjunction, not a superset: one non-mandatory target is
+	// enough to make the aggregate non-mandatory.
+	if merged.DefaultEffort != "low" || merged.Mandatory == nil || *merged.Mandatory || merged.DefaultEnabled == nil || !*merged.DefaultEnabled {
 		t.Fatalf("defaults/booleans = %#v", merged)
+	}
+}
+
+func TestMergeReasoningCapabilitiesMandatoryRequiresEveryTarget(t *testing.T) {
+	mandatory := boolPtr(true)
+	notMandatory := boolPtr(false)
+	mixed := mergeReasoningCapabilities(&providers.ReasoningCapabilities{Mandatory: mandatory}, &providers.ReasoningCapabilities{Mandatory: notMandatory})
+	if mixed.Mandatory == nil || *mixed.Mandatory {
+		t.Fatalf("mixed mandatory targets must not make the virtual model mandatory: %+v", mixed)
+	}
+	allMandatory := mergeReasoningCapabilities(&providers.ReasoningCapabilities{Mandatory: mandatory}, &providers.ReasoningCapabilities{Mandatory: boolPtr(true)})
+	if allMandatory.Mandatory == nil || !*allMandatory.Mandatory {
+		t.Fatalf("all-mandatory targets must preserve mandatory: %+v", allMandatory)
+	}
+	withUnknown := mergeReasoningCapabilities(&providers.ReasoningCapabilities{Mandatory: mandatory}, &providers.ReasoningCapabilities{})
+	if withUnknown.Mandatory != nil {
+		t.Fatalf("an unknown target must keep aggregate mandatory unknown: %+v", withUnknown)
 	}
 }
 
@@ -97,6 +145,40 @@ func TestMergeReasoningCapabilitiesHandlesNilAndFiniteEffortUnion(t *testing.T) 
 	)
 	if merged == nil || len(merged.Options) != 1 || !equalStrings(merged.Options[0].Values, []string{"minimal", "low", "medium", "high"}) {
 		t.Fatalf("finite effort union = %#v", merged)
+	}
+}
+
+func TestMergeReasoningCapabilitiesMergesClientEffortsSeparately(t *testing.T) {
+	codexEfforts := []string{"low", "high", "ultra"}
+	merged := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{
+			Options:       []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high", "max", "ultra"}}},
+			ClientEfforts: &codexEfforts,
+		},
+		&providers.ReasoningCapabilities{
+			Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"medium", "max"}}},
+		},
+	)
+	if merged == nil {
+		t.Fatal("merged capabilities = nil")
+	}
+	if got, want := merged.Options[0].Values, []string{"low", "medium", "high", "max", "ultra"}; !equalStrings(got, want) {
+		t.Fatalf("wire effort union = %v, want %v", got, want)
+	}
+	if merged.ClientEfforts == nil || !equalStrings(*merged.ClientEfforts, []string{"low", "medium", "high", "max", "ultra"}) {
+		t.Fatalf("client effort union = %v", merged.ClientEfforts)
+	}
+
+	codexOnlyEfforts := []string{"low", "ultra"}
+	codexOnly := mergeReasoningCapabilities(
+		&providers.ReasoningCapabilities{
+			Options:       []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "max", "ultra"}}},
+			ClientEfforts: &codexOnlyEfforts,
+		},
+		&providers.ReasoningCapabilities{},
+	)
+	if codexOnly.ClientEfforts == nil || !equalStrings(*codexOnly.ClientEfforts, []string{"low", "ultra"}) {
+		t.Fatalf("single-target client efforts = %v", codexOnly.ClientEfforts)
 	}
 }
 

@@ -7,7 +7,8 @@ name: tiller-router
 
 services:
   tiller-router:
-    container_name: tiller-router
+    # Override per deployment so standalone and hosted instances can coexist.
+    container_name: ${TILLER_CONTAINER_NAME:-tiller-router}
     build:
       context: .
       args:
@@ -16,11 +17,26 @@ services:
 
     restart: unless-stopped
 
+    # Persist logs in the host's journal so they remain available after Compose
+    # recreates this container. Query with: journalctl -t tiller-router.
+    logging:
+      driver: journald
+      options:
+        tag: tiller-router
+
+    # The app allows up to 15s to drain the HTTP server (which now also
+    # terminates live SSE streams) and flush the Activity writer. Docker's
+    # default stop timeout (10s) is shorter than that budget, so give the
+    # container enough time for a graceful SIGTERM-triggered shutdown.
+    stop_grace_period: 30s
+
     environment:
-      # Local operator credential. TILLER_USERNAME / TILLER_PASSWORD are the
-      # current names. The legacy TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD
-      # are still honoured with a startup deprecation warning; the new names
-      # win if both are set. See .env.example.
+      # Local operator credential (optional). Omit BOTH for first-run setup in
+      # the browser; set BOTH to skip it. Setting only one is a startup error.
+      # TILLER_USERNAME / TILLER_PASSWORD are the current names. The legacy
+      # TILLER_ADMIN_USERNAME / TILLER_ADMIN_PASSWORD are still honoured with a
+      # startup deprecation warning; the new names win if both are set.
+      # See .env.example.
       TILLER_USERNAME: ${TILLER_USERNAME:-}
       TILLER_PASSWORD: ${TILLER_PASSWORD:-}
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:-}
@@ -30,6 +46,13 @@ services:
       TILLER_MODE: ${TILLER_MODE:-local}
       TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:-}
       TILLER_USER_SESSION_TTL: ${TILLER_USER_SESSION_TTL:-720h}
+
+      # Custom hosted landing page. Hosted mode only (ignored in local mode):
+      # serves <DataDir>/site/index.html and its sibling assets at "/" instead
+      # of the embedded SPA. Requires ./data/site/index.html at startup.
+      # Application asset names (app.js, live.js, *.css, media/) are reserved:
+      # a custom file at one of those paths is ignored and logged as a warning.
+      TILLER_CUSTOM_SITE_ENABLED: ${TILLER_CUSTOM_SITE_ENABLED:-false}
 
       # Force the admin session cookie's Secure attribute. Set to "true" when
       # serving the admin UI over HTTPS (behind a reverse proxy or with TLS at

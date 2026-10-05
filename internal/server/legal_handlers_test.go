@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
@@ -18,9 +19,9 @@ import (
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
-// legalTestServer builds a hosted Server with seeded embedded legal drafts and
-// returns the app plus a platform-authenticated API and an unauthenticated
-// client.
+// legalTestServer builds a hosted Server with the generated legal placeholders
+// seeded and returns the app plus a platform-authenticated API and an
+// unauthenticated client.
 func legalTestServer(t *testing.T) (*Server, *testAPI, *http.Client, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -58,10 +59,13 @@ func legalTestServer(t *testing.T) (*Server, *testAPI, *http.Client, string) {
 	return app, api, &http.Client{}, router.URL
 }
 
-func TestLegalDocPublicGetReturnsSeededDraft(t *testing.T) {
+// TestLegalDocPublicGetReturnsSeededPlaceholder proves a fresh hosted install
+// serves the generated placeholder rather than a 404 or anything that reads like
+// approved legal text.
+func TestLegalDocPublicGetReturnsSeededPlaceholder(t *testing.T) {
 	_, _, client, base := legalTestServer(t)
 
-	for _, slug := range []string{"terms", "privacy", "aup", "subprocessors", "security"} {
+	for _, slug := range []string{"terms", "privacy"} {
 		resp, err := client.Get(base + "/api/legal/" + slug)
 		if err != nil {
 			t.Fatal(err)
@@ -77,6 +81,12 @@ func TestLegalDocPublicGetReturnsSeededDraft(t *testing.T) {
 		body, _ := payload["body"].(string)
 		if body == "" {
 			t.Fatalf("legal doc %s has empty body", slug)
+		}
+		if !strings.Contains(body, "NOT PUBLISHED") {
+			t.Fatalf("legal doc %s did not serve the unpublished placeholder: %q", slug, body)
+		}
+		if !strings.Contains(body, "[") {
+			t.Fatalf("legal doc %s has no bracketed fill-in fields: %q", slug, body)
 		}
 		if _, leaked := payload["updated_by"]; leaked {
 			t.Fatalf("public legal doc leaked updated_by: %v", payload)
@@ -108,8 +118,8 @@ func TestPlatformLegalListAndPublish(t *testing.T) {
 		t.Fatalf("list legal: %d %v", status, list)
 	}
 	data, _ := list["data"].([]any)
-	if len(data) != len(legal.Documents()) {
-		t.Fatalf("platform legal list = %d docs, want %d", len(data), len(legal.Documents()))
+	if len(data) != len(legal.SeedDocuments()) {
+		t.Fatalf("platform legal list = %d docs, want %d", len(data), len(legal.SeedDocuments()))
 	}
 
 	status, payload, _ := api.request("PUT", "/api/platform/legal/terms", map[string]any{"title": "Terms of Service", "body": "Operator-approved terms body."})
@@ -147,17 +157,15 @@ func TestPlatformLegalListAndPublish(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("unknown publish slug status = %d, want 404", status)
 	}
-	// The signup notice is not a platform-editable document.
-	status, _, _ = api.request("PUT", "/api/platform/legal/signup-notice", map[string]any{"title": "x", "body": "y"})
-	if status != http.StatusNotFound {
-		t.Fatalf("publish to signup-notice status = %d, want 404", status)
-	}
 }
 
-func TestSeedLegalDocumentsDoesNotOverwriteOperatorEdit(t *testing.T) {
-	app, api, _, base := legalTestServer(t)
+// TestSeedLegalDocumentsDoesNotOverwriteOperatorPublish is the guarantee that
+// lets the router re-seed its placeholder on every boot: once an operator
+// publishes, a deploy must never replace that text.
+func TestSeedLegalDocumentsDoesNotOverwriteOperatorPublish(t *testing.T) {
+	app, api, client, base := legalTestServer(t)
 
-	status, _, _ := api.request("PUT", "/api/platform/legal/privacy", map[string]any{"title": "Privacy Policy", "body": "Operator-edited privacy."})
+	status, _, _ := api.request("PUT", "/api/platform/legal/privacy", map[string]any{"title": "Privacy Policy", "body": "Operator-published privacy."})
 	if status != http.StatusNoContent {
 		t.Fatalf("publish privacy: %d", status)
 	}
@@ -165,14 +173,17 @@ func TestSeedLegalDocumentsDoesNotOverwriteOperatorEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resp, err := http.Get(base + "/api/legal/privacy")
+	resp, err := client.Get(base + "/api/legal/privacy")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var payload map[string]any
 	decodeResponse(t, resp, &payload)
-	if payload["body"] != "Operator-edited privacy." {
-		t.Fatalf("startup seed overwrote operator edit: %v", payload["body"])
+	if payload["body"] != "Operator-published privacy." {
+		t.Fatalf("startup seed overwrote an operator publish: %v", payload["body"])
+	}
+	if _, leaked := payload["updated_by"]; leaked {
+		t.Fatalf("public legal doc leaked updated_by: %v", payload)
 	}
 }
 
