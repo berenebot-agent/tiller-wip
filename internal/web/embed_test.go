@@ -152,6 +152,108 @@ func TestHandlerWithSiteRequiresIndex(t *testing.T) {
 	}
 }
 
+func TestHandlerWithSiteConfinesFilesAndCanonicalizesRoutes(t *testing.T) {
+	parent := t.TempDir()
+	siteDir := filepath.Join(parent, "site")
+	if err := os.Mkdir(siteDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"index.html": "custom landing", "landing.css": "custom stylesheet",
+		"app.js": "shadowed bundle", "api/private.txt": "shadowed API",
+	} {
+		full := filepath.Join(siteDir, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(parent, "private.txt")
+	if err := os.WriteFile(outside, []byte("outside site secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{
+		"escape.txt": outside, "escape-dir": parent, "inside.css": "landing.css",
+	} {
+		if err := os.Symlink(target, filepath.Join(siteDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler, err := HandlerWithSite(siteDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{
+		"/escape.txt", "/escape-dir/private.txt", "/../private.txt", "/%2e%2e/private.txt",
+		"//app.js", "/./app.js", "/%2e/app.js", "//api/private.txt", "/./api/private.txt",
+	} {
+		t.Run(target, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, target, nil))
+			for _, forbidden := range []string{"outside site secret", "shadowed bundle", "shadowed API"} {
+				if strings.Contains(res.Body.String(), forbidden) {
+					t.Fatalf("served forbidden content %q", forbidden)
+				}
+			}
+			if strings.Contains(target, "app.js") && (res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "LiveStream")) {
+				t.Fatalf("canonical application asset not served: status=%d", res.Code)
+			}
+		})
+	}
+	for _, target := range []string{"/", "/index.html", "/inside.css"} {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, target, nil))
+		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "custom") {
+			t.Fatalf("allowed file %s: status=%d", target, res.Code)
+		}
+	}
+	// Replacing a previously valid entry page must not bypass confinement.
+	index := filepath.Join(siteDir, "index.html")
+	if err := os.Remove(index); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, index); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/", "/index.html"} {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, target, nil))
+		if res.Code != http.StatusNotFound || strings.Contains(res.Body.String(), "outside site secret") {
+			t.Fatalf("escaping index %s: status=%d", target, res.Code)
+		}
+	}
+	if _, err := HandlerWithSite(siteDir, nil); err == nil {
+		t.Fatal("escaping index symlink accepted at startup")
+	}
+}
+
+func TestHandlerWithSiteSupportsRangeAndHead(t *testing.T) {
+	siteDir := t.TempDir()
+	for _, name := range []string{"index.html", "landing.txt"} {
+		if err := os.WriteFile(filepath.Join(siteDir, name), []byte("abcdef"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler, err := HandlerWithSite(siteDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/landing.txt", nil)
+	request.Header.Set("Range", "bytes=1-3")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, request)
+	if res.Code != http.StatusPartialContent || res.Body.String() != "bcd" {
+		t.Fatalf("range response: status=%d body=%q", res.Code, res.Body.String())
+	}
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodHead, "/landing.txt", nil))
+	if res.Code != http.StatusOK || res.Body.Len() != 0 || res.Header().Get("Content-Length") != "6" {
+		t.Fatalf("HEAD response: status=%d headers=%v", res.Code, res.Header())
+	}
+}
+
 func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) {
 	handler := Handler()
 
