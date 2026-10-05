@@ -197,17 +197,41 @@ func (s *Store) authenticateOperatorByID(ctx context.Context, userID, password s
 	return u, nil
 }
 
-// UpdateLocalOperatorPassword replaces the local operator's stored password
-// hash, keeping the users row in sync when the environment credential changes at
-// boot. It is a no-op when no operator row exists.
-func (s *Store) UpdateLocalOperatorPassword(ctx context.Context, passwordHash string) error {
-	if passwordHash == "" {
+// SyncLocalOperatorCredentials reconciles an existing local operator users row
+// with the credential the environment or the first-run wizard currently holds.
+// Both the synthetic username/email and the stored password hash are updated in
+// one transaction, because AuthenticateLocalOperator binds them together: a
+// changed username with a stale synthetic email would reject the new username
+// before password verification ever ran. auth_generation is bumped only when
+// something actually changed, so a no-op boot does not churn sessions.
+//
+// It is a no-op when no operator row exists (the row is materialised later by
+// EnsureLocalOperator). A marked row that does not own LocalAccountID is
+// inconsistent and reported as ErrLocalOperatorExists rather than silently
+// rewritten.
+func (s *Store) SyncLocalOperatorCredentials(ctx context.Context, username, passwordHash string) error {
+	username = strings.TrimSpace(username)
+	if username == "" || passwordHash == "" {
 		return nil
 	}
 	userID, err := s.LocalOperatorUserID(ctx)
 	if err != nil || userID == "" {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE users SET password_hash=?,auth_generation=auth_generation+1,updated_at=? WHERE id=?`, passwordHash, formatTime(time.Now().UTC()), userID)
+	var owner, currentEmail, currentHash string
+	if err := s.db.QueryRowContext(ctx, `SELECT a.owner_user_id,u.email,u.password_hash FROM users u JOIN accounts a ON a.id=? WHERE u.id=?`, database.LocalAccountID, userID).Scan(&owner, &currentEmail, &currentHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrLocalOperatorExists
+		}
+		return err
+	}
+	if owner != userID {
+		return ErrLocalOperatorExists
+	}
+	email := LocalOperatorEmail(username)
+	if currentEmail == email && currentHash == passwordHash {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE users SET email=?,password_hash=?,auth_generation=auth_generation+1,updated_at=? WHERE id=?`, email, passwordHash, formatTime(time.Now().UTC()), userID)
 	return err
 }

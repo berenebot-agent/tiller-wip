@@ -313,6 +313,44 @@ func TestBootstrapHostedExistingDatabaseMigratesOnce(t *testing.T) {
 	}
 }
 
+// A database that already booted on the unified local operator model owns
+// LocalAccountID. Hosted bootstrap must convert that same user (preserving its
+// id, so passkeys survive) rather than inserting a second user that the
+// owner_user_id IS NULL gate would reject as a collision.
+func TestBootstrapHostedCustomerConvertsExistingLocalOperatorInPlace(t *testing.T) {
+	st, db := newTestStore(t)
+	ctx := context.Background()
+	operator, err := st.EnsureLocalOperator(ctx, "operator", "correct horse battery staple", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := st.BootstrapHostedCustomer(ctx, "owner@example.com", "correct horse battery staple", false)
+	if err != nil {
+		t.Fatalf("convert local operator: %v", err)
+	}
+	if outcome != HostedBootstrapMigrated {
+		t.Fatalf("outcome = %v, want HostedBootstrapMigrated", outcome)
+	}
+	var id, email, owner string
+	if err := db.QueryRow(`SELECT u.id,u.email,a.owner_user_id FROM users u JOIN accounts a ON a.id=?`, database.LocalAccountID).Scan(&id, &email, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if id != operator.ID {
+		t.Fatalf("converted user id = %q, want preserved id %q", id, operator.ID)
+	}
+	if email != "owner@example.com" || owner != operator.ID {
+		t.Fatalf("converted row = id=%q email=%q owner=%q", id, email, owner)
+	}
+	// The migrated credential must authenticate with hosted bare-password
+	// semantics, and no longer with the local username-bound fingerprint.
+	if _, err := st.AuthenticatePassword(ctx, "owner@example.com", "correct horse battery staple"); err != nil {
+		t.Fatalf("hosted password did not authenticate after conversion: %v", err)
+	}
+	if _, err := st.AuthenticateLocalOperator(ctx, "operator", "correct horse battery staple"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("local operator login still works after conversion: %v", err)
+	}
+}
+
 func TestBootstrapHostedInvalidCredentialsDoNotMutate(t *testing.T) {
 	st, db := newTestStore(t)
 	if _, err := st.BootstrapHostedCustomer(context.Background(), "not-an-email", "short", false); !errors.Is(err, ErrBootstrapInvalid) {

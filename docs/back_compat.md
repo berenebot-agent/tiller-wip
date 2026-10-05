@@ -54,11 +54,23 @@ query against the normalised shape.
 ### 4. One-time upgrade markers / guards (permanent gates, not recurring compat)
 - `platform_settings` keys: `hosted_bootstrap_complete`,
   `local_operator_user_id`, `admin_credential_hash`, `admin_username`.
-- `accounts.owner_user_id IS NULL` conditions in
-  `internal/identity/identity.go` (`BootstrapHostedCustomer`) and
+- `accounts.owner_user_id IS NULL` condition in
   `internal/identity/local_operator.go` (`EnsureLocalOperator`) — the one-shot
   "claim the local account" guard. Stays so an install predating hosted identity
   converts exactly once.
+- `internal/identity/identity.go` (`BootstrapHostedCustomer`) has **two**
+  one-shot subjects behind the `hosted_bootstrap_complete` marker: (1) a
+  pre-tenancy account with `owner_user_id IS NULL` is claimed by inserting a
+  user (legacy path), and (2) a unified local operator row
+  (`local_operator_user_id`) is **converted in place**, preserving `users.id`
+  so passkeys survive. The second branch is not a compat shim in a hot path —
+  it is the marker-guarded upgrade step for the local→hosted switch.
+- `internal/identity/local_operator.go` (`SyncLocalOperatorCredentials`) — the
+  boot-time reconciliation of the local operator row with the environment
+  credential. It is a **ONE-TIME UPGRADE GUARD** for installs whose operator row
+  predates a username change, not recurring compat in a request path: it is a
+  no-op when nothing changed and it bumps `auth_generation` only on a real
+  change.
 - The route rows' `route_status='legacy'` value: **no longer produced** by new
   code (logging now defaults an unclassified row to `'unresolved'`), and
   reclassified at boot by `003_legacy_route_unresolved`. The `activity.db`

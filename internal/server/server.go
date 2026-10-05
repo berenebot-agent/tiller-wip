@@ -395,9 +395,13 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			if _, err := identityStore.EnsureLocalOperator(context.Background(), username, "", hash); err != nil && !errors.Is(err, identity.ErrLocalOperatorExists) {
 				return nil, fmt.Errorf("local operator: %w", err)
 			} else if errors.Is(err, identity.ErrLocalOperatorExists) {
-				// The row already exists; keep its credential aligned with the
-				// boot-synced environment/stored credential.
-				if uerr := identityStore.UpdateLocalOperatorPassword(context.Background(), hash); uerr != nil {
+				// The row already exists; keep both its synthetic username/email
+				// and its credential hash aligned with the boot-synced
+				// environment/stored credential. Updating only the hash would
+				// leave the email bound to the old username, so a changed
+				// TILLER_USERNAME would reject the new username before the
+				// password was ever checked.
+				if uerr := identityStore.SyncLocalOperatorCredentials(context.Background(), username, hash); uerr != nil {
 					return nil, fmt.Errorf("local operator sync: %w", uerr)
 				}
 			}

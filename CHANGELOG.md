@@ -171,6 +171,28 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Local admin credential change no longer breaks login.** Changing
+  `TILLER_USERNAME` after the local operator row existed updated only the
+  password hash, leaving the synthetic email bound to the old username; the new
+  username was rejected before the password was checked, and the legacy
+  fallback could not re-materialise the row (`EnsureLocalOperator` returned
+  `ErrLocalOperatorExists`). The boot-time sync now updates the synthetic
+  username/email, the credential hash, and the auth generation together (a
+  no-op when nothing changed), so `TILLER_USERNAME`/`TILLER_PASSWORD` behave as
+  the documented seed/override/recovery path again. Regression: boot as A,
+  restart the same database as B/password B — B works, A does not, and A's
+  session is revoked.
+- **Local → hosted conversion no longer collides after a local boot.** A local
+  install that had materialised its operator `users` row owned `LocalAccountID`,
+  so hosted bootstrap's `owner_user_id IS NULL` claim failed with
+  `ErrBootstrapCollision` and startup aborted. Bootstrap now recognises the
+  local operator row and converts **that same user in place** — preserving
+  `users.id` (so registered passkeys survive), replacing the synthetic
+  `@local.invalid` email with the supplied hosted email, and re-hashing the
+  credential with hosted bare-password semantics. Regression: register a passkey
+  in local mode, reopen the database in hosted mode, then verify hosted password
+  login, preserved tenant data, passkey login under the same RP/origin, and an
+  idempotent hosted restart.
 - **Notification budget panic on first delivery (TR-004 follow-up).** The
   per-account hourly notification budget dereferenced a nil entry for an
   account's first delivery — and again after its entry aged out of the window —
