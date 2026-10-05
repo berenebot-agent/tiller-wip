@@ -102,7 +102,12 @@ func HandlerWithSite(siteDir string, logger *slog.Logger) (http.Handler, error) 
 	sub, _ := fs.Sub(files, "assets")
 	indexHTML, _ := fs.ReadFile(sub, "index.html")
 	if siteDir != "" {
-		info, err := os.Stat(filepath.Join(siteDir, "index.html"))
+		index, err := os.OpenInRoot(siteDir, "index.html")
+		if err != nil {
+			return nil, fmt.Errorf("custom site index: %w", err)
+		}
+		info, err := index.Stat()
+		index.Close()
 		if err != nil {
 			return nil, fmt.Errorf("custom site index: %w", err)
 		}
@@ -127,10 +132,25 @@ func HandlerWithSite(siteDir string, logger *slog.Logger) (http.Handler, error) 
 		logger.Warn("custom site asset is shadowed by a reserved application path and will not be served", "path", p)
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if siteDir != "" {
+			for _, segment := range strings.Split(r.URL.Path, "/") {
+				if segment == ".." {
+					http.Error(w, "invalid URL path", http.StatusBadRequest)
+					return
+				}
+			}
+			// Use the same canonical path for routing and file access so aliases
+			// cannot bypass the application-owned route and asset checks.
+			r = r.Clone(r.Context())
+			r.URL.Path = path.Clean("/" + r.URL.Path)
+			r.URL.RawPath = ""
+		}
 		if siteDir != "" && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
 			w.Header().Set("Cache-Control", "no-store")
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			http.ServeFile(w, r, filepath.Join(siteDir, "index.html"))
+			if !serveCustomAsset(w, r, siteDir, warnShadowed) {
+				http.NotFound(w, r)
+			}
 			return
 		}
 		if siteDir != "" && serveCustomAsset(w, r, siteDir, warnShadowed) {
@@ -155,12 +175,21 @@ func HandlerWithSite(siteDir string, logger *slog.Logger) (http.Handler, error) 
 }
 
 func serveCustomAsset(w http.ResponseWriter, r *http.Request, siteDir string, warnShadowed func(string)) bool {
-	rel := path.Clean(strings.TrimPrefix(r.URL.Path, "/"))
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, "../") {
+	rel := strings.TrimPrefix(r.URL.Path, "/")
+	if rel == "" {
+		rel = "index.html"
+	}
+	if !fs.ValidPath(rel) {
 		return false
 	}
-	fullPath := filepath.Join(siteDir, filepath.FromSlash(rel))
-	info, err := os.Stat(fullPath)
+	// OpenInRoot confines resolution (including symlinks) to siteDir. Stat
+	// and serve the same open file to avoid a check-then-open race.
+	file, err := os.OpenInRoot(siteDir, rel)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	exists := err == nil && info.Mode().IsRegular()
 	if reservedCustomPath(r.URL.Path) {
 		if exists {
@@ -174,7 +203,7 @@ func serveCustomAsset(w http.ResponseWriter, r *http.Request, siteDir string, wa
 	if strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css") {
 		w.Header().Set("Cache-Control", "no-store")
 	}
-	http.ServeFile(w, r, fullPath)
+	http.ServeContent(w, r, info.Name(), info.ModTime(), file)
 	return true
 }
 
