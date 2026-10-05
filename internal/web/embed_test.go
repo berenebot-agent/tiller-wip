@@ -152,6 +152,204 @@ func TestHandlerWithSiteRequiresIndex(t *testing.T) {
 	}
 }
 
+func TestHandlerWithSiteConfinesFilesAndCanonicalizesRoutes(t *testing.T) {
+	parent := t.TempDir()
+	siteDir := filepath.Join(parent, "site")
+	if err := os.Mkdir(siteDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"index.html": "custom landing", "landing.css": "custom stylesheet",
+		"app.js": "shadowed bundle", "api/private.txt": "shadowed API",
+	} {
+		full := filepath.Join(siteDir, name)
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(parent, "private.txt")
+	if err := os.WriteFile(outside, []byte("outside site secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{
+		"escape.txt": outside, "escape-dir": parent, "inside.css": "landing.css",
+	} {
+		if err := os.Symlink(target, filepath.Join(siteDir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler, err := HandlerWithSite(siteDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{
+		"/escape.txt", "/escape-dir/private.txt", "/../private.txt", "/%2e%2e/private.txt",
+		"//app.js", "/./app.js", "/%2e/app.js", "//api/private.txt", "/./api/private.txt",
+	} {
+		t.Run(target, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, target, nil))
+			for _, forbidden := range []string{"outside site secret", "shadowed bundle", "shadowed API"} {
+				if strings.Contains(res.Body.String(), forbidden) {
+					t.Fatalf("served forbidden content %q", forbidden)
+				}
+			}
+			if strings.Contains(target, "app.js") && (res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "LiveStream")) {
+				t.Fatalf("canonical application asset not served: status=%d", res.Code)
+			}
+		})
+	}
+	for _, target := range []string{"/", "/index.html", "/inside.css"} {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, target, nil))
+		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "custom") {
+			t.Fatalf("allowed file %s: status=%d", target, res.Code)
+		}
+	}
+	// Replacing a previously valid entry page must not bypass confinement.
+	index := filepath.Join(siteDir, "index.html")
+	if err := os.Remove(index); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, index); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"/", "/index.html"} {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, target, nil))
+		if res.Code != http.StatusNotFound || strings.Contains(res.Body.String(), "outside site secret") {
+			t.Fatalf("escaping index %s: status=%d", target, res.Code)
+		}
+	}
+	if _, err := HandlerWithSite(siteDir, nil); err == nil {
+		t.Fatal("escaping index symlink accepted at startup")
+	}
+}
+
+// TestHandlerWithSiteRejectsTraversalVariants drives the filesystem boundary
+// with the shapes an attacker would actually send: literal and encoded dot-dot,
+// nested traversal, backslash/separator variants, absolute and volume-style
+// paths, and a symlink whose target is the parent directory. None may return
+// content from outside siteDir.
+func TestHandlerWithSiteRejectsTraversalVariants(t *testing.T) {
+	parent := t.TempDir()
+	siteDir := filepath.Join(parent, "site")
+	if err := os.Mkdir(siteDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"index.html":      "custom landing",
+		"landing.css":     "custom stylesheet",
+		"nested/deep.txt": "nested custom asset",
+		"notes.txt":       "plain custom asset",
+	} {
+		full := filepath.Join(siteDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Outside the root: a file and a directory the request must never reach.
+	outsideFile := filepath.Join(parent, "private.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside site secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A symlink inside siteDir pointing at the parent must not become a door.
+	if err := os.Symlink(parent, filepath.Join(siteDir, "escape-dir")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideFile, filepath.Join(siteDir, "escape.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	handler, err := HandlerWithSite(siteDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	escaping := []string{
+		"/../private.txt",
+		"/a/../../private.txt",
+		"/%2e%2e/private.txt",
+		"/%2e%2e%2fprivate.txt",
+		"/..%5cprivate.txt",
+		"/%2e%2e%5cprivate.txt",
+		"/escape.txt",
+		"/escape-dir/private.txt",
+		"/etc/passwd",
+		"/C:%5cprivate.txt",
+		"/..%2f..%2fprivate.txt",
+	}
+	for _, target := range escaping {
+		t.Run(target, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, target, nil)
+			handler.ServeHTTP(res, req)
+			if strings.Contains(res.Body.String(), "outside site secret") {
+				t.Fatalf("escaped siteDir: status=%d body=%q", res.Code, res.Body.String())
+			}
+		})
+	}
+
+	// Legitimate nested and root assets still serve, with the existing cache
+	// header rules: .css is no-store, other custom assets are not pinned.
+	cases := []struct {
+		target, want, cache string
+	}{
+		{"/nested/deep.txt", "nested custom asset", ""},
+		{"/notes.txt", "plain custom asset", ""},
+		{"/landing.css", "custom stylesheet", "no-store"},
+	}
+	for _, tc := range cases {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, tc.target, nil))
+		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), tc.want) {
+			t.Fatalf("allowed %s: status=%d body=%q", tc.target, res.Code, res.Body.String())
+		}
+		if got := res.Header().Get("Cache-Control"); got != tc.cache {
+			t.Fatalf("allowed %s: Cache-Control=%q, want %q", tc.target, got, tc.cache)
+		}
+	}
+
+	// Reserved application paths still win over a shadowing custom file: the
+	// embedded bundle is served and the custom file's bytes never appear.
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/app.js", nil))
+	if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "LiveStream") {
+		t.Fatalf("reserved /app.js not served from embedded app: status=%d", res.Code)
+	}
+}
+
+func TestHandlerWithSiteSupportsRangeAndHead(t *testing.T) {
+	siteDir := t.TempDir()
+	for _, name := range []string{"index.html", "landing.txt"} {
+		if err := os.WriteFile(filepath.Join(siteDir, name), []byte("abcdef"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handler, err := HandlerWithSite(siteDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/landing.txt", nil)
+	request.Header.Set("Range", "bytes=1-3")
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, request)
+	if res.Code != http.StatusPartialContent || res.Body.String() != "bcd" {
+		t.Fatalf("range response: status=%d body=%q", res.Code, res.Body.String())
+	}
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodHead, "/landing.txt", nil))
+	if res.Code != http.StatusOK || res.Body.Len() != 0 || res.Header().Get("Content-Length") != "6" {
+		t.Fatalf("HEAD response: status=%d headers=%v", res.Code, res.Header())
+	}
+}
+
 func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) {
 	handler := Handler()
 
