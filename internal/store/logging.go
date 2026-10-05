@@ -157,7 +157,10 @@ func (s *Scope) InsertRequestLogs(ctx context.Context, rows []RequestLogInsert) 
 func insertRequestLogRow(ctx context.Context, q querier, accountID string, in *RequestLogInsert) error {
 	routeStatus := in.RouteStatus
 	if routeStatus == "" {
-		routeStatus = "legacy"
+		// A row whose routing was not classified is explicitly unresolved; the
+		// historical 'legacy' value is no longer produced (existing rows were
+		// rewritten by the one-time Activity data upgrade).
+		routeStatus = "unresolved"
 	}
 	attempts := 0
 	for _, a := range in.Attempts {

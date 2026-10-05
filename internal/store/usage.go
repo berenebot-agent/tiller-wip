@@ -59,7 +59,7 @@ coalesce(sum(CASE WHEN created_at >= ? THEN coalesce(input_tokens,0)+coalesce(ou
 // captured on the row at resolution time (route_model), so the Activity file
 // is self-contained; a renamed virtual model's history stays under the name it
 // had when the request was served.
-const virtualAttributionFilter = `(route_kind='virtual' OR (route_kind IS NULL AND route_status='legacy')) AND route_model IS NOT NULL`
+const virtualAttributionFilter = `route_kind='virtual' AND route_model IS NOT NULL`
 
 func (s *Scope) UsageByClient(ctx context.Context, c1, c24, c7 string) (map[string]UsageWindows, error) {
 	var out map[string]UsageWindows
@@ -441,7 +441,7 @@ func (s *Scope) TargetResolutionHealth(ctx context.Context, c1, c24 string) (map
 	CASE WHEN l.http_status >= 200 AND l.http_status < 300 THEN 1 ELSE 0 END AS success_24h
 	FROM request_logs l
 	WHERE l.account_id=? AND l.created_at >= ? AND l.resolved_provider IS NOT NULL AND l.resolved_model IS NOT NULL
-	AND (l.route_kind='virtual' OR (l.route_kind IS NULL AND l.route_status='legacy'))
+	AND l.route_kind='virtual'
 	UNION ALL
 	SELECT a.provider||'/'||a.model AS key,
 	CASE WHEN a.created_at >= ? AND a.result='success' THEN 1 ELSE 0 END AS success_1h,

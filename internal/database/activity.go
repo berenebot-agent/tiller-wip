@@ -39,7 +39,11 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	route_kind TEXT CHECK (route_kind IN ('real','virtual')),
 	route_model_id TEXT,
 	route_model TEXT,
-	route_status TEXT NOT NULL DEFAULT 'legacy' CHECK (route_status IN ('legacy','routed','unresolved')),
+	-- route_status: 'routed' when routing was resolved, 'unresolved' otherwise.
+	-- The CHECK still admits 'legacy' so a pre-existing database needs no table
+	-- rebuild; the 003_legacy_route_unresolved data upgrade reclassifies any
+	-- legacy rows to 'unresolved'. Fresh databases never write 'legacy'.
+	route_status TEXT NOT NULL DEFAULT 'unresolved' CHECK (route_status IN ('legacy','routed','unresolved')),
 	resolved_provider TEXT,
 	resolved_model TEXT,
 	protocol TEXT NOT NULL,
@@ -190,6 +194,29 @@ var activityUpgrades = []struct {
 	},
 }
 
+// activityDataUpgrades are one-time data rewrites applied to a pre-existing
+// Activity database, keyed on activity_schema_migrations like the column
+// upgrades. They exist so historical-data concerns never leak into the query
+// paths: a rewrite runs once at boot, and the store's attribution predicates
+// can then assume the post-rewrite shape. Each step is idempotent (its WHERE
+// clause matches only un-rewritten rows) and is skipped once its version is
+// recorded.
+var activityDataUpgrades = []struct {
+	version string
+	apply   string
+}{
+	{
+		// route_status='legacy' marked pre-migration-010 rows that migration 014
+		// could not attribute. Those rows are permanently unattributable by
+		// design, so they are reclassified to the explicit 'unresolved' status.
+		// The store then matches attribution on route_kind alone, with no legacy
+		// disjunct. The schema CHECK still accepts 'legacy' (fresh databases no
+		// longer write it) so this rewrite need not rebuild the table.
+		version: "003_legacy_route_unresolved",
+		apply:   `UPDATE request_logs SET route_status='unresolved' WHERE route_status='legacy'`,
+	},
+}
+
 func upgradeActivitySchema(ctx context.Context, db *sql.DB) error {
 	for _, up := range activityUpgrades {
 		changed := false
@@ -210,6 +237,40 @@ func upgradeActivitySchema(ctx context.Context, db *sql.DB) error {
 			if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO activity_schema_migrations(version,applied_at) VALUES(?,?)`, up.version, Now()); err != nil {
 				return err
 			}
+		}
+	}
+	if err := upgradeActivityData(ctx, db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// upgradeActivityData applies the one-time activity data rewrites exactly once,
+// recording each in activity_schema_migrations. A rerun is a no-op because the
+// version row is present.
+func upgradeActivityData(ctx context.Context, db *sql.DB) error {
+	for _, up := range activityDataUpgrades {
+		var applied int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM activity_schema_migrations WHERE version=?`, up.version).Scan(&applied); err != nil {
+			return fmt.Errorf("activity data upgrade %s (check): %w", up.version, err)
+		}
+		if applied != 0 {
+			continue
+		}
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, up.apply); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("activity data upgrade %s: %w", up.version, err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO activity_schema_migrations(version,applied_at) VALUES(?,?)`, up.version, Now()); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("activity data upgrade %s (record): %w", up.version, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("activity data upgrade %s (commit): %w", up.version, err)
 		}
 	}
 	return nil

@@ -114,7 +114,9 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	}
 	routeStatus := row.routeStatus
 	if routeStatus == "" {
-		routeStatus = "legacy"
+		// A row whose routing was not classified is explicitly unresolved; the
+		// historical 'legacy' value is no longer produced.
+		routeStatus = "unresolved"
 	}
 	// Phase 1 local mode has exactly one account; a row built without an
 	// explicit account (e.g. an older code path) belongs to it.
