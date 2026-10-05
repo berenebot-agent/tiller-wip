@@ -371,13 +371,35 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		if err := identityStore.SyncPlatformCredential(cfg.TillerPlatformAdminUser, cfg.TillerPlatformAdminPassword); err != nil {
 			return nil, err
 		}
-		// Passkeys are hosted-only and need a stable public origin. Local mode
-		// has no public HTTPS origin, so it simply has no passkey endpoints.
-		if cfg.PublicURL != "" {
-			if rp, rerr := webauthnConfigFor(cfg.PublicURL); rerr != nil {
-				return nil, fmt.Errorf("hosted webauthn: %w", rerr)
-			} else if err := identityStore.ConfigureWebAuthn(rp); err != nil {
-				return nil, err
+	}
+	// Passkeys need a stable public HTTPS origin known at boot. Hosted mode
+	// always has one (TILLER_PUBLIC_URL is required); local mode opts in by
+	// setting it. When it is unset in local mode the passkey routes report 501
+	// and an INFO line explains how to enable them.
+	if cfg.PublicURL != "" {
+		if rp, rerr := webauthnConfigFor(cfg.PublicURL); rerr != nil {
+			return nil, fmt.Errorf("webauthn: %w", rerr)
+		} else if err := identityStore.ConfigureWebAuthn(rp); err != nil {
+			return nil, err
+		}
+	} else if cfg.Mode != config.ModeHosted && logger != nil {
+		logger.Info("passkeys are unavailable: set TILLER_PUBLIC_URL to enable WebAuthn sign-in")
+	}
+	// Local mode materialises a single operator users row so credentials live in
+	// the shared users table and passkeys have a user to bind to. The local
+	// session boundary (admin_sessions) is unchanged. When no credential exists
+	// yet (first-run, no env admin), the row is created later by the setup
+	// endpoint once the operator claims the instance.
+	if cfg.Mode != config.ModeHosted && sessions != nil {
+		if username, hash := sessions.StoredCredential(); hash != "" {
+			if _, err := identityStore.EnsureLocalOperator(context.Background(), username, "", hash); err != nil && !errors.Is(err, identity.ErrLocalOperatorExists) {
+				return nil, fmt.Errorf("local operator: %w", err)
+			} else if errors.Is(err, identity.ErrLocalOperatorExists) {
+				// The row already exists; keep its credential aligned with the
+				// boot-synced environment/stored credential.
+				if uerr := identityStore.UpdateLocalOperatorPassword(context.Background(), hash); uerr != nil {
+					return nil, fmt.Errorf("local operator sync: %w", uerr)
+				}
 			}
 		}
 	}
@@ -440,7 +462,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
 	if s.setupRequired() && logger != nil {
-		logger.Warn("local instance is unconfigured: the first visitor can claim it as administrator; set TILLER_USERNAME and TILLER_PASSWORD, or complete the setup page before exposing this instance")
+		logger.Warn("local instance is unconfigured: complete the setup page to claim it as administrator before exposing this instance; alternatively set TILLER_USERNAME and TILLER_PASSWORD as an automated/recovery bootstrap")
 	}
 	if cfg.Mode == config.ModeHosted {
 		if err := s.SeedLegalDocuments(context.Background()); err != nil && logger != nil {
@@ -617,6 +639,23 @@ func (s *Server) Handler() http.Handler {
 		// itself is the same dialog as hosted.
 		mux.Handle("GET /api/auth/onboarding", s.requireAdmin(http.HandlerFunc(s.writeOnboardingState)))
 		mux.Handle("POST /api/auth/onboarding/dismiss", s.requireAdmin(http.HandlerFunc(s.setOnboardingDismissed)))
+		// Local operator account view (identity + passkeys) for the Settings →
+		// Account panel. Reuses the hosted AccountProfile shape against the
+		// single local operator user.
+		mux.Handle("GET /api/admin/account", s.requireAdminUser(http.HandlerFunc(s.localAccountProfile)))
+		// Passkeys are available in local mode when TILLER_PUBLIC_URL is set
+		// (the routes 501 otherwise). Login is unauthenticated; management is
+		// behind requireAdminUser, which resolves the single local operator.
+		mux.HandleFunc("POST /api/auth/passkey/begin", s.passkeyLoginBegin)
+		mux.HandleFunc("POST /api/auth/passkey/finish", s.passkeyLoginFinish)
+		mux.Handle("GET /api/auth/account/passkeys", s.requireAdminUser(http.HandlerFunc(s.passkeyList)))
+		mux.Handle("POST /api/auth/account/passkeys/register/begin", s.requireAdminUser(http.HandlerFunc(s.passkeyRegisterBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/register/finish", s.requireAdminUser(http.HandlerFunc(s.passkeyRegisterFinish)))
+		mux.Handle("POST /api/auth/account/passkeys/rename", s.requireAdminUser(http.HandlerFunc(s.passkeyRename)))
+		mux.Handle("POST /api/auth/account/passkeys/delete", s.requireAdminUser(http.HandlerFunc(s.passkeyDelete)))
+		mux.Handle("POST /api/auth/account/passkeys/password-signin", s.requireAdminUser(http.HandlerFunc(s.setPasswordSignIn)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/begin", s.requireAdminUser(http.HandlerFunc(s.passkeyReauthBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/finish", s.requireAdminUser(http.HandlerFunc(s.passkeyReauthFinish)))
 	}
 	if s.config.Mode == config.ModeHosted {
 		mux.Handle("GET /api/admin/audit", s.requireUser(http.HandlerFunc(s.accountAudit)))
@@ -717,12 +756,20 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		respondDecodeError(w, err)
 		return
 	}
-	// The stored credential is the single source of truth: environment
-	// credentials are synced into it at boot (env wins, invalidating
-	// sessions), and the first-run wizard writes it directly. The env values
-	// are never compared here, so a wizard-created credential authenticates
-	// across restarts with no environment set.
-	if !s.sessions.VerifyCredential(input.Username, input.Password) {
+	// The operator credential lives in the local operator's users row (unified
+	// with hosted storage). The environment credentials are synced into it at
+	// boot (env wins, invalidating sessions), and the first-run wizard writes it
+	// directly, so the stored row is the single source of truth.
+	operator, err := s.identity.AuthenticateLocalOperator(r.Context(), input.Username, input.Password)
+	if err != nil {
+		// An install that predates the operator row (or one whose row cannot be
+		// resolved) still has the legacy credential fingerprint; fall back so no
+		// existing login breaks.
+		if s.sessions.VerifyCredential(input.Username, input.Password) {
+			operator, err = s.reconcileLocalOperator(r.Context(), input.Username, input.Password)
+		}
+	}
+	if err != nil || operator.ID == "" {
 		if s.loginLimiter.recordFailure(key) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 			return
@@ -755,6 +802,18 @@ func webauthnConfigFor(publicURL string) (identity.WebAuthnConfig, error) {
 		return identity.WebAuthnConfig{}, errors.New("public URL has no hostname")
 	}
 	return identity.WebAuthnConfig{RPDisplayName: "Tiller", RPID: rpID, Origins: []string{"https://" + u.Host}}, nil
+}
+
+// reconcileLocalOperator lazily creates the local operator users row for an
+// install that authenticated against the legacy credential fingerprint but has
+// no operator row yet (e.g. an in-place upgrade that predates the unified
+// storage). The stored hash is reused, so the credential is unchanged. The
+// password argument is only used if no stored hash is available.
+func (s *Server) reconcileLocalOperator(ctx context.Context, username, password string) (identity.User, error) {
+	if _, hash := s.sessions.StoredCredential(); hash != "" {
+		return s.identity.EnsureLocalOperator(ctx, username, "", hash)
+	}
+	return s.identity.EnsureLocalOperator(ctx, username, password, "")
 }
 
 // adminUsername is the operator identity shown in the UI and login
@@ -826,6 +885,26 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		stampRequestPrincipal(r, "admin", accountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// requireAdminUser resolves the authenticated administrator to the identity
+// User the hosted passkey handlers expect and injects it as userKey, then calls
+// next. In hosted mode it is requireUser (which already sets userKey). In local
+// mode the admin session owns the single local operator user; this bridges the
+// two so the shared passkey-management handlers work unchanged. It reports 404
+// when no operator user exists (an install that has not completed setup).
+func (s *Server) requireAdminUser(next http.Handler) http.Handler {
+	if s.config.Mode == config.ModeHosted {
+		return s.requireUser(next)
+	}
+	return s.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, err := s.identity.LocalOperatorUser(r.Context())
+		if err != nil {
+			adminError(w, http.StatusConflict, "operator_not_ready", "The local operator identity is not set up yet.")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
+	}))
 }
 
 // scope returns the account-scoped store handle for the request. The account

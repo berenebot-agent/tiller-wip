@@ -10,6 +10,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/identity"
 )
 
 // setupMinPasswordBytes is the first-run wizard's floor. It is deliberately
@@ -75,6 +76,14 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Materialise the local operator identity row so credentials live in the
+	// shared users table and passkeys can bind to a user. The credential hash
+	// written above is reused as-is (no re-hash). A database that already has an
+	// operator row is fine; the first-run gate guarantees there is none.
+	if _, err := s.identity.EnsureLocalOperator(r.Context(), input.Username, "", s.storedCredentialHash()); err != nil && !errors.Is(err, identity.ErrLocalOperatorExists) {
+		adminError(w, http.StatusInternalServerError, "internal_error", "Credential saved, but the operator identity could not be created.")
+		return
+	}
 	// Straight to an authenticated session: setup is a claim, and the claimer
 	// goes on to the onboarding wizard without a second login.
 	session, err := s.sessions.Create()
@@ -103,6 +112,17 @@ func (s *Server) setupRequired() bool {
 		return false
 	}
 	return !s.sessions.CredentialConfigured()
+}
+
+// storedCredentialHash returns the admin credential hash the session store has
+// persisted. It is used to seed the local operator users row with the exact
+// credential fingerprint already written, so the two never diverge at first-run.
+func (s *Server) storedCredentialHash() string {
+	if s.sessions == nil {
+		return ""
+	}
+	_, hash := s.sessions.StoredCredential()
+	return hash
 }
 
 // validateSetupUsername enforces a simple, storage-safe username: non-empty,
