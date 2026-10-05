@@ -6,6 +6,13 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+## [0.1.0-beta.3] - 2026-10-05
+
+Third public beta. Highlights: a hosted multi-tenant product shell with plans
+and quotas, passkeys and a unified local/hosted operator identity, first-run
+setup for self-hosted installs, thin Go and Python gateway clients, and a
+security-hardening pass from the pre-SaaS release review.
+
 ### Added
 
 - **Local first-run setup.** A local instance started without
