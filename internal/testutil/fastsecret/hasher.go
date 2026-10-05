@@ -4,6 +4,17 @@
 // Importing this package into production code would be a bug — there is no
 // runtime switch that selects it, and the encoding prefix makes its output
 // visibly distinct from real Argon2id hashes.
+//
+// CodeQL: the SHA-256 use here is an accepted, intentional test-only finding
+// (CWE-327/916, "weak cryptographic hashing on sensitive data"). This package
+// lives under internal/testutil, every consumer is a *_test.go file (zero
+// production imports), there is no runtime selector, and the "test-sha256:"
+// prefix cannot collide with a real production hash. It exists so unit tests
+// can exercise SecretHasher semantics without paying Argon2id's 64 MiB cost.
+// Do not "fix" it by routing tests through the production password hasher:
+// that would only make the suite slower while changing no production
+// security property. This is intentional test-only cryptography, suitable
+// for CodeQL dismissal ("used in tests").
 package fastsecret
 
 import (

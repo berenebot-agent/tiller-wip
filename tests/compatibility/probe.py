@@ -135,7 +135,11 @@ with tempfile.TemporaryDirectory() as opencode_home:
         "provider": {"tiller": {
             "npm": "@ai-sdk/openai-compatible",
             "name": "Tiller Router",
-            "options": {"baseURL": BASE + "/v1", "apiKey": secret},
+            # Reference the secret via environment substitution so the real
+            # client key never lands in opencode.json; it exists only in the
+            # subprocess environment below. This matches the documented config
+            # in README.md ("apiKey": "{env:TILLER_ROUTER_KEY}").
+            "options": {"baseURL": BASE + "/v1", "apiKey": "{env:TILLER_ROUTER_KEY}"},
             "models": {"virtual/coding": {"name": "Virtual / Coding"}},
         }},
         "model": "tiller/virtual/coding",
@@ -143,6 +147,7 @@ with tempfile.TemporaryDirectory() as opencode_home:
     cfg_path.chmod(0o600)
     opencode_env = os.environ.copy()
     opencode_env["HOME"] = opencode_home
+    opencode_env["TILLER_ROUTER_KEY"] = secret
     result = subprocess.run(
         ["opencode", "run", "Return exactly hello"],
         cwd=opencode_home,
