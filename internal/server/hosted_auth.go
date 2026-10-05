@@ -62,6 +62,10 @@ func (s *Server) runtime(w http.ResponseWriter, _ *http.Request) {
 	if s.config.Mode != config.ModeHosted {
 		payload["setup_required"] = s.setupRequired()
 		payload["wizard_enabled"] = s.wizardEnabled
+		// Local passkeys are available only when WebAuthn was configured (i.e.
+		// TILLER_PUBLIC_URL is set). The SPA gates the passkey button/card on
+		// this, matching the hosted auth-options payload.
+		payload["passkeys_enabled"] = s.identity != nil && s.identity.PasskeysEnabled()
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

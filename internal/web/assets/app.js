@@ -44,6 +44,10 @@ let hostedAuthOptions = {};
 // false for env-admin local installs, which skip onboarding entirely.
 let runtimeSetupRequired = false;
 let runtimeWizardEnabled = false;
+// runtimePasskeysEnabled is true on a local install that has WebAuthn
+// configured (TILLER_PUBLIC_URL set). It gates the passkey sign-in button and
+// the Account passkeys card, mirroring hosted's auth-options payload.
+let runtimePasskeysEnabled = false;
 // accountEmailForDelete holds the signed-in email for the delete confirmation
 // modal (the modal requires it to be typed exactly). googleReauthConfirmedAt is
 // the time a fresh Google confirmation completed; the backend one-shot token
@@ -281,7 +285,8 @@ function authView(name) {
   const googleSignIn = hosted && name === 'login-form' && !!hostedAuthOptions.google_enabled;
   $('#google-signin-button').hidden = !googleSignIn;
   $('#google-signin-notice').hidden = !googleSignIn;
-  const passkeySignIn = hosted && name === 'login-form' && !!hostedAuthOptions.passkeys_enabled && !!window.__passkeySupported;
+  const passkeyAvailable = hosted ? !!hostedAuthOptions.passkeys_enabled : !!runtimePasskeysEnabled;
+  const passkeySignIn = name === 'login-form' && passkeyAvailable && !!window.__passkeySupported;
   const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
   const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) { passkeyStatus.textContent = ''; passkeyStatus.className = 'setting-tip'; }
   if (googleSignIn) setupGoogleSignIn();
@@ -2470,20 +2475,31 @@ function lockTestNotificationButton() {
 const SETTINGS_TABS = ['account', 'routing', 'logging', 'notifications', 'data'];
 let settingsTab = 'routing';
 function showSettingsTab(tab) {
-  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && runtimeMode !== 'hosted')) tab = 'routing';
+  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable())) tab = 'routing';
   settingsTab = tab;
   $$('.settings-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.settingsTab === tab));
   $$('.settings-panel').forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.classList.toggle('active', active); panel.hidden = !active; });
-  $('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+  $('#settings-tab-account').hidden = !accountTabAvailable();
   // Account actions save themselves; the shared save bar only applies to config.
   $('#save-settings-top').hidden = tab === 'account';
   $('#save-settings-bottom').hidden = tab === 'account';
 }
+// accountTabAvailable reports whether the Settings → Account panel applies:
+// hosted installs always, and local installs only when passkeys are enabled
+// (the only local account surface is passkey management).
+function accountTabAvailable() {
+  return runtimeMode === 'hosted' || runtimePasskeysEnabled;
+}
 $$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSettingsTab(btn.dataset.settingsTab); const hash = btn.dataset.settingsTab === 'routing' ? '#settings' : `#settings/${btn.dataset.settingsTab}`; if (location.hash !== hash) history.pushState(null, '', hash); if (btn.dataset.settingsTab === 'account') loadAccount(); }));
-$('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+// The Account tab is hidden until the runtime probe reports whether this is a
+// hosted install or a local install with passkeys enabled. applyAccountTabVisibility
+// runs once /api/runtime has been parsed (see initialise()).
+function applyAccountTabVisibility() {
+  $('#settings-tab-account').hidden = !accountTabAvailable();
+}
 
 async function loadAccount() {
-  if (runtimeMode !== 'hosted') return;
+  if (runtimeMode !== 'hosted') { await loadLocalAccount(); return; }
   try {
     const [profile, usage, plan] = await Promise.all([api('/api/auth/account'), api('/api/admin/usage'), api('/api/auth/account/plan')]);
     $('#account-email').textContent = profile.email;
@@ -2538,6 +2554,27 @@ async function loadAccount() {
     ].join('');
     renderPlanCard(plan);
     state.planInfo = plan; state.planInfoAt = Date.now();
+    if (window.__renderPasskeysCard) window.__renderPasskeysCard(profile);
+  } catch (error) {
+    flash(errorMessage(error, 'Could not load account details.'), 'error');
+  }
+}
+
+// loadLocalAccount renders the local operator's Settings → Account panel. The
+// local install is single-operator with no hosted account surface (no plan, no
+// email change, no deletion), so only the identity summary and the passkeys
+// card are shown; the hosted-only cards are hidden.
+async function loadLocalAccount() {
+  try {
+    const profile = await api('/api/admin/account');
+    $('#account-email').textContent = profile.email;
+    $('#account-id').textContent = profile.account_id;
+    $('#account-plan').textContent = profile.plan;
+    $('#account-status').textContent = profile.account_status;
+    $('#account-created').textContent = profile.created_at ? new Date(profile.created_at).toLocaleString() : '—';
+    ['account-password-card', 'account-google-card', 'account-google-link-card', 'account-delete-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
+    const planCard = $('#account-plan-card'); if (planCard) planCard.closest('article').hidden = true;
+    const usage = $('#account-usage'); if (usage) usage.hidden = true;
     if (window.__renderPasskeysCard) window.__renderPasskeysCard(profile);
   } catch (error) {
     flash(errorMessage(error, 'Could not load account details.'), 'error');
@@ -3452,7 +3489,9 @@ async function setupAnalyticsConsent() {
     } else {
       runtimeSetupRequired = Boolean(runtime.setup_required);
       runtimeWizardEnabled = Boolean(runtime.wizard_enabled);
+      runtimePasskeysEnabled = Boolean(runtime.passkeys_enabled);
     }
+    applyAccountTabVisibility();
     // A first-run local instance shows the credential page instead of login;
     // skip the session probe entirely so a stale cookie cannot bounce to login.
     if (runtimeSetupRequired) { showLogin(); return; }
@@ -4058,7 +4097,9 @@ $('#platform-users-list').addEventListener('click', async event => {
         let makeOnly = false;
         // Offer to make it the only sign-in method only when password sign-in
         // is actually enabled (and not Google-linked, which hides the card).
-        const passwordEnabled = !!lastAccountProfile?.password_enabled && !lastAccountProfile?.google_linked;
+        // Local installs always keep password sign-in as the recovery path, so
+        // the option is hosted-only.
+        const passwordEnabled = runtimeMode === 'hosted' && !!lastAccountProfile?.password_enabled && !lastAccountProfile?.google_linked;
         if (passwordEnabled) makeOnly = confirm('Use this passkey as your only sign-in method? Your password will be disabled.');
         try {
           const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: '{}' });
@@ -4118,11 +4159,12 @@ $('#platform-users-list').addEventListener('click', async event => {
     // Password sign-in toggle: offer to turn it back on when disabled. Hidden
     // for Google-linked accounts: linking Google disables password sign-in by
     // design and the server refuses to re-enable it, so the control would only
-    // produce an error.
+    // produce an error. Local installs never disable password sign-in, so the
+    // toggle is hosted-only.
     const toggle = $('#account-password-signin-toggle');
     const passwordEnabled = !!profile.password_enabled;
     const googleLinked = !!profile.google_linked;
-    toggle.hidden = passwordEnabled || googleLinked;
+    toggle.hidden = runtimeMode !== 'hosted' || passwordEnabled || googleLinked;
     toggle.textContent = 'Re-enable password sign-in';
     toggle.onclick = async () => {
       try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }

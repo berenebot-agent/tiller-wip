@@ -71,6 +71,18 @@ func TestSetupClaimsInstanceAndMintsSession(t *testing.T) {
 	if !app.sessions.CredentialConfigured() {
 		t.Fatal("credential not configured after setup")
 	}
+	// The setup also materialises the local operator identity row (unified
+	// credential storage), which the Account panel and passkeys depend on.
+	if _, err := app.identity.LocalOperatorUser(context.Background()); err != nil {
+		t.Fatalf("setup did not create the local operator row: %v", err)
+	}
+	status, payload, _ = api.request("GET", "/api/admin/account", nil)
+	if status != 200 {
+		t.Fatalf("local account profile = %d %v, want 200", status, payload)
+	}
+	if payload["account_id"] != database.LocalAccountID {
+		t.Fatalf("local account profile account_id = %v, want LocalAccountID", payload["account_id"])
+	}
 
 	// The session minted by setup is immediately usable on an admin endpoint.
 	api.csrf, _ = payload["csrf_token"].(string)

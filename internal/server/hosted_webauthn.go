@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
@@ -136,6 +137,25 @@ func (s *Server) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("passkey use could not be recorded", "user_id", assertion.User.ID, "error_class", fmt.Sprintf("%T", assertion.RecordErr))
 	}
 	u := assertion.User
+	if s.config.Mode != config.ModeHosted {
+		// Local mode has no user_sessions boundary; the passkey login bridges to
+		// the existing admin session so requireAdmin and LocalAccountID scoping
+		// are unchanged. The session store is nil only in hosted mode, which is
+		// not this branch.
+		if s.sessions == nil {
+			adminError(w, http.StatusInternalServerError, "internal_error", "Could not create session.")
+			return
+		}
+		session, err := s.sessions.Create()
+		if err != nil {
+			adminError(w, http.StatusInternalServerError, "internal_error", "Could not create session.")
+			return
+		}
+		s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
+		s.notifyAdminEvent(u.AccountID, eventAdminLogin, fmt.Sprintf("User: %s\nMethod: passkey", u.Email))
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.adminUsername(), "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+		return
+	}
 	session, err := s.identity.CreateUserSession(r.Context(), u)
 	if err != nil {
 		if errors.Is(err, identity.ErrStaleAuthentication) {
@@ -193,9 +213,11 @@ func (s *Server) passkeyRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	// Optionally make this the only sign-in method. The passkey is already
 	// saved at this point, so a refusal must say so rather than implying the
-	// whole operation failed.
+	// whole operation failed. Local mode always keeps password sign-in
+	// available (the environment credential is the operator's recovery path),
+	// so the request is honoured only in hosted mode.
 	passwordOnly := false
-	if r.URL.Query().Get("only") == "1" {
+	if r.URL.Query().Get("only") == "1" && s.config.Mode == config.ModeHosted {
 		if err := s.identity.SetPasswordSignInEnabled(r.Context(), user.ID, rawUserSessionToken(r), false); err != nil {
 			if errors.Is(err, identity.ErrLastAuthMethod) {
 				adminError(w, http.StatusConflict, "last_auth_method", "Passkey saved, but it is your only sign-in method.")
@@ -290,6 +312,12 @@ func (s *Server) setPasswordSignIn(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
+		return
+	}
+	// Local mode keeps password sign-in permanently available as the operator's
+	// recovery path; it can never be disabled there.
+	if !input.Enabled && s.config.Mode != config.ModeHosted {
+		adminError(w, http.StatusConflict, "password_required", "Password sign-in cannot be disabled on a local install; it is the recovery path.")
 		return
 	}
 	if err := s.identity.SetPasswordSignInEnabled(r.Context(), user.ID, rawUserSessionToken(r), input.Enabled); err != nil {

@@ -308,3 +308,103 @@ test('adding a passkey can make it the only sign-in method', async ({ page }) =>
   await expect.poll(() => finishURL).not.toBeNull();
   expect(finishURL).toContain('only=1');
 });
+
+// ---------------------------------------------------------------------------
+// Standalone (local mode) passkeys. Local passkeys are enabled when the router
+// is started with TILLER_PUBLIC_URL; `/api/runtime` then reports
+// passkeys_enabled=true and the Account panel reads the operator profile from
+// /api/admin/account. These specs mock that local runtime and prove the browser
+// glue: the sign-in button appears, the ceremony round-trips, and password
+// sign-in is never offered as disableable.
+// ---------------------------------------------------------------------------
+
+const LOCAL_PROFILE = {
+  user_id: 'local-op',
+  email: 'admin@local.invalid',
+  account_id: '00000000-0000-0000-0000-000000000001',
+  plan: 'free',
+  user_status: 'active',
+  account_status: 'active',
+  verified: true,
+  password_enabled: true,
+  has_password: true,
+  google_linked: false,
+  passkeys_enabled: true,
+  passkeys: [{ id: 'pk-local-1', name: 'YubiKey', created_at: '2026-10-04T10:00:00Z', last_used_at: '2026-10-05T09:00:00Z' }],
+};
+
+// mockLocalPasskeySession mocks a signed-in local install with passkeys enabled.
+async function mockLocalPasskeySession(page, { profile = LOCAL_PROFILE } = {}) {
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: true }) }));
+  await page.route('**/api/admin/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true, username: 'admin', csrf_token: 'csrf-token' }) }));
+  await page.route('**/api/admin/account', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(profile) }));
+  await page.route('**/api/admin/settings', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) }));
+  await page.route('**/api/admin/providers**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/client-keys**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/virtual-models**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/usage', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) }));
+  await page.route('**/api/admin/live', route => route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }));
+  await page.route('**/api/auth/onboarding', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ needs_onboarding: false }) }));
+  await page.route('**/api/admin/providers/types', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/client-keys/types', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+}
+
+test('local install with passkeys shows the sign-in button', async ({ page }) => {
+  await installCredentialStub(page);
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: true }) }));
+  await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
+  await page.goto('/');
+  await expect(page.locator('#passkey-signin')).toBeVisible();
+});
+
+test('local install without passkeys hides the sign-in button', async ({ page }) => {
+  await installCredentialStub(page);
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: false }) }));
+  await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
+  await page.goto('/');
+  await expect(page.locator('#passkey-signin')).toBeHidden();
+});
+
+test('local passkey sign-in performs the ceremony and enters the app', async ({ page }) => {
+  await installCredentialStub(page);
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: true }) }));
+  await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
+  await page.route('**/api/auth/passkey/begin', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ challenge_token: 'local-login-token', options: { publicKey: { challenge: CHALLENGE, allowCredentials: [] } } }),
+  }));
+  let finishRequest = null;
+  await page.route('**/api/auth/passkey/finish', async route => {
+    finishRequest = route.request();
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ authenticated: true, username: 'admin', csrf_token: 'local-csrf' }),
+    });
+  });
+  await page.route('**/api/auth/onboarding', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ needs_onboarding: false }) }));
+  await page.route('**/api/admin/providers**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/client-keys**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/live', route => route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }));
+
+  await page.goto('/');
+  await expect(page.locator('#passkey-signin')).toBeVisible();
+  await page.click('#passkey-signin');
+  await expect(page.locator('#app')).toBeVisible();
+  await expect.poll(() => finishRequest).not.toBeNull();
+  expect(finishRequest.headers()['x-webauthn-challenge']).toBe('local-login-token');
+});
+
+test('local passkey management card lists passkeys and never offers password-only', async ({ page }) => {
+  await installCredentialStub(page);
+  await mockLocalPasskeySession(page);
+  await page.goto('/');
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="account"]').click();
+  await expect(page.locator('#account-passkeys-card')).toBeVisible();
+  await expect(page.locator('#account-passkeys-list')).toContainText('YubiKey');
+  // Local installs never disable password sign-in, so the re-enable toggle is
+  // not shown (there is nothing to re-enable).
+  await expect(page.locator('#account-password-signin-toggle')).toBeHidden();
+});

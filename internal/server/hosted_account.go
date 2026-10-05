@@ -37,6 +37,19 @@ func (s *Server) accountProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, profile)
 }
 
+// localAccountProfile returns the local operator's identity and passkeys for
+// the Settings → Account panel. It is the local-mode counterpart of
+// accountProfile; the panel only uses the identity fields and the passkey list.
+func (s *Server) localAccountProfile(w http.ResponseWriter, r *http.Request) {
+	user := r.Context().Value(userKey).(identity.User)
+	profile, err := s.identity.AccountProfile(r.Context(), user.ID)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load account details.")
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
 // changeOwnPassword re-authenticates and changes the password, then revokes
 // every other session.
 func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {

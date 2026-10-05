@@ -584,6 +584,21 @@ func (s *SessionStore) AdminUsername() string {
 	return username
 }
 
+// StoredCredential returns the stored admin credential hash and its username, or
+// empty strings when no credential exists. It lets the local operator identity
+// row be seeded with the already-hashed credential at boot without re-hashing
+// (the raw password is not recoverable). The hash is a stored secret; callers
+// must not log or expose it.
+func (s *SessionStore) StoredCredential() (username, hash string) {
+	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialUsernameKey).Scan(&username); err != nil {
+		username = ""
+	}
+	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&hash); err != nil {
+		hash = ""
+	}
+	return username, hash
+}
+
 // SetCredential writes the first admin credential as a one-shot claim. It is
 // used by the pre-login first-run setup endpoint: the insert refuses to
 // overwrite an existing credential, so a concurrent second claim (or a replay
