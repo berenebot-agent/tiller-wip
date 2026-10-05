@@ -182,8 +182,13 @@ func serveCustomAsset(w http.ResponseWriter, r *http.Request, siteDir string, wa
 	if !fs.ValidPath(rel) {
 		return false
 	}
-	// OpenInRoot confines resolution (including symlinks) to siteDir. Stat
-	// and serve the same open file to avoid a check-then-open race.
+	// OpenInRoot (a rooted filesystem primitive) is the traversal boundary:
+	// siteDir is opened once and every component of rel is resolved relative
+	// to it, so the result cannot escape it — via "..", nested traversal,
+	// encoded traversal, backslash/separator variants, absolute paths, or a
+	// symlink that points outside siteDir. The pre-check above rejects ".."
+	// early; OpenInRoot is the actual enforcement. Stat and serve the same
+	// open file to avoid a check-then-open race.
 	file, err := os.OpenInRoot(siteDir, rel)
 	if err != nil {
 		return false
