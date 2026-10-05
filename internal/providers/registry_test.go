@@ -434,6 +434,47 @@ func TestPagedDiscoveryCapturesCapabilities(t *testing.T) {
 	}
 }
 
+// TestPagedDiscoveryRoundTripsTillerReasoningMetadata covers a downstream
+// Tiller discovering an upstream Tiller: the flat `reasoning_options` list must
+// be parsed and merged with the nested `reasoning` object so mandatory,
+// defaults, toggle, and budget survive the hop.
+func TestPagedDiscoveryRoundTripsTillerReasoningMetadata(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{
+			"id":                "model-a",
+			"reasoning":         map[string]any{"supported_efforts": []string{"high"}, "mandatory": true, "default_effort": "high", "default_enabled": true, "supported_parameters": []string{"reasoning_effort"}},
+			"reasoning_options": []any{map[string]any{"type": "effort", "values": []string{"high"}}, map[string]any{"type": "toggle"}, map[string]any{"type": "budget_tokens", "min": 256, "max": 8192}},
+		}}})
+	}))
+	defer upstream.Close()
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "generic-openai", BaseURL: upstream.URL + "/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ReasoningCapabilities == nil {
+		t.Fatalf("reasoning capabilities missing: %+v", models)
+	}
+	caps := models[0].ReasoningCapabilities
+	if caps.Mandatory == nil || !*caps.Mandatory || caps.DefaultEffort != "high" || caps.DefaultEnabled == nil || !*caps.DefaultEnabled {
+		t.Fatalf("reasoning defaults/flags not preserved: %+v", caps)
+	}
+	if !slicesEqual(caps.Parameters, []string{"reasoning_effort"}) {
+		t.Fatalf("parameters not preserved: %v", caps.Parameters)
+	}
+	if len(caps.Options) != 3 {
+		t.Fatalf("reasoning options not merged: %+v", caps.Options)
+	}
+	if caps.Options[0].Type != ReasoningOptionEffort || !slicesEqual(caps.Options[0].Values, []string{"high"}) {
+		t.Fatalf("effort option = %+v", caps.Options[0])
+	}
+	if caps.Options[1].Type != ReasoningOptionToggle {
+		t.Fatalf("toggle option missing: %+v", caps.Options)
+	}
+	if budget := caps.Options[2]; budget.Type != ReasoningOptionBudgetTokens || budget.Min == nil || *budget.Min != 256 || budget.Max == nil || *budget.Max != 8192 {
+		t.Fatalf("budget option = %+v", caps.Options[2])
+	}
+}
+
 func TestOpenRouterDiscoveryCapturesTopProviderOutputLimit(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
@@ -939,6 +980,9 @@ func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
 	if !slicesEqual(astra.ReasoningCapabilities.Options[0].Values, []string{"low", "medium", "high", "xhigh", "max", "ultra"}) {
 		t.Errorf("astra effort values = %v", astra.ReasoningCapabilities.Options[0].Values)
 	}
+	if astra.ReasoningCapabilities.ClientEfforts == nil || !slicesEqual(*astra.ReasoningCapabilities.ClientEfforts, []string{"low", "medium", "high", "xhigh", "ultra"}) {
+		t.Errorf("astra client effort values = %v", astra.ReasoningCapabilities.ClientEfforts)
+	}
 	if got := astra.ReasoningCapabilities.EffortAliases["ultra"]; got != "max" {
 		t.Errorf("astra ultra alias = %q, want max", got)
 	}
@@ -952,6 +996,28 @@ func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
 	}
 	if got := noMax.ReasoningCapabilities.EffortAliases["ultra"]; got != "low" {
 		t.Errorf("no-max ultra alias = %q, want low (last non-ultra fallback)", got)
+	}
+	if noMax.ReasoningCapabilities.ClientEfforts == nil || !slicesEqual(*noMax.ReasoningCapabilities.ClientEfforts, []string{"low", "high", "ultra"}) {
+		t.Errorf("no-max client effort values = %v", noMax.ReasoningCapabilities.ClientEfforts)
+	}
+}
+
+func TestCodexClientEffortsHideWireMax(t *testing.T) {
+	cases := []struct {
+		name   string
+		levels []string
+		want   []string
+	}{
+		{name: "wire max and native ultra", levels: []string{"low", "max", "ultra"}, want: []string{"low", "ultra"}},
+		{name: "wire max without ultra", levels: []string{"low", "high", "max"}, want: []string{"low", "high"}},
+		{name: "no max", levels: []string{"medium", "low"}, want: []string{"low", "medium"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexClientEfforts(tc.levels); !slicesEqual(got, tc.want) {
+				t.Fatalf("codexClientEfforts(%v) = %v, want %v", tc.levels, got, tc.want)
+			}
+		})
 	}
 }
 

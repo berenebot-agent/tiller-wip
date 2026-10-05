@@ -6,6 +6,43 @@ import (
 	"time"
 )
 
+func TestLocalAdminCredentialsOptional(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_MODE", "")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_USERNAME", "")
+	t.Setenv("TILLER_PASSWORD", "")
+	t.Setenv("TILLER_ADMIN_USERNAME", "")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "")
+
+	// Neither set: a fresh first-run install loads with empty credentials.
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("local install with no admin credentials should load: %v", err)
+	}
+	if c.TillerUser != "" || c.TillerUserPassword != "" {
+		t.Fatalf("fresh install credentials = %q/%q, want empty", c.TillerUser, c.TillerUserPassword)
+	}
+
+	// Only one set: hard error, so a half-configured .env fails loud.
+	t.Setenv("TILLER_USERNAME", "admin")
+	if _, err := Load(); err == nil {
+		t.Fatal("TILLER_USERNAME without TILLER_PASSWORD should fail")
+	}
+	t.Setenv("TILLER_USERNAME", "")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	if _, err := Load(); err == nil {
+		t.Fatal("TILLER_PASSWORD without TILLER_USERNAME should fail")
+	}
+
+	// Both set: normal env-admin load.
+	t.Setenv("TILLER_USERNAME", "admin")
+	if c, err = Load(); err != nil || c.TillerUser != "admin" || c.TillerUserPassword != "secret" {
+		t.Fatalf("env-admin load = %+v err=%v", c, err)
+	}
+}
+
 func TestModelsDevEnabledFlag(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_USERNAME", "admin")
@@ -95,6 +132,53 @@ func TestDebugPprofFlag(t *testing.T) {
 	t.Setenv("TILLER_DEBUG_PPROF", "banana")
 	if _, err := Load(); err == nil {
 		t.Error("TILLER_DEBUG_PPROF=banana should fail to load")
+	}
+}
+
+func TestHostedDebugPprofRequiresPlatformCredentials(t *testing.T) {
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://tiller.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "127.0.0.1/32")
+	t.Setenv("TILLER_DEBUG_PPROF", "true")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("hosted TILLER_DEBUG_PPROF=true without platform credentials should fail")
+	}
+
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
+	if _, err := Load(); err != nil {
+		t.Fatalf("hosted TILLER_DEBUG_PPROF=true with platform credentials: %v", err)
+	}
+}
+
+func TestCustomSiteEnabledFlag(t *testing.T) {
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_CUSTOM_SITE_ENABLED", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.CustomSiteEnabled {
+		t.Fatal("CustomSiteEnabled should default to false")
+	}
+
+	t.Setenv("TILLER_CUSTOM_SITE_ENABLED", "true")
+	c, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.CustomSiteEnabled {
+		t.Fatal("CustomSiteEnabled should be true when enabled")
+	}
+
+	t.Setenv("TILLER_CUSTOM_SITE_ENABLED", "banana")
+	if _, err := Load(); err == nil {
+		t.Fatal("invalid TILLER_CUSTOM_SITE_ENABLED should fail to load")
 	}
 }
 

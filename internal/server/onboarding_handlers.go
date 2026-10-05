@@ -2,6 +2,7 @@ package server
 
 import (
 	"archive/zip"
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"errors"
@@ -21,8 +22,10 @@ import (
 const onboardingSettingKey = "onboarding_dismissed"
 
 // writeOnboardingState reports whether the first-run wizard should be shown.
-// `needs_onboarding` is true until the account has a 2xx routed request in
-// Activity or the user dismisses the wizard. When Activity is unavailable the
+// `needs_onboarding` is true until any of three completion signals is met: the
+// user dismisses the wizard ("Skip setup"), the account has a 2xx routed
+// request in Activity, or the account is configured with at least one provider
+// and at least one client key. When Activity is unavailable the
 // successful-request check degrades to "not yet" (the wizard still shows, and
 // dismissal still works) rather than failing the page.
 func (s *Server) writeOnboardingState(w http.ResponseWriter, r *http.Request) {
@@ -37,12 +40,30 @@ func (s *Server) writeOnboardingState(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not load onboarding state.")
 		return
 	}
-	needsOnboarding := !dismissed && firstRequestAt == ""
+	configured := accountConfigured(ctx, sc)
+	needsOnboarding := !dismissed && firstRequestAt == "" && !configured
 	writeJSON(w, http.StatusOK, map[string]any{
 		"needs_onboarding": needsOnboarding,
 		"dismissed":        dismissed,
 		"first_request_at": firstRequestAt,
+		"configured":       configured,
 	})
+}
+
+// accountConfigured reports whether the account has at least one provider and
+// at least one client key. A read failure degrades to "not configured" so a
+// transient error keeps the onboarding hint visible rather than failing the
+// page; the wizard is only an affordance, not a gate.
+func accountConfigured(ctx context.Context, sc *store.Scope) bool {
+	providers, err := sc.ListProviders(ctx, store.ProviderFilter{Limit: 1})
+	if err != nil {
+		return false
+	}
+	clients, err := sc.ListClientKeys(ctx, store.ClientKeyFilter{Limit: 1})
+	if err != nil {
+		return false
+	}
+	return len(providers) >= 1 && len(clients) >= 1
 }
 
 // setOnboardingDismissed remembers that the user skipped setup.
@@ -184,6 +205,7 @@ func (s *Server) writeAccountActivityCSV(out io.Writer, run func(fn func(store.A
 		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count",
 		"fallback_used", "fallback_reason", "error_message", "provider_request_id",
 		"client_request_id", "route_kind",
+		"estimated_cost_micros", "provider_cost_micros", "input_tokens_estimated",
 	}); err != nil {
 		return err
 	}
@@ -204,6 +226,7 @@ func (s *Server) writeAccountActivityCSV(out io.Writer, run func(fn func(store.A
 			strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
 			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID,
 			strPtrOrEmpty(row.RouteKind),
+			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), boolString(row.InputTokensEstimated),
 		}); err != nil {
 			return err
 		}

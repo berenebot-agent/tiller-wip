@@ -108,6 +108,49 @@ func TestChangePasswordRejectsWrongCurrent(t *testing.T) {
 	}
 }
 
+func TestGoogleLinkDisablesPasswordAndUnlinkRestoresIt(t *testing.T) {
+	st, db, _ := newAccountStore(t)
+	ctx := context.Background()
+	u, _ := signupAndVerify(t, st, "google-policy@example.com", "correct horse battery staple")
+	if err := st.LinkGoogleIdentity(ctx, u.ID, "google-subject-1", u.Email); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AuthenticatePassword(ctx, u.Email, "correct horse battery staple"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("password login while Google linked = %v, want ErrNotFound", err)
+	}
+	if err := st.VerifyPassword(ctx, u.ID, "correct horse battery staple"); !errors.Is(err, ErrPasswordDisabled) {
+		t.Fatalf("password verification while Google linked = %v, want ErrPasswordDisabled", err)
+	}
+	if err := st.UnlinkGoogleIdentity(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AuthenticatePassword(ctx, u.Email, "correct horse battery staple"); err != nil {
+		t.Fatalf("password login after Google unlink: %v", err)
+	}
+	var enabled bool
+	if err := db.QueryRow(`SELECT password_auth_enabled FROM users WHERE id=?`, u.ID).Scan(&enabled); err != nil {
+		t.Fatal(err)
+	}
+	if !enabled {
+		t.Fatal("password auth was not restored after unlink")
+	}
+}
+
+func TestPasswordResetCannotEnablePasswordWhileGoogleLinked(t *testing.T) {
+	st, _, _ := newAccountStore(t)
+	ctx := context.Background()
+	u, _ := signupAndVerify(t, st, "google-reset@example.com", "correct horse battery staple")
+	if err := st.LinkGoogleIdentity(ctx, u.ID, "google-subject-reset", u.Email); err != nil {
+		t.Fatal(err)
+	}
+	if _, token, err := st.IssuePasswordReset(ctx, u.Email); err != nil || token != "" {
+		t.Fatalf("password reset while Google linked: token=%q err=%v", token, err)
+	}
+	if err := st.UnlinkGoogleIdentity(ctx, u.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRequestEmailChangeEnqueuesConfirmAndWarning(t *testing.T) {
 	st, _, q := newAccountStore(t)
 	ctx := context.Background()

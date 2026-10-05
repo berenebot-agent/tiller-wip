@@ -149,11 +149,13 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    ```yaml
    services:
      tiller-router:
-       container_name: tiller-router
+       # Set TILLER_CONTAINER_NAME=tiller-hosted for a parallel instance.
+       container_name: ${TILLER_CONTAINER_NAME:-tiller-router}
        image: ghcr.io/dellarb/tiller-router:latest
        ports:
          - "8080:8080"
        environment:
+         # Optional: omit both to use first-run setup in the browser instead.
          TILLER_USERNAME: admin
          TILLER_PASSWORD: replace-this-with-a-long-random-password
        volumes:
@@ -169,7 +171,11 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080` and log in. For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
+   Then open `http://localhost:8080`. With no `TILLER_USERNAME` / `TILLER_PASSWORD` set, the first visitor gets a one-time **setup page** to create the administrator credential (8+ characters) and is signed straight in to a guided onboarding wizard. Once configured, the setup page is gone permanently — sign in from the login screen. Setting the environment credentials instead skips setup entirely and the onboarding wizard stays hidden, exactly as before. While an instance is unclaimed the router logs a warning on every boot; claim it (or set the env credentials) before exposing it to an untrusted network. To rotate or recover a wizard-created credential, set `TILLER_USERNAME` / `TILLER_PASSWORD` and restart: the environment values become the new credential and existing sessions are revoked.
+
+   For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
+
+> **Custom hosted landing page:** set `TILLER_CUSTOM_SITE_ENABLED=true` and place your site at `./data/site/index.html` (with optional CSS, JavaScript, and media files alongside it). The custom site replaces only the hosted landing page and its own assets; `/app`, authentication, API, health, and platform routes remain application-owned, and so do the embedded application asset filenames the SPA loads at fixed paths (`app.js`, `live.js`, `activity-graph.js`, `d3.min.js`, `style.css`, `virtual-dialog.css`, `activity-graph.css`, `typography.css`, and the `media/` directory). A custom file at one of those paths is ignored (the embedded asset wins) and logged as a warning, so name your landing-page files distinctly. When disabled or unset, the embedded landing page is used. Enabling it requires `data/site/index.html` to exist at startup.
 
 > **Renamed credential vars:** `TILLER_ADMIN_USERNAME` / `TILLER_ADMIN_PASSWORD` are now `TILLER_USERNAME` / `TILLER_PASSWORD`, to deconflict with the hosted platform console's `TILLER_PLATFORM_ADMIN_*`. The old names still work and log a startup deprecation warning; the new names win if both are set.
 
@@ -180,7 +186,7 @@ Provider support varies because upstream APIs vary. The beta should be treated a
 ```bash
 git clone https://github.com/dellarb/tiller-router.git
 cd tiller-router
-cp .env.example .env   # set TILLER_USERNAME / TILLER_PASSWORD
+cp .env.example .env   # optionally set TILLER_USERNAME / TILLER_PASSWORD
 docker compose up -d --build
 ```
 
@@ -235,9 +241,16 @@ Cloud. Add the redirect URI displayed beside the client ID field in the
 platform dashboard; it is the exact URL
 `https://<your-hostname>/api/auth/google/callback`. Enter the OAuth client ID
 and secret, then enable Google sign-in. Google supplies the verified email and
-stable subject identifier. A Google email that already belongs to a Tiller
-account is never linked automatically: sign in to that account and link Google
-from **Settings → Account**.
+stable subject identifier.
+
+A Google email that already belongs to a Tiller account is linked
+automatically **only when Google is authoritative for that address** — a
+`gmail.com`/`googlemail.com` address, or a Google Workspace account (a verified
+email carrying Google's `hd` claim). For any other address, Google's
+`email_verified` does not prove current ownership of the mailbox (the address
+may since have changed hands), so Tiller does not link it silently: sign in to
+the existing account with your password, and Tiller offers to link Google on
+the spot. You can also link at any time from **Settings → Account**.
 
 For bot protection, create a Cloudflare Turnstile widget and allow your hosted
 hostname in its widget settings. Enter its site key and secret key in the
@@ -257,10 +270,11 @@ value and save; leave it blank to keep the stored value. Use the explicit
 
 The repo's `docker-compose.yml` plus `.env` cover the most common local
 customisations without editing any Go code. The full list of local variables is
-in `.env.example`. The hosted override additionally requires the platform
-credentials below. `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated
-`TILLER_ADMIN_*` aliases) are only needed there when converting an existing
-local installation:
+in `.env.example`. `TILLER_USERNAME` / `TILLER_PASSWORD` are optional in local
+mode: omit both for first-run setup, set both to skip it. The hosted override
+additionally requires the platform credentials below. `TILLER_USERNAME` /
+`TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) are only needed
+there when converting an existing local installation:
 
 ```bash
 TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
@@ -318,6 +332,201 @@ curl http://localhost:8080/v1/chat/completions \
 ```
 
 With a Single key, `main` can be redirected from the control panel without changing this request.
+
+### Connect your tools
+
+Replace `https://router.example.com` with your Tiller (reverse-proxy) URL, `virtual/coding`
+with a model visible to the client key, and every placeholder secret with a
+one-time Tiller client key.
+
+The base URL differs by SDK convention:
+
+- OpenAI-compatible clients normally use `https://router.example.com/v1`.
+- Anthropic clients normally use `https://router.example.com` because the SDK
+  appends `/v1/messages`.
+
+Tiller accepts both `Authorization: Bearer` and `x-api-key` on `/v1/messages`.
+
+#### Hermes Agent
+
+Current Hermes supports `chat_completions`, `codex_responses`, and
+`anthropic_messages`. Declare the transport explicitly so URL heuristics cannot
+select the wrong wire format. Store the client secret in `~/.hermes/.env`:
+
+```dotenv
+TILLER_ROUTER_KEY=sk-tr-REPLACE_ONCE
+```
+
+Define one or more named custom providers in `~/.hermes/config.yaml`, then select
+one with `hermes model` (or `provider: custom:<name>`):
+
+Chat Completions:
+
+```yaml
+providers:
+  tiller-chat:
+    api: https://router.example.com/v1
+    key_env: TILLER_ROUTER_KEY
+    transport: chat_completions
+    default_model: virtual/coding
+```
+
+Codex/Responses:
+
+```yaml
+providers:
+  tiller-responses:
+    api: https://router.example.com/v1
+    key_env: TILLER_ROUTER_KEY
+    transport: codex_responses
+    default_model: virtual/coding
+```
+
+Anthropic Messages:
+
+```yaml
+providers:
+  tiller-messages:
+    api: https://router.example.com
+    key_env: TILLER_ROUTER_KEY
+    transport: anthropic_messages
+    default_model: virtual/coding
+```
+
+#### OpenCode
+
+Use a custom OpenAI-compatible provider and list the permitted virtual IDs that
+OpenCode should offer:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "tiller": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Tiller Router",
+      "options": {
+        "baseURL": "https://router.example.com/v1",
+        "apiKey": "{env:TILLER_ROUTER_KEY}"
+      },
+      "models": {
+        "virtual/coding": { "name": "Virtual / Coding" },
+        "virtual/general": { "name": "Virtual / General" }
+      }
+    }
+  },
+  "model": "tiller/virtual/coding"
+}
+```
+
+#### Codex CLI
+
+Set the client secret in the environment and add a Responses provider to
+`~/.codex/config.toml`:
+
+```sh
+export TILLER_ROUTER_KEY='sk-tr-REPLACE_ONCE'
+```
+
+```toml
+model = "virtual/coding"
+model_provider = "tiller"
+
+[model_providers.tiller]
+name = "Tiller Router"
+base_url = "https://router.example.com/v1"
+env_key = "TILLER_ROUTER_KEY"
+wire_api = "responses"
+```
+
+Declare `wire_api = "responses"` explicitly. Native Responses requests may use
+provider stateful fields only when the resolved upstream itself declares native
+Responses support; cross-protocol translation rejects conversations,
+previous-response state, storage, files, background mode, MCP, and
+provider-hosted tools with `unsupported_feature`.
+
+#### Claude Code
+
+```sh
+export ANTHROPIC_BASE_URL='https://router.example.com'
+export ANTHROPIC_AUTH_TOKEN='sk-tr-REPLACE_ONCE'
+export ANTHROPIC_MODEL='virtual/coding'
+claude
+```
+
+#### Python SDKs
+
+OpenAI:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://router.example.com/v1",
+    api_key="sk-tr-REPLACE_ONCE",
+)
+
+for event in client.responses.create(
+    model="virtual/coding",
+    input="Return one sentence.",
+    stream=True,
+):
+    print(event)
+```
+
+Anthropic:
+
+```python
+from anthropic import Anthropic
+
+client = Anthropic(
+    base_url="https://router.example.com",
+    api_key="sk-tr-REPLACE_ONCE",
+)
+
+message = client.messages.create(
+    model="virtual/coding",
+    max_tokens=256,
+    messages=[{"role": "user", "content": "Return one sentence."}],
+)
+print(message.content)
+```
+
+#### cURL probes
+
+Catalogue:
+
+```sh
+curl -fsS https://router.example.com/v1/models \
+  -H 'Authorization: Bearer sk-tr-REPLACE_ONCE'
+```
+
+Streaming Chat Completions:
+
+```sh
+curl -N https://router.example.com/v1/chat/completions \
+  -H 'Authorization: Bearer sk-tr-REPLACE_ONCE' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"virtual/coding","stream":true,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+Anthropic Messages:
+
+```sh
+curl -fsS https://router.example.com/v1/messages \
+  -H 'x-api-key: sk-tr-REPLACE_ONCE' \
+  -H 'anthropic-version: 2023-06-01' \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"virtual/coding","max_tokens":128,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+### Reusable application clients
+
+Native [Go and Python gateway clients](clients/README.md) provide normalized
+model/capability catalogs, Chat calls, streaming, tool-result continuation,
+structured-output options, usage and safe errors against Tiller or OpenRouter.
+They use only public HTTP and ship with runnable examples and shared contract
+tests. Applications retain their own tool execution and business policy.
 
 ---
 

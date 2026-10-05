@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostedauth"
 	"github.com/tiller-router/tiller-router/internal/identity"
@@ -24,6 +26,17 @@ const (
 	genericSignupMessage = "If the address can receive mail, a verification message will arrive shortly."
 	genericResetMessage  = "If the address belongs to an account, a password-reset message will arrive shortly."
 )
+
+// requireSameOrigin rejects a browser auth POST whose Origin is present and not
+// the request's own origin, blocking cross-site form/script logins. It writes
+// the standard generic error and reports false when the request must stop.
+func (s *Server) requireSameOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if s.sameOriginRequest(r) {
+		return true
+	}
+	adminError(w, http.StatusBadRequest, "invalid_request", "Request did not originate from this site.")
+	return false
+}
 
 func platformMailSettings(m config.MailBootstrap) store.PlatformMailSettings {
 	return store.PlatformMailSettings{
@@ -38,8 +51,23 @@ func parseMailPort(raw string) int {
 	return port
 }
 
+// runtime is the public deployment-mode probe the SPA boots from. In local
+// mode it also reports first-run state: setup_required drives the credential
+// page in place of the login form, and wizard_enabled marks whether the
+// onboarding wizard may be offered (false when environment credentials are
+// set). Hosted keeps its existing payload: hosted auth is a different,
+// pre-existing flow and its onboarding state comes from /api/auth/onboarding.
 func (s *Server) runtime(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"mode": string(s.config.Mode)})
+	payload := map[string]any{"mode": string(s.config.Mode)}
+	if s.config.Mode != config.ModeHosted {
+		payload["setup_required"] = s.setupRequired()
+		payload["wizard_enabled"] = s.wizardEnabled
+		// Local passkeys are available only when WebAuthn was configured (i.e.
+		// TILLER_PUBLIC_URL is set). The SPA gates the passkey button/card on
+		// this, matching the hosted auth-options payload.
+		payload["passkeys_enabled"] = s.identity != nil && s.identity.PasskeysEnabled()
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) authOptions(w http.ResponseWriter, r *http.Request) {
@@ -53,12 +81,21 @@ func (s *Server) authOptions(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "auth_unavailable", "Sign-in options are temporarily unavailable.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"google_enabled":     settings.GoogleEnabled && settings.GoogleClientID != "" && settings.GoogleClientSecret != "",
+	googleEnabled := settings.GoogleEnabled && settings.GoogleClientID != "" && settings.GoogleClientSecret != ""
+	options := map[string]any{
+		"google_enabled":     googleEnabled,
 		"turnstile_enabled":  settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != "",
 		"turnstile_site_key": settings.TurnstileSiteKey,
 		"signup_enabled":     signup,
-	})
+		"passkeys_enabled":   s.identity != nil && s.identity.PasskeysEnabled(),
+	}
+	// The client ID is public (it is embedded in every Google Identity Services
+	// page) and the frontend needs it to initialise GSI. Only expose it when
+	// Google sign-in is fully configured.
+	if googleEnabled {
+		options["google_client_id"] = settings.GoogleClientID
+	}
+	writeJSON(w, http.StatusOK, options)
 }
 
 func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token, action string) bool {
@@ -96,6 +133,9 @@ func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token
 }
 
 func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
@@ -113,7 +153,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !validEmail(input.Email) {
@@ -122,6 +162,13 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	if !input.AcceptTerms {
 		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
+		return
+	}
+	// Per-address budget: a successful signup also consumes it, so one mailbox
+	// cannot be enrolled and re-mailed repeatedly faster than the IP limiter's
+	// blind spot (rotating IPs) allows. The external response stays generic.
+	if !s.signupEmailLimiter.allowAttempt(s.authRateLimitEmailKey(input.Email)) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
 	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "signup") {
@@ -157,6 +204,9 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if s.userLoginIPLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
@@ -167,7 +217,7 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	emailKey := s.authRateLimitEmailKey(input.Email)
@@ -195,12 +245,52 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 	s.userLoginEmailLimiter.success(emailKey)
 	session, err := s.identity.CreateUserSession(r.Context(), u)
 	if err != nil {
+		if errors.Is(err, identity.ErrStaleAuthentication) {
+			adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid email or password.")
+			return
+		}
 		adminError(w, http.StatusInternalServerError, "internal_error", "Could not create session.")
 		return
 	}
 	s.setUserSessionCookie(w, r, session.Token, session.ExpiresAt)
 	s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.login", ActorType: "user", ActorID: u.ID})
-	writeJSON(w, http.StatusOK, userSessionPayload(session))
+	payload := userSessionPayload(session)
+	// If a Google sign-in just established that this email already belongs to a
+	// Tiller account, the visitor proved the Google factor but not ownership of
+	// the account. Offer to link it now that they have authenticated with the
+	// password: this substitutes for the manual trip to Account settings that
+	// the README describes. The grant authorises startGoogleLink without a
+	// second password entry.
+	if s.pendingGoogleLink(r, session) {
+		s.grantLinkAuth(session.Token)
+		payload["pending_google_link"] = true
+	}
+	writeJSON(w, http.StatusOK, payload)
+}
+
+// pendingGoogleLink reports whether a validated Google sign-in is waiting to be
+// attached to this freshly authenticated account. It requires: a live pending
+// claim for this exact email, a Google identity that is not already linked, and
+// a password-enabled account (the user just authenticated with it). The claim
+// is left in place; the link itself happens through the authenticated Google
+// redirect callback.
+func (s *Server) pendingGoogleLink(r *http.Request, session identity.UserSession) bool {
+	cookie, err := r.Cookie(googleSignupCookie)
+	if err != nil {
+		return false
+	}
+	claims, ok := s.googlePending.Peek(cookie.Value)
+	if !ok || claims.Subject == "" {
+		return false
+	}
+	if !strings.EqualFold(identity.NormalizeEmail(claims.Email), identity.NormalizeEmail(session.User.Email)) {
+		return false
+	}
+	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if err != nil || profile.GoogleLinked {
+		return false
+	}
+	return session.User.PasswordEnabled
 }
 
 func (s *Server) requireUser(next http.Handler) http.Handler {
@@ -223,6 +313,7 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), userSessionKey, session)
 		ctx = context.WithValue(ctx, userKey, session.User)
 		ctx = context.WithValue(ctx, accountKey, session.User.AccountID)
+		stampRequestPrincipal(r, "user", session.User.AccountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -245,7 +336,7 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConsumeVerification(r.Context(), input.Token)
@@ -276,6 +367,9 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
@@ -286,7 +380,7 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "recovery") {
@@ -303,6 +397,9 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
@@ -313,7 +410,7 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "recovery") {
@@ -330,12 +427,15 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	var input struct {
 		Token    string `json:"token"`
 		Password string `json:"password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConsumePasswordReset(r.Context(), input.Token, input.Password)
@@ -379,6 +479,44 @@ func userSessionPayload(session identity.UserSession) map[string]any {
 
 func validEmail(value string) bool {
 	return identity.ValidateEmail(identity.NormalizeEmail(value))
+}
+
+// auditActor resolves the principal who performed a tenant-config mutation.
+// Hosted requests carry the user session (requireAdmin == requireUser); local
+// requests carry the admin session over the single implicit account. The
+// actor id is the user id (hosted) or the admin username (local, which has no
+// user row). Zero value means the caller is not an authenticated tenant
+// principal and must not record an account audit event.
+type auditActor struct {
+	id        string
+	actorType string
+}
+
+func (s *Server) auditActorFor(r *http.Request) auditActor {
+	if s.config.Mode == config.ModeHosted {
+		if user, ok := r.Context().Value(userKey).(identity.User); ok {
+			return auditActor{id: user.ID, actorType: "user"}
+		}
+		return auditActor{}
+	}
+	if _, ok := r.Context().Value(adminSessionKey).(auth.Session); ok {
+		return auditActor{id: s.adminUsername(), actorType: "admin"}
+	}
+	return auditActor{}
+}
+
+// recordResourceAudit writes the account-scoped audit event for a
+// tenant-config mutation, best-effort (a failed write never fails the
+// operation), skipping silently when there is no authenticated principal.
+// (docs/pre_saas_release_review.md TR-014.)
+func (s *Server) recordResourceAudit(r *http.Request, accountID string, event store.AuditEvent) {
+	actor := s.auditActorFor(r)
+	if actor.id == "" {
+		return
+	}
+	event.ActorType = actor.actorType
+	event.ActorID = actor.id
+	s.recordAccountAudit(r.Context(), accountID, event)
 }
 
 // recordAccountAudit writes an account-scoped audit event best-effort. Audit is

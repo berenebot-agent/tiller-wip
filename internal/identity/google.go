@@ -18,8 +18,8 @@ var (
 // identifier. Email is deliberately never used as the lookup key.
 func (s *Store) GoogleUserBySubject(ctx context.Context, subject string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM user_identities i JOIN users u ON u.id=i.user_id JOIN accounts a ON a.owner_user_id=u.id WHERE i.provider='google' AND i.subject=?`, subject).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled,u.auth_generation FROM user_identities i JOIN users u ON u.id=i.user_id JOIN accounts a ON a.owner_user_id=u.id WHERE i.provider='google' AND i.subject=?`, subject).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled, &u.AuthGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -86,7 +86,7 @@ func (s *Store) LinkGoogleIdentity(ctx context.Context, userID, subject, email s
 	err := s.db.QueryRowContext(ctx, `SELECT user_id FROM user_identities WHERE provider='google' AND subject=?`, subject).Scan(&existingUser)
 	if err == nil {
 		if existingUser == userID {
-			return nil
+			return s.disablePasswordAuth(ctx, userID)
 		}
 		return ErrGoogleIdentityTaken
 	}
@@ -97,14 +97,15 @@ func (s *Store) LinkGoogleIdentity(ctx context.Context, userID, subject, email s
 	if err != nil {
 		return err
 	}
-	result, err := s.db.ExecContext(ctx, `INSERT INTO user_identities(id,user_id,provider,subject,email,created_at) SELECT ?,u.id,'google',?,?,? FROM users u JOIN accounts a ON a.owner_user_id=u.id AND a.status='active' WHERE u.id=? AND u.status='active' AND u.email_verified_at IS NOT NULL`, identityID, subject, NormalizeEmail(email), formatTime(time.Now().UTC()), userID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `INSERT INTO user_identities(id,user_id,provider,subject,email,created_at) SELECT ?,u.id,'google',?,?,? FROM users u JOIN accounts a ON a.owner_user_id=u.id AND a.status='active' WHERE u.id=? AND u.status='active' AND u.email_verified_at IS NOT NULL`, identityID, subject, NormalizeEmail(email), formatTime(time.Now().UTC()), userID)
 	if err != nil {
 		// The unique constraints close races where this subject or a Google
 		// identity for the user was linked after the reads above.
-		var count int
-		if lookupErr := s.db.QueryRowContext(ctx, `SELECT count(*) FROM user_identities WHERE provider='google' AND subject=? AND user_id=?`, subject, userID).Scan(&count); lookupErr == nil && count == 1 {
-			return nil
-		}
 		return ErrGoogleIdentityTaken
 	}
 	if n, rowsErr := result.RowsAffected(); rowsErr != nil {
@@ -112,29 +113,85 @@ func (s *Store) LinkGoogleIdentity(ctx context.Context, userID, subject, email s
 	} else if n != 1 {
 		return ErrNotFound
 	}
+	// A credential change must bump the auth generation, exactly as password
+	// change, password reset and email change do. Without it, a login that read
+	// this user before the link and creates its session afterwards would still
+	// satisfy CreateUserSession's generation check and mint a session from a
+	// credential state that no longer exists (password auth just became
+	// unavailable).
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_auth_enabled=0,auth_generation=auth_generation+1,updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.InvalidateUser(userID)
 	return nil
 }
 
-// UnlinkGoogleIdentity removes Google only when the user has password sign-in
-// available. This prevents deleting the only credential from a Google-first
-// account.
+func (s *Store) disablePasswordAuth(ctx context.Context, userID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Re-linking an already-linked subject still disables password auth, so it
+	// is still a credential change and still bumps the generation. A redundant
+	// re-link therefore revokes the user's sessions; that is the same behaviour
+	// as any other credential change and is preferable to a stale-generation
+	// race.
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_auth_enabled=0,auth_generation=auth_generation+1,updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.InvalidateUser(userID)
+	return nil
+}
+
+// UnlinkGoogleIdentity restores password sign-in when removing Google's
+// identity. Google can only be linked from an account with password sign-in,
+// so the existing password hash is available to restore.
 func (s *Store) UnlinkGoogleIdentity(ctx context.Context, userID string) error {
-	var passwordEnabled bool
-	if err := s.db.QueryRowContext(ctx, `SELECT password_auth_enabled FROM users WHERE id=?`, userID).Scan(&passwordEnabled); err != nil {
+	var hasPassword bool
+	if err := s.db.QueryRowContext(ctx, `SELECT password_hash<>'' FROM users WHERE id=?`, userID).Scan(&hasPassword); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
 	}
-	if !passwordEnabled {
+	if !hasPassword {
 		return ErrLastIdentity
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM user_identities WHERE user_id=? AND provider='google'`, userID)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `DELETE FROM user_identities WHERE user_id=? AND provider='google'`, userID)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	// Unlinking removes a sign-in method and restores password auth: a
+	// credential change. The bump stops a Google sign-in that read this user
+	// before the unlink (and therefore before the subject was removed) from
+	// creating a session after the revocation.
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_auth_enabled=CASE WHEN password_hash<>'' THEN 1 ELSE 0 END,auth_generation=auth_generation+1,updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), userID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.InvalidateUser(userID)
 	return nil
 }

@@ -51,8 +51,13 @@ type AccountProfile struct {
 	AccountStatus   string `json:"account_status"`
 	Verified        bool   `json:"verified"`
 	PasswordEnabled bool   `json:"password_enabled"`
+	HasPassword     bool   `json:"has_password"`
 	GoogleLinked    bool   `json:"google_linked"`
 	CreatedAt       string `json:"created_at"`
+	// Passkeys lists registered passkeys and whether the deployment supports
+	// them. Populated by AccountProfile when WebAuthn is configured.
+	Passkeys        []PasskeyInfo `json:"passkeys,omitempty"`
+	PasskeysEnabled bool          `json:"passkeys_enabled"`
 }
 
 // sessionSelector extracts the selector from a raw session token. The selector
@@ -89,8 +94,8 @@ func (s *Store) VerifyPassword(ctx context.Context, userID, password string) err
 func (s *Store) AccountProfile(ctx context.Context, userID string) (AccountProfile, error) {
 	var p AccountProfile
 	var verified sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.plan,a.status,u.created_at,u.password_auth_enabled,EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=u.id AND i.provider='google') FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
-		Scan(&p.UserID, &p.Email, &p.UserStatus, &verified, &p.AccountID, &p.Plan, &p.AccountStatus, &p.CreatedAt, &p.PasswordEnabled, &p.GoogleLinked)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.plan,a.status,u.created_at,u.password_auth_enabled,EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=u.id AND i.provider='google'),(u.password_hash<>'') FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
+		Scan(&p.UserID, &p.Email, &p.UserStatus, &verified, &p.AccountID, &p.Plan, &p.AccountStatus, &p.CreatedAt, &p.PasswordEnabled, &p.GoogleLinked, &p.HasPassword)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AccountProfile{}, ErrNotFound
 	}
@@ -98,6 +103,14 @@ func (s *Store) AccountProfile(ctx context.Context, userID string) (AccountProfi
 		return AccountProfile{}, err
 	}
 	p.Verified = verified.Valid && verified.String != ""
+	p.PasskeysEnabled = s.passkeysEnabled()
+	if p.PasskeysEnabled {
+		keys, kerr := s.ListPasskeys(ctx, userID)
+		if kerr != nil {
+			return AccountProfile{}, kerr
+		}
+		p.Passkeys = keys
+	}
 	return p, nil
 }
 
@@ -115,6 +128,13 @@ func (s *Store) ChangePasswordAfterReauthentication(ctx context.Context, userID,
 }
 
 func (s *Store) changePassword(ctx context.Context, userID, currentSession, currentPassword, newPassword string, identityConfirmed bool) (User, error) {
+	var googleLinked bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider='google')`, userID).Scan(&googleLinked); err != nil {
+		return User{}, err
+	}
+	if googleLinked {
+		return User{}, ErrPasswordDisabled
+	}
 	if err := ValidatePassword(newPassword); err != nil {
 		return User{}, err
 	}
@@ -137,10 +157,16 @@ func (s *Store) changePassword(ctx context.Context, userID, currentSession, curr
 		return User{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=?,auth_generation=auth_generation+1 WHERE id=?`, newHash, formatTime(now), userID); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=? AND id<>?`, userID, keepSelector); err != nil {
+		return User{}, err
+	}
+	// A password change invalidates any outstanding reset link: the generation
+	// bump above makes previously issued tokens stale, and the rows are removed
+	// outright so they cannot be retried.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
 		return User{}, err
 	}
 	// A pending email change must not survive a password change: the warning
@@ -159,7 +185,23 @@ func (s *Store) changePassword(ctx context.Context, userID, currentSession, curr
 // RevokeAllUserSessions deletes every session for the user, including the
 // initiating one, and clears the cache so revocation is immediate.
 func (s *Store) RevokeAllUserSessions(ctx context.Context, userID string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+	// Bump the generation so outstanding password-reset links are invalidated
+	// too, not just the sessions being deleted here.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET auth_generation=auth_generation+1,updated_at=? WHERE id=?`, formatTime(time.Now().UTC()), userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.InvalidateUser(userID)
@@ -269,10 +311,15 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, rawToken string) (User, 
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET email=?,email_verified_at=?,updated_at=? WHERE id=?`, newEmail, formatTime(now), formatTime(now), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET email=?,email_verified_at=?,updated_at=?,auth_generation=auth_generation+1 WHERE id=?`, newEmail, formatTime(now), formatTime(now), userID); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM email_change_tokens WHERE user_id=?`, userID); err != nil {
+		return User{}, err
+	}
+	// An email change invalidates outstanding password-reset links: the
+	// generation bump makes them stale and the rows are removed.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
 		return User{}, err
 	}
 	if keep.Valid && keep.String != "" {
@@ -339,6 +386,72 @@ func (s *Store) invalidateOtherUserSessions(userID, keepSelector string) {
 		}
 	}
 	s.mu.Unlock()
+}
+
+// pendingAccountMaxAge is how long a never-verified signup is retained before
+// the scheduled sweep reclaims it. Verification tokens expire after 24 h
+// anyway, so 30 days (docs/pre_saas_release_review.md TR-005) is a generous
+// grace period; without a sweep, abandoned signups would accumulate
+// indefinitely on a public service, holding their unique email and acceptance
+// record forever.
+const pendingAccountMaxAge = 30 * 24 * time.Hour
+
+// PrunePendingAccounts reclaims signup rows whose account never left the
+// `pending` state within pendingAccountMaxAge. A pending signup has no tenant
+// resources (client keys/providers only come later), so the sweep is user-row
+// work: the abandoned user plus its acceptance record, its queued-but-unsent
+// mail, and the pending account itself. A verified, active, suspended, or
+// deleting account is never touched: the guard is accounts.status='pending'
+// combined with the created_at cutoff, re-checked at delete time.
+func (s *Store) PrunePendingAccounts(ctx context.Context, now time.Time) (int64, error) {
+	cutoff := formatTime(now.Add(-pendingAccountMaxAge))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Collect the stale pending rows first and mutate after, so no query
+	// cursor races the deletes.
+	rows, err := tx.QueryContext(ctx, `SELECT a.id,a.owner_user_id FROM accounts a WHERE a.status='pending' AND a.created_at < ? AND a.owner_user_id IS NOT NULL`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	type stalePending struct{ accountID, userID string }
+	var stale []stalePending
+	for rows.Next() {
+		var row stalePending
+		if err := rows.Scan(&row.accountID, &row.userID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		stale = append(stale, row)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, row := range stale {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM legal_acceptances WHERE user_id=?`, row.userID); err != nil {
+			return total, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM mail_outbox WHERE user_id=? AND sent_at IS NULL`, row.userID); err != nil {
+			return total, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id=?`, row.userID); err != nil {
+			return total, err
+		}
+		// accounts.owner_user_id is ON DELETE SET NULL, so the account row is
+		// removed explicitly and only while still pending.
+		res, err := tx.ExecContext(ctx, `DELETE FROM accounts WHERE id=? AND status='pending'`, row.accountID)
+		if err != nil {
+			return total, err
+		}
+		if n, err := res.RowsAffected(); err == nil && n == 1 {
+			total++
+		}
+	}
+	return total, tx.Commit()
 }
 
 // PruneExpiredTokens removes used or expired one-time identity tokens. The rows

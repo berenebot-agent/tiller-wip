@@ -145,11 +145,14 @@ func mergeReasoningCapabilities(a, b *providers.ReasoningCapabilities) *provider
 	if b == nil {
 		return a
 	}
-	// Build a superset: union of effort values, toggle if either reports it,
-	// budget with widest known range, default effort from either.
+	// Build a capability superset: union of effort values, toggle if either
+	// reports it, budget with widest known range, default effort from either.
+	// Mandatory is deliberately NOT a superset: a virtual model only requires
+	// reasoning when every target does, so an aggregate never claims the
+	// constraint on behalf of a target that can serve plain chat.
 	result := &providers.ReasoningCapabilities{
 		DefaultEffort:  a.DefaultEffort,
-		Mandatory:      mergeBoolPtr(a.Mandatory, b.Mandatory),
+		Mandatory:      mergeBoolAndPtr(a.Mandatory, b.Mandatory),
 		DefaultEnabled: mergeBoolPtr(a.DefaultEnabled, b.DefaultEnabled),
 	}
 	if result.DefaultEffort == "" {
@@ -183,6 +186,29 @@ func mergeReasoningCapabilities(a, b *providers.ReasoningCapabilities) *provider
 			Type:   providers.ReasoningOptionEffort,
 			Values: values,
 		})
+		if !unrestrictedEffort && (a.ClientEfforts != nil || b.ClientEfforts != nil) {
+			clientValues := make(map[string]bool)
+			for _, capability := range []*providers.ReasoningCapabilities{a, b} {
+				for _, option := range capability.Options {
+					if option.Type != providers.ReasoningOptionEffort {
+						continue
+					}
+					efforts := option.Values
+					if capability.ClientEfforts != nil {
+						efforts = *capability.ClientEfforts
+					}
+					for _, effort := range efforts {
+						clientValues[effort] = true
+					}
+				}
+			}
+			union := make([]string, 0, len(clientValues))
+			for effort := range clientValues {
+				union = append(union, effort)
+			}
+			clientEfforts := providers.SortEfforts(union)
+			result.ClientEfforts = &clientEfforts
+		}
 	}
 	// Toggle if either reports it.
 	if hasOption(a, providers.ReasoningOptionToggle) || hasOption(b, providers.ReasoningOptionToggle) {
@@ -275,6 +301,17 @@ func findBudget(c *providers.ReasoningCapabilities) *providers.ReasoningOption {
 		}
 	}
 	return nil
+}
+
+// mergeBoolAndPtr returns the conjunction of two tri-state bools. Unknown
+// (nil) on either side yields unknown: an aggregate may only claim a property
+// it can prove for every contributor.
+func mergeBoolAndPtr(a, b *bool) *bool {
+	if a == nil || b == nil {
+		return nil
+	}
+	v := *a && *b
+	return &v
 }
 
 // mergeBoolPtr prefers a when both are present; otherwise returns whichever is

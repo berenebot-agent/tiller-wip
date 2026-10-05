@@ -4,14 +4,22 @@
 # The containerised test runners emit per-run artifacts under tests/logs/:
 # browser runs leave a tiller-browser-<pid>/ directory (~6MB, mostly an
 # extracted fixturectl binary), compat leaves a dated .log, and the Go wrapper
-# leaves a dated .log per invocation. Successful runs are cleaned up by their
-# own runners, but killed/interrupted runs (ssh drop, OOM, kill -9 while the
-# EXIT trap is pending) pile up and there is no bound.
+# leaves a dated .log per invocation. Killed/interrupted runs (ssh drop, OOM,
+# kill -9 while the EXIT trap is pending) pile up and there is no bound.
 #
-# Run the prune BEFORE a run starts: keep the N most recently modified
-# entries per glob, remove the rest. It is deliberately mtime-based (LRU),
-# not count-based on any per-test logic, so a preserved failed-run artifact is
-# kept if recent and only evicted once it becomes the oldest.
+# Sourced by the browser and compatibility runners (each with its own per-glob
+# cap) to bound their own artifacts. tests/run.sh no longer prunes its `runs/`
+# tree automatically — runs are retained in full there, and reclaimed only when
+# the human runs `./tests/run.sh --prune --keep N`, which sets every cap to N.
+#
+# Keep the N most recently modified entries per glob, remove the rest. It is
+# deliberately mtime-based (LRU), not count-based on any per-test logic, so a
+# preserved failed-run artifact is kept if recent and only evicted once it
+# becomes the oldest.
+#
+# Never touches:
+#   - tests/logs/history.tsv   (append-only ledger)
+#   - tests/logs/latest        (symlink pointer)
 #
 # Browser run dirs may contain activity-data/ subdirs chowned by the router
 # (running as uid 65532), so a plain `rm -rf` on the host fails. Evictions are
@@ -64,6 +72,10 @@ fi
 # Use plain rm for host-owned trees and a root container for trees that
 # contain 65532-owned subdirs.
 for rel in "${evict[@]}"; do
+    # Defensive: never remove the ledger or the latest-run pointer.
+    case "$rel" in
+        history.tsv|latest) continue ;;
+    esac
     if rm -rf -- "$logs_dir/$rel" 2>/dev/null; then
         continue
     fi

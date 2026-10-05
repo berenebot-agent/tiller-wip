@@ -37,6 +37,19 @@ func (s *Server) accountProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, profile)
 }
 
+// localAccountProfile returns the local operator's identity and passkeys for
+// the Settings → Account panel. It is the local-mode counterpart of
+// accountProfile; the panel only uses the identity fields and the passkey list.
+func (s *Server) localAccountProfile(w http.ResponseWriter, r *http.Request) {
+	user := r.Context().Value(userKey).(identity.User)
+	profile, err := s.identity.AccountProfile(r.Context(), user.ID)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load account details.")
+		return
+	}
+	writeJSON(w, http.StatusOK, profile)
+}
+
 // changeOwnPassword re-authenticates and changes the password, then revokes
 // every other session.
 func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
@@ -46,12 +59,21 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		NewPassword     string `json:"new_password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
+		return
+	}
+	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not verify your account details.")
+		return
+	}
+	if profile.GoogleLinked {
+		adminError(w, http.StatusConflict, "password_disabled", "Password changes are unavailable while Google is linked.")
 		return
 	}
 	_, authErr := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword)
 	if authErr != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your password.")
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing your password.")
 		return
 	}
 	if _, err := s.identity.ChangePasswordAfterReauthentication(r.Context(), session.User.ID, rawUserSessionToken(r), input.NewPassword); err != nil {
@@ -80,11 +102,21 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
-	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before changing your email.")
+	profile, profileErr := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if profileErr != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not verify your account details.")
+		return
+	}
+	if profile.GoogleLinked && !profile.PasswordEnabled {
+		if !s.consumeGoogleReauth(rawUserSessionToken(r)) && !s.consumePasskeyReauth(rawUserSessionToken(r)) {
+			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google or a passkey before changing your email.")
+			return
+		}
+	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing your email.")
 		return
 	}
 	if !validEmail(input.NewEmail) {
@@ -119,7 +151,7 @@ func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
 		Token string `json:"token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConfirmEmailChange(r.Context(), input.Token)
@@ -159,15 +191,25 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		Confirm  string `json:"confirm"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !strings.EqualFold(identity.NormalizeEmail(input.Confirm), identity.NormalizeEmail(session.User.Email)) {
 		adminError(w, http.StatusBadRequest, "confirmation_required", "Type your email address to confirm deletion.")
 		return
 	}
-	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before deleting your account.")
+	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not verify your account details.")
+		return
+	}
+	if profile.GoogleLinked && !profile.PasswordEnabled {
+		if !s.consumeGoogleReauth(rawUserSessionToken(r)) && !s.consumePasskeyReauth(rawUserSessionToken(r)) {
+			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with Google or a passkey before deleting your account.")
+			return
+		}
+	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before deleting your account.")
 		return
 	}
 	accountID := session.User.AccountID

@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"reflect"
 	"strconv"
+	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostednet"
@@ -36,7 +37,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	notifications, err := sc.GetNotificationSettings(r.Context())
+	notifications, err := s.notificationSettings(r.Context(), sc)
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
@@ -56,9 +57,6 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		"notifications_event_client_key_deleted": notifications.EventClientKeyDeleted,
 		"notifications_event_admin_login":        notifications.EventAdminLogin,
 		"notifications_auth_header_set":          notifications.AuthHeader != "",
-		"provider_credential_encryption": map[string]any{
-			"state": s.secretEncryptionState(),
-		},
 	})
 }
 
@@ -118,6 +116,14 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_cooldown", "Notification cooldown must be 0 or more seconds.")
 		return
 	}
+	// Hosted-mode policy: the cooldown is pinned at 60s and the admin-
+	// login event never applies (hosted accounts have no admin login).
+	if s.config.Mode == config.ModeHosted {
+		adminLoginDisabled := false
+		cooldownPinned := hostedNotificationCooldownSeconds
+		input.NotificationsEventAdminLogin = &adminLoginDisabled
+		input.NotificationsCooldownSeconds = &cooldownPinned
+	}
 	// Each entry writes its setting only when the field was supplied (non-nil),
 	// so a PATCH touches exactly the fields present. The auth header is a
 	// secret: it is never returned by GET; a non-nil value here replaces it
@@ -125,6 +131,19 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	type settingUpdate struct {
 		value any // *bool / *int / *string; nil skips the write
 		key   string
+	}
+
+	// updatedSettingFields lists the setting keys a PATCH actually wrote, in
+	// call order, so the audit event names fields — never their values.
+	updatedSettingFields := func(updates []settingUpdate) []string {
+		names := make([]string, 0, len(updates))
+		for _, u := range updates {
+			if u.value == nil || reflect.ValueOf(u.value).IsNil() {
+				continue
+			}
+			names = append(names, u.key)
+		}
+		return names
 	}
 	updates := []settingUpdate{
 		{key: store.SettingDefaultLoggingEnabled, value: input.DefaultLoggingEnabled},
@@ -162,6 +181,16 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		if u.key == store.SettingFallbackCooldownSeconds && *input.FallbackCooldownSeconds == 0 {
 			s.cooldown.clearFor(sc.AccountID())
 		}
+	}
+	// TR-014: settings mutations are audited by field name only — webhook URLs
+	// and the auth header are never recorded as values.
+	if fields := updatedSettingFields(updates); len(fields) > 0 {
+		s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+			Event:      "settings.updated",
+			TargetType: "settings",
+			TargetID:   sc.AccountID(),
+			Metadata:   map[string]string{"fields": strings.Join(fields, ",")},
+		})
 	}
 	w.WriteHeader(204)
 }

@@ -275,7 +275,13 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
 	})
 	api, secret, canonical, app := cooldownTestHarness(t, waitA, okB)
-	t.Cleanup(func() { close(releaseA) })
+	// releaseA unblocks the first upstream attempt. It is closed once the
+	// cancelled request has been observed to return, so the follow-up request
+	// below does not block behind a still-parked handler goroutine (which would
+	// otherwise wait out the full upstream response-header timeout, ~60s).
+	releaseOnce := sync.Once{}
+	release := func() { releaseOnce.Do(func() { close(releaseA) }) }
+	t.Cleanup(release)
 	app.providers.Registry().SetResponseHeaderTimeout(80 * time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -299,6 +305,9 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 	}
 	_ = resp
 	_ = reqErr
+	// Let the parked first attempt finish before the follow-up request, so this
+	// test does not pay the upstream response-header timeout.
+	release()
 
 	var modelA string
 	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {

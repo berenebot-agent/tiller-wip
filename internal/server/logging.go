@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
@@ -34,19 +35,41 @@ type logRow struct {
 	outputTokens             *int64
 	cacheReadInputTokens     *int64
 	cacheCreationInputTokens *int64
-	providerRequestID        *string
-	clientRequestID          string
-	errorText                *string
-	errorMessage             *string
-	fallbackUsed             bool
-	fallbackReason           *string
-	attempts                 []requestAttempt
-	routeStatus              string
-	requestBody              *string
-	requestBodyTruncated     bool
-	errorBody                *string
-	errorBodyTruncated       bool
-	createdAt                string
+	// providerType is the selected target's provider type (e.g. "openai"),
+	// used only to look up models.dev pricing for the display estimate.
+	providerType *string
+	// providerCostMicros is a provider-reported exact cost (OpenRouter
+	// usage.cost) when the upstream response carried one.
+	providerCostMicros   *int64
+	inputTokensEstimated bool
+	inputEstimate        int64
+	providerRequestID    *string
+	clientRequestID      string
+	errorText            *string
+	errorMessage         *string
+	fallbackUsed         bool
+	fallbackReason       *string
+	attempts             []requestAttempt
+	routeStatus          string
+	requestBody          *string
+	requestBodyTruncated bool
+	errorBody            *string
+	errorBodyTruncated   bool
+	createdAt            string
+}
+
+// copyUsage moves the captured token counts and any provider-reported cost from
+// the in-memory usage capture onto the log row. It is the single copy point so
+// every response shape (translated stream, native SSE, non-streaming) records
+// the same fields.
+func (row *logRow) copyUsage(usage *usageCapture) {
+	if usage == nil {
+		return
+	}
+	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
+	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
+	row.providerCostMicros = usage.providerCostMicros
+	row.inputTokensEstimated = usage.inputTokensEstimated
 }
 
 type requestAttempt struct {
@@ -91,7 +114,9 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	}
 	routeStatus := row.routeStatus
 	if routeStatus == "" {
-		routeStatus = "legacy"
+		// A row whose routing was not classified is explicitly unresolved; the
+		// historical 'legacy' value is no longer produced.
+		routeStatus = "unresolved"
 	}
 	// Phase 1 local mode has exactly one account; a row built without an
 	// explicit account (e.g. an older code path) belongs to it.
@@ -110,6 +135,43 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	if row.httpStatus >= 200 && row.httpStatus < 300 && (row.resolvedProvider == nil || row.resolvedModel == nil) {
 		if s.logger != nil {
 			s.logger.Warn("request logged as success without a resolved target", "client_request_id", row.clientRequestID, "requested_model", row.requestedModel, "http_status", row.httpStatus)
+		}
+	}
+	// Missing-usage fallback: some upstreams omit a usage block entirely, which
+	// would otherwise leave input_tokens NULL and hide the request from token
+	// totals. When a successful row has no provider-reported input count but a
+	// body was captured, estimate it so the request still appears in the
+	// aggregate. The row is flagged estimated so the UI can mark it and so it is
+	// never confused with provider-reported accounting.
+	if row.inputTokens == nil && row.inputEstimate > 0 && row.httpStatus >= 200 && row.httpStatus < 300 {
+		if est := row.inputEstimate; est > 0 {
+			v := est
+			row.inputTokens = &v
+			row.inputTokensEstimated = true
+		}
+	}
+	// Estimated cost is computed only for a successfully resolved row that has
+	// token counts and a resolvable provider type. A provider-reported exact
+	// cost (providerCostMicros) supersedes it for display, so the estimate is
+	// skipped in that case to avoid storing a number nobody will show.
+	var estimatedCostMicros *int64
+	if row.providerCostMicros == nil && row.providerType != nil && row.resolvedModel != nil &&
+		(row.inputTokens != nil || row.outputTokens != nil || row.cacheReadInputTokens != nil || row.cacheCreationInputTokens != nil) {
+		var in, out, cr, cw int64
+		if row.inputTokens != nil {
+			in = *row.inputTokens
+		}
+		if row.outputTokens != nil {
+			out = *row.outputTokens
+		}
+		if row.cacheReadInputTokens != nil {
+			cr = *row.cacheReadInputTokens
+		}
+		if row.cacheCreationInputTokens != nil {
+			cw = *row.cacheCreationInputTokens
+		}
+		if micros, ok := s.providers.Registry().EstimatedCostMicros(*row.providerType, *row.resolvedModel, in, out, cr, cw); ok {
+			estimatedCostMicros = &micros
 		}
 	}
 	attempts := make([]store.RequestAttemptInsert, 0, len(row.attempts))
@@ -151,6 +213,9 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		OutputTokens:             row.outputTokens,
 		CacheReadInputTokens:     row.cacheReadInputTokens,
 		CacheCreationInputTokens: row.cacheCreationInputTokens,
+		EstimatedCostMicros:      estimatedCostMicros,
+		ProviderCostMicros:       row.providerCostMicros,
+		InputTokensEstimated:     row.inputTokensEstimated,
 		ProviderRequestID:        row.providerRequestID,
 		ClientRequestID:          row.clientRequestID,
 		ErrorText:                row.errorText,
@@ -309,6 +374,13 @@ type usageCapture struct {
 	outputTokens             *int64
 	cacheReadInputTokens     *int64 // OpenAI cached_tokens / Anthropic cache_read_input_tokens
 	cacheCreationInputTokens *int64 // Anthropic cache_creation_input_tokens
+	// providerCostMicros is a provider-reported exact cost in micro-dollars
+	// (OpenRouter's usage.cost, a USD float). Nil when the provider did not
+	// report one. It is authoritative over any models.dev estimate.
+	providerCostMicros *int64
+	// inputTokensEstimated reports that inputTokens is a local heuristic
+	// estimate because the provider omitted usage. Set by the Slice 4 fallback.
+	inputTokensEstimated bool
 }
 
 // extractUsage parses a non-streaming JSON response body for usage numbers.
@@ -324,6 +396,26 @@ func extractUsage(body []byte, usage *usageCapture) {
 	setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
 	setUsage(usage, u["input_tokens"], u["output_tokens"])
 	setCacheFromUsage(u, usage)
+	setProviderCostFromUsage(u, usage)
+}
+
+// setProviderCostFromUsage records an exact, provider-reported request cost.
+// OpenRouter reports usage.cost as a USD float; it is converted to
+// micro-dollars (1e-6 USD, rounded) so the value survives the integer column
+// without a float comparison at read time. First non-nil wins.
+func setProviderCostFromUsage(u map[string]any, usage *usageCapture) {
+	if usage.providerCostMicros != nil {
+		return
+	}
+	cost, ok := u["cost"].(float64)
+	if !ok {
+		return
+	}
+	if cost < 0 {
+		return
+	}
+	micros := int64(math.Round(cost * 1_000_000))
+	usage.providerCostMicros = &micros
 }
 
 // captureStreamUsage extracts usage from a single SSE event payload, handling
@@ -334,16 +426,19 @@ func captureStreamUsage(payload map[string]any, target providers.Protocol, usage
 		if u, ok := payload["usage"].(map[string]any); ok {
 			setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
 			setCacheFromUsage(u, usage)
+			setProviderCostFromUsage(u, usage)
 		}
 	case providers.ProtocolMessages:
 		if u, ok := payload["usage"].(map[string]any); ok {
 			setUsage(usage, nil, u["output_tokens"])
 			setCacheFromUsage(u, usage)
+			setProviderCostFromUsage(u, usage)
 		}
 		if msg, ok := payload["message"].(map[string]any); ok {
 			if u, ok := msg["usage"].(map[string]any); ok {
 				setUsage(usage, u["input_tokens"], nil)
 				setCacheFromUsage(u, usage)
+				setProviderCostFromUsage(u, usage)
 			}
 		}
 	case providers.ProtocolResponses:
@@ -351,6 +446,7 @@ func captureStreamUsage(payload map[string]any, target providers.Protocol, usage
 			if u, ok := resp["usage"].(map[string]any); ok {
 				setUsage(usage, u["input_tokens"], u["output_tokens"])
 				setCacheFromUsage(u, usage)
+				setProviderCostFromUsage(u, usage)
 			}
 		}
 	}

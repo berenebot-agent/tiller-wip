@@ -10,9 +10,23 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/virtual-dialog.css">
   <link rel="stylesheet" href="/activity-graph.css">
+  <link rel="stylesheet" href="/typography.css">
 </head>
 <body>
-  <div class="login-shell" id="login-shell">
+  <div class="boot-shell" id="boot-shell" hidden>
+    <div class="boot-panel">
+      <div class="boot-mark"><img class="login-mark" src="/media/tiller-mark.svg" alt=""><span>Tiller <b>Router</b></span></div>
+      <div class="boot-bar"></div>
+      <div class="boot-grid">
+        <div class="boot-block"></div>
+        <div class="boot-block"></div>
+        <div class="boot-block"></div>
+      </div>
+      <span class="boot-spin" role="status" aria-label="Loading"></span>
+    </div>
+  </div>
+
+  <div class="login-shell" id="login-shell" hidden>
     <section class="login-card" aria-labelledby="login-title">
       <h1 id="login-title" class="login-brand"><a href="/login"><img class="login-mark" src="/media/tiller-mark.svg" alt=""><span>Tiller <b>Router</b></span></a></h1>
       <form id="login-form" class="stack-form">
@@ -21,34 +35,60 @@
         <p class="form-error" id="login-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" id="login-submit" type="submit">Sign in</button>
         <button class="btn btn-secondary btn-wide" id="resend-login-verification" type="button" hidden>Send verification email again</button>
-        <button class="btn btn-secondary btn-wide" id="google-signin" type="button" hidden>Continue with Google</button>
-        <p class="collection-notice" id="google-signin-notice" hidden>Google provides your verified email and account identifier. If enabled, Cloudflare Turnstile checks browser signals. See the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>
+        <button class="btn btn-secondary btn-wide" id="show-signup" type="button" hidden>Create an account</button>
+        <button class="btn btn-secondary btn-wide" id="passkey-signin" type="button" hidden>Sign in with a passkey</button>
+        <p class="setting-tip" id="passkey-signin-status" role="status" aria-live="polite"></p>
+        <div id="google-signin-button" class="google-signin-button" hidden></div>
+        <p class="collection-notice" id="google-signin-notice" hidden>Google provides your verified email and account identifier. If enabled, Cloudflare Turnstile checks browser signals. See the <a href="/legal/privacy">Privacy Policy</a>.</p>
       </form>
       <div id="hosted-auth-links" class="auth-links" hidden>
-        <button class="btn-link" id="show-signup" type="button">Create an account</button>
         <button class="btn-link" id="show-forgot-password" type="button">Forgot password?</button>
       </div>
-      <div id="auth-captcha-wrap" class="auth-captcha" hidden><div id="auth-captcha"></div><p class="meta-line">Complete the security check to continue. Cloudflare processes browser signals for abuse prevention; see the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p></div>
+      <form id="setup-form" class="stack-form" hidden>
+        <p class="eyebrow">FIRST-RUN SETUP</p>
+        <h2>Set up Tiller</h2>
+        <p>Choose the administrator credentials for this instance. Tiller has no administrator configured yet, so this page is shown once and then permanently disabled.</p>
+        <label>Admin username <input name="username" autocomplete="username" maxlength="64" required autofocus></label>
+        <label>Password <input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
+        <label>Confirm password <input name="confirm" type="password" autocomplete="new-password" minlength="8" required></label>
+        <p class="form-error" id="setup-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" id="setup-submit" type="submit">Create admin and continue</button>
+      </form>
+      <div id="auth-captcha-wrap" class="auth-captcha" hidden><div id="auth-captcha"></div><p class="meta-line">Complete the security check to continue. Cloudflare processes browser signals for abuse prevention; see the <a href="/legal/privacy">Privacy Policy</a>.</p></div>
       <form id="signup-form" class="stack-form" hidden>
         <p class="eyebrow">CREATE ACCOUNT</p>
         <label>Email <input name="email" type="email" autocomplete="email" required></label>
         <label>Passphrase <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
-        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a> and acknowledge the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</label>
-        <p class="collection-notice">Tiller stores your account information and request metadata to operate the service. Request content is processed transiently and routed to the providers you configure; Tiller does not persist prompt or response bodies. If you choose Google sign-in, Google provides your verified email and account identifier. If enabled, Cloudflare Turnstile processes security-check and browser data. Our service providers may process data outside your country, including in Australia and the United States.</p>
+        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms">Terms of Service</a> and acknowledge the <a href="/legal/privacy">Privacy Policy</a>.</label>
         <p class="form-error" id="signup-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Create account</button>
-        <button class="btn btn-secondary btn-wide" id="resend-signup-verification" type="button" hidden>Send verification email again</button>
         <button class="btn-link" id="show-login-from-signup" type="button">Back to sign in</button>
       </form>
+      <section id="signup-done" class="stack-form" hidden>
+        <p class="eyebrow">CHECK YOUR INBOX</p>
+        <h2>Verify your email</h2>
+        <p id="signup-done-message">If the address can receive mail, a verification message will arrive shortly.</p>
+        <p class="form-error" id="signup-done-error" role="alert"></p>
+        <button class="btn btn-secondary btn-wide" id="resend-signup-verification" type="button">Send verification email again</button>
+        <button class="btn-link" id="signup-done-login" type="button">Back to sign in</button>
+      </section>
       <form id="google-consent-form" class="stack-form" hidden>
         <p class="eyebrow">CREATE ACCOUNT WITH GOOGLE</p>
         <h2>Review and accept</h2>
-        <p>Your verified Google email will be used for this Tiller account. Tiller will not connect it to an existing account automatically.</p>
-        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a> and acknowledge the <a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a>.</label>
-        <p class="collection-notice">Google provides your verified email and account identifier. Tiller stores account and request metadata, but does not persist prompt or response bodies.</p>
+        <p>Your verified Google email will be used for this Tiller account.</p>
+        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms">Terms of Service</a> and acknowledge the <a href="/legal/privacy">Privacy Policy</a>.</label>
         <p class="form-error" id="google-consent-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Accept and create account</button>
         <button class="btn-link" id="google-consent-cancel" type="button">Back to sign in</button>
+      </form>
+      <form id="google-link-confirm-form" class="stack-form" hidden>
+        <p class="eyebrow">LINK GOOGLE TO YOUR ACCOUNT</p>
+        <h2>Existing account found</h2>
+        <p id="google-link-confirm-message"></p>
+        <p class="meta-line">Linking Google turns off password sign-in and recovery for this account.</p>
+        <p class="form-error" id="google-link-confirm-error" role="alert"></p>
+        <button class="btn btn-primary btn-wide" type="submit">Link Google and sign in</button>
+        <button class="btn-link" id="google-link-confirm-cancel" type="button">Back to sign in</button>
       </form>
       <form id="forgot-form" class="stack-form" hidden>
         <p class="eyebrow">PASSWORD RECOVERY</p>
@@ -57,6 +97,12 @@
         <button class="btn btn-primary btn-wide" type="submit">Send reset link</button>
         <button class="btn-link" id="show-login-from-forgot" type="button">Back to sign in</button>
       </form>
+      <section id="forgot-done" class="stack-form" hidden>
+        <p class="eyebrow">CHECK YOUR INBOX</p>
+        <h2>Check your email</h2>
+        <p id="forgot-done-message">If the address belongs to an account, a password-reset message will arrive shortly.</p>
+        <button class="btn-link" id="forgot-done-login" type="button">Back to sign in</button>
+      </section>
       <section id="verify-panel" class="stack-form" hidden>
         <p class="eyebrow">EMAIL VERIFICATION</p><h2>Check your email</h2>
         <p id="verify-message">Verifying your link…</p>
@@ -73,33 +119,109 @@
         <button class="btn-link" id="reset-login" type="button" hidden>Continue to sign in</button>
       </form>
       <form id="platform-login-form" class="stack-form" hidden>
+        <div class="platform-login-banner" role="note">
+          <strong>Platform login</strong>
+          <span>Hosting control panel — not the router admin sign-in.</span>
+        </div>
         <p class="eyebrow">PLATFORM ADMIN</p>
         <label>Username <input name="username" autocomplete="username" required></label>
         <label>Password <input aria-label="Platform admin credential" name="password" type="password" autocomplete="current-password" required></label>
         <p class="form-error" id="platform-login-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Open platform dashboard</button>
       </form>
-      <section id="legal-panel" class="stack-form legal-panel" hidden>
-        <p class="eyebrow">LEGAL</p>
-        <h2 id="legal-title">Document</h2>
-        <p class="meta-line" id="legal-updated"></p>
-        <pre class="legal-body" id="legal-body"></pre>
-        <button class="btn btn-secondary btn-wide" id="legal-back" type="button">Back</button>
-      </section>
       
+    </section>
+  </div>
+
+  <div class="legal-shell" id="legal-shell" hidden>
+    <section class="legal-card">
+      <header class="legal-header">
+        <div><p class="eyebrow">LEGAL</p><h1 id="legal-title">Document</h1><p class="meta-line" id="legal-updated"></p></div>
+        <button class="btn btn-secondary" id="legal-back" type="button">Back</button>
+      </header>
+      <pre class="legal-body" id="legal-body"></pre>
+    </section>
+  </div>
+
+  <div class="legal-shell" id="account-google-link-shell" hidden>
+    <section class="login-card account-delete-card" aria-labelledby="account-google-link-title">
+      <h1 id="account-google-link-title">Link Google to this account?</h1>
+      <p id="account-google-link-copy">This email already has a Tiller account. Linking Google lets you sign in with Google instead of your password.</p>
+      <p class="meta-line">Linking Google turns off password sign-in and recovery for this account. You can unlink Google later from Settings &rarr; Account.</p>
+      <p class="form-error" id="account-google-link-error" role="alert"></p>
+      <button class="btn btn-primary btn-wide" id="account-google-link-confirm" type="button">Link Google and continue</button>
+      <button class="btn btn-secondary btn-wide" id="account-google-link-skip" type="button">Not now</button>
+    </section>
+  </div>
+
+  <div class="legal-shell" id="feedback-shell" hidden>
+    <section class="legal-card feedback-card" aria-labelledby="feedback-title">
+      <header class="legal-header">
+        <div><p class="eyebrow">FEEDBACK</p><h1 id="feedback-title">Tiller Router is in active development</h1></div>
+        <button class="btn btn-secondary" id="feedback-back" type="button">Back</button>
+      </header>
+      <div class="feedback-body">
+        <p>We are actively building Tiller Router and we would love to hear from you. Bug reports, feature ideas, rough edges, or anything else — your feedback shapes what comes next.</p>
+        <p>Email us any time at <a href="mailto:tiller-router@hgolabs.com">tiller-router@hgolabs.com</a> and we will get back to you.</p>
+        <p>Prefer GitHub? Tiller Router is open source — browse the code, open an issue, or send a pull request at <a href="https://github.com/dellarb/tiller-router" target="_blank" rel="noopener">github.com/dellarb/tiller-router</a>.</p>
+      </div>
+    </section>
+  </div>
+
+  <div class="legal-shell" id="account-delete-shell" hidden>
+    <section class="login-card account-delete-card" aria-labelledby="account-delete-page-title">
+      <h1 id="account-delete-page-title">Confirm account deletion</h1>
+      <p id="account-delete-page-copy">This permanently deletes your account, provider credentials, client keys, and activity history. Audit history is retained.</p>
+      <form id="account-delete-confirm-form" class="stack-form" autocomplete="off">
+        <label>Email address <input id="account-delete-confirm-email" name="confirm" type="email" autocomplete="off" required></label>
+        <label id="account-delete-confirm-password-row">Password <input id="account-delete-confirm-password" name="password" type="password" autocomplete="current-password" required></label>
+        <p class="form-error" id="account-delete-confirm-error" role="alert"></p>
+        <button class="btn btn-danger btn-wide" type="submit">Permanently delete my account</button>
+        <button class="btn btn-secondary btn-wide" id="account-delete-cancel" type="button">Cancel</button>
+      </form>
     </section>
   </div>
 
   <div class="platform-shell" id="platform-shell" hidden>
     <section class="platform-card">
       <header class="platform-header"><div><p class="eyebrow">PLATFORM CONTROL</p><h1>Hosted operations</h1></div><button class="btn-link" id="platform-logout" type="button">Sign out</button></header>
-      <div class="platform-grid">
-        <article class="system-card"><h2>Signup and mail</h2><form id="platform-settings-form" class="stack-form"><label class="check-label"><input type="checkbox" name="hosted_signup_enabled"> Allow public signup</label><label>Audit retention (days) <input name="audit_retention_days" type="number" min="1" required></label><label>Mail provider <select name="mail_provider"><option value="">Disabled</option><option value="resend">Resend</option><option value="brevo">Brevo</option><option value="smtp">SMTP</option></select></label><label data-mail-when="any">From address <input name="mail_from" type="text" autocomplete="off"></label><label data-mail-when="resend">Resend API key <input name="mail_resend_api_key" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label data-mail-when="brevo">Brevo API key <input name="mail_brevo_api_key" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label data-mail-when="smtp">SMTP host <input name="mail_smtp_host" type="text" autocomplete="off"></label><label data-mail-when="smtp">SMTP port <input name="mail_smtp_port" type="number" min="1" max="65535"></label><label data-mail-when="smtp">SMTP mode <select name="mail_smtp_mode"><option value="starttls">STARTTLS</option><option value="implicit">Implicit TLS</option></select></label><label data-mail-when="smtp">SMTP username <input name="mail_smtp_username" type="text" autocomplete="off"></label><label data-mail-when="smtp">SMTP secret <input name="mail_smtp_password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><hr><h3>Google sign-in</h3><label class="check-label"><input type="checkbox" name="google_signin_enabled"> Allow Google sign-in</label><label>OAuth client ID <input name="google_client_id" type="text" autocomplete="off"></label><label>OAuth client secret <input name="google_client_secret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label class="check-label"><input type="checkbox" name="clear_google_client_secret"> Clear saved Google client secret</label><p class="meta-line">Google cannot be disabled or moved to a different OAuth client while accounts still depend on it. Each account must add a password and unlink Google first.</p><p class="meta-line" id="google-settings-status"></p><hr><h3>Cloudflare Turnstile</h3><label class="check-label"><input type="checkbox" name="turnstile_enabled"> Require Turnstile on signup and recovery</label><label>Site key <input name="turnstile_site_key" type="text" autocomplete="off"></label><label>Secret key <input name="turnstile_secret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label class="check-label"><input type="checkbox" name="clear_turnstile_secret"> Clear saved Turnstile secret</label><p class="meta-line" id="turnstile-settings-status"></p><p class="form-error" id="platform-settings-error" role="alert"></p><button class="btn btn-primary" type="submit">Save platform settings</button></form><p class="meta-line" id="platform-mail-status"></p></article>
-         <article class="system-card"><h2>Hosted accounts</h2><label class="search-field platform-search"><span>Search</span><input id="platform-user-search" type="search" placeholder="Email or account ID"></label><div class="platform-list" id="platform-users-list"></div><div class="activity-pager"><span id="platform-users-count"></span><button class="btn btn-small btn-secondary" id="platform-users-prev" type="button">← Previous</button><button class="btn btn-small btn-secondary" id="platform-users-next" type="button">Next →</button></div><p class="form-error" id="platform-users-error" role="alert"></p></article>
-          <article class="system-card"><h2>Platform audit</h2><div class="platform-list" id="platform-audit-list"></div><p class="form-error" id="platform-audit-error" role="alert"></p></article>
-          <article class="system-card"><h2>Plans</h2><p>Entitlement caps per plan. -1 means unlimited. Local installs never enforce these.</p><div class="platform-list" id="platform-plans-list"></div><p class="form-error" id="platform-plans-error" role="alert"></p></article>
-          <article class="system-card"><h2>Legal documents</h2><p>Published Terms, Privacy, AUP, subprocessor, and security documents. Edits take effect immediately.</p><div class="platform-list" id="platform-legal-list"></div><p class="form-error" id="platform-legal-error" role="alert"></p></article>
-         <article class="system-card"><h2>Mail queue</h2><p>Durable transactional mail. Dead letters are sends that exhausted every retry in the last 24 hours.</p><dl class="platform-mail-metrics"><dt>Queued</dt><dd id="platform-mail-queued">—</dd><dt>Dead (24h)</dt><dd id="platform-mail-dead">—</dd></dl><p class="form-error" id="platform-mail-error" role="alert"></p></article>
+      <nav class="platform-tabs" id="platform-tabs" role="tablist" aria-label="Platform sections" aria-orientation="horizontal" tabindex="-1">
+        <button class="platform-tab active" id="platform-tab-overview" type="button" role="tab" aria-selected="true" aria-controls="platform-panel-overview" data-platform-tab="overview" tabindex="0">Overview</button>
+        <button class="platform-tab" id="platform-tab-users" type="button" role="tab" aria-selected="false" aria-controls="platform-panel-users" data-platform-tab="users" tabindex="-1">Users</button>
+        <button class="platform-tab" id="platform-tab-plans" type="button" role="tab" aria-selected="false" aria-controls="platform-panel-plans" data-platform-tab="plans" tabindex="-1">Plans</button>
+        <button class="platform-tab" id="platform-tab-mail" type="button" role="tab" aria-selected="false" aria-controls="platform-panel-mail" data-platform-tab="mail" tabindex="-1">Mail</button>
+        <button class="platform-tab" id="platform-tab-logs" type="button" role="tab" aria-selected="false" aria-controls="platform-panel-logs" data-platform-tab="logs" tabindex="-1">Logs</button>
+        <button class="platform-tab" id="platform-tab-legal" type="button" role="tab" aria-selected="false" aria-controls="platform-panel-legal" data-platform-tab="legal" tabindex="-1">Legal</button>
+        <button class="platform-tab" id="platform-tab-settings" type="button" role="tab" aria-selected="false" aria-controls="platform-panel-settings" data-platform-tab="settings" tabindex="-1">Settings</button>
+      </nav>
+      <div class="platform-panels" id="platform-panels">
+        <section class="platform-panel active" id="platform-panel-overview" role="tabpanel" aria-labelledby="platform-tab-overview">
+          <header class="dashboard-header"><div><h2>Project overview</h2><p class="meta-line">Hosted platform totals · rolling windows</p></div><button class="btn btn-small btn-secondary" id="platform-stats-refresh" type="button">Refresh</button></header>
+          <div class="metric-strip platform-metric-strip" id="platform-overview-metrics" aria-live="polite"></div>
+          <p class="form-error" id="platform-overview-error" role="alert"></p>
+        </section>
+        <section class="platform-panel" id="platform-panel-users" role="tabpanel" aria-labelledby="platform-tab-users" hidden>
+          <article class="system-card"><h2>Hosted users and accounts</h2><label class="search-field platform-search"><span>Search</span><input id="platform-user-search" type="search" placeholder="Email or account ID"></label><div class="platform-list" id="platform-users-list"></div><div class="activity-pager"><span id="platform-users-count"></span><button class="btn btn-small btn-secondary" id="platform-users-prev" type="button">← Previous</button><button class="btn btn-small btn-secondary" id="platform-users-next" type="button">Next →</button></div><p class="form-error" id="platform-users-error" role="alert"></p></article>
+        </section>
+        <section class="platform-panel" id="platform-panel-plans" role="tabpanel" aria-labelledby="platform-tab-plans" hidden>
+          <article class="system-card"><div class="system-card-head"><h2>Plans</h2><button class="btn btn-small btn-primary" id="platform-plan-add" type="button">+ Add plan</button></div><p>Entitlement caps per plan. -1 means unlimited. Local installs never enforce these.</p><div class="platform-list" id="platform-plans-list"></div><p class="form-error" id="platform-plans-error" role="alert"></p></article>
+        </section>
+        <section class="platform-panel" id="platform-panel-mail" role="tabpanel" aria-labelledby="platform-tab-mail" hidden>
+          <div class="platform-grid platform-mail-grid">
+            <article class="system-card"><h2>Mail delivery settings</h2><form id="platform-mail-settings-form" class="stack-form"><label>Mail provider <select name="mail_provider"><option value="">Disabled</option><option value="resend">Resend</option><option value="brevo">Brevo</option><option value="smtp">SMTP</option></select></label><label data-mail-when="any">From address <input name="mail_from" type="text" autocomplete="off"></label><label data-mail-when="resend">Resend API key <input name="mail_resend_api_key" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label data-mail-when="brevo">Brevo API key <input name="mail_brevo_api_key" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label data-mail-when="smtp">SMTP host <input name="mail_smtp_host" type="text" autocomplete="off"></label><label data-mail-when="smtp">SMTP port <input name="mail_smtp_port" type="number" min="1" max="65535"></label><label data-mail-when="smtp">SMTP mode <select name="mail_smtp_mode"><option value="starttls">STARTTLS</option><option value="implicit">Implicit TLS</option></select></label><label data-mail-when="smtp">SMTP username <input name="mail_smtp_username" type="text" autocomplete="off"></label><label data-mail-when="smtp">SMTP secret <input name="mail_smtp_password" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><p class="meta-line" id="platform-mail-status"></p><p class="form-error" id="platform-mail-settings-error" role="alert"></p><button class="btn btn-primary" type="submit">Save mail settings</button></form></article>
+            <article class="system-card"><h2>Mail queue</h2><p>Durable transactional mail. Dead letters are sends that exhausted every retry in the last 24 hours.</p><dl class="platform-mail-metrics"><dt>Queued</dt><dd id="platform-mail-queued">—</dd><dt>Sent (24h)</dt><dd id="platform-mail-sent">—</dd><dt>Dead (24h)</dt><dd id="platform-mail-dead">—</dd></dl><div class="platform-list mail-log" id="platform-mail-log"></div><p class="form-error" id="platform-mail-error" role="alert"></p></article>
+          </div>
+        </section>
+        <section class="platform-panel" id="platform-panel-logs" role="tabpanel" aria-labelledby="platform-tab-logs" hidden>
+          <article class="system-card"><h2>Platform audit log</h2><p>Operator and hosted-platform events. Request contents are not shown here.</p><div class="platform-list" id="platform-audit-list"></div><div class="activity-pager"><span id="platform-audit-count"></span><button class="btn btn-small btn-secondary" id="platform-audit-prev" type="button">← Previous</button><button class="btn btn-small btn-secondary" id="platform-audit-next" type="button">Next →</button></div><p class="form-error" id="platform-audit-error" role="alert"></p></article>
+        </section>
+        <section class="platform-panel" id="platform-panel-legal" role="tabpanel" aria-labelledby="platform-tab-legal" hidden>
+          <article class="system-card"><h2>Legal documents</h2><p>Published Terms of Service and Privacy Policy. Edits take effect immediately.</p><div class="platform-list" id="platform-legal-list"></div><p class="form-error" id="platform-legal-error" role="alert"></p></article>
+        </section>
+        <section class="platform-panel" id="platform-panel-settings" role="tabpanel" aria-labelledby="platform-tab-settings" hidden>
+          <article class="system-card"><h2>Signup and authentication</h2><form id="platform-settings-form" class="stack-form"><label class="check-label"><input type="checkbox" name="hosted_signup_enabled"> Allow public signup</label><label>Audit retention (days) <input name="audit_retention_days" type="number" min="1" required></label><hr><h3>Google sign-in</h3><label class="check-label"><input type="checkbox" name="google_signin_enabled"> Allow Google sign-in</label><label>OAuth client ID <input name="google_client_id" type="text" autocomplete="off"></label><label>OAuth client secret <input name="google_client_secret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label class="check-label"><input type="checkbox" name="clear_google_client_secret"> Clear saved Google client secret</label><p class="meta-line">Google cannot be disabled or moved to a different OAuth client while accounts still depend on it. Each account must add a password and unlink Google first.</p><p class="meta-line" id="google-settings-status"></p><hr><h3>Cloudflare Turnstile</h3><label class="check-label"><input type="checkbox" name="turnstile_enabled"> Require Turnstile on signup and recovery</label><label>Site key <input name="turnstile_site_key" type="text" autocomplete="off"></label><label>Secret key <input name="turnstile_secret" type="password" autocomplete="new-password" placeholder="Leave blank to keep current"></label><label class="check-label"><input type="checkbox" name="clear_turnstile_secret"> Clear saved Turnstile secret</label><p class="meta-line" id="turnstile-settings-status"></p><p class="form-error" id="platform-settings-error" role="alert"></p><button class="btn btn-primary" type="submit">Save platform settings</button></form></article>
+          <article class="system-card"><h2>Analytics and tracking</h2><p>Optional, consent-gated web analytics for hosted pages. The script is loaded by the browser only after a visitor accepts the consent banner, and the script origin is added to the hosted Content-Security-Policy while enabled.</p><form id="platform-analytics-form" class="stack-form"><label class="check-label"><input type="checkbox" name="analytics_enabled"> Enable analytics</label><label>Provider <select name="analytics_provider"><option value="umami">Umami</option><option value="plausible">Plausible</option><option value="custom">Custom script</option></select></label><label>Script URL <input name="analytics_script_url" type="url" autocomplete="off" placeholder="https://analytics.example.com/script.js"></label><label>Site ID <input name="analytics_site_id" type="text" autocomplete="off"></label><p class="meta-line" id="platform-analytics-status"></p><p class="form-error" id="platform-analytics-error" role="alert"></p><button class="btn btn-primary" type="submit">Save analytics settings</button></form></article>
+        </section>
       </div>
     </section>
   </div>
@@ -113,7 +235,6 @@
           <a href="#clients" data-view="clients" class="active"><svg class="nav-link-icon" aria-hidden="true"><use href="#icon-clients"></use></svg><span>Clients</span></a>
           <a href="#activity" data-view="activity"><svg class="nav-link-icon" aria-hidden="true"><use href="#icon-activity"></use></svg><span>Activity</span></a>
           <a href="#providers" data-view="providers"><svg class="nav-link-icon" aria-hidden="true"><use href="#icon-providers"></use></svg><span>Providers</span></a>
-          <a href="#models" data-view="models"><svg class="nav-link-icon" aria-hidden="true"><use href="#icon-models"></use></svg><span>Real Models</span></a>
           <a href="#virtual" data-view="virtual"><svg class="nav-link-icon" aria-hidden="true"><use href="#icon-virtual"></use></svg><span>Virtual Models</span></a>
           <a href="#settings" data-view="settings"><svg class="nav-link-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span>Settings</span></a>
         </div>
@@ -121,11 +242,10 @@
           <a href="#clients" data-view="clients" class="active" aria-label="Clients"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-clients"></use></svg><span class="nav-quick-label">Clients</span></a>
           <a href="#activity" data-view="activity" aria-label="Activity"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-activity"></use></svg><span class="nav-quick-label">Activity</span></a>
           <a href="#providers" data-view="providers" aria-label="Providers"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-providers"></use></svg><span class="nav-quick-label">Providers</span></a>
-          <a href="#models" data-view="models" aria-label="Real Models"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-models"></use></svg><span class="nav-quick-label">Real Models</span></a>
           <a href="#virtual" data-view="virtual" aria-label="Virtual Models"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-virtual"></use></svg><span class="nav-quick-label">Virtual Models</span></a>
           <a href="#settings" data-view="settings" aria-label="Settings"><svg class="nav-quick-icon" aria-hidden="true"><use href="#icon-settings"></use></svg><span class="nav-quick-label">Settings</span></a>
         </div>
-        <div class="nav-meta"><button class="btn btn-small btn-secondary" id="open-wizard" type="button" hidden>Get started</button><span class="system-state"><i></i><span id="top-status">READY</span></span><span id="admin-name"></span><button class="btn-link" id="logout">Logout</button></div>
+        <div class="nav-meta"><button class="btn btn-small btn-secondary" id="open-wizard" type="button" hidden>Get started</button><button class="btn btn-small btn-secondary" id="open-feedback" type="button">Feedback</button><button class="btn-link admin-identity" id="admin-name" type="button" title="Account settings"></button><button class="btn-link" id="logout">Logout</button></div>
       </div>
     </nav>
 
@@ -135,18 +255,18 @@
       <section class="view active" id="view-providers" aria-labelledby="providers-title">
         <header class="dashboard-header"><div><h1 id="providers-title">Providers</h1></div><button class="btn btn-primary" id="add-provider">+ Add provider</button></header>
         <div class="metric-strip" id="provider-metrics"></div>
-        <div class="filter-bar responsive-filter" data-filter-bar="providers"><button class="mobile-filter-toggle" type="button" data-filter-toggle="providers" aria-expanded="false">Filter providers <span aria-hidden="true">⌄</span></button><div class="filter-panel"><label class="search-field"><span>Filter</span><input id="provider-search" type="search" placeholder="Provider name or type"></label><span class="filter-note">Refresh cadence: approximately 24 hours</span></div></div>
-        <div class="table-shell providers-table-shell"><table class="form-table"><thead><tr><th>Provider</th><th>Type / surface</th><th>Catalogue</th><th>Last refresh</th><th>State</th><th class="actions-head">Actions</th></tr></thead><tbody id="providers-body"></tbody></table><div class="empty-state" id="providers-empty" hidden><span>00</span><h2>No providers configured</h2><p>Add the first upstream; it remains stored even if initial discovery fails.</p></div></div>
-        <div class="mobile-card-list" id="providers-cards"></div><div class="empty-state mobile-list-empty" id="providers-empty-mobile" hidden><span>00</span><h2>No providers configured</h2><p>Add the first upstream; it remains stored even if initial discovery fails.</p></div>
+        <div class="filter-bar responsive-filter" data-filter-bar="providers"><button class="mobile-filter-toggle" type="button" data-filter-toggle="providers" aria-expanded="false">Filter providers <span aria-hidden="true">⌄</span></button><div class="filter-panel"><label class="search-field"><span>Search</span><input id="provider-search" type="search" placeholder="Provider or model"></label><label class="inline-check"><input type="checkbox" id="show-retired" checked> Show retired models</label></div></div>
+        <div class="provider-card-grid" id="providers-cards"></div>
+        <div class="empty-state provider-empty" id="providers-empty" hidden><span>00</span><h2>No providers configured</h2><p>Add an upstream provider to discover its available models. Credentials are encrypted and never shown again.</p><button class="btn btn-primary" id="add-provider-empty">+ Add first provider</button></div>
         <div class="mobile-actionbar"><button class="btn btn-primary" id="add-provider-mobile">+ Add provider</button></div>
       </section>
 
-      <section class="view" id="view-models" aria-labelledby="models-title">
-        <header class="dashboard-header"><div><h1 id="models-title">Real Models</h1></div><div class="header-actions"><button class="btn btn-secondary" data-refresh-view="models">Reload catalogue</button><button class="btn btn-primary" id="add-real-model">Add Manual Model</button></div></header>
-        <div class="filter-bar responsive-filter" data-filter-bar="models"><button class="mobile-filter-toggle" type="button" data-filter-toggle="models" aria-expanded="false">Filter models <span aria-hidden="true">⌄</span></button><div class="filter-panel"><label class="search-field"><span>Search</span><input id="model-search" type="search" placeholder="Canonical or upstream model ID"></label><label class="inline-check"><input type="checkbox" id="show-retired" checked> Show retired</label><button class="btn btn-small btn-secondary mobile-filter-refresh" type="button" data-refresh-view="models">Reload catalogue</button></div></div>
-        <div class="table-shell models-table-shell"><table class="form-table model-table"><thead><tr><th data-sort="canonical" class="sortable">Canonical model ID <span class="sort-arrow"></span></th><th data-sort="provider" class="sortable">Provider <span class="sort-arrow"></span></th><th>Provider-native ID</th><th data-sort="1h" class="sortable sort-active">1h <span class="sort-arrow">▼</span></th><th data-sort="24h" class="sortable">24h <span class="sort-arrow"></span></th><th data-sort="7d" class="sortable">7d <span class="sort-arrow"></span></th><th class="actions-head">Actions</th></tr></thead><tbody id="models-body"></tbody></table><div class="empty-state" id="models-empty" hidden><span>∅</span><h2>No matching models</h2><p>Refresh a provider catalogue or adjust the filter.</p></div></div>
-        <div class="mobile-card-list" id="models-cards"></div><div class="empty-state mobile-list-empty" id="models-empty-mobile" hidden><span>∅</span><h2>No matching models</h2><p>Refresh a provider catalogue or adjust the filter.</p></div>
-        <div class="mobile-actionbar"><button class="btn btn-primary" id="add-real-model-mobile">+ Add manual model</button></div>
+      <section class="provider-catalogue" id="provider-drawer" aria-labelledby="provider-drawer-title" aria-hidden="true" inert hidden>
+        <div class="provider-catalogue-head"><header class="dashboard-header"><div><h1 id="provider-drawer-title">Provider models</h1><p id="provider-drawer-meta" class="meta-line"></p></div><div class="header-actions"><button class="btn btn-secondary" id="provider-drawer-close" type="button">← Back to providers</button><button class="btn btn-primary" id="add-real-model">+ Add manual model</button><button class="btn btn-secondary" id="drawer-refresh">Refresh</button><button class="btn btn-secondary" id="drawer-edit">Edit provider</button><button class="btn btn-danger" id="drawer-delete">Delete provider</button></div></header></div>
+        <div class="provider-drawer-toolbar"><label class="search-field"><span>Search models</span><input id="model-search" type="search" placeholder="Canonical or upstream ID"></label><label class="inline-check"><input type="checkbox" id="drawer-show-retired" checked> Show retired</label></div>
+        <div class="provider-drawer-content"><div class="table-shell models-table-shell"><table class="form-table model-table"><thead><tr><th data-sort="canonical" class="sortable">Canonical model ID <span class="sort-arrow"></span></th><th>Provider-native ID</th><th data-sort="1h" class="sortable sort-active">1h <span class="sort-arrow">▼</span></th><th data-sort="24h" class="sortable">24h <span class="sort-arrow"></span></th><th data-sort="7d" class="sortable">7d <span class="sort-arrow"></span></th><th class="actions-head">Actions</th></tr></thead><tbody id="models-body"></tbody></table><div class="empty-state" id="models-empty" hidden><span>∅</span><h2>No matching models</h2><p>Adjust the search or retired-model filter.</p></div></div>
+          <div class="mobile-card-list" id="models-cards"></div><div class="empty-state mobile-list-empty" id="models-empty-mobile" hidden><span>∅</span><h2>No matching models</h2><p>Adjust the search or retired-model filter.</p></div>
+        </div>
       </section>
 
       <section class="view" id="view-virtual" aria-labelledby="virtual-title">
@@ -177,7 +297,6 @@
           <button class="settings-tab" type="button" role="tab" data-settings-tab="account" id="settings-tab-account" hidden>Account</button>
           <button class="settings-tab active" type="button" role="tab" data-settings-tab="routing">Routing</button>
           <button class="settings-tab" type="button" role="tab" data-settings-tab="logging">Logging</button>
-          <button class="settings-tab" type="button" role="tab" data-settings-tab="security">Security</button>
           <button class="settings-tab" type="button" role="tab" data-settings-tab="notifications">Notifications</button>
           <button class="settings-tab" type="button" role="tab" data-settings-tab="data">Data</button>
         </div>
@@ -185,12 +304,13 @@
           <div class="settings-panel system-grid" id="settings-panel-account" data-settings-panel="account" role="tabpanel" hidden>
             <article class="system-card settings-card"><h2>Plan</h2><p>Your current plan and how much of it you are using.</p><div class="plan-grid" id="account-plan-card"></div></article>
             <article class="system-card settings-card"><h2>Account</h2><p>Your Tiller identity and account details.</p><dl class="account-details"><dt>Email</dt><dd id="account-email">—</dd><dt>Account ID</dt><dd id="account-id">—</dd><dt>Plan</dt><dd id="account-plan">—</dd><dt>Status</dt><dd id="account-status">—</dd><dt>Created</dt><dd id="account-created">—</dd></dl><div class="account-usage" id="account-usage"></div></article>
-            <article class="system-card settings-card"><h2>Sign-in methods</h2><p id="account-google-status">Loading sign-in methods…</p><p class="meta-line">Linking Google requires your password. A fresh Google confirmation can be used once for a password, email, or account change.</p><form id="account-google-link-form" class="stack-form settings-form" hidden><label>Current password <input name="current_password" type="password" autocomplete="current-password" required></label><p class="form-error" id="account-google-link-error" role="alert"></p><button class="btn btn-secondary" type="submit">Link Google account</button></form><p class="form-error" id="account-google-error" role="alert"></p><div class="setting-actions"><button class="btn btn-secondary" type="button" id="account-google-reauth" hidden>Confirm an account change with Google</button><button class="btn btn-secondary" type="button" id="account-google-unlink" hidden>Unlink Google</button></div><form id="account-google-unlink-form" class="stack-form settings-form" hidden><label>Current password <input name="password" type="password" autocomplete="current-password"></label><button class="btn btn-danger" type="submit">Confirm unlink</button></form></article>
-            <article class="system-card settings-card"><h2>Change password</h2><p>Confirm your current password, then choose a new one. Other sessions are signed out.</p><form id="account-password-form" class="stack-form settings-form"><div class="setting-row"><label class="setting-label" for="account-current-password">Current password</label><div class="setting-control"><input id="account-current-password" name="current_password" type="password" autocomplete="current-password" required></div><span class="setting-tip" id="account-password-auth-hint"></span></div><div class="setting-row"><label class="setting-label" for="account-new-password">New password</label><div class="setting-control"><input id="account-new-password" name="new_password" type="password" autocomplete="new-password" minlength="12" required></div><span class="setting-tip">At least 12 characters.</span></div><p class="form-error" id="account-password-error" role="alert"></p><div class="setting-actions"><button class="btn btn-primary" type="submit">Update password</button></div></form></article>
-            <article class="system-card settings-card"><h2>Change email</h2><p>Your current address keeps working until the new one is confirmed. We will email the new address to confirm and warn your current address.</p><form id="account-email-form" class="stack-form settings-form"><div class="setting-row"><label class="setting-label" for="account-new-email">New email</label><div class="setting-control"><input id="account-new-email" name="new_email" type="email" autocomplete="email" required></div><span class="setting-tip"></span></div><div class="setting-row"><label class="setting-label" for="account-email-password">Password</label><div class="setting-control"><input id="account-email-password" name="password" type="password" autocomplete="current-password" required></div><span class="setting-tip">Confirms it is really you.</span></div><p class="form-error" id="account-email-error" role="alert"></p><div class="setting-actions"><button class="btn btn-primary" type="submit">Send confirmation</button></div></form></article>
+            <article class="system-card settings-card" id="account-password-card"><h2>Change password</h2><p>Confirm your current password, then choose a new one. Other sessions are signed out.</p><form id="account-password-form" class="stack-form settings-form" autocomplete="off"><div class="setting-row" id="account-current-password-row"><label class="setting-label" for="account-current-password">Current password</label><div class="setting-control"><input id="account-current-password" name="current_password" type="password" autocomplete="current-password" required></div><span class="setting-tip" id="account-password-auth-hint"></span></div><div class="setting-row" id="account-passkey-reauth-row" hidden><span class="setting-label">Passkey confirmation</span><span class="setting-tip">Confirm with a passkey to continue.</span></div><div class="setting-row"><label class="setting-label" for="account-new-password">New password</label><div class="setting-control"><input id="account-new-password" name="new_password" type="password" autocomplete="new-password" minlength="12" required></div><span class="setting-tip">At least 12 characters.</span></div><p class="form-error" id="account-password-error" role="alert"></p><div class="setting-actions"><button class="btn btn-primary" type="submit">Update password</button></div></form></article>
+            <article class="system-card settings-card" id="account-google-card" hidden><h2>Google sign-in</h2><p>Google is linked to this account. Password sign-in and recovery are disabled.</p><p class="form-error" id="account-google-error" role="alert"></p><div class="setting-actions"><button class="btn btn-secondary" type="button" id="account-google-unlink">Unlink Google</button></div></article>            <article class="system-card settings-card" id="account-google-link-card" hidden><h2>Link Google</h2><p>Sign in with Google instead of your password, or use it to confirm sensitive account changes.</p><p class="meta-line">Linking Google turns off password sign-in and recovery for this account. Confirm your password to continue.</p><form id="account-google-link-card-form" class="stack-form settings-form" autocomplete="off"><div class="setting-row"><label class="setting-label" for="account-google-link-password">Current password</label><div class="setting-control"><input id="account-google-link-password" name="current_password" type="password" autocomplete="current-password" required></div></div><p class="form-error" id="account-google-link-card-error" role="alert"></p><div class="setting-actions"><button class="btn btn-primary" type="submit">Link Google</button></div></form></article>
+            <article class="system-card settings-card" id="account-passkeys-card" hidden><h2>Passkeys</h2><p>Sign in without a password using a passkey (Touch ID, Windows Hello, or a security key). Add one per device.</p><div id="account-passkeys-list"></div><div class="setting-actions"><button class="btn btn-secondary" type="button" id="account-passkey-add">Add a passkey</button><button class="btn btn-secondary" type="button" id="account-password-signin-toggle" hidden></button></div><p class="setting-tip" id="account-passkeys-status" role="status" aria-live="polite"></p></article>
+            <article class="system-card settings-card"><h2>Change email</h2><p>Your current address keeps working until the new one is confirmed. We will email the new address to confirm and warn your current address.</p><form id="account-email-form" class="stack-form settings-form" autocomplete="off"><div class="setting-row"><label class="setting-label" for="account-new-email">New email</label><div class="setting-control"><input id="account-new-email" name="new_email" type="email" autocomplete="off" required></div><span class="setting-tip"></span></div><div class="setting-row" id="account-email-password-row"><label class="setting-label" for="account-email-password">Password</label><div class="setting-control"><input id="account-email-password" name="password" type="password" autocomplete="new-password" required></div><span class="setting-tip">Confirms it is really you.</span></div><div class="setting-row" id="account-email-passkey-row" hidden><span class="setting-label">Passkey confirmation</span><span class="setting-tip">We will ask for your passkey when you submit.</span></div><p class="form-error" id="account-email-error" role="alert"></p><div class="setting-actions"><button class="btn btn-primary" type="submit">Send confirmation</button></div></form></article>
             <article class="system-card settings-card"><h2>Sessions</h2><p>Sign out of every device, including this one.</p><p class="form-error" id="account-sessions-error" role="alert"></p><div class="setting-actions"><button class="btn btn-secondary" type="button" id="account-revoke-sessions">Sign out everywhere</button></div></article>
             <article class="system-card settings-card"><h2>Export my data</h2><p>Download your account configuration, Activity metadata, and audit history as a ZIP archive. Provider credentials and client secrets are never included.</p><p class="form-error" id="account-export-error" role="alert"></p><div class="setting-actions"><a class="btn btn-secondary" href="/api/auth/account/export" id="account-export">Export my data</a></div></article>
-            <article class="system-card settings-card danger-card"><h2>Delete account</h2><p>Deleting is immediate and irreversible. Your account, provider credentials, client keys, and activity history are removed. Audit history is retained.</p><form id="account-delete-form" class="stack-form settings-form"><div class="setting-row"><label class="setting-label" for="account-delete-email">Type your email</label><div class="setting-control"><input id="account-delete-email" name="confirm" type="text" autocomplete="off" required></div><span class="setting-tip" id="account-delete-hint"></span></div><div class="setting-row"><label class="setting-label" for="account-delete-password">Password</label><div class="setting-control"><input id="account-delete-password" name="password" type="password" autocomplete="current-password" required></div><span class="setting-tip"></span></div><p class="form-error" id="account-delete-error" role="alert"></p><div class="setting-actions"><button class="btn btn-danger" type="submit">Delete my account</button></div></form></article>
+            <article class="system-card settings-card danger-card"><h2>Delete account</h2><p>Deleting is immediate and irreversible. Your account, provider credentials, client keys, and activity history are removed. Audit history is retained.</p><form id="account-delete-form" class="stack-form settings-form" autocomplete="off"><div class="setting-row" id="account-delete-password-row"><label class="setting-label" for="account-delete-password">Password</label><div class="setting-control"><input id="account-delete-password" name="password" type="password" autocomplete="off"></div><span class="setting-tip">Confirms it is really you.</span></div><div class="setting-row" id="account-delete-google-row" hidden><span class="setting-label">Google confirmation</span><span class="setting-tip" id="account-delete-google-status">Click Delete my account to confirm with Google, then return here to complete deletion.</span></div><div class="setting-row" id="account-delete-passkey-row" hidden><span class="setting-label">Passkey confirmation</span><span class="setting-tip" id="account-delete-passkey-status">Click Delete my account, then confirm with your passkey.</span></div><p class="form-error" id="account-delete-error" role="alert"></p><div class="setting-actions"><button class="btn btn-danger" type="submit">Delete my account</button></div></form></article>
           </div>
           <div class="settings-panel system-grid active" id="settings-panel-routing" data-settings-panel="routing" role="tabpanel">
           <article class="system-card settings-card"><h2>Fallback routing</h2><p>Ordered virtual routes try each target in turn. This timeout bounds how long a stalled target may delay before the next target is tried. Cooldown skips temporarily failing targets to avoid repeated retries.</p><form id="fallback-form" class="stack-form settings-form"><div class="setting-row"><label class="setting-label" for="fallback_timeout_seconds">Fallback timeout (seconds)</label><div class="setting-control"><input id="fallback_timeout_seconds" name="fallback_timeout_seconds" type="number" min="1" max="3600" step="1" required></div><span class="setting-tip">Be careful setting this too low — it must be high enough for the provider to process the request and start responding. We recommend keeping it at least 60 seconds.</span></div><div class="setting-row"><label class="setting-label" for="fallback_cooldown_seconds">Fallback cooldown (seconds)</label><div class="setting-control"><input id="fallback_cooldown_seconds" name="fallback_cooldown_seconds" type="number" min="0" max="86400" step="1" required></div><span class="setting-tip">When a target fails with a cooldown-triggering failure, it is skipped for this many seconds. 0 disables cooldown. Maximum 86400 (24 hours). Default: 300 (5 minutes).</span></div><p class="form-error" id="fallback-error" role="alert"></p></form></article>
@@ -198,11 +318,8 @@
           <div class="settings-panel system-grid" id="settings-panel-logging" data-settings-panel="logging" role="tabpanel" hidden>
           <article class="system-card settings-card"><h2>Logging Settings</h2><p>Client logging controls whether request metadata is recorded. Request and provider response bodies are never persisted unless detailed error logging is enabled.</p><form id="settings-form" class="stack-form settings-form"><div class="setting-row"><span class="setting-label">New Client Default Logging</span><div class="setting-control"><label class="toggle-label"><input class="switch" name="default_logging_enabled" type="checkbox"></label></div><span class="setting-tip"></span></div><div class="setting-row"><span class="setting-label">Detailed error logging</span><div class="setting-control"><label class="toggle-label"><input class="switch" name="log_error_bodies" type="checkbox"></label></div><span class="setting-tip">Opt-in: stores failed request bodies and provider error bodies, bounded to 1 MiB. Treat activity and exports as sensitive.</span></div><div class="setting-row"><label class="setting-label" for="default_retention_days">Default retention (days)</label><div class="setting-control"><input id="default_retention_days" name="default_retention_days" type="number" min="1" step="1" required></div><span class="setting-tip">Existing client keys use their client logging switch.</span></div>          <p class="form-error" id="settings-error" role="alert"></p></form></article>
           </div>
-          <div class="settings-panel system-grid" id="settings-panel-security" data-settings-panel="security" role="tabpanel" hidden>
-          <article class="system-card settings-card"><h2>Security</h2><p>Recoverable provider credentials, OAuth tokens, and webhook auth headers are encrypted at rest with AES-256-GCM. The master key lives outside the database.</p><div class="setting-row"><span class="setting-label">Credential encryption</span><div class="setting-control"><span class="setting-tip" id="encryption-state" data-state="disabled">Checking…</span></div></div></article>
-          </div>
           <div class="settings-panel system-grid" id="settings-panel-notifications" data-settings-panel="notifications" role="tabpanel" hidden>
- <article class="system-card settings-card"><h2>Notifications</h2><p>Best-effort plain-text webhook alerts for routing events. Delivery never blocks or alters inference requests. Metadata-only payloads — no prompts, responses, or credentials.</p><form id="notifications-form" class="stack-form settings-form"><div class="setting-row"><span class="setting-label">Enable notifications</span><div class="setting-control"><label class="toggle-label"><input class="switch" name="notifications_enabled" type="checkbox"></label></div><span class="setting-tip"></span></div><div class="setting-row"><label class="setting-label" for="notifications_webhook_url">Webhook URL</label><div class="setting-control"><input id="notifications_webhook_url" name="notifications_webhook_url" type="url" placeholder="https://your-ntfy-server.example.com/tiller"></div><span class="setting-tip">A simple HTTP(S) plain-text endpoint, compatible with ntfy and similar notification relays.</span></div><div class="setting-row"><label class="setting-label" for="notifications_auth_header">Authorization header</label><div class="setting-control"><span class="setting-inline"><input id="notifications_auth_header" name="notifications_auth_header" type="password" autocomplete="off" placeholder="Optional, e.g. Bearer &lt;token&gt;"><button class="btn btn-small btn-secondary" type="button" id="clear-notifications-auth" hidden>Clear saved header</button></span></div><span class="setting-tip" id="notifications-auth-note"></span></div><div class="setting-row"><span class="setting-label">Events</span><div class="setting-control"><label class="check-label"><input type="checkbox" name="notifications_event_fallback"> Fallback occurred</label><label class="check-label"><input type="checkbox" name="notifications_event_all_failed"> All targets failed</label><label class="check-label"><input type="checkbox" name="notifications_event_client_key_created"> Client key created</label><label class="check-label"><input type="checkbox" name="notifications_event_client_key_deleted"> Client key deleted</label><label class="check-label"><input type="checkbox" name="notifications_event_admin_login"> Admin login</label></div><span class="setting-tip"></span></div><div class="setting-row"><label class="setting-label" for="notifications_cooldown_seconds">Cooldown (seconds)</label><div class="setting-control"><input id="notifications_cooldown_seconds" name="notifications_cooldown_seconds" type="number" min="0" step="1" placeholder="60"></div><span class="setting-tip">Suppress repeat notifications for the same event + model within this window. 0 disables.</span></div><div class="setting-row"><span class="setting-label">Test</span><div class="setting-control"><button class="btn btn-secondary" type="button" id="send-test-notification">Send test notification</button></div><span class="setting-tip">Sends a harmless message to the configured webhook.</span></div><p class="form-error" id="notifications-error" role="alert"></p></form></article>
+ <article class="system-card settings-card"><h2>Notifications</h2><p>Best-effort plain-text webhook alerts for routing events. Delivery never blocks or alters inference requests. Metadata-only payloads — no prompts, responses, or credentials.</p><form id="notifications-form" class="stack-form settings-form" autocomplete="off"><div class="setting-row"><span class="setting-label">Enable notifications</span><div class="setting-control"><label class="toggle-label"><input class="switch" name="notifications_enabled" type="checkbox"></label></div><span class="setting-tip"></span></div><div class="setting-row"><label class="setting-label" for="notifications_webhook_url">Webhook URL</label><div class="setting-control"><input id="notifications_webhook_url" name="notifications_webhook_url" type="url" autocomplete="off" placeholder="https://your-ntfy-server.example.com/tiller"></div><span class="setting-tip">A simple HTTP(S) plain-text endpoint, compatible with ntfy and similar notification relays.</span></div><div class="setting-row"><label class="setting-label" for="notifications_auth_header">Authorization header</label><div class="setting-control"><span class="setting-inline"><input id="notifications_auth_header" name="notifications_auth_header" type="password" autocomplete="new-password" placeholder="Optional, e.g. Bearer &lt;token&gt;"><button class="btn btn-small btn-secondary" type="button" id="clear-notifications-auth" hidden>Clear saved header</button></span></div><span class="setting-tip" id="notifications-auth-note"></span></div><div class="setting-row"><span class="setting-label">Events</span><div class="setting-control"><label class="check-label"><input type="checkbox" name="notifications_event_fallback"> Fallback occurred</label><label class="check-label"><input type="checkbox" name="notifications_event_all_failed"> All targets failed</label><label class="check-label"><input type="checkbox" name="notifications_event_client_key_created"> Client key created</label><label class="check-label"><input type="checkbox" name="notifications_event_client_key_deleted"> Client key deleted</label><label class="check-label" id="notifications-event-admin-login"><input type="checkbox" name="notifications_event_admin_login"> Admin login</label></div><span class="setting-tip"></span></div><div class="setting-row"><label class="setting-label" for="notifications_cooldown_seconds">Cooldown (seconds)</label><div class="setting-control"><input id="notifications_cooldown_seconds" name="notifications_cooldown_seconds" type="number" min="0" step="1" placeholder="60"></div><span class="setting-tip" id="notifications-cooldown-tip">Suppress repeat notifications for the same event + model within this window. 0 disables.</span></div><div class="setting-row"><span class="setting-label">Test</span><div class="setting-control"><button class="btn btn-secondary" type="button" id="send-test-notification">Send test notification</button></div><span class="setting-tip">Sends a harmless message to the configured webhook.</span></div><p class="form-error" id="notifications-error" role="alert"></p></form></article>
           </div>
           <div class="settings-panel system-grid" id="settings-panel-data" data-settings-panel="data" role="tabpanel" hidden>
                      <article class="system-card" id="backup-card"><h2>Backup database</h2><p>Exports use SQLite’s consistent snapshot mechanism and include all configuration, permissions, catalogues, and key hashes.</p><div class="backup-row"><a class="btn btn-primary" href="/api/admin/backup/export" id="download-backup">Download backup</a><span class="backup-warning">The backup contains encrypted provider credentials. The master key is stored separately and is required to restore them. Client secrets remain unrecoverable.</span></div></article>
@@ -215,7 +332,7 @@
 
   <dialog id="form-dialog"><form method="dialog" id="entity-form"><header><div><p class="eyebrow" id="dialog-eyebrow">CONFIGURE</p><h2 id="dialog-title">Entity</h2></div><button class="dialog-close" value="cancel" formnovalidate aria-label="Close">×</button></header><div id="dialog-fields" class="dialog-fields"></div><p class="form-error" id="dialog-error" role="alert"></p><footer><button class="btn btn-secondary" value="cancel" formnovalidate>Cancel</button><button class="btn btn-primary" id="dialog-submit" value="default">Save</button></footer></form></dialog>
 
-  <dialog id="secret-dialog" class="secret-dialog"><section><header><div><p class="eyebrow">ONE-TIME SECRET</p><h2>Copy this key now</h2></div></header><p>This plaintext key will not be shown again. Closing this window does not preserve it.</p><div class="secret-box"><code id="secret-value"></code><button class="btn btn-secondary" id="copy-secret">Copy</button></div><p class="copy-state" id="copy-state" aria-live="polite"></p><footer><button class="btn btn-primary" id="close-secret">I have stored the key</button></footer></section></dialog>
+  <dialog id="secret-dialog" class="secret-dialog"><section><header><div><p class="eyebrow">ONE-TIME SECRET</p><h2>Copy this key now</h2></div></header><p>This plaintext key will not be shown again. Closing this window does not preserve it.</p><div class="secret-box"><code id="secret-value"></code><button class="btn btn-secondary" id="copy-secret" aria-label="Copy API key">Copy</button></div><p class="copy-state" id="copy-state" aria-live="polite"></p><p>API Base URL</p><div class="secret-box"><code id="api-base-url"></code><button class="btn btn-secondary" id="copy-api-base-url" aria-label="Copy API Base URL">Copy</button></div><p class="copy-state" id="api-base-url-copy-state" aria-live="polite"></p><footer><button class="btn btn-primary" id="close-secret">I have stored the key</button></footer></section></dialog>
 
   <dialog id="confirm-dialog" class="confirm-dialog"><form method="dialog"><header><div><p class="eyebrow" id="confirm-eyebrow">CONFIRM CHANGE</p><h2 id="confirm-title">Are you sure?</h2></div></header><p id="confirm-copy"></p><label class="confirm-check" id="confirm-check-wrap" hidden><input type="checkbox" id="confirm-check"> <span>I understand this changes client-facing model IDs.</span></label><label class="confirm-type" id="confirm-type-wrap" hidden><span id="confirm-type-label">Type the name to confirm</span><input type="text" id="confirm-type" autocomplete="off" spellcheck="false"></label><p class="form-error" id="confirm-error"></p><footer><button class="btn btn-secondary" value="cancel">Cancel</button><button class="btn btn-danger" value="confirm" id="confirm-action">Confirm</button></footer></form></dialog>
 
@@ -232,8 +349,19 @@
 
   <dialog id="wizard-dialog" class="wizard-dialog" aria-labelledby="wizard-title"><section><header><div><p class="eyebrow">FIRST-RUN SETUP</p><h2 id="wizard-title">Get routing in minutes</h2></div><button class="dialog-close" id="close-wizard" aria-label="Close setup wizard">×</button></header><div class="wizard-steps" id="wizard-steps"></div><div class="wizard-body" id="wizard-body"></div><p class="form-error" id="wizard-error" role="alert"></p><footer><button class="btn btn-link" id="wizard-dismiss" type="button">Skip setup</button><button class="btn btn-secondary" id="wizard-prev" type="button">Back</button><button class="btn btn-primary" id="wizard-next" type="button">Continue</button></footer></section></dialog>
 
-  <footer class="app-footer" id="app-footer" hidden><span>Tiller Router</span><span id="footer-source"></span></footer>
+  <footer class="app-footer" id="app-footer" hidden><span>Tiller Router</span><span id="footer-feedback"></span></footer>
+
+  <section id="analytics-consent" class="analytics-consent" role="region" aria-label="Analytics consent" hidden>
+    <p>We use optional analytics to understand how the hosted pages are used. See the <a href="/legal/privacy">Privacy Policy</a>.</p>
+    <div class="analytics-consent-actions">
+      <button class="btn btn-small btn-secondary" id="analytics-decline" type="button">Decline</button>
+      <button class="btn btn-small btn-primary" id="analytics-accept" type="button">Accept</button>
+    </div>
+  </section>
 
   <script type="module" src="/app.js"></script>
+  <noscript>
+    <style>#login-shell{display:block!important}</style>
+  </noscript>
 </body>
 </html>

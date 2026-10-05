@@ -10,6 +10,8 @@
 #   ./tests/run.sh                      # default preset: unit + vet + runtime
 #   ./tests/run.sh --unit --vet         # pick specific tiers
 #   ./tests/run.sh --all                # every tier
+#   ./tests/run.sh --last               # print the newest run's summary + paths (no run)
+#   ./tests/run.sh --prune [--keep N]   # prune old runs (default: keep all, no-op)
 #   ./tests/run.sh --list               # list tiers and exit
 #
 # Tiers:
@@ -21,9 +23,15 @@
 #
 # Output levels (all written to the run folder every time):
 #   L1  summary.txt   per-tier pass/fail + elapsed + first error + folder path
-#   L2  timings.txt   per-tier elapsed + Go per-test breakdown + browser phases
+#   L2  timings.txt   per-tier elapsed + per-test breakdown + browser phases
 #   L3  full.log      concat of every tier's complete output (tier-tagged)
+#   meta.txt          run id, tiers, git SHA/branch/dirty, toolchain image
 #       <tier>/out.log  each tier's raw output
+#
+# Retention: runs are kept in full (no automatic pruning) so an agent can
+# always dig into an earlier run. Reclaim space explicitly with:
+#   ./tests/run.sh --prune --keep 20
+# tests/logs/history.tsv is an append-only ledger that survives pruning.
 #
 # The stdout block is L1 only — context-cheap for agents. Detail lives in
 # the folder; the summary's `detail:` line points straight at it.
@@ -33,11 +41,23 @@ set -eu
 REPO_ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$REPO_ROOT"
 
+RUNS_DIR="tests/logs/runs"
+LATEST_LINK="tests/logs/latest"
+HISTORY="tests/logs/history.tsv"
+
+# --- mode flags -----------------------------------------------------------
+SHOW_LAST=0
+DO_PRUNE=0
+PRUNE_KEEP=""
+
 # --- tier selection -------------------------------------------------------
 declare -A TIER_SELECTED=()
 ALL_TIERS=(unit vet browser compat runtime)
 
-for arg in "$@"; do
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+    arg="${args[$i]}"
     case "$arg" in
         --unit)     TIER_SELECTED[unit]=1 ;;
         --vet)      TIER_SELECTED[vet]=1 ;;
@@ -45,9 +65,20 @@ for arg in "$@"; do
         --compat)   TIER_SELECTED[compat]=1 ;;
         --runtime)  TIER_SELECTED[runtime]=1 ;;
         --all)      for t in "${ALL_TIERS[@]}"; do TIER_SELECTED[$t]=1; done ;;
+        --last)     SHOW_LAST=1 ;;
+        --prune)    DO_PRUNE=1 ;;
+        --keep)
+            i=$((i + 1))
+            if [ "$i" -ge "${#args[@]}" ]; then
+                echo "tests/run.sh: --keep requires a number" >&2
+                exit 2
+            fi
+            PRUNE_KEEP="${args[$i]}"
+            ;;
         --list)
             echo "Tiers: ${ALL_TIERS[*]}"
             echo "Flags:  --unit --vet --browser --compat --runtime --all"
+            echo "Modes:  --last | --prune [--keep N] | --list"
             exit 0
             ;;
         -h|--help)
@@ -59,7 +90,46 @@ for arg in "$@"; do
             exit 2
             ;;
     esac
+    i=$((i + 1))
 done
+
+# --- --last: print the newest run, no execution ---------------------------
+newest_run() {
+    ls -1dt "$RUNS_DIR"/*/ 2>/dev/null | head -1 | sed 's:/$::'
+}
+
+if [ "$SHOW_LAST" -eq 1 ]; then
+    latest=$(newest_run)
+    if [ -z "${latest:-}" ]; then
+        echo "tests/run.sh: no runs yet under $RUNS_DIR/" >&2
+        exit 1
+    fi
+    echo "run:     $latest/"
+    echo "summary: $latest/summary.txt"
+    echo "timings: $latest/timings.txt"
+    echo "full:    $latest/full.log"
+    [ -f "$latest/meta.txt" ] && echo "meta:    $latest/meta.txt"
+    echo
+    cat "$latest/summary.txt" 2>/dev/null || echo "(no summary.txt)"
+    echo
+    if [ -f "$HISTORY" ]; then
+        echo "recent history ($HISTORY):"
+        tail -n 5 "$HISTORY"
+    fi
+    exit 0
+fi
+
+# --- --prune: optional, explicit LRU pruning ------------------------------
+if [ "$DO_PRUNE" -eq 1 ]; then
+    if [ -z "$PRUNE_KEEP" ]; then
+        echo "tests/run.sh: --prune requires --keep N (runs are kept in full by default)" >&2
+        exit 2
+    fi
+    KEEP_RUNS="$PRUNE_KEEP" KEEP_BROWSER="$PRUNE_KEEP" KEEP_COMPAT="$PRUNE_KEEP" KEEP_GO="$PRUNE_KEEP" \
+        . tests/scripts/prune-test-logs.sh
+    echo "pruned $RUNS_DIR/ to the newest $PRUNE_KEEP runs" >&2
+    exit 0
+fi
 
 # default preset: fast, high-signal. Use --all for everything.
 if [ "${#TIER_SELECTED[@]}" -eq 0 ]; then
@@ -82,8 +152,32 @@ for t in "${SELECTED[@]}"; do
     mkdir -p "$RUN_DIR/$t"
 done
 
-# bound the runs/ tree (LRU, same policy as the other test-log dirs)
-. tests/scripts/prune-test-logs.sh
+# --- run metadata ---------------------------------------------------------
+git_sha="unknown"
+git_branch="unknown"
+git_dirty="unknown"
+if git rev-parse --git-dir >/dev/null 2>&1; then
+    git_sha=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+    git_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        git_dirty="dirty"
+    else
+        git_dirty="clean"
+    fi
+fi
+# Single source of truth for the Go image is ./tiller-go.sh.
+image=$(grep -m1 '^GO_IMAGE=' tiller-go.sh 2>/dev/null | cut -d'"' -f2 || echo unknown)
+
+{
+    echo "run_id:    ${TS}-${TIER_LABEL}"
+    echo "started:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "host:      $(hostname 2>/dev/null || echo unknown)"
+    echo "tiers:     ${TIER_LABEL}"
+    echo "git_sha:   ${git_sha}"
+    echo "git_br:    ${git_branch}"
+    echo "git_state: ${git_dirty}"
+    echo "image:     ${image}"
+} > "$RUN_DIR/meta.txt"
 
 # --- run tiers ------------------------------------------------------------
 declare -A TIER_RC=()
@@ -169,15 +263,21 @@ overall_str=$([ "$overall_rc" -eq 0 ] && echo "PASS" || echo "FAIL")
     done
     printf "total    %ss\n" "$total_elapsed"
 
-    # Go per-test breakdown (parsed from -v output)
-    if [ -n "${TIER_SELECTED[unit]:-}" ] && [ -f "$RUN_DIR/unit/out.log" ]; then
+    # Go per-test breakdown (parsed from -v output) for any selected tier that
+    # produced it, not just unit — compat and runtime also run Go tests.
+    for t in "${SELECTED[@]}"; do
+        out="$RUN_DIR/$t/out.log"
+        [ -f "$out" ] || continue
+        if ! grep -qE '^\s*--- (PASS|FAIL):' "$out" 2>/dev/null; then
+            continue
+        fi
         echo
-        echo "Unit per-test (sorted by elapsed, descending):"
-        grep -E '^\s*--- (PASS|FAIL):' "$RUN_DIR/unit/out.log" 2>/dev/null | \
+        echo "${t^} per-test (sorted by elapsed, descending):"
+        grep -E '^\s*--- (PASS|FAIL):' "$out" 2>/dev/null | \
             sed -E 's/^[[:space:]]*--- (PASS|FAIL):[[:space:]]+([^[:space:]]+)[[:space:]]+\(([0-9.]+)s\)[[:space:]]*$/\3 \1 \2/' | \
             sort -t' ' -k1 -rn | \
             awk '{printf "  %7.3fs  %-6s  %s\n", $1, $2, $3}' || true
-    fi
+    done
 
     # Browser per-phase lines
     if [ -n "${TIER_SELECTED[browser]:-}" ] && [ -f "$RUN_DIR/browser/out.log" ]; then
@@ -203,5 +303,15 @@ overall_str=$([ "$overall_rc" -eq 0 ] && echo "PASS" || echo "FAIL")
         echo
     done
 } > "$RUN_DIR/full.log"
+
+# --- latest pointer + durable history -------------------------------------
+ln -sfn "runs/${TS}-${TIER_LABEL}" "$LATEST_LINK"
+
+if [ ! -f "$HISTORY" ]; then
+    printf 'timestamp\tsha\tbranch\tstate\ttiers\toverall\telapsed_s\trun_dir\n' > "$HISTORY"
+fi
+printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$TS" "$git_sha" "$git_branch" "$git_dirty" "$TIER_LABEL" "$overall_str" "$total_elapsed" "$RUN_DIR" \
+    >> "$HISTORY"
 
 exit "$overall_rc"

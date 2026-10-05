@@ -281,31 +281,50 @@ func (s *Scope) ListModels(ctx context.Context, filter ModelFilter) ([]ModelRow,
 
 // DeleteManualModel removes a manually-added model and its permissions. It
 // returns ErrModelNotFound, ErrModelNotManual or ErrModelInUse as appropriate.
+//
+// The origin check, the reference check, the permission delete and the model
+// delete all run in one transaction against the same connection. Doing the
+// checks outside the transaction allowed a concurrent catalogue refresh to
+// adopt the row as 'discovered' (ApplyCatalogue upserts origin) between the
+// check and the delete: the permission delete would commit, the model delete
+// would match zero rows, and the call would report success while the discovered
+// model survived with its permissions stripped.
 func (s *Scope) DeleteManualModel(ctx context.Context, modelID string) error {
-	var origin string
-	err := s.q.QueryRowContext(ctx, `SELECT origin FROM provider_models WHERE id=? AND account_id=?`, modelID, s.accountID).Scan(&origin)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrModelNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if origin != "manual" {
-		return ErrModelNotManual
-	}
-	var refs int
-	if err := s.q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM client_single_bindings WHERE real_model_id=? AND account_id=?) + (SELECT count(*) FROM virtual_model_targets WHERE provider_model_id=? AND account_id=?) + (SELECT count(*) FROM virtual_models WHERE target_provider_model_id=? AND account_id=?)`, modelID, s.accountID, modelID, s.accountID, modelID, s.accountID).Scan(&refs); err != nil {
-		return err
-	}
-	if refs > 0 {
-		return ErrModelInUse
-	}
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
+		var origin string
+		err := tx.q.QueryRowContext(ctx, `SELECT origin FROM provider_models WHERE id=? AND account_id=?`, modelID, tx.accountID).Scan(&origin)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrModelNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if origin != "manual" {
+			return ErrModelNotManual
+		}
+		var refs int
+		if err := tx.q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM client_single_bindings WHERE real_model_id=? AND account_id=?) + (SELECT count(*) FROM virtual_model_targets WHERE provider_model_id=? AND account_id=?) + (SELECT count(*) FROM virtual_models WHERE target_provider_model_id=? AND account_id=?)`, modelID, tx.accountID, modelID, tx.accountID, modelID, tx.accountID).Scan(&refs); err != nil {
+			return err
+		}
+		if refs > 0 {
+			return ErrModelInUse
+		}
 		if _, err := tx.q.ExecContext(ctx, `DELETE FROM client_model_permissions WHERE model_kind='real' AND model_id=? AND account_id=?`, modelID, tx.accountID); err != nil {
 			return err
 		}
-		_, err := tx.q.ExecContext(ctx, `DELETE FROM provider_models WHERE id=? AND origin='manual' AND account_id=?`, modelID, tx.accountID)
-		return err
+		res, err := tx.q.ExecContext(ctx, `DELETE FROM provider_models WHERE id=? AND origin='manual' AND account_id=?`, modelID, tx.accountID)
+		if err != nil {
+			return err
+		}
+		if n, rowsErr := res.RowsAffected(); rowsErr != nil {
+			return rowsErr
+		} else if n == 0 {
+			// The row was adopted (now origin='discovered') or removed between
+			// the reads and the delete. Report the same conflict the checks
+			// above would have produced rather than a false success.
+			return ErrModelNotManual
+		}
+		return nil
 	})
 }
 

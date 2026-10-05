@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/mailer"
 	"github.com/tiller-router/tiller-router/internal/mailoutbox"
+	"github.com/tiller-router/tiller-router/internal/providerquota"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -60,7 +62,23 @@ type Server struct {
 	googlePending     *hostedauth.PendingSignupStore
 	googleReauthMu    sync.Mutex
 	googleReauth      map[[32]byte]time.Time
-	mailer            *mailer.Manager
+	// linkAuth is a purpose-scoped variant of googleReauth: a short-lived,
+	// single-use "this session proved a factor recently" grant that authorises
+	// starting the Google account-link flow without re-typing the password. It
+	// is keyed by sha256(raw session token) | purpose so a grant minted for
+	// linking can never be spent on unlink, email change, or deletion, and
+	// vice versa. Cleared for a session when a successful password
+	// reauthentication happens, matching reauthenticateSensitive's behaviour.
+	linkAuthMu sync.Mutex
+	linkAuth   map[[32]byte]time.Time
+	// passkeyReauth is the passkey analogue of googleReauth: a short-lived,
+	// single-use grant that this session completed a passkey assertion
+	// recently. It lets a passkey-only (or password-less-at-the-moment)
+	// account confirm sensitive operations without a password. Keyed by
+	// sha256(raw session token).
+	passkeyReauthMu sync.Mutex
+	passkeyReauth   map[[32]byte]time.Time
+	mailer          *mailer.Manager
 	// outbox is the durable transactional-mail queue. It is nil in local mode,
 	// where identity flows never enqueue.
 	outbox *mailoutbox.Outbox
@@ -70,13 +88,21 @@ type Server struct {
 	adminAccount func(auth.Session) string
 	// secretHasher is the token hasher used when generating client keys
 	// (bcrypt in production; a fast hasher in tests).
-	secretHasher  auth.SecretHasher
-	providers     *providers.Manager
+	secretHasher auth.SecretHasher
+	providers    *providers.Manager
+	// quota polls subscription/quota endpoints for display. It is best-effort:
+	// nil is tolerated by every reader.
+	quota         *providerquota.Poller
 	oauthFlows    *oauth.FlowStore
 	oauthDeviceMu sync.Mutex
 	oauthDevices  map[string]*oauthDeviceState
-	logger        *slog.Logger
-	assets        http.Handler
+	// oauthPending marks a hosted redirect-callback flow that has started but not
+	// yet completed, so status polling reports "pending" instead of a stale
+	// pre-existing token. Guarded by oauthDeviceMu; entries expire after
+	// oauthPendingTTL so an abandoned flow cannot pin the status forever.
+	oauthPending map[string]time.Time
+	logger       *slog.Logger
+	assets       http.Handler
 	// notifyClient is a dedicated HTTP client for best-effort outbound webhook
 	// notifications. It has a short timeout so a slow webhook can never
 	// materially delay an inference request.
@@ -87,13 +113,50 @@ type Server struct {
 	notifyCooldownMu sync.Mutex
 	notifyLastSent   map[string]time.Time
 	notifyInFlight   map[string]bool
+	// notifyAdmitted counts webhook deliveries currently in flight across all
+	// accounts, and notifyAdmittedByAccount counts them per account. They bound
+	// concurrent outbound work: the per-event cooldown only limits repeats of
+	// one key, so without an aggregate bound a burst of distinct events (for
+	// example client-key churn, which is exempt from the cooldown) could start
+	// unbounded deliveries against a slow endpoint.
+	notifyAdmitted          int
+	notifyAdmittedByAccount map[string]int
+	// notifBudget is the rolling hourly per-account delivery budget
+	// (hostedHourlyNotificationBudget). Nil outside hosted mode: local mode is
+	// a single trusted operator and keeps unthrottled admin events.
+	notifBudget *notificationBudget
+	// bodyReads bounds concurrent inbound request-body reads so a slow-upload
+	// flood cannot park unbounded buffers/goroutines before admission applies.
+	bodyReads bodyReadGate
+	// testNotificationLimiter gates the manual test-delivery endpoint
+	// in hosted mode so a tenant cannot hammer arbitrary public HTTPS
+	// webhooks. Keyed by account id.
+	testNotificationLimiter *loginLimiter
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
-	loginLimiter          *loginLimiter
+	loginLimiter *loginLimiter
+	// setupLimiter throttles the unauthenticated first-run setup endpoint so a
+	// flood cannot force unbounded argon2id hashing before an admin exists.
+	setupLimiter *loginLimiter
+	// wizardEnabled reports whether the local-mode onboarding wizard may be
+	// offered. It is false when environment credentials are set: those
+	// installs skip onboarding entirely, preserving the pre-first-run
+	// experience.
+	wizardEnabled         bool
 	userLoginIPLimiter    *loginLimiter
 	userLoginEmailLimiter *loginLimiter
-	signupLimiter         *loginLimiter
-	recoveryIPLimiter     *loginLimiter
-	recoveryEmailLimiter  *loginLimiter
+	// signupEmailLimiter bounds signup/verification mail per address (HMAC-keyed
+	// like the login limiter) so rotating IPs cannot make the platform mail
+	// arbitrary mailboxes faster than the provider's own spend tolerates.
+	signupEmailLimiter   *loginLimiter
+	signupLimiter        *loginLimiter
+	recoveryIPLimiter    *loginLimiter
+	recoveryEmailLimiter *loginLimiter
+	// passkeyBeginLimiter charges every (unauthenticated) passkey ceremony
+	// begin against a per-IP fixed window so a ceremony flood cannot churn the
+	// process-wide challenge store. It is separate from the login-failure
+	// limiter because begins are expected events, not failures: sharing the
+	// 8-failure lockout would sign a legitimate user out of their own retries.
+	passkeyBeginLimiter   *loginLimiter
 	authRateLimitHashKey  [32]byte
 	clientSelectorLimiter *loginLimiter
 	clientAddressLimiter  *loginLimiter
@@ -132,14 +195,12 @@ type Server struct {
 	// tests and direct Server construction stay deterministic.
 	logWriter          *logWriter
 	platformSettingsMu sync.Mutex
-}
-
-// secretEncryptionState reports the credential-encryption state for the admin
-// status API: "enabled", "disabled" (no cipher configured; tests/hash-only),
-// or "locked" (the master key is missing or does not match the stored
-// ciphertext). It never exposes key material, fingerprints, or nonces.
-func (s *Server) secretEncryptionState() string {
-	return store.SecretsState(s.secretCipher)
+	// platformAnalytics is the in-memory cache of the operator-configured
+	// analytics integration. It feeds the per-response CSP so the script origin
+	// is allow-listed without a database read on every request. Guarded by
+	// platformAnalyticsMu and refreshed at boot and whenever settings are saved.
+	platformAnalyticsMu sync.RWMutex
+	platformAnalytics   store.PlatformAnalyticsSettings
 }
 
 // secretsLocked reports whether the recoverable-secret cipher is in the locked
@@ -287,12 +348,63 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	if err != nil {
 		return nil, err
 	}
+	identityStore.SetPlatformSessionTTL(cfg.PlatformSessionTTL)
 	if cfg.Mode == config.ModeHosted {
-		if err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.TillerUser, cfg.TillerUserPassword, db.FreshInstall); err != nil {
+		outcome, err := identityStore.BootstrapHostedCustomer(context.Background(), cfg.TillerUser, cfg.TillerUserPassword, db.FreshInstall)
+		if err != nil {
 			return nil, fmt.Errorf("hosted bootstrap: %w", err)
+		}
+		// A fresh hosted install never creates a customer from the environment,
+		// so the customer credentials are not provisioning input. Two ways to
+		// arrive here: normally database.Open has already recorded the completed
+		// bootstrap (so the store reports "skipped"), and any other composition
+		// reports "fresh". Warn on both. Without this an operator who set those
+		// variables sees only "Invalid email or password" at the login screen,
+		// which points at the password rather than the configuration.
+		fresh := db.FreshInstall || outcome == identity.HostedBootstrapFresh
+		if fresh && (cfg.TillerUser != "" || cfg.TillerUserPassword != "") && logger != nil {
+			logger.Warn("ignoring TILLER_USERNAME/TILLER_PASSWORD: a fresh hosted install creates no customer; create one through signup or an invitation. These variables are one-time migration input for an existing local database only")
+		}
+		if outcome == identity.HostedBootstrapMigrated && logger != nil {
+			logger.Info("converted the existing local account into a verified hosted customer")
 		}
 		if err := identityStore.SyncPlatformCredential(cfg.TillerPlatformAdminUser, cfg.TillerPlatformAdminPassword); err != nil {
 			return nil, err
+		}
+	}
+	// Passkeys need a stable public HTTPS origin known at boot. Hosted mode
+	// always has one (TILLER_PUBLIC_URL is required); local mode opts in by
+	// setting it. When it is unset in local mode the passkey routes report 501
+	// and an INFO line explains how to enable them.
+	if cfg.PublicURL != "" {
+		if rp, rerr := webauthnConfigFor(cfg.PublicURL); rerr != nil {
+			return nil, fmt.Errorf("webauthn: %w", rerr)
+		} else if err := identityStore.ConfigureWebAuthn(rp); err != nil {
+			return nil, err
+		}
+	} else if cfg.Mode != config.ModeHosted && logger != nil {
+		logger.Info("passkeys are unavailable: set TILLER_PUBLIC_URL to enable WebAuthn sign-in")
+	}
+	// Local mode materialises a single operator users row so credentials live in
+	// the shared users table and passkeys have a user to bind to. The local
+	// session boundary (admin_sessions) is unchanged. When no credential exists
+	// yet (first-run, no env admin), the row is created later by the setup
+	// endpoint once the operator claims the instance.
+	if cfg.Mode != config.ModeHosted && sessions != nil {
+		if username, hash := sessions.StoredCredential(); hash != "" {
+			if _, err := identityStore.EnsureLocalOperator(context.Background(), username, "", hash); err != nil && !errors.Is(err, identity.ErrLocalOperatorExists) {
+				return nil, fmt.Errorf("local operator: %w", err)
+			} else if errors.Is(err, identity.ErrLocalOperatorExists) {
+				// The row already exists; keep both its synthetic username/email
+				// and its credential hash aligned with the boot-synced
+				// environment/stored credential. Updating only the hash would
+				// leave the email bound to the old username, so a changed
+				// TILLER_USERNAME would reject the new username before the
+				// password was ever checked.
+				if uerr := identityStore.SyncLocalOperatorCredentials(context.Background(), username, hash); uerr != nil {
+					return nil, fmt.Errorf("local operator sync: %w", uerr)
+				}
+			}
 		}
 	}
 	if cfg.Mail.Configured() {
@@ -329,12 +441,41 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		notifyClient = hostednet.NewClient(notificationTimeout)
 		authClient = hostednet.NewClient(10 * time.Second)
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, logger: logger, assets: webassets.Handler(), notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	siteDir := ""
+	if cfg.Mode == config.ModeHosted && cfg.CustomSiteEnabled {
+		siteDir = filepath.Join(cfg.DataDir, "site")
+	}
+	assets, err := webassets.HandlerWithSite(siteDir, logger)
+	if err != nil {
+		return nil, fmt.Errorf("load custom site: %w", err)
+	}
+	if siteDir != "" {
+		shadowed, scanErr := webassets.ShadowedCustomAssets(siteDir)
+		if scanErr != nil {
+			if logger != nil {
+				logger.Warn("custom site scan failed", "error_class", fmt.Sprintf("%T", scanErr))
+			}
+		} else if logger != nil {
+			for _, p := range shadowed {
+				logger.Warn("custom site asset is shadowed by a reserved application path and will not be served", "path", p)
+			}
+		}
+	}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
+	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
+	if s.setupRequired() && logger != nil {
+		logger.Warn("local instance is unconfigured: complete the setup page to claim it as administrator before exposing this instance; alternatively set TILLER_USERNAME and TILLER_PASSWORD as an automated/recovery bootstrap")
+	}
 	if cfg.Mode == config.ModeHosted {
 		if err := s.SeedLegalDocuments(context.Background()); err != nil && logger != nil {
 			logger.Warn("legal document seed failed", "error_class", fmt.Sprintf("%T", err))
+		}
+		if analytics, loadErr := st.GetPlatformAnalyticsSettings(context.Background()); loadErr == nil {
+			s.setPlatformAnalytics(analytics)
+		} else if logger != nil {
+			logger.Warn("analytics settings load failed", "error_class", fmt.Sprintf("%T", loadErr))
 		}
 	}
 	return s, nil
@@ -345,6 +486,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 		s.logger.Warn("activity cleanup reconciliation failed", "error_class", fmt.Sprintf("%T", err))
 	}
 	s.providers.StartScheduler(ctx)
+	s.startQuotaPoller(ctx)
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
@@ -430,10 +572,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /.well-known/security.txt", s.handleSecurityTxt)
 	if s.config.Mode == config.ModeHosted {
 		mux.HandleFunc("GET /api/auth/options", s.authOptions)
+		mux.HandleFunc("GET /api/analytics/options", s.analyticsOptions)
 		mux.HandleFunc("POST /api/auth/signup", s.signup)
 		mux.HandleFunc("POST /api/auth/login", s.userLogin)
+		mux.HandleFunc("POST /api/auth/passkey/begin", s.passkeyLoginBegin)
+		mux.HandleFunc("POST /api/auth/passkey/finish", s.passkeyLoginFinish)
 		mux.HandleFunc("POST /api/auth/google/start", s.startGoogleSignIn)
 		mux.HandleFunc("GET /api/auth/google/callback", s.googleCallback)
+		mux.HandleFunc("POST /api/auth/google/gsi", s.completeGoogleGSI)
+		mux.HandleFunc("GET /auth/callback", s.completeProviderOAuthRedirect)
 		mux.HandleFunc("POST /api/auth/google/signup/complete", s.completeGoogleSignup)
 		mux.HandleFunc("GET /api/legal/{slug}", s.legalDoc)
 		mux.Handle("GET /api/auth/session", s.requireUser(http.HandlerFunc(s.userSessionStatus)))
@@ -449,6 +596,14 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("GET /api/auth/onboarding", s.requireUser(http.HandlerFunc(s.writeOnboardingState)))
 		mux.Handle("POST /api/auth/onboarding/dismiss", s.requireUser(http.HandlerFunc(s.setOnboardingDismissed)))
 		mux.Handle("POST /api/auth/account/password", s.requireUser(http.HandlerFunc(s.changeOwnPassword)))
+		mux.Handle("GET /api/auth/account/passkeys", s.requireUser(http.HandlerFunc(s.passkeyList)))
+		mux.Handle("POST /api/auth/account/passkeys/register/begin", s.requireUser(http.HandlerFunc(s.passkeyRegisterBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/register/finish", s.requireUser(http.HandlerFunc(s.passkeyRegisterFinish)))
+		mux.Handle("POST /api/auth/account/passkeys/rename", s.requireUser(http.HandlerFunc(s.passkeyRename)))
+		mux.Handle("POST /api/auth/account/passkeys/delete", s.requireUser(http.HandlerFunc(s.passkeyDelete)))
+		mux.Handle("POST /api/auth/account/passkeys/password-signin", s.requireUser(http.HandlerFunc(s.setPasswordSignIn)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/begin", s.requireUser(http.HandlerFunc(s.passkeyReauthBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/finish", s.requireUser(http.HandlerFunc(s.passkeyReauthFinish)))
 		mux.Handle("POST /api/auth/account/email", s.requireUser(http.HandlerFunc(s.requestOwnEmailChange)))
 		mux.Handle("POST /api/auth/google/link/start", s.requireUser(http.HandlerFunc(s.startGoogleLink)))
 		mux.Handle("POST /api/auth/google/reauth/start", s.requireUser(http.HandlerFunc(s.startGoogleReauth)))
@@ -458,10 +613,13 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/platform/session", s.platformLogin)
 		mux.Handle("GET /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformSessionStatus)))
 		mux.Handle("DELETE /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformLogout)))
+		mux.Handle("GET /api/platform/stats", s.requirePlatform(http.HandlerFunc(s.platformStats)))
 		mux.Handle("GET /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.platformSettings)))
 		mux.Handle("PUT /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.updatePlatformSettings)))
 		mux.Handle("GET /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlans)))
+		mux.Handle("POST /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanCreate)))
 		mux.Handle("PUT /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanUpdate)))
+		mux.Handle("DELETE /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanDelete)))
 		mux.Handle("POST /api/platform/accounts/{id}/plan", s.requirePlatform(http.HandlerFunc(s.writeAccountPlanAssign)))
 		mux.Handle("GET /api/platform/legal", s.requirePlatform(http.HandlerFunc(s.writePlatformLegalDocs)))
 		mux.Handle("PUT /api/platform/legal/{slug}", s.requirePlatform(http.HandlerFunc(s.writePlatformLegalUpdate)))
@@ -476,6 +634,32 @@ func (s *Server) Handler() http.Handler {
 		mux.HandleFunc("POST /api/admin/session", s.login)
 		mux.Handle("GET /api/admin/session", s.requireAdmin(http.HandlerFunc(s.sessionStatus)))
 		mux.Handle("DELETE /api/admin/session", s.requireAdmin(http.HandlerFunc(s.logout)))
+		// First-run bootstrap: the route exists only while the instance has no
+		// credential at all. Once configured it 404s, so it can never act as a
+		// backdoor. It owns its own same-origin/rate-limit/one-shot write.
+		mux.HandleFunc("POST /api/admin/setup", s.setup)
+		// First-run onboarding wizard state. Unlike hosted, these are behind
+		// requireAdmin because local mode is single-operator; the wizard
+		// itself is the same dialog as hosted.
+		mux.Handle("GET /api/auth/onboarding", s.requireAdmin(http.HandlerFunc(s.writeOnboardingState)))
+		mux.Handle("POST /api/auth/onboarding/dismiss", s.requireAdmin(http.HandlerFunc(s.setOnboardingDismissed)))
+		// Local operator account view (identity + passkeys) for the Settings →
+		// Account panel. Reuses the hosted AccountProfile shape against the
+		// single local operator user.
+		mux.Handle("GET /api/admin/account", s.requireAdminUser(http.HandlerFunc(s.localAccountProfile)))
+		// Passkeys are available in local mode when TILLER_PUBLIC_URL is set
+		// (the routes 501 otherwise). Login is unauthenticated; management is
+		// behind requireAdminUser, which resolves the single local operator.
+		mux.HandleFunc("POST /api/auth/passkey/begin", s.passkeyLoginBegin)
+		mux.HandleFunc("POST /api/auth/passkey/finish", s.passkeyLoginFinish)
+		mux.Handle("GET /api/auth/account/passkeys", s.requireAdminUser(http.HandlerFunc(s.passkeyList)))
+		mux.Handle("POST /api/auth/account/passkeys/register/begin", s.requireAdminUser(http.HandlerFunc(s.passkeyRegisterBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/register/finish", s.requireAdminUser(http.HandlerFunc(s.passkeyRegisterFinish)))
+		mux.Handle("POST /api/auth/account/passkeys/rename", s.requireAdminUser(http.HandlerFunc(s.passkeyRename)))
+		mux.Handle("POST /api/auth/account/passkeys/delete", s.requireAdminUser(http.HandlerFunc(s.passkeyDelete)))
+		mux.Handle("POST /api/auth/account/passkeys/password-signin", s.requireAdminUser(http.HandlerFunc(s.setPasswordSignIn)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/begin", s.requireAdminUser(http.HandlerFunc(s.passkeyReauthBegin)))
+		mux.Handle("POST /api/auth/account/passkeys/reauth/finish", s.requireAdminUser(http.HandlerFunc(s.passkeyReauthFinish)))
 	}
 	if s.config.Mode == config.ModeHosted {
 		mux.Handle("GET /api/admin/audit", s.requireUser(http.HandlerFunc(s.accountAudit)))
@@ -525,15 +709,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.updateSettings)))
 	mux.Handle("POST /api/admin/notifications/test", s.requireAdmin(http.HandlerFunc(s.sendTestNotification)))
 	mux.Handle("GET /api/admin/usage", s.requireAdmin(http.HandlerFunc(s.usage)))
+	mux.Handle("GET /api/admin/quota", s.requireAdmin(http.HandlerFunc(s.quotaEndpoint)))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
 	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))
 	mux.Handle("GET /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.cooldownStatus)))
 	mux.Handle("DELETE /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.clearCooldown)))
 	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
-	mux.Handle("GET /api/admin/debug/memory", s.requireAdmin(http.HandlerFunc(s.debugMemory)))
+	mux.Handle("GET /api/admin/debug/memory", s.requireDebugAdmin(http.HandlerFunc(s.debugMemory)))
 	if s.config.DebugPprof {
-		mux.Handle("GET "+debugPprofPrefix, s.requireAdmin(http.HandlerFunc(s.debugPprof)))
+		mux.Handle("GET "+debugPprofPrefix, s.requireDebugAdmin(http.HandlerFunc(s.debugPprof)))
 	}
 	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
 	mux.Handle("GET /v1/models/{model...}", s.requireClient(http.HandlerFunc(s.clientModel), false))
@@ -562,6 +747,9 @@ func (s *Server) versionHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
@@ -569,10 +757,23 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct{ Username, Password string }
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
-	if !auth.EqualCredential(input.Username, s.config.TillerUser) || !auth.EqualCredential(input.Password, s.config.TillerUserPassword) {
+	// The operator credential lives in the local operator's users row (unified
+	// with hosted storage). The environment credentials are synced into it at
+	// boot (env wins, invalidating sessions), and the first-run wizard writes it
+	// directly, so the stored row is the single source of truth.
+	operator, err := s.identity.AuthenticateLocalOperator(r.Context(), input.Username, input.Password)
+	if err != nil {
+		// An install that predates the operator row (or one whose row cannot be
+		// resolved) still has the legacy credential fingerprint; fall back so no
+		// existing login breaks.
+		if s.sessions.VerifyCredential(input.Username, input.Password) {
+			operator, err = s.reconcileLocalOperator(r.Context(), input.Username, input.Password)
+		}
+	}
+	if err != nil || operator.ID == "" {
 		if s.loginLimiter.recordFailure(key) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 			return
@@ -587,8 +788,52 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", s.config.TillerUser, clientIP(r, s.config.TrustedProxy)))
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": s.config.TillerUser, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+	username := s.adminUsername()
+	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", username, clientIP(r, s.config.TrustedProxy)))
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": username, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+}
+
+// webauthnConfigFor derives the relying-party configuration from the public
+// HTTPS origin. The RP id is the host with any port removed (WebAuthn scopes a
+// credential to a registrable domain); the origin is the exact PublicURL.
+func webauthnConfigFor(publicURL string) (identity.WebAuthnConfig, error) {
+	u, err := url.Parse(publicURL)
+	if err != nil || u.Host == "" {
+		return identity.WebAuthnConfig{}, errors.New("invalid public URL")
+	}
+	rpID := u.Hostname()
+	if rpID == "" {
+		return identity.WebAuthnConfig{}, errors.New("public URL has no hostname")
+	}
+	return identity.WebAuthnConfig{RPDisplayName: "Tiller", RPID: rpID, Origins: []string{"https://" + u.Host}}, nil
+}
+
+// reconcileLocalOperator lazily creates the local operator users row for an
+// install that authenticated against the legacy credential fingerprint but has
+// no operator row yet (e.g. an in-place upgrade that predates the unified
+// storage). The stored hash is reused, so the credential is unchanged. The
+// password argument is only used if no stored hash is available.
+func (s *Server) reconcileLocalOperator(ctx context.Context, username, password string) (identity.User, error) {
+	if _, hash := s.sessions.StoredCredential(); hash != "" {
+		return s.identity.EnsureLocalOperator(ctx, username, "", hash)
+	}
+	return s.identity.EnsureLocalOperator(ctx, username, password, "")
+}
+
+// adminUsername is the operator identity shown in the UI and login
+// notifications. Environment credentials win while they are set; otherwise the
+// username persisted by the first-run wizard is used, so identity survives a
+// restart with no environment configured.
+func (s *Server) adminUsername() string {
+	if s.config.TillerUser != "" {
+		return s.config.TillerUser
+	}
+	if s.sessions != nil {
+		if stored := s.sessions.AdminUsername(); stored != "" {
+			return stored
+		}
+	}
+	return "admin"
 }
 
 // setSessionCookie writes the admin session cookie. Refreshing it on every
@@ -601,7 +846,7 @@ func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token 
 
 func (s *Server) sessionStatus(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(adminSessionKey).(auth.Session)
-	writeJSON(w, 200, map[string]any{"authenticated": true, "username": s.config.TillerUser, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
+	writeJSON(w, 200, map[string]any{"authenticated": true, "username": s.adminUsername(), "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
@@ -641,8 +886,29 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), adminSessionKey, session)
 		ctx = context.WithValue(ctx, accountKey, accountID)
+		stampRequestPrincipal(r, "admin", accountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// requireAdminUser resolves the authenticated administrator to the identity
+// User the hosted passkey handlers expect and injects it as userKey, then calls
+// next. In hosted mode it is requireUser (which already sets userKey). In local
+// mode the admin session owns the single local operator user; this bridges the
+// two so the shared passkey-management handlers work unchanged. It reports 404
+// when no operator user exists (an install that has not completed setup).
+func (s *Server) requireAdminUser(next http.Handler) http.Handler {
+	if s.config.Mode == config.ModeHosted {
+		return s.requireUser(next)
+	}
+	return s.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, err := s.identity.LocalOperatorUser(r.Context())
+		if err != nil {
+			adminError(w, http.StatusConflict, "operator_not_ready", "The local operator identity is not set up yet.")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
+	}))
 }
 
 // scope returns the account-scoped store handle for the request. The account
@@ -720,6 +986,7 @@ func (s *Server) requireClient(next http.Handler, anthropic bool) http.Handler {
 		s.clientAddressLimiter.success(address)
 		ctx := context.WithValue(r.Context(), clientKey, identity)
 		ctx = context.WithValue(ctx, accountKey, identity.AccountID)
+		stampRequestPrincipal(r, "client", identity.AccountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -748,6 +1015,41 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
 }
 
+// sameOriginRequest is the browser-binding check for the JSON auth endpoints.
+// A cross-site form/script cannot set Origin to the target's own origin, so a
+// present Origin must match the origin the request was served from: the
+// configured PublicURL in hosted mode, otherwise the request's own
+// scheme://Host. A missing Origin is allowed for non-browser clients (they
+// still must send a JSON content type); a present Sec-Fetch-Site of
+// "same-origin" or "none" is also accepted.
+func (s *Server) sameOriginRequest(r *http.Request) bool {
+	if site := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")); site != "" {
+		if !strings.EqualFold(site, "same-origin") && !strings.EqualFold(site, "none") {
+			return false
+		}
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	if s.config.Mode == config.ModeHosted {
+		publicURL, err := url.Parse(s.config.PublicURL)
+		if err != nil || publicURL.Host == "" {
+			return false
+		}
+		return strings.EqualFold(parsed.Scheme, publicURL.Scheme) && strings.EqualFold(parsed.Host, publicURL.Host)
+	}
+	scheme := "http"
+	if s.secureRequest(r) {
+		scheme = "https"
+	}
+	return strings.EqualFold(parsed.Scheme, scheme) && strings.EqualFold(parsed.Host, r.Host)
+}
+
 // tenantKey joins an account id with a tenant-variable cache/state key so a
 // value for one account can never be served to another.
 func tenantKey(accountID, id string) string {
@@ -773,10 +1075,16 @@ func boolInt(v bool) int {
 
 // requestClientIP returns the client address suitable for forwarding to an
 // anonymous provider. Forwarded headers are accepted only from the configured
-// trusted proxy; otherwise the direct peer address is used. When the direct
-// peer is trusted, the authoritative X-Real-IP header is preferred, and the
-// X-Forwarded-For chain is resolved by the canonical clientIP walker so the
-// two helpers can never drift.
+// trusted proxy; otherwise the direct peer address is used. Resolution always
+// goes through the canonical clientIP walker.
+//
+// X-Real-IP is deliberately NOT consulted. The peer check proves only that the
+// request arrived through the proxy -- it cannot prove the proxy authored the
+// header. A proxy that does not overwrite an inbound X-Real-IP therefore lets a
+// client choose this value, and it keys the client-address authentication
+// limiter in requireClient. The X-Forwarded-For walk is safe because the
+// reference proxy appends to it and the walker discards client-injected
+// leftmost hops.
 func (s *Server) requestClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -789,11 +1097,6 @@ func (s *Server) requestClientIP(r *http.Request) string {
 	if err != nil || !s.config.TrustedProxy.IsValid() || !s.config.TrustedProxy.Contains(peer) {
 		return host
 	}
-	if value := strings.TrimSpace(r.Header.Get("X-Real-IP")); value != "" {
-		if address, err := netip.ParseAddr(value); err == nil {
-			return address.String()
-		}
-	}
 	return clientIP(r, s.config.TrustedProxy)
 }
 
@@ -804,21 +1107,79 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		csp := "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 		if s.config.Mode == config.ModeHosted {
-			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self'; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+			// HSTS is hosted-only: the local appliance serves plain HTTP on the
+			// LAN by design, so it must never advertise an HTTPS-only policy.
+			// No includeSubDomains — an operator may run unrelated services on
+			// sibling subdomains and this app cannot vouch for them.
+			// (docs/pre_saas_release_review.md TR-008.)
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://challenges.cloudflare.com https://accounts.google.com; frame-src https://challenges.cloudflare.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+			// The analytics origin is operator-configured and only extends the
+			// hosted policy. Its presence in the header does not load a script;
+			// the consent-gated frontend decides whether to request it.
+			if origin, ok := s.analyticsScriptOrigin(); ok {
+				csp = strings.Replace(csp, "script-src 'self'", "script-src 'self' "+origin, 1)
+				csp = strings.Replace(csp, "connect-src 'self'", "connect-src 'self' "+origin, 1)
+				csp = strings.Replace(csp, "img-src 'self' data:", "img-src 'self' data: "+origin, 1)
+			}
 		}
 		w.Header().Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)
 	})
 }
 
+// requestInfo carries per-request authenticated attribution from the auth
+// middleware out to the request log line. requestLog wraps the mux OUTSIDE the
+// auth middleware, so the log line cannot see the context values the
+// middleware sets; a pointer stashed in the context closes that gap (the
+// middleware mutates, the tail reads). The account id is the pseudonymous
+// account UUID — never an email, client key name, or credential.
+// (docs/pre_saas_release_review.md TR-014.)
+type requestInfo struct {
+	// AccountID is the verified principal's account, set by the auth
+	// middleware. Empty for unauthenticated paths.
+	accountID string
+	// principalKind names the authenticated plane for the log line:
+	// "admin", "user", "platform", or "client".
+	principalKind string
+}
+
+// requestInfoKey is a value-type context key so requests can carry their own
+// info struct without colliding with package-level identity keys.
+type requestInfoKey struct{}
+
+// requestInfoContext installs the requestInfo the middleware can mutate and
+// the request log can read after the handler returns.
+func requestInfoContext(ctx context.Context) (context.Context, *requestInfo) {
+	info := &requestInfo{}
+	return context.WithValue(ctx, requestInfoKey{}, info), info
+}
+
+// stampRequestInfo resolves the caller's requestInfo and records the
+// principal. The first stamp wins: only one auth middleware wraps a given
+// route (requireAdmin delegates to requireUser in hosted mode, but then
+// requireUser is the one that runs).
+func stampRequestPrincipal(r *http.Request, kind, accountID string) {
+	if info, ok := r.Context().Value(requestInfoKey{}).(*requestInfo); ok && info.accountID == "" {
+		info.accountID, info.principalKind = accountID, kind
+	}
+}
+
 func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		with, info := requestInfoContext(r.Context())
+		next.ServeHTTP(w, r.WithContext(with))
 		if strings.HasPrefix(r.URL.Path, "/health/") {
 			return
 		}
-		s.logger.Info("http request", "method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds())
+		// The account id is a generated UUID, not user-identifying by itself;
+		// it exists to correlate a request line with the account it served.
+		args := []any{"method", r.Method, "path", r.URL.Path, "duration_ms", time.Since(start).Milliseconds()}
+		if info.accountID != "" {
+			args = append(args, "account_id", info.accountID, "principal", info.principalKind)
+		}
+		s.logger.Info("http request", args...)
 	})
 }
 
@@ -827,24 +1188,58 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 }
 
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
+	// Auth endpoints use this decoder, so require a JSON content type. Without
+	// it a cross-site HTML form can post an enctype=text/plain body that is
+	// still valid JSON ("JSON CSRF"). decodeJSON intentionally does not impose
+	// this so admin/provider endpoints keep their broader accepted types.
+	if !jsonContentType(r.Header.Get("Content-Type")) {
+		return errors.New("request body must be valid JSON")
+	}
 	return decodeJSONBody(w, r, target, maxBytes, true)
+}
+
+// jsonContentType reports whether a Content-Type header names application/json,
+// ignoring any parameters such as "; charset=utf-8".
+func jsonContentType(value string) bool {
+	mediaType := strings.TrimSpace(strings.SplitN(value, ";", 2)[0])
+	return strings.EqualFold(mediaType, "application/json")
 }
 
 func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any, maxBytes int64, requireSingleValue bool) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return errors.New("request body must be valid JSON")
-	}
-	if requireSingleValue {
-		var trailing any
-		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-			return errors.New("request body must contain one JSON value")
+	// Bound the body read so an incomplete body cannot hold a connection
+	// indefinitely. This affects every JSON endpoint, including the
+	// unauthenticated auth routes, whose rate limiters are only charged after a
+	// completed decode. The deadline is per read and resets on progress, so a
+	// slow but progressing upload is unaffected.
+	var decodeErr error
+	readErr := withBodyReadDeadline(w, func() error {
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(target); err != nil {
+			// A read-deadline timeout is a stalled upload, not malformed JSON:
+			// surface it so the caller can answer 408 rather than 400.
+			if isTimeoutError(err) {
+				return err
+			}
+			decodeErr = errors.New("request body must be valid JSON")
+			return nil
 		}
+		if requireSingleValue {
+			var trailing any
+			if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+				decodeErr = errors.New("request body must contain one JSON value")
+				return nil
+			}
+		}
+		return nil
+	})
+	if readErr != nil && isTimeoutError(readErr) {
+		return errBodyReadTimeout
 	}
-	return nil
+	return decodeErr
 }
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

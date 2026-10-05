@@ -28,6 +28,19 @@ const (
 	argonKeyBytes    = 32
 )
 
+// argonAdmission bounds how many human-password Argon2id computations (hash or
+// verify) run at once, process-wide. Each call commits argonMemory (64 MiB), so
+// the capacity is the KDF memory bound: 4 x 64 MiB = 256 MiB peak. Blocking
+// (not rejecting) admits every request while keeping the memory ceiling fixed;
+// the alternative -- unbounded concurrency -- lets a burst of login attempts
+// park gigabytes. The SecretHasher interface is deliberately left unchanged:
+// callers acquire this slot inside the hasher implementation.
+var argonAdmission = make(chan struct{}, 4)
+
+func acquireArgonSlot() { argonAdmission <- struct{}{} }
+
+func releaseArgonSlot() { <-argonAdmission }
+
 type GeneratedKey struct {
 	Plaintext   string
 	Selector    string
@@ -68,15 +81,21 @@ func GenerateKey() (GeneratedKey, error) {
 }
 
 func HashSecret(secret string) (string, error) {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idHash(secret)
 }
 
 func VerifySecret(secret, encoded string) bool {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idVerify(secret, encoded)
 }
 
-// argon2idHash is the canonical Argon2id implementation. Both Argon2Hasher
-// and the package-level HashSecret delegate here.
+// argon2idHash is the canonical Argon2id implementation. Both Argon2Hasher and
+// the package-level HashSecret acquire the KDF slot before delegating here; it
+// must not acquire again (that would deadlock once the gate is saturated), so
+// direct callers are responsible for holding a slot.
 func argon2idHash(secret string) (string, error) {
 	salt, err := randomBytes(argonSaltBytes)
 	if err != nil {
@@ -87,8 +106,9 @@ func argon2idHash(secret string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(hash)), nil
 }
 
-// argon2idVerify is the canonical Argon2id verification. Both Argon2Hasher
-// and the package-level VerifySecret delegate here.
+// argon2idVerify is the canonical Argon2id verification. Both Argon2Hasher and
+// the package-level VerifySecret acquire the KDF slot before delegating here; it
+// must not acquire again, so direct callers are responsible for holding a slot.
 func argon2idVerify(secret, encoded string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {
@@ -374,7 +394,22 @@ const (
 	sessionSelectorBytes = 16
 	sessionSecretBytes   = 32
 	credentialHashKey    = "admin_credential_hash"
+	// credentialUsernameKey stores the admin username in plaintext. It is not
+	// a secret (the setup wizard shows it, and the UI displays it); it exists
+	// so the login identity survives a restart after a first-run
+	// wizard-created credential, when no TILLER_USERNAME is set.
+	credentialUsernameKey = "admin_username"
 )
+
+// ErrCredentialAlreadySet is returned by SetCredential when an admin
+// credential already exists, so the one-shot first-run write can never
+// overwrite an existing one. It also covers the concurrent-claim race: the
+// platform_settings primary key admits exactly one writer.
+var ErrCredentialAlreadySet = errors.New("admin credential already set")
+
+// ErrPartialCredential is returned when exactly one of username/password is
+// empty. The configured environment contract is both-or-neither.
+var ErrPartialCredential = errors.New("admin credential requires both username and password")
 
 type sessionCacheEntry struct {
 	session Session
@@ -419,6 +454,8 @@ func NewSessionStoreWithHasher(db *sql.DB, username, password string, ttl time.D
 // NewSessionStoreTiered constructs a SessionStore with separate hashers for
 // session tokens and the admin credential fingerprint. Either nil falls back to
 // the production default for its role (bcrypt tokens, argon2id credential).
+// An empty username and password is the first-run state: no credential is
+// written, and the store reports CredentialConfigured() == false.
 func NewSessionStoreTiered(db *sql.DB, username, password string, ttl time.Duration, tokenHasher, credentialHasher SecretHasher) (*SessionStore, error) {
 	if ttl <= 0 {
 		ttl = 30 * 24 * time.Hour
@@ -430,8 +467,10 @@ func NewSessionStoreTiered(db *sql.DB, username, password string, ttl time.Durat
 		credentialHasher = Argon2Hasher{}
 	}
 	s := &SessionStore{db: db, ttl: ttl, tokenHasher: tokenHasher, credentialHasher: credentialHasher, cacheTTL: defaultSessionCacheTTL, maxEntries: maxAuthCacheEntries, cache: make(map[string]sessionCacheEntry)}
-	if err := s.syncCredential(username, password); err != nil {
-		return nil, err
+	if username != "" || password != "" {
+		if err := s.syncCredential(username, password); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -458,6 +497,9 @@ func NewSessionStore(db *sql.DB, username, password string, ttl time.Duration) (
 // all existing sessions if the credentials changed since the last start, so a
 // material username/password change forces a fresh login.
 func (s *SessionStore) syncCredential(username, password string) error {
+	if username == "" || password == "" {
+		return ErrPartialCredential
+	}
 	material := username + "\x00" + password
 	var stored string
 	err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&stored)
@@ -466,14 +508,17 @@ func (s *SessionStore) syncCredential(username, password string) error {
 		if err != nil {
 			return err
 		}
-		_, err = s.db.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?)`, credentialHashKey, hash, formatUTC(time.Now()))
-		return err
+		return s.writeCredential(username, hash)
 	}
 	if err != nil {
 		return err
 	}
 	if s.credentialHasher.Verify(material, stored) {
-		return nil
+		// The hash already matches, so the stored username (if any) is the
+		// same. Backfill the display-name key for databases written before it
+		// existed; never overwrite an existing one here.
+		_, err = s.db.Exec(`INSERT OR IGNORE INTO platform_settings(key,value,updated_at) VALUES(?,?,?)`, credentialUsernameKey, username, formatUTC(time.Now()))
+		return err
 	}
 	if err := s.InvalidateAll(); err != nil {
 		return err
@@ -482,8 +527,116 @@ func (s *SessionStore) syncCredential(username, password string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE platform_settings SET value=?, updated_at=? WHERE key=?`, hash, formatUTC(time.Now()), credentialHashKey)
-	return err
+	return s.writeCredential(username, hash)
+}
+
+// writeCredential upserts the admin credential hash and its plaintext username
+// together, so the displayed identity can never diverge from the credential
+// that authenticates.
+func (s *SessionStore) writeCredential(username, hash string) error {
+	now := formatUTC(time.Now())
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, credentialHashKey, hash, now); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, credentialUsernameKey, username, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// VerifyCredential reports whether username/password match the stored admin
+// credential. It is the local-mode login check; the environment credentials
+// are synced into the same stored credential at boot, so this covers both the
+// env-admin and first-run-wizard paths. A missing credential verifies false.
+func (s *SessionStore) VerifyCredential(username, password string) bool {
+	if username == "" || password == "" {
+		return false
+	}
+	var stored string
+	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&stored); err != nil {
+		return false
+	}
+	return s.credentialHasher.Verify(username+"\x00"+password, stored)
+}
+
+// CredentialConfigured reports whether an admin credential exists. It is the
+// first-run gate: setup is only offered while this is false.
+func (s *SessionStore) CredentialConfigured() bool {
+	var exists int
+	if err := s.db.QueryRow(`SELECT 1 FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&exists); err != nil {
+		return false
+	}
+	return exists == 1
+}
+
+// AdminUsername returns the stored admin username for display, or "" when no
+// credential exists yet. It is never used for authentication.
+func (s *SessionStore) AdminUsername() string {
+	var username string
+	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialUsernameKey).Scan(&username); err != nil {
+		return ""
+	}
+	return username
+}
+
+// StoredCredential returns the stored admin credential hash and its username, or
+// empty strings when no credential exists. It lets the local operator identity
+// row be seeded with the already-hashed credential at boot without re-hashing
+// (the raw password is not recoverable). The hash is a stored secret; callers
+// must not log or expose it.
+func (s *SessionStore) StoredCredential() (username, hash string) {
+	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialUsernameKey).Scan(&username); err != nil {
+		username = ""
+	}
+	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&hash); err != nil {
+		hash = ""
+	}
+	return username, hash
+}
+
+// SetCredential writes the first admin credential as a one-shot claim. It is
+// used by the pre-login first-run setup endpoint: the insert refuses to
+// overwrite an existing credential, so a concurrent second claim (or a replay
+// after setup) gets ErrCredentialAlreadySet instead of replacing the admin.
+// Sessions are invalidated so the new credential is the only one that can
+// mint authenticated state.
+func (s *SessionStore) SetCredential(username, password string) error {
+	if username == "" || password == "" {
+		return ErrPartialCredential
+	}
+	hash, err := s.credentialHasher.Hash(username + "\x00" + password)
+	if err != nil {
+		return err
+	}
+	now := formatUTC(time.Now())
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO NOTHING`, credentialHashKey, hash, now)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return ErrCredentialAlreadySet
+	}
+	if _, err := tx.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, credentialUsernameKey, username, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.InvalidateAll()
 }
 
 func (s *SessionStore) Create() (Session, error) {

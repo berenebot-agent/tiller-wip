@@ -32,13 +32,19 @@ type SecretHasher interface {
 // HashSecret/VerifySecret, which hold the single Argon2id implementation.
 type Argon2Hasher struct{}
 
-// Hash implements SecretHasher by delegating to the production HashSecret.
+// Hash implements SecretHasher by delegating to the production HashSecret,
+// which acquires the process-wide Argon2id admission slot.
 func (Argon2Hasher) Hash(secret string) (string, error) {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idHash(secret)
 }
 
-// Verify implements SecretHasher by delegating to the production VerifySecret.
+// Verify implements SecretHasher by delegating to the production VerifySecret,
+// which acquires the process-wide Argon2id admission slot.
 func (Argon2Hasher) Verify(secret, encoded string) bool {
+	acquireArgonSlot()
+	defer releaseArgonSlot()
 	return argon2idVerify(secret, encoded)
 }
 
@@ -90,11 +96,19 @@ func (h BcryptHasher) NeedsRehash(encoded string) bool {
 }
 
 // VerifyEncoded verifies secret against an encoded secret hash, dispatching on
-// the encoding's algorithm prefix. It supports the current bcrypt format and
-// the legacy argon2id PHC format so a deploy can verify pre-migration rows.
+// the encoding's algorithm prefix.
+//
+// PERMANENT COMPAT (see docs/back_compat.md): the $argon2id$ branch is retained
+// deliberately. Legacy argon2id client keys cannot be pre-migrated to bcrypt —
+// they are stored hash-only, so the plaintext needed to re-hash is gone. They
+// keep verifying here and lazily upgrade to bcrypt on next successful use.
+// Sessions are NOT argon2id anymore (the boot upgrade revokes legacy ones), so
+// this branch exists for client keys alone.
 func VerifyEncoded(secret, encoded string) bool {
 	switch {
 	case strings.HasPrefix(encoded, "$argon2id$"):
+		acquireArgonSlot()
+		defer releaseArgonSlot()
 		return argon2idVerify(secret, encoded)
 	case strings.HasPrefix(encoded, "$2a$"), strings.HasPrefix(encoded, "$2b$"), strings.HasPrefix(encoded, "$2y$"):
 		return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(secret)) == nil

@@ -96,6 +96,13 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_provider_type", "Unknown provider type.")
 		return
 	}
+	// Hosted mode honours the provider-terms decision recorded on the
+	// descriptor. The admin UI hides these types; this is the authoritative
+	// backstop for a direct API call (docs/provider_terms_review.md).
+	if s.config.Mode == config.ModeHosted && descriptor.HostedDisabled {
+		adminError(w, 400, "provider_type_disabled", "This provider type is not available in hosted mode.")
+		return
+	}
 	if input.Name == "" {
 		input.Name = descriptor.Type
 		if input.Type == "codex-subscription" {
@@ -212,6 +219,12 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	if refreshErr != nil {
 		message = "Provider was saved, but initial discovery failed."
 	}
+	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+		Event:      "provider.created",
+		TargetType: "provider",
+		TargetID:   providerID,
+		Metadata:   map[string]string{"name": input.Name, "type": input.Type, "discovery_error": fmt.Sprintf("%t", refreshErr != nil)},
+	})
 	writeJSON(w, status, map[string]any{"id": providerID, "name": input.Name, "credential_configured": input.Credential != "", "refresh_error": message})
 }
 
@@ -263,11 +276,12 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		current.Protocols = providers.EncodeProtocols(input.Protocols)
 	}
 	err = sc.UpdateProvider(r.Context(), store.UpdateProviderInput{
-		ID:        providerID,
-		Name:      current.Name,
-		BaseURL:   current.BaseURL,
-		Enabled:   current.Enabled,
-		Protocols: current.Protocols,
+		ID:         providerID,
+		Name:       current.Name,
+		BaseURL:    current.BaseURL,
+		Enabled:    current.Enabled,
+		EnabledSet: input.Enabled != nil,
+		Protocols:  current.Protocols,
 	})
 	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
@@ -281,6 +295,25 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	changed := make([]string, 0, 4)
+	if input.Name != nil {
+		changed = append(changed, "name")
+	}
+	if input.BaseURL != nil {
+		changed = append(changed, "base_url")
+	}
+	if input.Enabled != nil {
+		changed = append(changed, "enabled")
+	}
+	if len(input.Protocols) > 0 && (current.Type == "generic-openai" || current.Type == "vllm") {
+		changed = append(changed, "protocols")
+	}
+	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+		Event:      "provider.updated",
+		TargetType: "provider",
+		TargetID:   providerID,
+		Metadata:   map[string]string{"fields": strings.Join(changed, ",")},
+	})
 	w.WriteHeader(204)
 }
 
@@ -314,6 +347,13 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
+	// The credential value is never recorded — only that it was replaced
+	// (docs/pre_saas_release_review.md TR-014; SECURITY.md secret guardrail).
+	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+		Event:      "provider.credential_replaced",
+		TargetType: "provider",
+		TargetID:   r.PathValue("id"),
+	})
 	w.WriteHeader(204)
 }
 
@@ -329,6 +369,11 @@ func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().RefreshModelsDevIfStale(context.Background(), filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "provider.refreshed",
+		TargetType: "provider",
+		TargetID:   r.PathValue("id"),
+	})
 	writeJSON(w, 200, map[string]any{"status": "refreshed"})
 }
 
@@ -384,6 +429,11 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request) {
 	// Drop the per-provider refresh lock so the map does not grow without
 	// bound as providers are created and deleted.
 	s.providers.DropProviderLock(sc.AccountID(), providerID)
+	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
+		Event:      "provider.deleted",
+		TargetType: "provider",
+		TargetID:   providerID,
+	})
 	w.WriteHeader(204)
 }
 
@@ -469,6 +519,12 @@ func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not create model.")
 		return
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "model.added",
+		TargetType: "provider",
+		TargetID:   r.PathValue("id"),
+		Metadata:   map[string]string{"upstream_model_id": input.UpstreamModelID},
+	})
 	writeJSON(w, 201, map[string]any{"id": modelID})
 }
 
@@ -507,7 +563,8 @@ func positiveIntOrNil(value int) any {
 }
 
 func (s *Server) deleteManualModel(w http.ResponseWriter, r *http.Request) {
-	err := s.scope(r).DeleteManualModel(r.Context(), r.PathValue("id"))
+	modelID := r.PathValue("id")
+	err := s.scope(r).DeleteManualModel(r.Context(), modelID)
 	switch {
 	case errors.Is(err, store.ErrModelNotFound):
 		adminError(w, 404, "not_found", "Model not found.")
@@ -522,6 +579,11 @@ func (s *Server) deleteManualModel(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not delete model.")
 		return
 	}
+	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+		Event:      "model.deleted",
+		TargetType: "provider",
+		TargetID:   modelID,
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 

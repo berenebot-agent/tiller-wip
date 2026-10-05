@@ -11,17 +11,24 @@ import (
 // drift.
 
 // virtualAttribution returns the predicate + args that match request_logs rows
-// attributable to a virtual model, handling both new rows (route_model_id) and
-// legacy rows (route_kind NULL, matched by canonical name).
-func virtualAttribution(virtualID, canonical string) (string, []any) {
-	return `((rl.route_kind='virtual' AND rl.route_model_id=?) OR (rl.route_status='legacy' AND rl.route_kind IS NULL AND rl.requested_model=?) OR (rl.route_status='legacy' AND rl.route_kind IS NULL AND rl.route_model=?))`,
-		[]any{virtualID, canonical, canonical}
+// attributable to a virtual model. Rows are matched by the canonical
+// route_model_id captured at resolution time. Pre-migration-010 rows that
+// carried no route_kind were reclassified to route_status='unresolved' by the
+// one-time Activity data upgrade (003_legacy_route_unresolved), so no legacy
+// disjunct remains here. The canonical-name argument is retained in the
+// signature because callers still pass it; it is no longer part of the match.
+func virtualAttribution(virtualID, _ string) (string, []any) {
+	return `(rl.route_kind='virtual' AND rl.route_model_id=?)`,
+		[]any{virtualID}
 }
 
 // realAttribution returns the predicate + args that match rows resolved to a
-// real model. Callers must alias request_logs as "rl".
+// real model. Callers must alias request_logs as "rl". Attribution is by the
+// stored route_model_id, the virtual target's resolved provider/model, or a
+// failed attempt against the target; the legacy route_kind-NULL branch is gone
+// (see virtualAttribution).
 func realAttribution(modelID, provider, upstream string) (string, []any) {
-	return `((rl.route_kind='real' AND rl.route_model_id=?) OR (rl.route_kind='virtual' AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_status='legacy' AND rl.route_kind IS NULL AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_kind='virtual' AND EXISTS (SELECT 1 FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.provider=? AND ra.model=? AND ra.result='failed')))`, []any{modelID, provider, upstream, provider, upstream, provider, upstream}
+	return `((rl.route_kind='real' AND rl.route_model_id=?) OR (rl.route_kind='virtual' AND rl.resolved_provider=? AND rl.resolved_model=?) OR (rl.route_kind='virtual' AND EXISTS (SELECT 1 FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.provider=? AND ra.model=? AND ra.result='failed')))`, []any{modelID, provider, upstream, provider, upstream}
 }
 
 func activitySearchClause(alias, pattern string) (string, []any) {
@@ -46,6 +53,9 @@ type ActivityRow struct {
 	OutputTokens             *int64
 	CacheReadInputTokens     *int64
 	CacheCreationInputTokens *int64
+	EstimatedCostMicros      *int64
+	ProviderCostMicros       *int64
+	InputTokensEstimated     bool
 	ProviderRequestID        *string
 	ClientRequestID          string
 	ErrorText                *string
@@ -78,7 +88,12 @@ type RequestAttemptRow struct {
 	CreatedAt          string
 }
 
-const activityColumns = `rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.account_id=rl.account_id),rl.fallback_used,rl.fallback_reason,rl.created_at`
+const activityColumns = `rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.account_id=rl.account_id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_estimated`
+
+// activityCostColumns appends numeric accounting metadata to each SELECT.
+func activityCostColumns(columns string) string {
+	return columns + `,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_estimated`
+}
 
 func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName bool) ([]ActivityRow, error) {
 	defer rows.Close()
@@ -87,6 +102,8 @@ func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName b
 		var v ActivityRow
 		var streaming, fallback, bodyTruncated, errorTruncated int
 		dest := []any{&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.CacheCreationInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.ErrorMessage, &v.RequestBody, &bodyTruncated, &v.ErrorBody, &errorTruncated, &v.AttemptCount, &v.AttemptRows, &fallback, &v.FallbackReason, &v.CreatedAt}
+		var estimated bool
+		dest = append(dest, &v.EstimatedCostMicros, &v.ProviderCostMicros, &estimated)
 		if withClientKey {
 			dest = append(dest, &v.ClientKeyID)
 		}
@@ -97,6 +114,7 @@ func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName b
 			return nil, err
 		}
 		v.Streaming = streaming != 0
+		v.InputTokensEstimated = estimated
 		v.FallbackUsed = fallback != 0
 		v.RequestBodyTruncated = bodyTruncated != 0
 		v.ErrorBodyTruncated = errorTruncated != 0

@@ -1,9 +1,62 @@
 import { LiveStream } from './live.js';
+const PROVIDER_LOGOS = {
+  openai: '/media/providers/openai.svg', 'codex-subscription': '/media/providers/codex.svg',
+  anthropic: '/media/providers/anthropic.svg', 'claude-subscription': '/media/providers/claude-code.svg',
+  'github-copilot': '/media/providers/github-copilot.svg', gemini: '/media/providers/gemini.svg',
+  deepseek: '/media/providers/deepseek.svg', zai: '/media/providers/zai.svg',
+  'azure-openai': '/media/providers/azure.svg', 'bedrock-api-key': '/media/providers/bedrock.svg',
+  groq: '/media/providers/groq.svg', mistral: '/media/providers/mistral.svg',
+  xai: '/media/providers/xai.svg', together: '/media/providers/together.svg',
+  fireworks: '/media/providers/fireworks.svg', cerebras: '/media/providers/cerebras.svg',
+  perplexity: '/media/providers/perplexity.svg', 'huggingface': '/media/providers/huggingface.svg',
+  'cloudflare-ai': '/media/providers/cloudflare.svg', 'alibaba-qwen': '/media/providers/qwen.svg',
+  minimax: '/media/providers/minimax.svg', commandcode: '/media/providers/commandcode.svg',
+  'generic-openai': '/media/providers/generic-openai.svg', vllm: '/media/providers/vllm.svg',
+  'lm-studio': '/media/providers/lm-studio.svg', 'llama-cpp': '/media/providers/llama-cpp.svg',
+  openrouter: '/media/providers/openrouter.svg', 'opencode-zen': '/media/providers/opencode.svg',
+  'opencode-go': '/media/providers/opencode.svg', 'opencode-free': '/media/providers/opencode.svg',
+  'ollama-local': '/media/providers/ollama.svg', 'ollama-cloud': '/media/providers/ollama.svg',
+  'nvidia-nim': '/media/providers/nvidia.svg',
+};
+function providerMark(type, label, className = '') {
+  const path = PROVIDER_LOGOS[type];
+  const initials = String(label || type || 'Provider').trim().split(/\s+/).slice(0, 2).map(word => word[0]).join('').toUpperCase();
+  return `<span class="provider-mark ${h(className)}${path ? '' : ' provider-mark-fallback'}" aria-hidden="true">${path ? `<img src="${path}" alt="" loading="lazy">` : ''}<span class="provider-mark-initials">${h(initials || 'P')}</span></span>`;
+}
+// CSP forbids inline handlers, so provider logo load failures are handled by a
+// document-level capture listener: a failed image is dropped and the monogram
+// takes over. The listener is registered once at module scope.
+document.addEventListener('error', event => {
+  const image = event.target;
+  if (!(image instanceof HTMLImageElement)) return;
+  const mark = image.closest('.provider-mark');
+  if (!mark) return;
+  image.remove();
+  mark.classList.add('provider-mark-fallback');
+}, true);
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0 };
+const state = { csrf: '', view: 'clients', providers: [], models: [], groups: [], virtualModels: [], clients: [], permissionData: null, providerTypes: [], usage: null, usageAt: 0, usageReady: false, planInfo: null, planInfoAt: 0, liveRequests: {}, liveRoutes: {}, liveLegs: {}, mobileActivity: [], loadToken: 0, platformTab: 'overview', platformUsersOffset: 0, platformUsersSearch: '', platformUsersLoadToken: 0, platformAuditOffset: 0, platformPlans: [], platformPlanData: [] };
 let runtimeMode = 'local';
 let hostedAuthOptions = {};
+// runtimeSetupRequired is true on a local first-run instance with no admin
+// credential: the setup form replaces the login form. runtimeWizardEnabled is
+// false for env-admin local installs, which skip onboarding entirely.
+let runtimeSetupRequired = false;
+let runtimeWizardEnabled = false;
+// runtimePasskeysEnabled is true on a local install that has WebAuthn
+// configured (TILLER_PUBLIC_URL set). It gates the passkey sign-in button and
+// the Account passkeys card, mirroring hosted's auth-options payload.
+let runtimePasskeysEnabled = false;
+// accountEmailForDelete holds the signed-in email for the delete confirmation
+// modal (the modal requires it to be typed exactly). googleReauthConfirmedAt is
+// the time a fresh Google confirmation completed; the backend one-shot token
+// lives five minutes, so the delete card treats it as valid for the same window.
+let accountEmailForDelete = '';
+let googleReauthConfirmedAt = 0;
+let accountGoogleLinked = false;
+const googleReauthValid = () => Date.now() - googleReauthConfirmedAt < 5 * 60 * 1000;
+let signupEmail = '';
 let captchaWidgetID = null;
 let captchaAction = '';
 let captchaToken = '';
@@ -32,17 +85,17 @@ const routeActivity = routeID => {
 // from one client key on different routes distinct.
 const routeTicketKey = (clientID, routeID) => `${clientID}\u0000${routeID || ''}`;
 const sortState = { column: '1h', direction: 'desc' };
+let drawerProviderID = '';
+let drawerModelSearch = '';
+let providerSearchValue = '';
 const SORT_DEFAULTS = { canonical: 'asc', provider: 'asc', '1h': 'desc', '24h': 'desc', '7d': 'desc' };
 // MODEL_USAGE_SORTS names the model-table sort columns whose ordering depends on
 // the usage envelope. The catalogue renders before usage arrives, so a usage
 // sort is only meaningful once usage lands — at which point the rows must be
-// re-sorted (see modelsResortPending / reorderModelRows).
+// re-sorted (see modelsResortPending / renderModels).
 const MODEL_USAGE_SORTS = new Set(['1h', '24h', '7d']);
 // modelsResortPending records that usage first became available while a
-// usage-sorted model table may still be in catalogue order. Set by
-// markUsageReady, consumed once by reconcileLive (which respects an open dialog
-// and the user's current sortState). This deliberately re-applies the *current*
-// sort — it never resets the user's chosen column or direction.
+// usage-sorted model drawer may still be in catalogue order.
 let modelsResortPending = false;
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
 const GROUP_ARROW = { up: '▼', down: '▶' };
@@ -59,27 +112,53 @@ const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'm
 // carries aria-busy instead of each cell being a live region. It is transient:
 // the first usage snapshot replaces it.
 const tokLoadingInner = '<span class="tok-loading" aria-hidden="true"><span class="tok-loading-spin"></span></span>';
+// fmtCost renders a micro-dollar cost (1e-6 USD) as a short USD string. Small
+// amounts keep enough precision to be useful ($0.0004), larger ones round to
+// cents. null/undefined renders nothing.
+const fmtCost = (micros) => {
+  if (micros == null || isNaN(micros)) return '';
+  const usd = micros / 1e6;
+  if (usd === 0) return '$0';
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  if (usd < 1) return `$${usd.toFixed(3)}`;
+  return `$${usd.toFixed(2)}`;
+};
 // renderTokInner returns the inner markup of a .tok cell (no <span class="tok">
 // wrapper). Both initial render (tok) and live patching (patchTokenCell) build
 // their DOM from this single source so the .tok element is never re-wrapped and
 // transitions between loading, populated, and empty states keep consistent
-// structure.
-const renderTokInner = (tokens, pct, loading = false) => {
+// structure. cost is an optional estimated spend in micro-dollars.
+const renderTokInner = (tokens, pct, loading = false, cost = null) => {
   if (loading) return tokLoadingInner;
-  if (!tokens && pct == null) return '—';
+  if (!tokens && pct == null && cost == null) return '—';
   const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
   const cache = (pct != null && !isNaN(pct))
     ? `<span class="cache-hit"><b>${Math.round(pct)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
-  return `${num}${cache}`;
+  const costText = fmtCost(cost);
+  const costEl = costText ? `<span class="tok-cost" title="Estimated from published model prices — not a billing figure"><b>${costText}</b><small>est.</small></span>` : '';
+  return `${num}${cache}${costEl}`;
 };
+
+// tokenBreakdownTitle builds the tooltip for a token cell from the per-type
+// breakdown map (input/output/cache_read/cache_creation UsageWindows).
+const tokenBreakdownTitle = (types, window) => {
+  if (!types) return '';
+  const b = Object.fromEntries(['input', 'output', 'cache_read', 'cache_creation'].map(k => [k, types[k]?.[window]]));
+  const n = v => Number(v || 0).toLocaleString();
+  return `input ${n(b.input)} · output ${n(b.output)} · cache read ${n(b.cache_read)} · cache write ${n(b.cache_creation)}`;
+};
+// estimatedMark returns the "est." suffix for a client whose totals include at
+// least one locally-estimated input count (the provider omitted usage).
+const estimatedMark = (clientId) => state.usage?.tokens_estimated?.[clientId] ? ' (est.)' : '';
 // A cell is "loading" only while the usage envelope is unknown AND this cell has
 // no value yet. Once any snapshot/fetch has landed (usageReady), absent data is
 // a genuine empty state ("—").
-const tokLoading = (tokens, pct) => !state.usageReady && !tokens && pct == null;
-const tok = (tokens, pct, window) => {
-  const loading = tokLoading(tokens, pct);
-  return `<span class="tok" data-window="${window}"${loading ? ' aria-busy="true"' : ''}>${renderTokInner(tokens, pct, loading)}</span>`;
+const tokLoading = (tokens, pct, cost = null) => !state.usageReady && !tokens && pct == null && !cost;
+const tok = (tokens, pct, window, cost = null, breakdown = null) => {
+  const loading = tokLoading(tokens, pct, cost);
+  const title = tokenBreakdownTitle(breakdown, window);
+  return `<span class="tok" data-window="${window}"${title ? ` title="${h(title)}"` : ''}${loading ? ' aria-busy="true"' : ''}>${renderTokInner(tokens, pct, loading, cost)}</span>`;
 };
 const rowCache = (row) => {
   const inp = row.input_tokens;
@@ -88,10 +167,13 @@ const rowCache = (row) => {
   const line = (cache != null && inp > 0)
     ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
-  return `<span class="activity-tokens"><b>${inp ?? '—'} / ${output ?? '—'}</b>${line}</span>`;
+  const exact = row.provider_cost_micros;
+  const cost = exact ?? row.estimated_cost_micros;
+  const costLine = cost == null ? '<small>Cost —</small>' : `<span class="tok-cost"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<small>est.</small>' : ''}</span>`;
+  return `<span class="activity-tokens"><b>${row.input_tokens_estimated ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
 };
-const VIEWS = ['providers', 'models', 'virtual', 'clients', 'activity', 'settings'];
-const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return VIEWS.includes(v) ? v : 'clients'; };
+const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
+const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return v === 'models' ? 'providers' : VIEWS.includes(v) ? v : 'clients'; };
 const settingsTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'settings' && parts[1] ? parts[1] : ''; };
 
 async function api(path, options = {}) {
@@ -129,8 +211,13 @@ function markUsageReady() {
   state.usageReady = true;
   modelsResortPending = true;
 }
+// usageHasCostKeys reports whether a cached envelope carries the cost/type
+// fields added after the first usage envelope shipped. An envelope missing them
+// (e.g. an older SSE baseline) must not suppress the real fetch, or cost/token
+// breakdowns would stay blank until the next unrelated refresh.
+const usageHasCostKeys = usage => usage && (usage.real_cost !== undefined || usage.client_cost !== undefined || usage.client_tokens !== undefined);
 async function loadUsage() {
-  if (state.usage && Date.now() - state.usageAt < USAGE_REUSE_MS) return state.usage;
+  if (usageHasCostKeys(state.usage) && Date.now() - state.usageAt < USAGE_REUSE_MS) return state.usage;
   if (usageInFlight) return usageInFlight;
   usageInFlight = api('/api/admin/usage').then(usage => {
     state.usage = usage; state.usageAt = Date.now(); markUsageReady();
@@ -147,19 +234,128 @@ async function loadUsage() {
 function deferUsage() {
   loadUsage().then(() => reconcileLive()).catch(() => {});
 }
+
+// PLAN_REUSE_MS bounds how long a cached plan snapshot (caps + usage) is
+// trusted for the create-button guard. Caps change rarely, but usage moves on
+// every create/delete, so those paths force a refresh rather than waiting this
+// out. The guard is advisory: the store create transaction stays the only
+// authority, and a raced create still returns 409 limit_exceeded.
+const PLAN_REUSE_MS = 60000;
+let planInfoInFlight = null;
+// loadPlanSnapshot fetches GET /api/auth/account/plan — the same payload the
+// Account settings tab renders. It is a hard no-op outside hosted mode, where
+// plan limits are never enforced, and errors are swallowed: this only feeds an
+// advisory UI hint and must never block a create.
+function loadPlanSnapshot(force = false) {
+  if (runtimeMode !== 'hosted') return Promise.resolve(null);
+  if (!force && state.planInfo && Date.now() - state.planInfoAt < PLAN_REUSE_MS) return Promise.resolve(state.planInfo);
+  if (planInfoInFlight) return planInfoInFlight;
+  planInfoInFlight = api('/api/auth/account/plan').then(info => {
+    state.planInfo = info; state.planInfoAt = Date.now();
+    return info;
+  }).catch(() => state.planInfo).finally(() => { planInfoInFlight = null; });
+  return planInfoInFlight;
+}
+// capReached reports whether a capped resource is at (or past) its plan cap. A
+// missing snapshot, a non-numeric cap, or an unlimited (-1) cap is never
+// "reached", so the guard degrades to today's behaviour whenever the snapshot
+// is unavailable.
+function capReached(kind) {
+  const limit = state.planInfo?.limits?.[`max_${kind}`], used = state.planInfo?.usage?.[kind];
+  if (typeof limit !== 'number' || limit === -1 || typeof used !== 'number') return false;
+  return used >= limit;
+}
+const CAP_NOUNS = { providers: 'provider', client_keys: 'client key', virtual_models: 'virtual model' };
+// capNotice renders the click-time refusal. Phrasing matches the server's 409
+// limit_exceeded message so the preflight and the race backstop read alike.
+function capNotice(kind) {
+  const noun = CAP_NOUNS[kind] || 'resource';
+  const label = noun.charAt(0).toUpperCase() + noun.slice(1);
+  const limit = state.planInfo?.limits?.[`max_${kind}`], used = state.planInfo?.usage?.[kind];
+  return `${label} limit reached — your plan allows ${limit} ${noun}${limit === 1 ? '' : 's'} and you have ${used}. Delete one to add another.`;
+}
 function authView(name) {
-  ['login-form','signup-form','forgot-form','verify-panel','reset-form','platform-login-form','legal-panel','google-consent-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  hideBoot();
+  $('#login-shell').hidden = false;
+  ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form','google-link-confirm-form','setup-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = id !== name; });
+  const loginCard = $('.login-card'); if (loginCard) loginCard.classList.toggle('is-platform', name === 'platform-login-form');
   const hosted = runtimeMode === 'hosted';
   $('#hosted-auth-links').hidden = !hosted || name !== 'login-form';
-  $('#show-signup').hidden = !hosted || !hostedAuthOptions.signup_enabled;
-  $('#google-signin').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.google_enabled;
-  $('#google-signin-notice').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.google_enabled;
+  $('#show-signup').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.signup_enabled;
+  const googleSignIn = hosted && name === 'login-form' && !!hostedAuthOptions.google_enabled;
+  $('#google-signin-button').hidden = !googleSignIn;
+  $('#google-signin-notice').hidden = !googleSignIn;
+  const passkeyAvailable = hosted ? !!hostedAuthOptions.passkeys_enabled : !!runtimePasskeysEnabled;
+  const passkeySignIn = name === 'login-form' && passkeyAvailable && !!window.__passkeySupported;
+  const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
+  const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) { passkeyStatus.textContent = ''; passkeyStatus.className = 'setting-tip'; }
+  if (googleSignIn) setupGoogleSignIn();
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
-  const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : name === 'login-form' && hostedAuthOptions.google_enabled ? 'google_signin' : '';
+  const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
   showAuthCaptcha(action);
 }
-function showLogin() { $('#app').hidden = true; $('#platform-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); authView(platform ? 'platform-login-form' : 'login-form'); history.replaceState(null, '', platform ? '/platform' : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
-function showApp(session) { state.csrf = session.csrf_token; $('#admin-name').textContent = session.username || session.email; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { loadFooterVersion(); refreshWizardButton(true); } }
+// UI_SESSION_HINT is a purely presentational, client-side flag: when set, the
+// next boot paints the app skeleton instead of the login card while the session
+// probe resolves. It never carries identity or a token and is never consulted
+// for an auth decision — the session endpoint remains the sole authority.
+const UI_SESSION_HINT = 'tiller_ui_session';
+function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = true; }
+function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
+function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
+function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+// The signed-in identity in the top bar is the shortcut into Settings →
+// Account. Account is hosted-only, so in self-hosted mode the control stays
+// disabled and renders as plain text rather than as a dead link.
+function renderIdentity(session) {
+  const identity = $('#admin-name');
+  const hosted = runtimeMode === 'hosted';
+  identity.textContent = session.username || session.email;
+  identity.disabled = !hosted;
+  identity.title = hosted ? 'Account settings' : '';
+}
+function showApp(session) { hideBoot(); state.csrf = session.csrf_token; setSessionHint(true); renderIdentity(session); $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#app').hidden = false; $('#app-footer').hidden = runtimeMode !== 'hosted'; liveStart(); navigate(state.view); if (runtimeMode === 'hosted') { renderFooterFeedback(); refreshWizardButton(true); loadPlanSnapshot(); } else if (runtimeWizardEnabled) { refreshWizardButton(true); } }
+function showAccountDeleteConfirmation({ email, google, passkey = false }) {
+  hideBoot();
+  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-google-link-shell').hidden = true;
+  $('#account-delete-shell').hidden = false;
+  $('#account-delete-confirm-form').hidden = false;
+  $('#account-delete-confirm-email').value = '';
+  $('#account-delete-confirm-password').value = '';
+  const passwordNeeded = !google && !passkey;
+  $('#account-delete-confirm-password-row').hidden = !passwordNeeded;
+  $('#account-delete-confirm-password').required = passwordNeeded;
+  $('#account-delete-confirm-error').textContent = '';
+  $('#account-delete-confirm-form').dataset.email = email;
+  $('#account-delete-confirm-form').dataset.google = google ? '1' : '0';
+  $('#account-delete-confirm-form').dataset.passkey = passkey ? '1' : '0';
+  $('#account-delete-page-copy').textContent = `This permanently deletes ${email}, including the account, provider credentials, client keys, and activity history. Audit history is retained.`;
+  $('#account-delete-confirm-email').focus();
+}
+// showGoogleLinkPrompt offers to attach the Google identity the visitor just
+// proved, now that they have authenticated to the existing account with their
+// password. It deliberately gates the app behind the choice: linking changes
+// how the account authenticates, so it is a decision, not a dismissible toast.
+let pendingGoogleLinkSession = null;
+function showGoogleLinkPrompt(session) {
+  pendingGoogleLinkSession = session;
+  hideBoot();
+  $('#app').hidden = true; $('#login-shell').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true;
+  $('#account-google-link-shell').hidden = false;
+  $('#account-google-link-error').textContent = '';
+  const button = $('#account-google-link-confirm');
+  button.disabled = false;
+  button.focus();
+}
+// finishGoogleLinkPrompt is the non-linking exit: the visitor authenticated
+// legitimately, so declining must land them in the app, not back at login.
+function finishGoogleLinkPrompt() {
+  const session = pendingGoogleLinkSession;
+  pendingGoogleLinkSession = null;
+  $('#account-google-link-shell').hidden = true;
+  if (session) showApp(session);
+  else showLogin();
+}
 function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
 
@@ -226,11 +422,70 @@ function resetAuthCaptcha(action) {
 $('#login-form').addEventListener('submit', async event => {
   event.preventDefault(); $('#login-error').textContent = '';
   const formElement = event.currentTarget; const form = new FormData(formElement); const button = $('button[type="submit"]', formElement); button.disabled = true;
-  try { const path = runtimeMode === 'hosted' ? '/api/auth/login' : '/api/admin/session'; const body = runtimeMode === 'hosted' ? { email: form.get('username'), password: form.get('password') } : { username: form.get('username'), password: form.get('password') }; const session = await api(path, { method: 'POST', body: JSON.stringify(body) }); formElement.reset(); showApp(session); }
+  try { const path = runtimeMode === 'hosted' ? '/api/auth/login' : '/api/admin/session'; const body = runtimeMode === 'hosted' ? { email: form.get('username'), password: form.get('password') } : { username: form.get('username'), password: form.get('password') }; const session = await api(path, { method: 'POST', body: JSON.stringify(body) }); formElement.reset(); if (session.pending_google_link) { showGoogleLinkPrompt(session); return; } showApp(session); }
   catch (error) { $('#login-error').textContent = errorMessage(error, 'Login failed.'); if (error.code === 'email_not_verified') exposeResend('#resend-login-verification', '#login-form [name="username"]', '#login-error'); }
   finally { button.disabled = false; }
 });
 $('#logout').addEventListener('click', async () => { try { await api(runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session', { method: 'DELETE' }); } finally { showLogin(); } });
+
+// First-run setup: create the local admin credential. The endpoint only exists
+// while the instance is unconfigured; on success it mints a session, so the
+// claimer lands straight in the app and the onboarding wizard takes over.
+$('#setup-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
+  const error = $('#setup-error');
+  const button = $('#setup-submit');
+  error.textContent = '';
+  if (form.get('password') !== form.get('confirm')) { error.textContent = 'Passwords do not match.'; return; }
+  button.disabled = true;
+  try {
+    const session = await api('/api/admin/setup', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) });
+    runtimeSetupRequired = false;
+    formElement.reset();
+    showApp(session);
+  } catch (err) {
+    error.textContent = errorMessage(err, 'Setup failed.');
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// Interstitial controls. "Link Google and continue" starts the authenticated
+// link flow; the session already carries the short-lived link grant, so no
+// password re-entry is required. "Not now" simply enters the app.
+$('#account-google-link-skip').addEventListener('click', () => finishGoogleLinkPrompt());
+$('#account-google-link-confirm').addEventListener('click', async () => {
+  const button = $('#account-google-link-confirm');
+  $('#account-google-link-error').textContent = '';
+  button.disabled = true;
+  try {
+    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: '' }) });
+    location.assign(result.redirect_url);
+  } catch (error) {
+    button.disabled = false;
+    $('#account-google-link-error').textContent = errorMessage(error, 'Google linking is temporarily unavailable.');
+  }
+});
+// Account settings → Link Google. Reached deliberately, so the password is
+// requested here and the normal start path takes it.
+$('#account-google-link-card-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const button = $('button[type="submit"]', event.currentTarget);
+  const errorEl = $('#account-google-link-card-error');
+  errorEl.textContent = '';
+  button.disabled = true;
+  try {
+    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password') }) });
+    location.assign(result.redirect_url);
+  } catch (error) {
+    errorEl.textContent = errorMessage(error, 'Could not start Google linking.');
+  } finally {
+    button.disabled = false;
+  }
+});
 
 function showAuthError(id, error, fallback) { const el = $('#' + id); if (el) el.textContent = errorMessage(error, fallback); }
 async function resendVerification(email, target) {
@@ -248,19 +503,107 @@ function exposeResend(target, emailInput, messageTarget) {
 $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
 $('#show-login-from-signup').onclick = () => authView('login-form');
+$('#signup-done-login').onclick = () => authView('login-form');
 $('#show-login-from-forgot').onclick = () => authView('login-form');
-$('#signup-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; } try { const captcha_token = authCaptchaToken('signup'); const result = await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) }); $('#signup-error').textContent = result.message || 'Check your email.'; exposeResend('#resend-signup-verification', '#signup-form [name="email"]', '#signup-error'); } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); } });
-$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-error').textContent = result.message || 'Check your email.'; } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
-$('#google-signin').addEventListener('click', async () => {
+$('#forgot-done-login').onclick = () => authView('login-form');
+// exposeSignupResend wires the resend button on the post-signup inbox screen.
+// The address is captured at submit time (signupEmail) because the done panel
+// has no email input of its own.
+function exposeSignupResend() {
+  const button = $('#resend-signup-verification'); if (!button) return;
+  button.hidden = false;
+  button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+}
+$('#signup-form').addEventListener('submit', async event => {
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement);
+  if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; }
+  try {
+    const captcha_token = authCaptchaToken('signup');
+    await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) });
+    signupEmail = String(form.get('email') || '');
+    formElement.reset();
+    $('#signup-done-message').textContent = 'If the address can receive mail, a verification message will arrive shortly.';
+    authView('signup-done');
+    exposeSignupResend();
+  } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); }
+});
+$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-done-message').textContent = result.message || 'If the address belongs to an account, a password-reset message will arrive shortly.'; authView('forgot-done'); } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
+// === GOOGLE IDENTITY SERVICES ===
+// The "Sign in with Google" button and the One Tap account chooser are rendered
+// by Google's own script so the branding and in-page account popup are the ones
+// users recognise. The script is only loaded in hosted mode when Google is
+// configured (the hosted CSP allows accounts.google.com); if it fails to load,
+// email/password sign-in still works. The Google-issued credential is verified
+// server-side, which is why this path does not use the Turnstile widget (One
+// Tap cannot be gated behind a pre-flight captcha).
+let gsiScriptPromise = null;
+let gsiInitialized = false;
+let googlePromptIssued = false;
+function loadGsiScript() {
+  if (window.google?.accounts?.id) return Promise.resolve();
+  if (!gsiScriptPromise) {
+    gsiScriptPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'https://accounts.google.com/gsi/client';
+      script.async = true; script.defer = true;
+      script.onload = () => window.google?.accounts?.id ? resolve() : reject(new Error('Google sign-in failed to load.'));
+      script.onerror = () => reject(new Error('Google sign-in failed to load.'));
+      document.head.appendChild(script);
+    });
+  }
+  return gsiScriptPromise;
+}
+// setupGoogleSignIn renders the official button and requests One Tap once.
+// Subsequent re-shows are idempotent; prompt() is not re-issued so the
+// chooser does not flash in and out on repeated view switches.
+async function setupGoogleSignIn() {
+  const clientID = hostedAuthOptions.google_client_id;
+  const container = $('#google-signin-button');
+  if (!clientID || !container) return;
+  try { await loadGsiScript(); } catch { return; }
+  try {
+    if (!gsiInitialized) {
+      window.google.accounts.id.initialize({
+        client_id: clientID,
+        callback: handleGoogleCredential,
+        auto_select: false,
+        cancel_on_tap_outside: true,
+        use_fedcm_for_prompt: true,
+      });
+      gsiInitialized = true;
+    }
+    if (!container.dataset.rendered) {
+      const width = Math.max(200, Math.min(400, Math.round(container.clientWidth) || 354));
+      window.google.accounts.id.renderButton(container, {
+        type: 'standard', theme: 'outline', size: 'large',
+        text: 'signin_with', shape: 'rectangular', logo_alignment: 'left', width,
+      });
+      container.dataset.rendered = '1';
+    }
+     if (!googlePromptIssued) { window.google.accounts.id.prompt(); googlePromptIssued = true; }
+  } catch { /* the button/One Tap is best-effort; password sign-in remains */ }
+}
+async function handleGoogleCredential(response) {
+  if (!response?.credential) return;
   $('#login-error').textContent = '';
   try {
-    const captcha_token = authCaptchaToken('google_signin');
-    const result = await api('/api/auth/google/start', { method: 'POST', body: JSON.stringify({ captcha_token }) });
-    location.assign(result.redirect_url);
-  } catch (error) { showAuthError('login-error', error, 'Google sign-in could not be started.'); }
-  finally { resetAuthCaptcha('google_signin'); }
-});
+    const result = await api('/api/auth/google/gsi', { method: 'POST', body: JSON.stringify({ credential: response.credential }) });
+    if (result?.link_required) { $('#google-link-confirm-message').textContent = `A Tiller account already exists for ${result.email}. Link this Google account to sign in to it?`; history.replaceState(null, '', '/login'); authView('google-link-confirm-form'); return; }
+    if (result?.link_challenge_required) { history.replaceState(null, '', '/login'); authView('login-form'); $('#login-error').textContent = `A Tiller account already exists for ${result.email}. Sign in with your password to continue, and we will offer to link Google.`; return; }
+    if (result?.signup_required) { history.replaceState(null, '', '/login?google_signup=1'); authView('google-consent-form'); return; }
+    history.replaceState(null, '', '/#clients'); showApp(result);
+  } catch (error) { showAuthError('login-error', error, 'Google sign-in could not be completed.'); }
+}
 $('#google-consent-cancel').onclick = () => { history.replaceState(null, '', '/login'); authView('login-form'); };
+$('#google-link-confirm-cancel').onclick = () => { history.replaceState(null, '', '/login'); authView('login-form'); };
+$('#google-link-confirm-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  $('#google-link-confirm-error').textContent = '';
+  try {
+    const session = await api('/api/auth/google/signup/complete', { method: 'POST', body: JSON.stringify({ link_existing: true }) });
+    history.replaceState(null, '', '/#clients'); showApp(session);
+  } catch (error) { showAuthError('google-link-confirm-error', error, 'Google could not be linked.'); }
+});
 $('#google-consent-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget);
   if (form.get('accept_terms') !== 'on') { showAuthError('google-consent-error', { message: 'Please agree to the Terms of Service and Privacy Policy.' }, 'Account creation failed.'); return; }
@@ -272,21 +615,81 @@ $('#google-consent-form').addEventListener('submit', async event => {
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-login').onclick = () => authView('login-form');
 $('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; $('#reset-login').hidden = false; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
-$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
+$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; setSessionHint(true); hideBoot(); $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await selectPlatformTab(platformTabFromHash(), { push: false }); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
 $('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
 
+const PLATFORM_TABS = ['overview', 'users', 'plans', 'mail', 'logs', 'legal', 'settings'];
+function platformTabFromHash() {
+  const tab = location.hash.replace(/^#\/?/, '').split('/')[0];
+  return PLATFORM_TABS.includes(tab) ? tab : 'overview';
+}
+async function selectPlatformTab(tab, { push = true } = {}) {
+  if (!PLATFORM_TABS.includes(tab)) tab = 'overview';
+  state.platformTab = tab;
+  const hash = `#${tab}`;
+  if (location.hash !== hash) {
+    if (push) history.pushState(null, '', `/platform${hash}`);
+    else history.replaceState(null, '', `/platform${hash}`);
+  }
+  $$('.platform-tab').forEach(button => {
+    const active = button.dataset.platformTab === tab;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  $$('.platform-panel').forEach(panel => {
+    const active = panel.id === `platform-panel-${tab}`;
+    panel.classList.toggle('active', active);
+    panel.hidden = !active;
+  });
+  try { await loadPlatformDashboard(tab); }
+  catch (error) {
+    if (tab === 'overview') setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'));
+    const errorEl = $(`#platform-${tab === 'overview' ? 'overview' : tab === 'logs' ? 'audit' : tab}-error`);
+    if (errorEl) errorEl.textContent = errorMessage(error, `Could not load ${tab}.`);
+  }
+}
+$$('.platform-tab').forEach((button, index, buttons) => {
+  button.addEventListener('click', () => selectPlatformTab(button.dataset.platformTab));
+  button.addEventListener('keydown', event => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length;
+    buttons[next].focus();
+    selectPlatformTab(buttons[next].dataset.platformTab);
+  });
+});
+window.addEventListener('popstate', () => {
+  if (location.pathname.startsWith('/platform') && !$('#platform-shell').hidden) selectPlatformTab(platformTabFromHash(), { push: false });
+});
+$('#platform-stats-refresh').addEventListener('click', () => loadPlatformDashboard('overview').catch(error => setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'))));
+
 async function navigate(view) {
+  const legacyModelsHash = location.hash === '#models';
+  if (view === 'models') view = 'providers';
+  if (view !== 'providers' && drawerProviderID) closeProviderDrawer(false);
   state.view = view;
   // Preserve the settings sub-tab in the hash; only the base view is rewritten.
   const desiredHash = view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : '#' + view;
-  if (location.hash !== desiredHash) history.pushState(null, '', desiredHash);
+  if (location.hash !== desiredHash) {
+    if (legacyModelsHash) history.replaceState(null, '', desiredHash);
+    else history.pushState(null, '', desiredHash);
+  }
   $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-  try { if (view === 'providers') await loadProviders(); if (view === 'models') await loadModels(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); } }
+  try { if (view === 'providers') await loadProviders(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); } }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
 $$('[data-view]').forEach(link => link.addEventListener('click', event => { if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return; event.preventDefault(); navigate(link.dataset.view); }));
-window.addEventListener('popstate', () => navigate(viewFromHash()));
+// Clicking the identity opens Settings → Account. The hash is written first so
+// navigate() resolves the sub-tab from it, keeping deep links and the back
+// button working exactly as they do for the settings tabs themselves.
+$('#admin-name').addEventListener('click', () => {
+  if (runtimeMode !== 'hosted') return;
+  if (location.hash !== '#settings/account') history.pushState(null, '', '#settings/account');
+  navigate('settings');
+});
+window.addEventListener('popstate', () => { if (!location.pathname.startsWith('/platform')) navigate(viewFromHash()); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
   const bar = button.closest('[data-filter-bar]');
@@ -295,90 +698,204 @@ $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', ()
 }));
 $('#add-client-mobile').onclick = () => openClient();
 $('#add-provider-mobile').onclick = () => openProvider();
-$('#add-real-model-mobile').onclick = openManualModel;
 $('#add-virtual-group-mobile').onclick = () => openVirtualGroup();
 $('#add-virtual-model-mobile').onclick = () => openVirtualModel();
 
 let filterTimers = new Map();
 function filterInput(selector, callback) { $(selector).addEventListener('input', event => { clearTimeout(filterTimers.get(selector)); filterTimers.set(selector, setTimeout(() => callback(event.target.value), 180)); }); }
-filterInput('#provider-search', loadProviders); filterInput('#model-search', loadModels); filterInput('#virtual-search', loadVirtual); filterInput('#client-search', loadClients);
-$('#show-retired').addEventListener('change', renderModels);
+filterInput('#provider-search', value => { providerSearchValue = value; loadProviders(value); }); filterInput('#virtual-search', loadVirtual); filterInput('#client-search', loadClients);
+$('#show-retired').addEventListener('change', event => { $('#drawer-show-retired').checked = event.target.checked; renderModels(); });
+$('#drawer-show-retired').addEventListener('change', event => { $('#show-retired').checked = event.target.checked; renderModels(); });
+$('#provider-drawer-close').addEventListener('click', closeProviderDrawer);
+$('#drawer-refresh').addEventListener('click', async () => { if (drawerProviderID) await refreshProvider(drawerProviderID); });
+$('#drawer-edit').addEventListener('click', () => { const provider = state.providers.find(item => item.id === drawerProviderID); if (provider) openProvider(provider); });
+$('#drawer-delete').addEventListener('click', async () => { if (drawerProviderID) await deleteProvider(drawerProviderID); });
 $('#client-group-filter').addEventListener('change', loadClients);
 
 async function loadProviders(search = $('#provider-search').value) {
   const token = ++state.loadToken;
-  const [result, types] = await Promise.all([api(`/api/admin/providers?limit=200&search=${encodeURIComponent(search || '')}`), state.providerTypes.length ? Promise.resolve({ data: state.providerTypes }) : api('/api/admin/provider-types')]);
+  const [result, types, models] = await Promise.all([api(`/api/admin/providers?limit=200&search=${encodeURIComponent(search || '')}`), state.providerTypes.length ? Promise.resolve({ data: state.providerTypes }) : api('/api/admin/provider-types'), api('/api/admin/models?all=1')]);
   if (token !== state.loadToken) return;
-  state.providers = result.data; state.providerTypes = types.data; renderProviders();
+  const term = (search || '').trim().toLowerCase();
+  state.providers = result.data; state.providerTypes = types.data; state.models = models.data;
+  renderModels();
+  const matchingProviders = term ? [...new Map([
+    ...result.data.filter(provider => provider.name.toLowerCase().includes(term) || typeLabel(provider.type).toLowerCase().includes(term)).map(provider => [provider.id, provider]),
+    ...models.data.filter(model => model.canonical_model_id.toLowerCase().includes(term) || model.upstream_model_id.toLowerCase().includes(term)).map(model => [model.provider_id, result.data.find(provider => provider.id === model.provider_id)]).filter(([, provider]) => provider),
+  ]).values()] : result.data;
+  renderProviders(matchingProviders);
+  loadQuota();
+  deferUsage();
+  if (drawerProviderID && !state.providers.some(provider => provider.id === drawerProviderID)) closeProviderDrawer();
+  else if (drawerProviderID) {
+    const provider = state.providers.find(item => item.id === drawerProviderID);
+    $('#provider-drawer-title').textContent = provider.name;
+    $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`;
+    $('#drawer-refresh').disabled = false;
+    renderModels();
+  }
 }
-function renderProviders() {
-  const body = $('#providers-body'); $('#providers-empty').hidden = state.providers.length > 0; body.innerHTML = state.providers.map(provider => `<tr>
-    <td class="primary-cell"><strong>${h(provider.name)}</strong><small>${h(provider.base_url)}</small>${provider.last_refresh_error ? `<span class="error-text">${h(provider.last_refresh_error)}</span>` : ''}</td>
-    <td><strong>${h(typeLabel(provider.type))}</strong><div class="protocols">${provider.protocols.map(p => `<span class="protocol">${h(p)}</span>`).join('')}</div></td>
-    <td><strong>${provider.available_model_count}</strong> available${provider.model_count !== provider.available_model_count ? `<span class="meta-line"> · ${provider.model_count - provider.available_model_count} retired</span>` : ''}</td>
-    <td><span class="meta-line">${date(provider.last_refresh_at)}</span></td>
-    <td>${badge(provider.enabled && !provider.last_refresh_error, provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled', provider.enabled ? (provider.last_refresh_error ? 'warn' : 'good') : 'neutral')}<div class="meta-line">Credential: ${provider.auth_state ? provider.auth_state : (provider.credential_configured ? 'configured' : 'none')}</div></td>
-   <td><div class="actions"><button class="btn btn-small btn-secondary" data-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-provider-delete="${h(provider.id)}">Delete</button></div></td></tr>`).join('');
-  $('#providers-empty-mobile').hidden = state.providers.length > 0;
-  $('#providers-cards').innerHTML = state.providers.map(providerCard).join('');
+function renderProviders(providers = state.providers) {
+  $('#providers-empty').hidden = providers.length > 0;
+  $('#providers-cards').innerHTML = providers.map(providerCard).join('');
   const available = state.providers.reduce((sum, item) => sum + item.available_model_count, 0), retired = state.providers.reduce((sum, item) => sum + item.model_count - item.available_model_count, 0), errors = state.providers.filter(item => item.last_refresh_error).length;
   $('#provider-metrics').innerHTML = metric(state.providers.length, 'Provider instances') + metric(available, 'Available models') + metric(retired, 'Retired models') + metric(errors, 'Refresh errors');
-  $$('[data-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.providerRefresh));
-  $$('[data-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.providerEdit)));
-  $$('[data-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.providerDelete));
-  $$('[data-mobile-provider-refresh]').forEach(button => button.onclick = () => refreshProvider(button.dataset.mobileProviderRefresh));
-  $$('[data-mobile-provider-edit]').forEach(button => button.onclick = () => openProvider(state.providers.find(p => p.id === button.dataset.mobileProviderEdit)));
-  $$('[data-mobile-provider-delete]').forEach(button => button.onclick = () => deleteProvider(button.dataset.mobileProviderDelete));
+  $$('[data-provider-open]').forEach(button => button.onclick = () => openProviderDrawer(button.dataset.providerOpen));
+  $$('#providers-cards .provider-card').forEach(card => card.addEventListener('click', event => { if (!event.target.closest('[data-provider-open], summary, a, button, input, select, details')) openProviderDrawer(card.dataset.providerId); }));
 }
 function providerCard(provider) {
   const healthy = provider.enabled && !provider.last_refresh_error;
   const stateLabel = provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled';
-  return `<article class="mobile-card provider-card" data-provider-id="${h(provider.id)}">
-    <div class="mobile-card-head"><div class="mobile-card-title"><span class="status-roundel${healthy ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(stateLabel)}"></span><strong>${h(provider.name)}</strong></div>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</div>
-    <div class="mobile-card-subtitle">${h(typeLabel(provider.type))} · ${h((provider.protocols || []).join(' · ') || 'provider default')}</div>
-    <div class="mobile-card-meta"><span><b>${h(provider.available_model_count)}</b> available</span><span><b>${h(provider.model_count - provider.available_model_count)}</b> retired</span><span>${h(date(provider.last_refresh_at))}</span></div>
-    ${provider.last_refresh_error ? `<p class="mobile-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
-    <div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-provider-refresh="${h(provider.id)}">Refresh</button><button class="btn btn-small btn-secondary" data-mobile-provider-edit="${h(provider.id)}">Edit</button><button class="btn btn-small btn-danger" data-mobile-provider-delete="${h(provider.id)}">Delete</button></div>
+  const retired = provider.model_count - provider.available_model_count;
+  const providerLabel = typeLabel(provider.type) || 'Provider';
+  const countLabel = `${provider.available_model_count} ${provider.available_model_count === 1 ? 'model' : 'models'}`;
+  return `<article class="provider-card${provider.enabled ? '' : ' provider-card-disabled'}" data-provider-id="${h(provider.id)}" data-provider-name="${h(provider.name.toLowerCase())}" data-provider-type="${h(providerLabel.toLowerCase())}">
+    <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models">${providerMark(provider.type, providerLabel, 'provider-card-mark')}<span class="provider-card-identity"><strong>${h(provider.name)} · ${h(countLabel)}</strong><small>${h(providerLabel)} · ${(provider.protocols || []).map(h).join(' · ') || 'provider default'}${retired ? ` · ${retired} retired` : ''}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</button>
+    ${provider.last_refresh_error ? `<p class="provider-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
+    <div class="provider-usage">${providerQuotaHTML(provider)}${providerCostHTML(provider)}</div>
   </article>`;
 }
 const metric = (value, label) => `<div class="metric"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
+// subscriptionProviderTypes have a flat-fee subscription: quota is the right
+// signal and a per-token cost would be misleading, so no cost line is shown.
+const subscriptionProviderTypes = ['codex-subscription', 'claude-subscription', 'github-copilot', 'ollama-cloud', 'opencode-go'];
+const isSubscription = provider => subscriptionProviderTypes.includes(provider.type);
+// quotaProviderTypes have a quota endpoint (subscriptions plus plan-tiered
+// pay-as-you-go like Z.ai).
+const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github-copilot', 'zai', 'ollama-cloud', 'commandcode'];
+
+// providerQuotaHTML renders the compact quota block: one line per window with
+// the label, an inline bar, the used percentage and a short reset countdown.
+// The plan name and freshness line are deliberately omitted to keep the card
+// short.
+function providerQuotaHTML(provider) {
+  if (!quotaProviderTypes.includes(provider.type)) return '';
+  const snap = state.providerQuota?.[provider.id];
+  if (!snap) return '<p class="provider-quota-status">Quota: loading…</p>';
+  if (!snap.available) return '<p class="provider-quota-status">Quota unavailable</p>';
+  const windows = snap.windows || [];
+  if (!windows.length) return '<p class="provider-quota-status">No quota reported</p>';
+  const rows = windows.map(w => {
+    const pct = w.used_percent == null ? null : Math.max(0, Math.min(100, Number(w.used_percent)));
+    const minutes = w.resets_at ? Math.max(0, Math.ceil((new Date(w.resets_at) - Date.now()) / 60000)) : null;
+    const reset = minutes == null ? '' : ` · ${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
+    const detail = pct == null ? 'Unlimited' : `${Math.round(pct)}% used`;
+    return `<div class="provider-quota-window"><strong>${h(w.label)}</strong>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<span>${detail}${h(reset)}</span></div>`;
+  });
+  // Show up to three bars inline (5h/weekly/monthly for plan providers);
+  // collapse anything beyond that (e.g. org spend caps) behind a toggle.
+  const inline = 3;
+  return `<div class="provider-quota">${rows.slice(0, inline).join('')}${rows.length > inline ? `<details><summary>${rows.length - inline} more limits</summary>${rows.slice(inline).join('')}</details>` : ''}</div>`;
+}
+
+// providerCostHTML renders the router usage cost for pay-per-token providers
+// across the same 1h/24h/7d windows the token views use. It is omitted for
+// subscriptions, and a window with no costed traffic shows "—".
+function providerCostHTML(provider) {
+  if (isSubscription(provider)) return '';
+  const windows = ['1h', '24h', '7d'];
+  const totals = Object.fromEntries(windows.map(w => [w, null]));
+  const estimated = Object.fromEntries(windows.map(w => [w, false]));
+  for (const model of state.models.filter(m => m.provider_id === provider.id)) {
+    const costs = state.usage?.real_cost?.[model.canonical_model_id];
+    for (const window of windows) {
+      if (costs?.[window] != null) totals[window] = (totals[window] ?? 0) + costs[window];
+      if (costs?.estimated?.[window]) estimated[window] = true;
+    }
+  }
+  if (windows.every(w => totals[w] == null)) return '';
+  const part = window => totals[window] == null ? `${window} —` : `${window} ${estimated[window] ? '~' : ''}${fmtCost(totals[window])}${estimated[window] ? ' est.' : ''}`;
+  return `<div class="provider-cost"><span>${windows.map(part).join(' · ')}</span></div>`;
+}
 const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="badge badge-${kind}">${h(label)}</span>`;
 const typeLabel = type => state.providerTypes.find(item => item.type === type)?.label || type;
 
 $('#add-provider').onclick = () => openProvider();
+$('#add-provider-empty').onclick = () => openProvider();
 function providerFields(provider) {
   const options = state.providerTypes.map(item => `<option value="${h(item.type)}" ${provider?.type === item.type ? 'selected' : ''}>${h(item.label)}</option>`).join('');
   const selectedProtocols = provider?.protocols || ['chat'];
   const isOAuthEdit = provider && ['codex-subscription','claude-subscription','github-copilot'].includes(provider.type);
-  return `<label>Provider name <input name="name" value="${h(provider?.name || '')}" placeholder="openai-main" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"><small>Lowercase namespace used in client-facing model IDs. Leave blank to use provider type (e.g. DeepSeek → deepseek).</small></label>
-    <label>Provider type <select name="type" ${provider ? 'disabled' : ''} required>${options}</select></label>
+  const authSearch = item => item.auth_mode === 'oauth' ? 'oauth' : item.credential_needed ? 'api key' : 'no credential';
+  const COMMON_PROVIDERS = ['openai','anthropic','openrouter','gemini','deepseek','github-copilot','ollama-local','generic-openai'];
+  const rank = item => { const index = COMMON_PROVIDERS.indexOf(item.type); return index < 0 ? COMMON_PROVIDERS.length : index; };
+  const catalogue = [...state.providerTypes].filter(item => runtimeMode !== 'hosted' || !item.hosted_disabled).sort((a, b) => rank(a) - rank(b));
+  const typeField = provider
+    ? `<label>Provider type <select name="type" disabled required>${options}</select></label>`
+    : `<div class="provider-type-picker" data-provider-picker><label for="provider-type-search">Search provider types</label><input id="provider-type-search" type="search" placeholder="Search by name, protocol, or auth method" aria-controls="provider-type-options"><div class="provider-type-options" id="provider-type-options" role="listbox" aria-label="Provider types">${catalogue.map(item => `<button type="button" class="provider-type-option" role="option" aria-selected="false" data-provider-type-option="${h(item.type)}" data-search="${h(`${item.label} ${item.type} ${authSearch(item)} ${(item.protocols || []).join(' ')}`.toLowerCase())}">${providerMark(item.type,item.label,'provider-type-mark')}<span class="provider-type-copy"><strong>${h(item.label)}</strong><small>${item.auth_mode === 'oauth' ? 'OAuth' : item.credential_needed ? 'API key' : 'No credential'} · ${(item.protocols || []).map(h).join(' / ') || 'provider default'}</small></span></button>`).join('')}</div><input type="hidden" name="type" value="" required></div>`;
+  return `${typeField}<div class="provider-setup" data-provider-setup ${provider ? '' : 'hidden'}><div class="provider-setup-inner">${provider ? '' : '<button class="btn btn-small btn-secondary" type="button" data-provider-back>← Choose another provider</button>'}<div data-selected-provider></div><label>Provider name <input name="name" value="${h(provider?.name || '')}" placeholder="openai-main" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"><small>Lowercase namespace used in client-facing model IDs. Leave blank to use provider type (e.g. DeepSeek → deepseek).</small></label>
     ${isOAuthEdit ? `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" disabled><small>Fixed by the OAuth provider. Reconnect to change the upstream.</small></label>` : `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" placeholder="https://api.example.com/v1" required></label>`}
-      ${provider ? '' : '<div data-credential-create><label data-api-credential>API credential <input name="credential" type="password" autocomplete="new-password"><small>Write-only. Leave empty only when the provider permits unauthenticated access.</small></label></div>'}
+    ${provider ? '' : '<div data-credential-create><label data-api-credential>API credential <input name="credential" type="password" autocomplete="new-password"><small>Write-only. Leave empty only when the provider permits unauthenticated access.</small></label></div>'}
     ${provider && !isOAuthEdit ? `<label data-credential-replace>Replacement credential <input name="credential" type="password" autocomplete="new-password" placeholder="•••••••• (set)"><small>A credential is configured. Type a new value to replace it.</small></label>` : ''}
     ${isOAuthEdit ? '<div data-provider-reconnect><label>OAuth connection <button type="button" class="btn btn-secondary" data-provider-reconnect-btn>Reconnect</button><small>Start a fresh OAuth sign-in. Replaces any saved token for this provider.</small></label></div><div data-provider-disconnect><button type="button" class="btn btn-danger" data-provider-disconnect-btn>Disconnect</button><small>Remove the OAuth connection. Provider configuration, models, and routing are preserved.</small></div>' : ''}
     <fieldset class="protocol-select" data-protocol-config><legend>Declared native protocols</legend>${['chat','responses','messages'].map(protocol => `<label><input type="checkbox" name="protocol" value="${protocol}" ${selectedProtocols.includes(protocol) ? 'checked' : ''}> ${protocol}</label>`).join('')}<small>Generic providers default to Chat Completions. Declare only surfaces the upstream implements natively.</small></fieldset>
     <label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${provider?.enabled !== false ? 'checked' : ''}> Provider enabled</label>
-    ${provider ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm_breaking_change" type="checkbox"> <span>Confirm if the provider name changes; every direct model ID will change.</span></label>' : ''}`;
+    ${provider ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm_breaking_change" type="checkbox"> <span>Confirm if the provider name changes; every direct model ID will change.</span></label>' : ''}</div></div>`;
 }
- function openProvider(provider = null) {
-   openEntity({ eyebrow: provider ? 'EDIT UPSTREAM' : 'REGISTER UPSTREAM', title: provider ? `Edit ${provider.name}` : 'Add provider', fields: providerFields(provider), submit: provider ? 'Save provider' : 'Add & discover', onMount: form => { const select = $('[name="type"]', form); const protocolConfig = $('[data-protocol-config]', form); const showProtocols = () => protocolConfig.hidden = !['generic-openai','vllm'].includes(provider?.type || select.value); if (!provider) { const base = $('[name="base_url"]', form); const nameInput = $('[name="name"]', form); const credential = $('[name="credential"]', form); const createWrap = $('[data-credential-create]', form); const apiCredential = $('[data-api-credential]', form); const apply = () => { const item = state.providerTypes.find(t => t.type === select.value); if (!base.value || base.dataset.auto === 'true') { base.value = item?.default_base_url || ''; base.dataset.auto = 'true'; } if (nameInput) nameInput.placeholder = select.value || 'openai-main'; const isKeyless = item?.type === 'opencode-free'; const isOAuth = item?.auth_mode === 'oauth'; credential.required = Boolean(item?.credential_needed) && !isOAuth; if (createWrap) createWrap.hidden = isKeyless; if (apiCredential) apiCredential.hidden = isOAuth; if (isOAuth) { credential.value = ''; $('#dialog-submit').textContent = 'Connect with ' + item.label; } else $('#dialog-submit').textContent = 'Add & discover'; showProtocols(); }; base.addEventListener('input', () => base.dataset.auto = 'false'); select.addEventListener('change', apply); apply(); } else { const replaceWrap = $('[data-credential-replace]', form); if (replaceWrap) replaceWrap.hidden = provider.type === 'opencode-free' || (state.providerTypes.find(t => t.type === provider.type)?.auth_mode === 'oauth'); showProtocols(); const reconnectBtn = $('[data-provider-reconnect-btn]', form); if (reconnectBtn) reconnectBtn.onclick = () => { $('#form-dialog').close(); connectProviderOAuth(provider.id); }; const disconnectBtn = $('[data-provider-disconnect-btn]', form); if (disconnectBtn) disconnectBtn.onclick = () => { $('#form-dialog').close(); disconnectProviderOAuth(provider.id); }; const credentialInput = $('[name="credential"]', form); if (credentialInput) { const savedPlaceholder = credentialInput.placeholder; credentialInput.addEventListener('focus', () => { credentialInput.placeholder = ''; }); credentialInput.addEventListener('blur', () => { if (!credentialInput.value) credentialInput.placeholder = savedPlaceholder; }); } const nameInput = $('[name="name"]', form), confirmWrap = $('[data-confirm-wrap]', form); const syncConfirm = () => { confirmWrap.hidden = nameInput.value === provider.name; if (confirmWrap.hidden) { const cb = $('[name="confirm_breaking_change"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', syncConfirm); syncConfirm(); } }, onSubmit: async form => {
-     const values = new FormData(form); const rawName = String(values.get('name') || '').trim(); const payload = { name: rawName || String(values.get('type') || '').trim(), base_url: values.get('base_url'), enabled: values.get('enabled') === 'on', protocols: values.getAll('protocol') };
+async function openProvider(provider = null, onSaved = null) {
+  if (!provider && capReached('providers')) { flash(capNotice('providers'), 'error'); return; }
+  // The onboarding wizard can open the provider form before any catalogue has
+  // been loaded (it auto-opens over the Clients view on a fresh install), so
+  // populate the provider-type picker and model list first.
+  if (!provider && !state.providerTypes.length) {
+    try { await loadProviders(); } catch { /* open anyway; a later reload retries discovery */ }
+  }
+  // The provider-type picker needs a wider canvas than the standard form
+  // dialog so the full logo catalogue fits without a cramped scroll box.
+  if (!provider) {
+    const dialog = $('#form-dialog');
+    dialog.classList.add('provider-picker-dialog');
+    dialog.addEventListener('close', () => dialog.classList.remove('provider-picker-dialog'), { once: true });
+  }
+  openEntity({ eyebrow: provider ? 'EDIT UPSTREAM' : 'REGISTER UPSTREAM', title: provider ? `Edit ${provider.name}` : 'Add provider', fields: providerFields(provider), submit: provider ? 'Save provider' : 'Add & discover', onMount: form => {
+    const type = $('[name="type"]', form), setup = $('[data-provider-setup]', form), picker = $('[data-provider-picker]', form), submit = $('#dialog-submit'), protocols = $('[data-protocol-config]', form);
+    const showProtocols = () => protocols.hidden = !['generic-openai','vllm'].includes(provider?.type || type.value);
+    if (!provider) {
+      const search = $('#provider-type-search', form), options = $$('[data-provider-type-option]', form), base = $('[name="base_url"]', form), name = $('[name="name"]', form), credential = $('[name="credential"]', form), credentialWrap = $('[data-credential-create]', form), credentialLabel = $('[data-api-credential]', form);
+      const filter = () => options.forEach(option => option.hidden = !option.dataset.search.includes(search.value.trim().toLowerCase()));
+      const choose = option => {
+        const item = state.providerTypes.find(candidate => candidate.type === option.dataset.providerTypeOption); if (!item) return;
+        type.value = item.type; options.forEach(candidate => candidate.setAttribute('aria-selected', String(candidate === option)));
+        picker.hidden = true; setup.hidden = false; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = false); submit.hidden = false; submit.disabled = false;
+        $('[data-selected-provider]', form).innerHTML = `${providerMark(item.type,item.label,'provider-selected-mark')}<strong>${h(item.label)}</strong>`;
+        if (!base.value || base.dataset.auto === 'true') { base.value = item.default_base_url || ''; base.dataset.auto = 'true'; }
+        name.placeholder = item.type; const oauth = item.auth_mode === 'oauth'; credential.required = Boolean(item.credential_needed) && !oauth; credentialWrap.hidden = item.type === 'opencode-free' || oauth; credentialLabel.hidden = oauth; base.required = Boolean(item.base_url_required || !item.default_base_url); if (oauth) credential.value = '';
+        submit.textContent = oauth ? `Connect with ${item.label}` : 'Add & discover'; showProtocols(); base.focus();
+      };
+      search.addEventListener('input', filter);
+      search.addEventListener('keydown', event => { const visible = options.filter(option => !option.hidden); if (event.key === 'ArrowDown' && visible.length) { event.preventDefault(); visible[0].focus(); } if (event.key === 'Enter') { event.preventDefault(); if (visible.length) choose(visible[0]); } });
+      options.forEach(option => {
+        option.addEventListener('click', () => choose(option));
+        option.addEventListener('keydown', event => { const visible = options.filter(candidate => !candidate.hidden), index = visible.indexOf(option); if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); visible[(index + (event.key === 'ArrowDown' ? 1 : visible.length - 1)) % visible.length]?.focus(); } if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(option); } });
+      });
+      $('[data-provider-back]', form).addEventListener('click', () => { setup.hidden = true; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); picker.hidden = false; submit.hidden = true; submit.disabled = true; search.focus(); });
+      base.addEventListener('input', () => base.dataset.auto = 'false'); $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); submit.hidden = true; submit.disabled = true; filter();
+    } else {
+      const item = state.providerTypes.find(candidate => candidate.type === provider.type), replace = $('[data-credential-replace]', form);
+      if (replace) replace.hidden = provider.type === 'opencode-free' || item?.auth_mode === 'oauth'; showProtocols();
+      const reconnect = $('[data-provider-reconnect-btn]', form); if (reconnect) reconnect.onclick = () => { $('#form-dialog').close(); connectProviderOAuth(provider.id); };
+      const disconnect = $('[data-provider-disconnect-btn]', form); if (disconnect) disconnect.onclick = () => { $('#form-dialog').close(); disconnectProviderOAuth(provider.id); };
+      const name = $('[name="name"]', form), confirm = $('[data-confirm-wrap]', form); const sync = () => { confirm.hidden = name.value === provider.name; if (confirm.hidden) $('[name="confirm_breaking_change"]', form).checked = false; }; name.addEventListener('input', sync); sync();
+    }
+  }, onSubmit: async form => {
+    const values = new FormData(form), rawName = String(values.get('name') || '').trim(), payload = { name: rawName || String(values.get('type') || '').trim(), base_url: values.get('base_url'), enabled: values.get('enabled') === 'on', protocols: values.getAll('protocol') };
     if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
-     else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
-    await loadProviders(); await loadClients();
+    else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id, onSaved); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
+    await loadProviders(); await loadClients(); if (!provider) refreshWizardButton(false); if (onSaved) await onSaved();
   }});
 }
-async function refreshProvider(id) { const button = $(`[data-provider-refresh="${CSS.escape(id)}"]`); button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); await loadProviders(); await loadClients(); } finally { button.disabled = false; } }
- async function connectProviderOAuth(id) { const provider = state.providers.find(item => item.id === id); const type = provider?.type; try { const result = await api(`/api/admin/providers/${id}/oauth/start`, { method: 'POST' }); if (result.flow === 'device_code') { showGitHubDeviceDialog(id, result); return; } window.open(result.authorization_url, 'tiller-oauth-auth', 'popup,width=520,height=720,resizable=yes,scrollbars=yes'); showOAuthCallbackDialog(id, result.authorization_url, type, result.redirect_uri); } catch (error) { flash(errorMessage(error), 'error'); } }
- function showGitHubDeviceDialog(id, result) { openEntity({ eyebrow: 'GITHUB COPILOT', title: 'Connect GitHub Copilot', submit: 'Done', fields: `<p>1. Open GitHub device sign-in.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><a class="btn btn-secondary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Open GitHub</a> <button type="button" class="btn btn-secondary" data-copy-device>Copy code</button></p><p data-oauth-status>Waiting for GitHub authorization...</p>`, onMount: form => { $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const label = $('[data-oauth-status]', form); if (label) label.textContent = status.status === 'pending' ? 'Waiting for GitHub authorization...' : status.status === 'connected' ? 'GitHub connected.' : (status.error || 'GitHub connection failed.'); if (status.status !== 'pending') { clearInterval(poll); if (status.status === 'connected') { $('#form-dialog').close(); flash('GitHub Copilot connected.'); await loadProviders(); } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
- function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><label>Redirected URL <textarea name="redirected_url" rows="3" required placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label>`, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); }}); }
-async function refreshModels(id) { const button = $(`[data-refresh-models="${CSS.escape(id)}"]`); button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); } catch (error) { flash(errorMessage(error), 'error'); } finally { await loadModels(); await loadProviders(); await loadClients(); button.disabled = false; } }
+async function refreshProvider(id) { const button = $('#drawer-refresh'); if (drawerProviderID === id) button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); await loadProviders(); await loadClients(); } finally { button.disabled = false; } }
+ async function connectProviderOAuth(id, onSaved = null) { const provider = state.providers.find(item => item.id === id); const type = provider?.type; try { const result = await api(`/api/admin/providers/${id}/oauth/start`, { method: 'POST' }); if (result.flow === 'device_code') { showDeviceDialog(id, result, type, onSaved); return; } window.open(result.authorization_url, 'tiller-oauth-auth', 'popup,width=520,height=720,resizable=yes,scrollbars=yes'); if (result.callback_mode === 'redirect') { showOAuthRedirectDialog(id, result.authorization_url, type, result.redirect_uri, onSaved); return; } showOAuthCallbackDialog(id, result.authorization_url, type, result.redirect_uri, onSaved); } catch (error) { flash(errorMessage(error), 'error'); } }
+ function showDeviceDialog(id, result, type, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label.toUpperCase(), title: `Connect ${label}`, submit: 'Done', fields: `<p>1. Open the ${h(label)} sign-in page.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><a class="btn btn-secondary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Open sign-in page</a> <button type="button" class="btn btn-secondary" data-copy-device>Copy code</button></p><p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for authorization...</span></p>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const node = $('[data-oauth-status]', form); if (node) node.textContent = status.status === 'pending' ? 'Waiting for authorization...' : status.status === 'connected' ? label + ' connected.' : (status.error || 'Connection failed.'); if (status.status !== 'pending') { clearInterval(poll); $('[data-oauth-spinner]', form)?.remove(); if (status.status === 'connected') { $('#form-dialog').close(); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); } else { submit.hidden = false; } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
+function showOAuthRedirectDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. It returns to <code>${h(redirectURI)}</code> automatically. Leave this dialog open.</p><p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for sign-in...</span></p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><details><summary>Trouble signing in? Paste the redirected URL instead.</summary><label>Redirected URL <textarea name="redirected_url" rows="3" placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label><small>Copy the complete URL from the sign-in window's address bar and paste it above, then choose Connect.</small></details>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; const urlField = $('[name="redirected_url"]', form); const syncSubmit = () => { submit.hidden = !String(urlField.value || '').trim(); }; urlField.addEventListener('input', syncSubmit); syncSubmit(); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const node = $('[data-oauth-status]', form); if (status.status === 'connected') { if (node) node.textContent = label + ' connected.'; clearInterval(poll); $('[data-oauth-spinner]', form)?.remove(); $('#form-dialog').close(); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); return; } if (node && status.status && status.status !== 'pending') { node.textContent = status.error || 'Connection failed. Finish sign-in again, or paste the redirected URL.'; } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async form => { const value = String(new FormData(form).get('redirected_url') || '').trim(); if (!value) { throw new Error('Finish sign-in in the popup, or paste the complete redirected URL.'); } await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
+ function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p><p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for sign-in...</span></p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><label>Redirected URL <textarea name="redirected_url" rows="3" required placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; form.addEventListener('input', () => { submit.hidden = !String($('[name="redirected_url"]', form).value || '').trim(); }); }, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
 async function deleteProvider(id) {
   const provider = state.providers.find(item => item.id === id);
   const doDelete = async () => {
     try {
       await api(`/api/admin/providers/${id}`, { method: 'DELETE' });
       flash('Provider deleted.');
+      loadPlanSnapshot(true);
       await loadProviders();
       await loadClients();
     } catch (error) {
@@ -398,11 +915,11 @@ async function deleteProvider(id) {
 
 async function disconnectProviderOAuth(id) { const provider = state.providers.find(item => item.id === id); if (!await confirmAction({ title: `Disconnect ${provider?.name || 'provider'}?`, copy: 'This removes the OAuth connection. Provider configuration, models, and routing are preserved.', action: 'Disconnect', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/providers/${id}/oauth`, { method: 'DELETE' }); flash('Provider disconnected.'); await loadProviders(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
-async function deleteManualModel(id) { const model = state.models.find(item => item.id === id); if (!model || !await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'This manually-added model will be removed from the provider catalogue.', action: 'Delete model', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/models/${id}`, { method: 'DELETE' }); flash('Manual model deleted.'); await loadModels(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
-function manualModelFields() {
+async function deleteManualModel(id) { const model = state.models.find(item => item.id === id); if (!model || !await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'This manually-added model will be removed from the provider catalogue.', action: 'Delete model', typeMatch: null, typeLabel: '' })) return; try { await api(`/api/admin/models/${id}`, { method: 'DELETE' }); flash('Manual model deleted.'); await loadProviders(); if (drawerProviderID) await loadModels($('#model-search').value); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
+function manualModelFields(preferredProviderID = '') {
   const providers = state.providers.filter(item => item.enabled);
   const protocols = ['', 'chat', 'responses', 'messages'];
-  return `<label>Provider <select name="provider_id" required>${providers.map(provider => `<option value="${h(provider.id)}">${h(provider.name)}</option>`).join('')}</select></label>
+  return `<label>Provider <select name="provider_id" required>${providers.map(provider => `<option value="${h(provider.id)}" ${provider.id === preferredProviderID ? 'selected' : ''}>${h(provider.name)}</option>`).join('')}</select></label>
     <label>Provider-native model ID <input name="upstream_model_id" required maxlength="255" placeholder="model-name"><small>Enter the exact model ID accepted by the provider.</small></label>
     <div class="detect-row"><button type="button" class="btn btn-small btn-secondary" data-detect-model>Detect metadata</button><span class="meta-line">Fills from the provider, then models.dev. Blank fields are detected on save.</span></div>
     <label>Display name <input name="display_name" placeholder="Optional"></label>
@@ -410,10 +927,10 @@ function manualModelFields() {
     <label>Max output tokens <input name="max_output_tokens" type="number" min="1" placeholder="Optional"></label>
     <label>Native protocol <select name="native_protocol">${protocols.map(protocol => `<option value="${protocol}">${protocol || 'Provider default'}</option>`).join('')}</select><small>Leave as provider default unless the upstream surface is known.</small></label>`;
 }
-function openManualModel() {
+function openManualModel(preferredProviderID = '') {
   if (!state.providers.some(item => item.enabled)) { flash('Add an enabled provider before adding a model.', 'error'); return; }
   openEntity({
-    eyebrow: 'REAL MODEL', title: 'Add manual model', fields: manualModelFields(), submit: 'Add model',
+    eyebrow: preferredProviderID ? typeLabel(state.providers.find(item => item.id === preferredProviderID)?.type || '') : 'REAL MODEL', title: 'Add manual model', fields: manualModelFields(preferredProviderID), submit: 'Add model',
     onMount: form => {
       const button = $('[data-detect-model]', form);
       if (!button) return;
@@ -438,13 +955,42 @@ function openManualModel() {
     onSubmit: async form => {
       const values = new FormData(form);
       const number = name => values.get(name) ? Number(values.get(name)) : null;
-      await api(`/api/admin/providers/${values.get('provider_id')}/models`, { method: 'POST', body: JSON.stringify({ upstream_model_id: values.get('upstream_model_id'), display_name: values.get('display_name'), context_length: number('context_length'), max_output_tokens: number('max_output_tokens'), native_protocol: values.get('native_protocol') }) });
-      flash('Manual model added.'); await loadModels(); await loadClients();
+      const providerID = values.get('provider_id');
+      await api(`/api/admin/providers/${providerID}/models`, { method: 'POST', body: JSON.stringify({ upstream_model_id: values.get('upstream_model_id'), display_name: values.get('display_name'), context_length: number('context_length'), max_output_tokens: number('max_output_tokens'), native_protocol: values.get('native_protocol') }) });
+      flash('Manual model added.'); await loadProviders(); if (drawerProviderID) openProviderDrawer(providerID); await loadClients();
     }
   });
 }
-$('#add-real-model').onclick = openManualModel;
-async function loadModels(search = $('#model-search').value) { const token = ++state.loadToken; const [result, providersResult] = await Promise.all([api(`/api/admin/models?all=1&search=${encodeURIComponent(search || '')}`), api('/api/admin/providers?limit=200')]); if (token !== state.loadToken) return; state.models = result.data; state.providers = providersResult.data; renderModels(); deferUsage(); }
+$('#add-real-model').onclick = () => openManualModel(drawerProviderID);
+async function loadModels(search = $('#model-search').value) { drawerModelSearch = (search || '').trim().toLowerCase(); const provider = state.providers.find(item => item.id === drawerProviderID); if (provider) $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`; renderModels(); deferUsage(); }
+function openProviderDrawer(id) {
+  drawerProviderID = id;
+  drawerModelSearch = '';
+  const provider = state.providers.find(item => item.id === id);
+  if (!provider) return;
+  $('#provider-drawer-title').textContent = provider.name;
+  $('#provider-drawer-meta').textContent = `${provider.available_model_count} available · ${provider.model_count - provider.available_model_count} retired · Refreshed ${date(provider.last_refresh_at)}`;
+  $('#add-real-model').disabled = !provider.enabled;
+  $('#model-search').value = '';
+  $('#show-retired').checked = true;
+  $('#drawer-show-retired').checked = true;
+  $('#provider-drawer').hidden = false;
+  $('#provider-drawer').classList.add('open');
+  $('#provider-drawer').setAttribute('aria-hidden', 'false');
+  $('#provider-drawer').inert = false;
+  loadModels('').then(() => { $('#provider-drawer-close').focus(); }).catch(error => flash(errorMessage(error), 'error'));
+}
+function closeProviderDrawer(restoreFocus = true) {
+  $('#provider-drawer').classList.remove('open');
+  $('#provider-drawer').setAttribute('aria-hidden', 'true');
+  $('#provider-drawer').inert = true;
+  $('#provider-drawer').hidden = true;
+  drawerProviderID = '';
+  $('#show-retired').checked = $('#drawer-show-retired').checked;
+  $('#provider-search').value = providerSearchValue;
+  if (restoreFocus) $('#provider-search').focus({ preventScroll: true });
+}
+$('#model-search').addEventListener('input', event => loadModels(event.target.value));
 function groupBanner(kind, key, label, note, count, actions = '') { const collapsed = (kind === 'models' ? collapsedModels : kind === 'clients' ? collapsedClients : collapsedVirtual).has(key); const columns = kind === 'virtual' ? 7 : kind === 'clients' ? 7 : 6; const noteMarkup = kind === 'virtual' ? '' : `<span class="meta-line">${h(note)}</span>`; return `<tr class="group-toggle" data-group-toggle="${kind}" data-group-key="${h(key)}" data-expanded="${collapsed ? 'false' : 'true'}" aria-expanded="${collapsed ? 'false' : 'true'}"><td colspan="${columns}"><span class="group-arrow">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</span><span class="group-label">${h(label)}</span><span class="count-badge">${h(count)}</span>${noteMarkup}${actions ? `<span class="banner-actions">${actions}</span>` : ''}</td></tr>`; }
 function toggleGroup(event) {
   const header = event.currentTarget;
@@ -533,36 +1079,15 @@ function cycleModelSort(column) {
 // shownModels is the set the Models table renders: available models (unless
 // "show retired" is checked) owned by an enabled provider.
 function shownModels() {
-  const disabledProviders = new Set(state.providers.filter(item => !item.enabled).map(item => item.id));
-  return state.models.filter(item => !disabledProviders.has(item.provider_id) && ($('#show-retired').checked || item.available));
-}
-// reorderModelRows re-applies the current sort in place, moving the existing
-// <tr> nodes rather than rebuilding the tbody. It exists for the one-time
-// correction after usage first arrives: a models table rendered before usage
-// was known sorts every row as zero and keeps catalogue order, while the header
-// still claims the default "1h ↓". applyModelSort reads the live sortState, so
-// this honours whatever column/direction the user has selected — it never
-// resets the sort. Event handlers and transient DOM state are preserved because
-// the nodes are moved, not replaced.
-function reorderModelRows() {
-  const body = $('#models-body');
-  if (!body) return;
-  const rowsByID = new Map();
-  $$('tr[data-model-id]', body).forEach(row => rowsByID.set(row.dataset.modelId, row));
-  const fragment = document.createDocumentFragment();
-  applyModelSort(shownModels()).forEach(model => {
-    const row = rowsByID.get(model.id);
-    if (row) fragment.appendChild(row);
-  });
-  body.appendChild(fragment);
+  return state.models.filter(item => item.provider_id === drawerProviderID && ($('#show-retired').checked || item.available) && (!drawerModelSearch || item.canonical_model_id.toLowerCase().includes(drawerModelSearch) || item.upstream_model_id.toLowerCase().includes(drawerModelSearch)));
 }
  function renderModels() {
    const shown = shownModels();
-   $('#models-empty').hidden = shown.length > 0;
-   $('#models-empty-mobile').hidden = shown.length > 0;
+  $('#models-empty').hidden = shown.length > 0;
+  $('#models-empty-mobile').hidden = shown.length > 0;
    const rows = applyModelSort(shown);
    const mobile = window.matchMedia('(max-width: 720px)').matches;
-   $('#models-body').innerHTML = mobile ? '' : rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-provider">${h(model.provider_name)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
+   $('#models-body').innerHTML = mobile ? '' : rows.map(model => `<tr data-model-id="${h(model.id)}"><td><code class="model-id">${h(model.canonical_model_id)}</code></td><td><code class="model-id">${h(model.upstream_model_id)}</code></td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['1h'], state.usage?.real_cache?.[model.canonical_model_id]?.['1h'], '1h', state.usage?.real_cost?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['24h'], state.usage?.real_cache?.[model.canonical_model_id]?.['24h'], '24h', state.usage?.real_cost?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.real_models?.[model.canonical_model_id]?.['7d'], state.usage?.real_cache?.[model.canonical_model_id]?.['7d'], '7d', state.usage?.real_cost?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions">${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-model-delete="${h(model.id)}">Delete</button>` : ''}<button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-model-capabilities="${h(model.id)}">Capabilities</button></div></td></tr>`).join('');
    $('#models-cards').innerHTML = mobile ? rows.map(modelCard).join('') : '';
   const head = $('#models-body').parentElement.querySelector('thead');
   if (head) {
@@ -588,7 +1113,8 @@ function mobileUsage(model, kind = 'real') {
   const key = model.canonical_model_id;
   const usage = kind === 'virtual' ? state.usage?.virtual_models?.[key] : state.usage?.real_models?.[key];
   const cache = kind === 'virtual' ? state.usage?.virtual_cache?.[key] : state.usage?.real_cache?.[key];
-  return ['1h', '24h', '7d'].map(window => `<span><small>${window}</small>${tok(usage?.[window], cache?.[window], window)}</span>`).join('');
+  const cost = kind === 'virtual' ? state.usage?.virtual_cost?.[key] : state.usage?.real_cost?.[key];
+  return ['1h', '24h', '7d'].map(window => `<span><small>${window}</small>${tok(usage?.[window], cache?.[window], window, cost?.[window])}</span>`).join('');
 }
 function modelCard(model) {
   const available = model.available;
@@ -671,7 +1197,7 @@ function renderVirtual() {
     const broken = models.filter(m => !m.available).length;
     const note = broken ? `${broken} broken target` : (models.length ? 'group' : 'empty group');
     const actions = grp ? `<button class="btn btn-small btn-secondary" data-group-edit="${h(grp.id)}">Edit</button><button class="btn btn-small btn-danger" data-group-delete="${h(grp.id)}">Delete</button>` : '';
-    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><div class="client-name-line"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(model.available ? 'Routable' : 'Broken target')}" title="${h(model.available ? 'Routable' : 'Broken target')}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(model.canonical_model_id)}</strong></div><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h')}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
+    return groupBanner('virtual', name, name, note, `${models.length} model${models.length === 1 ? '' : 's'}`, actions) + groupRows(models.map(model => { const targets = model.targets || []; const summary = targets.length ? `<div class="target-summary">${targets.map((target, index) => `<span class="meta-line" data-target-key="${h(target.provider_model_id || `${target.provider_name}/${target.upstream_model_id}`)}">${index + 1}. ${resolutionIndicator(target)}${h(target.provider_name)}/${h(target.upstream_model_id)}${target.enabled ? '' : ' (disabled)'}</span>`).join('')}</div>` : `<span class="meta-line" data-target-key="${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}">${resolutionIndicator({provider_name:model.target_provider_name,upstream_model_id:model.target_upstream_model_id})}</span><code class="model-id">${h(model.target_provider_name || '')}/${h(model.target_upstream_model_id || '')}</code>`; return { attr: ` data-virtual-id="${h(model.id)}"`, html: `<td><div class="client-name-line"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(model.available ? 'Routable' : 'Broken target')}" title="${h(model.available ? 'Routable' : 'Broken target')}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(model.canonical_model_id)}</strong></div><span class="meta-line">${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed')}</span></td><td></td><td>${summary}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['1h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['1h'], '1h', state.usage?.virtual_cost?.[model.canonical_model_id]?.['1h'])}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['24h'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['24h'], '24h', state.usage?.virtual_cost?.[model.canonical_model_id]?.['24h'])}</td><td>${tok(state.usage?.virtual_models?.[model.canonical_model_id]?.['7d'], state.usage?.virtual_cache?.[model.canonical_model_id]?.['7d'], '7d', state.usage?.virtual_cost?.[model.canonical_model_id]?.['7d'])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-model-activity="${h(model.canonical_model_id)}">Activity</button><button class="btn btn-small btn-secondary" data-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-virtual-edit="${h(model.id)}">Settings</button><button class="btn btn-small btn-danger" data-virtual-delete="${h(model.id)}">Delete</button></div></td>` }; }), collapsed);
   }).join('');
    $('#virtual-body').innerHTML = html;
    $('#virtual-empty-mobile').hidden = state.virtualModels.length > 0 || (!searching && state.groups.length > 0);
@@ -982,7 +1508,8 @@ $('#refresh-capabilities').onclick = async () => {
       const model = state.models.find(item => item.id === modelId);
       if (!model) return;
       await refreshProviderCatalogues([model.provider_id]);
-      await loadModels();
+      await loadProviders();
+      if (drawerProviderID) await loadModels($('#model-search').value);
       $('#capabilities-dialog').close();
       openRealModelCapabilities(state.models.find(item => item.id === modelId) || model);
     } else {
@@ -1086,7 +1613,7 @@ function virtualModelFields(model) {
   const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
   return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Targets run from top to bottom. Turn a target off to skip it, or use the arrows to change its priority.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
-function openVirtualModel(model = null) { if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
+function openVirtualModel(model = null, onSaved = null) { if (!model && capReached('virtual_models')) { flash(capNotice('virtual_models'), 'error'); return; } if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
   const providerEnabled = new Map(state.providers.map(item => [item.id, item.enabled]));
   const options = state.models.filter(item => item.available && providerEnabled.get(item.provider_id) !== false).map(item => ({ value:item.id, label:`${item.provider_name} / ${item.upstream_model_id}`, match:item.upstream_model_id })); availableOptions = options;
@@ -1096,8 +1623,8 @@ function openVirtualModel(model = null) { if (!state.models.length) { flash('Dis
    const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; enableLabel.innerHTML='<span class="target-toggle-copy">Use</span>'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up"><span class="target-action-glyph">↑</span><span class="target-action-text">Up</span></button><button type="button" data-target-down title="Move target down" aria-label="Move target down"><span class="target-action-glyph">↓</span><span class="target-action-text">Down</span></button><button type="button" data-target-remove title="Remove target" aria-label="Remove target"><span class="target-action-glyph">×</span><span class="target-action-text">Remove</span></button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
    fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<16) addFallback(); else flash('The admin UI supports up to 16 targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
-  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); } }); }
-async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
+  }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); if (onSaved) await onSaved(payload.name); } }); }
+async function deleteVirtualModel(id) { const model = state.virtualModels.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${model.canonical_model_id}?`, copy: 'Clients using this stable identity will receive model-not-found after deletion.', action: 'Delete virtual model' })) return; try { await api(`/api/admin/virtual-models/${id}`, { method: 'DELETE' }); flash('Virtual model deleted.'); loadPlanSnapshot(true); await loadVirtual(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 async function loadClients() {
   const token = ++state.loadToken;
@@ -1284,7 +1811,7 @@ function clientRow(client) {
   const routeCell = client.type === 'single'
     ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
     : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
-  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong></div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h')}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d')}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
+  return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong>${estimatedMark(client.id)}</div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h', state.usage?.client_cost?.[client.id]?.['1h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h', state.usage?.client_cost?.[client.id]?.['24h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d', state.usage?.client_cost?.[client.id]?.['7d'], state.usage?.client_tokens?.[client.id])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
@@ -1325,12 +1852,14 @@ $('#clients-cards').addEventListener('click', event => {
   if (!wasOpen) { detail.hidden = false; head.setAttribute('aria-expanded', 'true'); }
 });
 $('#add-client').onclick = () => openClient();
-function openClient(client = null) {
+function openClient(client = null, onSaved = null, defaultType = null) {
+  if (!client && capReached('client_keys')) { flash(capNotice('client_keys'), 'error'); return; }
   const dialog = $('#form-dialog');
   dialog.classList.add('client-form-dialog');
   dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
+  const selectedType = client?.type || defaultType;
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
-  const typeField = `<label>Type <select name="type"><option value="catalogue" ${client?.type === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${client?.type !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
+  const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
   const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
@@ -1377,16 +1906,21 @@ function openClient(client = null) {
           payload.single_target_id = selected.slice(split + 1);
         }
         const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify(payload) });
+        loadPlanSnapshot(true);
         showSecret(result.secret);
+        if (onSaved) await onSaved(result, payload);
+        refreshWizardButton(false);
       }
       await loadClients();
     }
   });
 }
 async function rotateClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Rotate ${client.name}?`, copy: 'The current secret will stop authenticating immediately. Permissions and metadata are preserved.', action: 'Rotate now' })) return; try { const result = await api(`/api/admin/client-keys/${id}/rotate`, { method: 'POST' }); showSecret(result.secret); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
-async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
+async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); loadPlanSnapshot(true); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
-async function openPermissions(client) {
+let permissionsSavedHook = null;
+async function openPermissions(client, onSaved = null) {
+  permissionsSavedHook = onSaved;
   try {
     state.permissionData = await api(`/api/admin/client-keys/${client.id}/permissions`);
     state.modelClient = client;
@@ -1396,6 +1930,16 @@ async function openPermissions(client) {
     $('#permissions-dialog').showModal();
   }
   catch (error) { flash(errorMessage(error), 'error'); }
+}
+// enableAllClientModels gives a freshly-created catalogue key access to every
+// currently-available model and turns on the per-group "new models default" so
+// future models in those groups are enabled too. Retired models keep whatever
+// state they already had, matching the permissions dialog's Enable all action.
+async function enableAllClientModels(client) {
+  const data = await api(`/api/admin/client-keys/${client.id}/permissions`);
+  const defaults = (data.groups || []).map(group => ({ kind: group.kind, group_id: group.id, enabled: true }));
+  const permissions = (data.groups || []).flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.available ? true : model.enabled })));
+  await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
 }
 function renderPermissions() {
   const renderGroup = group => {
@@ -1506,7 +2050,7 @@ function bulkSetAllPermissions(enabled) {
 }
 $('#enable-all-permissions').onclick = () => bulkSetAllPermissions(true);
 $('#disable-all-permissions').onclick = () => bulkSetAllPermissions(false);
-$('#close-permissions').onclick = $('#cancel-permissions').onclick = () => $('#permissions-dialog').close();
+$('#close-permissions').onclick = $('#cancel-permissions').onclick = () => { permissionsSavedHook = null; $('#permissions-dialog').close(); };
 $('#save-permissions').onclick = async () => {
   const button = $('#save-permissions'), client = state.modelClient;
   button.disabled = true;
@@ -1516,8 +2060,10 @@ $('#save-permissions').onclick = async () => {
     const permissions = state.permissionData.groups.flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.enabled })));
     await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
     flash('Client catalogue permissions saved.');
+    const hook = permissionsSavedHook; permissionsSavedHook = null;
     $('#permissions-dialog').close();
     await loadClients();
+    if (hook) await hook();
   } catch (error) { $('#permissions-error').textContent = errorMessage(error); }
   finally { button.disabled = false; }
 };
@@ -1544,7 +2090,7 @@ function activityDetailHTML(row, kind) {
   return `${parts.join('')}${loadError}${pending}`;
 }
 function resolvedActivity(row) { return activityDetailHTML(row, 'table'); }
-function activityCardDetail(row) { return activityDetailHTML(row, 'card'); }
+function activityCardDetail(row) { return activityDetailHTML(row, 'card') + `<div class="history-meta">${rowCache(row)}</div>`; }
 
 // createActivityFeed renders a window of rows immediately, backfills each row's
 // attempt details as it scrolls into view (bounded concurrency), and loads
@@ -1807,6 +2353,7 @@ document.addEventListener('keydown', event => { if (event.key !== 'Enter' && eve
   const status = row.http_status >= 200 && row.http_status < 300 ? 'Succeeded' : `HTTP ${row.http_status || 'error'}`;
   const statusClass = row.http_status >= 200 && row.http_status < 300 ? 'history-success' : 'history-failure';
   const resolved = row.resolved_provider && row.resolved_model ? `${row.resolved_provider}/${row.resolved_model}` : 'No resolved target';
+  // Shared detail renderer below includes the request's accounting.
    return `<article class="history-card" data-activity-row="${h(row.id)}"><div class="history-card-head"><span class="history-status ${statusClass}">${h(status)}</span><time>${h(date(row.created_at))}</time></div>${showClient ? `<strong class="history-client">${h(row.client_name || '')}</strong>` : ''}<div class="history-route"><code>${h(row.requested_model)}</code>${row.exposed_model && row.exposed_model !== row.requested_model ? `<small>map → ${h(row.exposed_model)}</small>` : ''}</div><div class="history-resolution"><span>Resolved</span><strong>${h(resolved)}</strong></div><div class="history-meta"><span>${h(row.protocol)}${row.streaming ? ' · stream' : ''}</span><span>${h(row.latency_ms)} ms</span><span>${row.fallback_used ? 'Fallback' : 'Direct'}</span></div><div data-activity-resolved="${h(row.id)}" data-activity-detail-kind="card">${activityCardDetail(row)}</div><div class="history-footer"><span>${activityRequestID(row)}</span>${row.error_text ? `<span class="error-text">${h(row.error_text)}</span>` : ''}</div></article>`;
 }
  filterInput('#activity-search', value => { activityFeed.setSearch(value); });
@@ -1883,40 +2430,76 @@ filterInput('#mobile-history-search', value => { mobileHistoryFeed.setSearch(val
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
+// HOSTED_NOTIFICATION_COOLDOWN mirrors the server's hosted clamp
+// (hostedNotificationCooldownSeconds in internal/server/notifications.go). The
+// server is authoritative — it re-clamps on read and on write — this only
+// keeps the form honest so a readonly-looking field never shows a stale value.
+const HOSTED_NOTIFICATION_COOLDOWN = 60;
+function applyHostedNotificationPolicy(hosted, nf) {
+  // Hosted accounts never perform an admin login, so the event does not apply.
+  $('#notifications-event-admin-login').hidden = hosted;
+  const cooldown = $('[name="notifications_cooldown_seconds"]', nf);
+  cooldown.readOnly = hosted;
+  if (hosted) cooldown.value = HOSTED_NOTIFICATION_COOLDOWN;
+  $('#notifications-cooldown-tip').textContent = hosted
+    ? 'Fixed at 60 seconds in hosted mode.'
+    : 'Suppress repeat notifications for the same event + model within this window. 0 disables.';
+}
 async function loadSettings() {
   $('#backup-card').hidden = runtimeMode === 'hosted';
+  const hosted = runtimeMode === 'hosted';
   const token = ++state.loadToken;
-  const [health, settings] = await Promise.all([api('/api/admin/health'), api('/api/admin/settings')]);
+  const settings = await api('/api/admin/settings');
   if (token !== state.loadToken) return;
-  $('#top-status').textContent = health.status.toUpperCase(); $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; $('[name="notifications_cooldown_seconds"]', nf).value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; updateEncryptionState(settings.provider_credential_encryption); await loadGlobalActivity();
+  $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; applyHostedNotificationPolicy(hosted, nf); await loadGlobalActivity();
 }
-async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_event_admin_login: notificationsValues.get('notifications_event_admin_login') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
+async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (runtimeMode !== 'hosted') { body.notifications_event_admin_login = notificationsValues.get('notifications_event_admin_login') === 'on'; } if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
 $('#save-settings-top').addEventListener('click', saveSettings);
 $('#save-settings-bottom').addEventListener('click', saveSettings);
 $('[name="log_error_bodies"]', $('#settings-form')).addEventListener('change', async event => { try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ log_error_bodies: event.target.checked }) }); flash(event.target.checked ? 'Detailed error logging enabled.' : 'Detailed error logging disabled.'); } catch (error) { event.target.checked = !event.target.checked; $('#settings-error').textContent = errorMessage(error); } });
 $('[name="notifications_auth_header"]', $('#notifications-form')).addEventListener('input', () => { authHeaderDirty = true; authHeaderClear = false; });
 $('#clear-notifications-auth').addEventListener('click', async () => { const button = $('#clear-notifications-auth'); button.disabled = true; $('#notifications-error').textContent = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ notifications_auth_header: '' }) }); authHeaderClear = false; authHeaderDirty = false; $('[name="notifications_auth_header"]', $('#notifications-form')).value = ''; $('#notifications-auth-note').textContent = 'Authorization header cleared.'; $('#clear-notifications-auth').hidden = true; } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
-$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
+$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); if (runtimeMode === 'hosted') lockTestNotificationButton(); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { if (runtimeMode !== 'hosted') button.disabled = false; } });
+// In hosted mode the server allows one test delivery per minute per account
+// (hostedTestNotificationCooldown in internal/server/notifications.go). The
+// button is held disabled for that window so the UI matches the server budget
+// instead of surfacing a 429 on a second click.
+function lockTestNotificationButton() {
+  const button = $('#send-test-notification');
+  button.disabled = true;
+  setTimeout(() => { button.disabled = false; }, HOSTED_NOTIFICATION_COOLDOWN * 1000);
+}
 
 // Settings tabs. Account is hosted-only; the others carry the existing config
 // cards. The hash reflects the sub-tab (#settings/<tab>) so deep links work.
-const SETTINGS_TABS = ['account', 'routing', 'logging', 'security', 'notifications', 'data'];
+const SETTINGS_TABS = ['account', 'routing', 'logging', 'notifications', 'data'];
 let settingsTab = 'routing';
 function showSettingsTab(tab) {
-  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && runtimeMode !== 'hosted')) tab = 'routing';
+  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable())) tab = 'routing';
   settingsTab = tab;
   $$('.settings-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.settingsTab === tab));
   $$('.settings-panel').forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.classList.toggle('active', active); panel.hidden = !active; });
-  $('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+  $('#settings-tab-account').hidden = !accountTabAvailable();
   // Account actions save themselves; the shared save bar only applies to config.
   $('#save-settings-top').hidden = tab === 'account';
   $('#save-settings-bottom').hidden = tab === 'account';
 }
+// accountTabAvailable reports whether the Settings → Account panel applies:
+// hosted installs always, and local installs only when passkeys are enabled
+// (the only local account surface is passkey management).
+function accountTabAvailable() {
+  return runtimeMode === 'hosted' || runtimePasskeysEnabled;
+}
 $$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSettingsTab(btn.dataset.settingsTab); const hash = btn.dataset.settingsTab === 'routing' ? '#settings' : `#settings/${btn.dataset.settingsTab}`; if (location.hash !== hash) history.pushState(null, '', hash); if (btn.dataset.settingsTab === 'account') loadAccount(); }));
-$('#settings-tab-account').hidden = runtimeMode !== 'hosted';
+// The Account tab is hidden until the runtime probe reports whether this is a
+// hosted install or a local install with passkeys enabled. applyAccountTabVisibility
+// runs once /api/runtime has been parsed (see initialise()).
+function applyAccountTabVisibility() {
+  $('#settings-tab-account').hidden = !accountTabAvailable();
+}
 
 async function loadAccount() {
-  if (runtimeMode !== 'hosted') return;
+  if (runtimeMode !== 'hosted') { await loadLocalAccount(); return; }
   try {
     const [profile, usage, plan] = await Promise.all([api('/api/auth/account'), api('/api/admin/usage'), api('/api/auth/account/plan')]);
     $('#account-email').textContent = profile.email;
@@ -1924,22 +2507,75 @@ async function loadAccount() {
     $('#account-plan').textContent = profile.plan;
     $('#account-status').textContent = profile.account_status;
     $('#account-created').textContent = profile.created_at ? new Date(profile.created_at).toLocaleString() : '—';
-    $('#account-delete-hint').textContent = profile.email;
-    $('#account-google-status').textContent = profile.google_linked ? 'Google is linked to this account.' : 'Google is not linked to this account.';
-    $('#account-google-link-form').hidden = profile.google_linked || !profile.password_enabled || !hostedAuthOptions.google_enabled;
-    $('#account-google-reauth').hidden = !profile.google_linked || !hostedAuthOptions.google_enabled;
-    $('#account-google-unlink').hidden = !profile.google_linked || !profile.password_enabled;
-    $('#account-google-unlink-form').hidden = true;
-    $('#account-password-auth-hint').textContent = profile.password_enabled ? '' : 'Confirm with Google before setting a password.';
-    $('#account-current-password').required = profile.password_enabled;
-    $('#account-email-password').required = profile.password_enabled;
+    accountEmailForDelete = profile.email;
+    const googleEnabled = !!hostedAuthOptions.google_enabled, googleLinked = !!profile.google_linked;
+    accountGoogleLinked = googleLinked;
+    $('#account-google-card').hidden = !googleLinked;
+    $('#account-google-unlink').hidden = !profile.has_password;
+    $('#account-google-link-card').hidden = !googleEnabled || googleLinked;
+    // Accounts without a usable password (Google-only, passkey-only) cannot
+    // type a password to confirm sensitive changes. Google-only accounts get
+    // the Google reauth row; a passkey-only account gets a passkey-confirm row.
+    const noPassword = !profile.password_enabled;
+    const googleOnlyDelete = noPassword && googleLinked;
+    const hasPasskey = (profile.passkeys || []).length > 0 && !!profile.passkeys_enabled;
+    const passkeyOnly = noPassword && hasPasskey && !googleLinked;
+    $('#account-password-card').hidden = googleLinked;
+    $('#account-password-auth-hint').textContent = '';
+    $('#account-current-password-row').hidden = passkeyOnly;
+    $('#account-current-password').required = !passkeyOnly;
+    $('#account-passkey-reauth-row').hidden = !passkeyOnly;
+    $('#account-email-passkey-row').hidden = !passkeyOnly;
+    $('#account-email-password-row').hidden = googleLinked || passkeyOnly;
+    $('#account-email-password').required = !noPassword;
+    $('#account-email-password').disabled = noPassword;
+    $('#account-delete-password-row').hidden = noPassword;
     $('#account-delete-password').required = profile.password_enabled;
-    $('#account-delete-password').disabled = false;
-    $('#account-delete-password').placeholder = profile.password_enabled ? '' : 'Use Google confirmation';
+    $('#account-delete-password').disabled = noPassword;
+    $('#account-delete-google-row').hidden = !googleOnlyDelete;
+    $('#account-delete-google-status').textContent = googleReauthValid()
+      ? 'Google confirmed your identity. Click Delete my account to continue.'
+      : 'Click Delete my account to confirm with Google, then return here to complete deletion.';
+    // Google-linked accounts confirm via Google; a non-Google passkey-only
+    // account confirms with an assertion.
+    $('#account-delete-passkey-row').hidden = !passkeyOnly;
+    $('#account-delete-passkey-status').textContent = 'Click Delete my account, then confirm with your passkey.';
     const windows = usage.client_keys ? Object.values(usage.client_keys) : [];
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
-    $('#account-usage').innerHTML = [['1h', sum('1h')], ['24h', sum('24h')], ['7d', sum('7d')]].map(([label, value]) => `<div class="metric"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label} tokens</span></div>`).join('');
+    const costWindows = usage.client_cost ? Object.values(usage.client_cost) : [];
+    const sumCost = windowKey => costWindows.reduce((total, w) => total + ((w?.[windowKey] ?? 0) || 0), 0);
+    const metric = (label, value, usd = false) => `<div class="metric${usd ? ' metric-usd' : ''}"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
+    $('#account-usage').innerHTML = [
+      metric('1h tokens', sum('1h')),
+      metric('24h tokens', sum('24h')),
+      metric('7d tokens', sum('7d')),
+      metric('24h est. USD', (sumCost('24h') / 1e6).toFixed(2), true),
+      metric('7d est. USD', (sumCost('7d') / 1e6).toFixed(2), true),
+    ].join('');
     renderPlanCard(plan);
+    state.planInfo = plan; state.planInfoAt = Date.now();
+    if (window.__renderPasskeysCard) window.__renderPasskeysCard(profile);
+  } catch (error) {
+    flash(errorMessage(error, 'Could not load account details.'), 'error');
+  }
+}
+
+// loadLocalAccount renders the local operator's Settings → Account panel. The
+// local install is single-operator with no hosted account surface (no plan, no
+// email change, no deletion), so only the identity summary and the passkeys
+// card are shown; the hosted-only cards are hidden.
+async function loadLocalAccount() {
+  try {
+    const profile = await api('/api/admin/account');
+    $('#account-email').textContent = profile.email;
+    $('#account-id').textContent = profile.account_id;
+    $('#account-plan').textContent = profile.plan;
+    $('#account-status').textContent = profile.account_status;
+    $('#account-created').textContent = profile.created_at ? new Date(profile.created_at).toLocaleString() : '—';
+    ['account-password-card', 'account-google-card', 'account-google-link-card', 'account-delete-form'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
+    const planCard = $('#account-plan-card'); if (planCard) planCard.closest('article').hidden = true;
+    const usage = $('#account-usage'); if (usage) usage.hidden = true;
+    if (window.__renderPasskeysCard) window.__renderPasskeysCard(profile);
   } catch (error) {
     flash(errorMessage(error, 'Could not load account details.'), 'error');
   }
@@ -1962,23 +2598,86 @@ function renderPlanCard(plan) {
   ].join('');
 }
 
-// loadFooterVersion shows the deployed version/commit with an AGPL source link.
-async function loadFooterVersion() {
-  try {
-    const info = await fetch('/health/version').then(res => res.json());
-    const commit = info.commit || ''; const version = info.version || '';
-    const label = [version, commit].filter(Boolean).join(' · ') || 'development build';
-    const url = commit ? `https://github.com/dellarb/tiller-router/commit/${encodeURIComponent(commit)}` : 'https://github.com/dellarb/tiller-router';
-    $('#footer-source').innerHTML = `${h(label)} — <a href="${h(url)}" target="_blank" rel="noopener">source</a>`;
-  } catch { /* footer is best-effort */ }
+// renderProviderUsage fills every provider card's usage block from the current
+// quota snapshots (state.providerQuota) and usage envelope (state.usage). It is
+// called both when quota arrives and when the usage envelope arrives, so cost
+// and quota never depend on fetch ordering.
+function renderProviderUsage() {
+  $$('article.provider-card').forEach(card => {
+    const provider = state.providers.find(p => p.id === card.dataset.providerId);
+    const usage = $('.provider-usage', card);
+    if (provider && usage) usage.innerHTML = providerQuotaHTML(provider) + providerCostHTML(provider);
+  });
 }
 
-// showLegalDocument renders a published legal document. Bodies are plain text
-// (no rich rendering), so they are inserted as textContent with preserved
-// whitespace to avoid any injection path.
+// loadQuota fetches cached subscription/quota snapshots and re-renders the
+// provider-card usage blocks.
+async function loadQuota() {
+  try {
+    const payload = await api('/api/admin/quota');
+    state.providerQuota = payload?.providers || {};
+    renderProviderUsage();
+  } catch {
+    state.providerQuota = state.providerQuota || {};
+    renderProviderUsage();
+  }
+}
+// Viewing Providers keeps the displayed snapshots fresh; the server owns the
+// 30-minute idle / 60-second active cadence and the 30-second on-view floor.
+setInterval(() => {
+  if (state.view === 'providers' && !document.hidden) loadQuota();
+}, 60000);
+
+// renderQuotaProvider renders one provider's quota snapshot.
+function renderQuotaProvider(snap) {
+  const name = h(snap.provider_name || snap.provider_id || 'Provider');
+  if (!snap.available) {
+    return `<div class="plan-row"><span class="plan-label">${name}</span><span class="plan-value">Unavailable${snap.reason ? ` (${h(snap.reason)})` : ''}</span></div>`;
+  }
+  const plan = snap.plan ? `<span class="plan-label">${name} <small>${h(snap.plan)}</small></span>` : `<span class="plan-label">${name}</span>`;
+  const windows = (snap.windows || []).map(w => {
+    if (w.used_percent != null) {
+      const pct = Math.round(w.used_percent);
+      return `<span class="quota-window"><small>${h(w.label)}</small><b>${pct}% used</b></span>`;
+    }
+    if (w.remaining != null) {
+      return `<span class="quota-window"><small>${h(w.label)}</small><b>${Number(w.remaining).toLocaleString()} left</b></span>`;
+    }
+    return `<span class="quota-window"><small>${h(w.label)}</small><b>—</b></span>`;
+  }).join('');
+  return `<div class="plan-row quota-row"><span class="plan-label">${plan}</span><span class="quota-windows">${windows}</span></div>`;
+}
+
+// showFeedback opens the full-width feedback panel inviting users to email us
+// while Tiller Router is in active development.
+function showFeedback() {
+  $('#login-shell').hidden = true; $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true;
+  $('#feedback-shell').hidden = false;
+  $('#feedback-shell').scrollTop = 0;
+}
+// The footer link is built in JS so the label stays in one place with the panel
+// copy. It opens the same feedback panel as the top-bar button.
+function renderFooterFeedback() {
+  $('#footer-feedback').innerHTML = '<button class="btn-link" id="open-feedback-footer" type="button">Feedback — tiller-router@hgolabs.com</button>';
+  $('#open-feedback-footer').addEventListener('click', showFeedback);
+}
+// Feedback is reachable from the signed-in top bar and (hosted) footer, so
+// closing it returns to the app. showFeedback is never the entry point for an
+// unauthenticated visitor, so there is no login fallback to handle.
+$('#open-feedback').addEventListener('click', showFeedback);
+$('#feedback-back').addEventListener('click', () => {
+  $('#feedback-shell').hidden = true;
+  $('#app').hidden = false;
+});
+
+// showLegalDocument renders a published legal document in the full-width legal
+// shell. Bodies are plain text (no rich rendering), so they are inserted as
+// textContent with preserved whitespace to avoid any injection path.
 async function showLegalDocument(slug) {
-  $('#login-shell').hidden = false; $('#app').hidden = true; $('#platform-shell').hidden = true;
-  authView('legal-panel');
+  $('#login-shell').hidden = true; $('#app').hidden = true; $('#platform-shell').hidden = true;
+  $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true;
+  $('#legal-shell').hidden = false;
+  $('#legal-shell').scrollTop = 0;
   const body = $('#legal-body');
   body.textContent = 'Loading…';
   try {
@@ -1988,15 +2687,20 @@ async function showLegalDocument(slug) {
     body.textContent = doc.body;
   } catch (error) {
     $('#legal-title').textContent = 'Not found';
+    $('#legal-updated').textContent = '';
     body.textContent = errorMessage(error, 'This document is not available.');
   }
 }
+$('#legal-back').onclick = () => showLogin();
 
 // refreshWizardButton shows/hides the top-bar Get started button based on
 // whether onboarding is still outstanding, and auto-opens the wizard on the
-// first hosted login when setup is incomplete.
+// first login when setup is incomplete. It applies to hosted and to local
+// installs whose admin came from the first-run wizard; env-admin local installs
+// skip onboarding entirely (runtimeWizardEnabled false).
 async function refreshWizardButton(autoOpen = false) {
-  if (runtimeMode !== 'hosted') { $('#open-wizard').hidden = true; return; }
+  const enabled = runtimeMode === 'hosted' || (runtimeMode === 'local' && runtimeWizardEnabled);
+  if (!enabled) { $('#open-wizard').hidden = true; return; }
   try {
     const status = await api('/api/auth/onboarding');
     const show = Boolean(status.needs_onboarding);
@@ -2005,14 +2709,31 @@ async function refreshWizardButton(autoOpen = false) {
   } catch { $('#open-wizard').hidden = true; }
 }
 
-const WIZARD_STEPS = ['Provider', 'Target', 'Client key', 'Connect'];
+const WIZARD_STEPS = ['Provider', 'Client key', 'Virtual route', 'Connect'];
 let wizardStep = 0;
-const wizardState = { clientKey: '', modelName: '' };
+const wizardState = { clientType: '', clientName: '', virtualName: '' };
 
 function openWizard() {
   wizardStep = 0;
+  wizardState.clientType = ''; wizardState.clientName = ''; wizardState.virtualName = '';
   renderWizard();
   const dialog = $('#wizard-dialog'); if (dialog && !dialog.open) dialog.showModal();
+}
+
+// wizardAdvance moves to the next step when an action launched from the wizard
+// completes. It is a no-op if the wizard was closed in the meantime.
+function wizardAdvance() {
+  if (!$('#wizard-dialog')?.open) return;
+  if (wizardStep < WIZARD_STEPS.length - 1) { wizardStep++; renderWizard(); }
+}
+
+// modelNameForSnippet picks the model identity the Connect step should show: a
+// virtual route if one was created, else the Single key's exposed name, else the
+// first available real model, else a neutral fallback.
+function modelNameForSnippet() {
+  if (wizardState.virtualName) return wizardState.virtualName;
+  if (wizardState.clientType === 'single' && wizardState.clientName) return wizardState.clientName;
+  return state.models.find(model => model.available)?.canonical_model_id || 'main';
 }
 
 function renderWizard() {
@@ -2023,19 +2744,45 @@ function renderWizard() {
   $('#wizard-next').textContent = wizardStep === WIZARD_STEPS.length - 1 ? 'Done' : 'Continue';
   if (wizardStep === 0) {
     body.innerHTML = `<h3>Connect a provider</h3><p>Add the AI provider you want Tiller to route to. Your credential is encrypted at rest and never shown again.</p><button class="btn btn-primary" id="wizard-add-provider" type="button">Add provider</button><p class="meta-line">${state.providers.length ? h(state.providers.length + ' provider(s) configured.') : 'No providers configured yet.'}</p>`;
-    const button = $('#wizard-add-provider'); if (button) button.onclick = () => openProvider();
+    const button = $('#wizard-add-provider'); if (button) button.onclick = () => openProvider(null, wizardAdvance);
   } else if (wizardStep === 1) {
-    body.innerHTML = `<h3>Choose a target</h3><p>Point the client at a real model, or create a virtual route to map a stable name and add fallbacks.</p><div class="wizard-actions"><button class="btn btn-secondary" id="wizard-add-virtual" type="button">Create virtual route (optional)</button></div><p class="meta-line">You can skip this and use a real model directly.</p>`;
-    const button = $('#wizard-add-virtual'); if (button) button.onclick = () => openVirtualModel();
+    body.innerHTML = `<h3>Create a client key</h3><p>A client key is the API key your tools use. Tiller shows the secret once. First, choose how much this key can reach.</p><div class="wizard-actions"><button class="btn btn-primary" id="wizard-client-all" type="button">All models</button><button class="btn btn-secondary" id="wizard-client-subset" type="button">Choose models</button></div><p class="meta-line">All models reaches every model, including ones added later. You can change this in the client's settings.</p>`;
+    const allButton = $('#wizard-client-all'); if (allButton) allButton.onclick = () => wizardCreateClient('all');
+    const subsetButton = $('#wizard-client-subset'); if (subsetButton) subsetButton.onclick = () => wizardCreateClient('subset');
   } else if (wizardStep === 2) {
-    body.innerHTML = `<h3>Create a client key</h3><p>A client key is the API key your tools use. Tiller shows the secret once.</p><button class="btn btn-primary" id="wizard-add-client" type="button">Create client key</button>`;
-    const button = $('#wizard-add-client'); if (button) button.onclick = () => openClient();
+    body.innerHTML = `<h3>Create a virtual route (optional)</h3><p>Map a stable model name to one or more real models, with ordered fallback if the first target fails.</p><div class="wizard-actions"><button class="btn btn-secondary" id="wizard-add-virtual" type="button">Create virtual route</button></div><p class="meta-line">Optional — continue to use a real model directly.</p>`;
+    const button = $('#wizard-add-virtual'); if (button) button.onclick = () => openVirtualModel(null, name => { if (name) wizardState.virtualName = name; wizardAdvance(); });
   } else {
+    const modelName = modelNameForSnippet();
     const base = location.origin + '/v1';
-    const snippet = `curl ${base}/chat/completions -H "Authorization: Bearer $TILLER_API_KEY" -H "Content-Type: application/json" -d '{"model":"${wizardState.modelName || 'main'}","messages":[{"role":"user","content":"Hello"}]}'`;
-    body.innerHTML = `<h3>Point your tool at Tiller</h3><p>Use this endpoint and your client key (model name: <code>${h(wizardState.modelName || 'main')}</code>).</p><div class="secret-box"><code>${h(snippet)}</code><button class="btn btn-secondary" id="wizard-copy" type="button">Copy</button></div><p class="meta-line">Setup completes automatically when your first request routes successfully.</p>`;
+    const snippet = `curl ${base}/chat/completions -H "Authorization: Bearer $TILLER_API_KEY" -H "Content-Type: application/json" -d '{"model":"${modelName}","messages":[{"role":"user","content":"Hello"}]}'`;
+    body.innerHTML = `<h3>Point your tool at Tiller</h3><p>Use this endpoint and your client key (model name: <code>${h(modelName)}</code>).</p><div class="secret-box"><code>${h(snippet)}</code><button class="btn btn-secondary" id="wizard-copy" type="button">Copy</button></div><p class="meta-line">Setup completes automatically when your first request routes successfully.</p>`;
     const button = $('#wizard-copy'); if (button) button.onclick = () => navigator.clipboard?.writeText(snippet);
   }
+}
+
+// wizardCreateClient runs the wizard's access-mode choice against the shared
+// client form. "all" grants the new catalogue key every model (current and
+// future); "subset" hands off to the permissions dialog and only advances once
+// that catalogue is saved. Single keys carry their own target, so the mode is
+// ignored for them.
+function wizardCreateClient(mode) {
+  openClient(null, async (result, payload) => {
+    wizardState.clientType = result?.type || '';
+    if (wizardState.clientType === 'single') wizardState.clientName = payload?.single_model_name || 'main';
+    if (wizardState.clientType === 'catalogue' && mode === 'all') {
+      try { await enableAllClientModels(result); } catch (error) { flash(errorMessage(error, 'Could not grant all-model access.'), 'error'); return; }
+      wizardAdvance();
+    } else if (wizardState.clientType === 'catalogue' && mode === 'subset') {
+      // Wait for the one-time secret dialog to close so permissions opens on top
+      // of the wizard, not behind the key reveal.
+      const secret = $('#secret-dialog');
+      if (secret?.open) secret.addEventListener('close', () => openPermissions(result, wizardAdvance), { once: true });
+      else openPermissions(result, wizardAdvance);
+    } else {
+      wizardAdvance();
+    }
+  }, 'catalogue');
 }
 $('#wizard-prev').addEventListener('click', () => { if (wizardStep > 0) { wizardStep--; renderWizard(); } });
 $('#wizard-next').addEventListener('click', async () => {
@@ -2044,44 +2791,57 @@ $('#wizard-next').addEventListener('click', async () => {
   await refreshWizardButton(false);
 });
 $('#wizard-dismiss').addEventListener('click', async () => {
-  try { await api('/api/auth/onboarding/dismiss', { method: 'POST', body: '{}' }); } catch { /* best-effort */ }
-  $('#wizard-dialog').close(); $('#open-wizard').hidden = true;
+  const button = $('#wizard-dismiss');
+  const error = $('#wizard-error');
+  button.disabled = true;
+  error.textContent = '';
+  try {
+    await api('/api/auth/onboarding/dismiss', { method: 'POST', body: '{}' });
+    $('#wizard-dialog').close(); $('#open-wizard').hidden = true;
+  } catch (err) {
+    error.textContent = errorMessage(err, 'Could not save your setup preference.');
+  } finally {
+    button.disabled = false;
+  }
 });
 $('#close-wizard').addEventListener('click', () => $('#wizard-dialog').close());
 $('#open-wizard').addEventListener('click', openWizard);
 $('#legal-back').addEventListener('click', () => { history.replaceState(null, '', '/login'); showLogin(); });
 
 $('#account-password-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-password-error').textContent = '';
-  try { await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password'), new_password: form.get('new_password') }) }); event.currentTarget.reset(); flash('Password updated. Other sessions were signed out.'); }
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); $('#account-password-error').textContent = '';
+  try {
+    // A passkey-only account confirms with an assertion instead of a password;
+    // the one-use grant is spent by the password endpoint server-side.
+    const currentPassword = $('#account-current-password-row').hidden ? '' : form.get('current_password');
+    if ($('#account-current-password-row').hidden) await window.__confirmWithPasskey();
+    await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: form.get('new_password') }) }); formElement.reset(); flash('Password updated. Other sessions were signed out.');
+  }
   catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
 });
-$('#account-google-link-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-google-link-error').textContent = '';
-  try {
-    const result = await api('/api/auth/google/link/start', { method: 'POST', body: JSON.stringify({ current_password: form.get('current_password') }) });
-    location.assign(result.redirect_url);
-  } catch (error) { $('#account-google-link-error').textContent = errorMessage(error, 'Could not start Google linking.'); }
-});
-$('#account-google-reauth').addEventListener('click', async () => {
+$('#account-google-unlink').addEventListener('click', async () => {
   $('#account-google-error').textContent = '';
   try {
+    sessionStorage.setItem('googleReauthAction', 'unlink');
     const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
     location.assign(result.redirect_url);
-  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not start Google confirmation.'); }
-});
-$('#account-google-unlink').addEventListener('click', () => { $('#account-google-unlink-form').hidden = !$('#account-google-unlink-form').hidden; });
-$('#account-google-unlink-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget);
-  try {
-    await api('/api/auth/account/google', { method: 'DELETE', body: JSON.stringify({ password: form.get('password') }) });
-    await loadAccount(); flash('Google was unlinked from your account.');
-  } catch (error) { $('#account-google-error').textContent = errorMessage(error, 'Could not unlink Google.'); }
+  } catch (error) { sessionStorage.removeItem('googleReauthAction'); $('#account-google-error').textContent = errorMessage(error, 'Could not start Google confirmation.'); }
 });
 $('#account-email-form').addEventListener('submit', async event => {
-  event.preventDefault(); const form = new FormData(event.currentTarget); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
-  try { const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); event.currentTarget.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.'; }
-  catch (error) { note.textContent = errorMessage(error, 'Could not start the email change.'); }
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const note = $('#account-email-error'); note.style.color = ''; note.textContent = '';
+  try {
+    if (accountGoogleLinked) {
+      sessionStorage.setItem('googleReauthAction', 'email');
+      sessionStorage.setItem('googleReauthEmail', String(form.get('new_email') || ''));
+      const reauth = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+      location.assign(reauth.redirect_url);
+      return;
+    }
+    // Passkey-only accounts confirm with an assertion instead of a password.
+    if (!$('#account-email-passkey-row').hidden) await window.__confirmWithPasskey();
+    const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: form.get('new_email'), password: form.get('password') }) }); formElement.reset(); note.style.color = 'var(--green)'; note.textContent = result.message || 'Check the new address for a confirmation link.';
+  }
+  catch (error) { sessionStorage.removeItem('googleReauthAction'); sessionStorage.removeItem('googleReauthEmail'); note.textContent = errorMessage(error, 'Could not start the email change.'); }
 });
 $('#account-revoke-sessions').addEventListener('click', async () => {
   const button = $('#account-revoke-sessions'); button.disabled = true; $('#account-sessions-error').textContent = '';
@@ -2101,10 +2861,60 @@ $('#account-export').addEventListener('click', async event => {
 });
 $('#account-delete-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = new FormData(event.currentTarget); $('#account-delete-error').textContent = '';
-  if (!window.confirm('Delete your account now? This is immediate and irreversible.')) return;
-  const button = $('#account-delete-form button[type="submit"]'); button.disabled = true;
-  try { const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: form.get('confirm'), password: form.get('password') }) }); flash(result.message || 'Account deleted.'); showLogin(); }
-  catch (error) { $('#account-delete-error').textContent = errorMessage(error, 'Could not delete the account.'); button.disabled = false; }
+  if (accountGoogleLinked && !googleReauthValid()) {
+    try {
+      sessionStorage.setItem('googleReauthAction', 'delete');
+      const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+      location.assign(result.redirect_url);
+    } catch (error) {
+      sessionStorage.removeItem('googleReauthAction');
+      $('#account-delete-error').textContent = errorMessage(error, 'Could not start Google confirmation.');
+    }
+    return;
+  }
+  if (accountGoogleLinked) {
+    showAccountDeleteConfirmation({ email: accountEmailForDelete, google: true });
+    return;
+  }
+  const passkeyConfirm = !$('#account-delete-passkey-row').hidden;
+  showAccountDeleteConfirmation({ email: accountEmailForDelete, google: false, passkey: passkeyConfirm });
+});
+
+$('#account-delete-cancel').addEventListener('click', () => {
+  $('#account-delete-shell').hidden = true;
+  $('#app').hidden = false;
+  if (sessionStorage.getItem('googleReauthAction') === 'delete') sessionStorage.removeItem('googleReauthAction');
+  state.view = 'settings';
+  showSettingsTab('account');
+  history.replaceState(null, '', '/#settings/account');
+});
+
+$('#account-delete-confirm-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const email = formElement.dataset.email || '';
+  const google = formElement.dataset.google === '1';
+  const passkey = formElement.dataset.passkey === '1';
+  const button = $('button[type="submit"]', formElement);
+  const typedEmail = String(form.get('confirm') || '').trim();
+  $('#account-delete-confirm-error').textContent = '';
+  if (typedEmail.toLowerCase() !== email.trim().toLowerCase()) {
+    $('#account-delete-confirm-error').textContent = 'Enter the account email exactly to confirm deletion.';
+    return;
+  }
+  button.disabled = true;
+  try {
+    if (passkey) await window.__confirmWithPasskey();
+    const result = await api('/api/auth/account', { method: 'DELETE', body: JSON.stringify({ confirm: email, password: google || passkey ? '' : form.get('password') || '' }) });
+    sessionStorage.removeItem('googleReauthAction');
+    flash(result.message || 'Account deleted.');
+    showLogin();
+  } catch (error) {
+    $('#account-delete-confirm-error').textContent = errorMessage(error, google ? 'Could not delete the account. Start deletion again to confirm with Google.' : 'Could not delete the account. Check your password and try again.');
+    if (google) googleReauthConfirmedAt = 0;
+    button.disabled = false;
+  }
 });
 
 let entitySubmit = null;
@@ -2118,9 +2928,11 @@ async function handleEntitySubmit(event) { const form = event.currentTarget, but
 
 function confirmAction({ title, copy, action, breaking = false, typeMatch = null, typeLabel = 'name' }) { return new Promise(resolve => { const dialog = $('#confirm-dialog'), form = $('form', dialog), checkWrap = $('#confirm-check-wrap'), check = $('#confirm-check'), typeWrap = $('#confirm-type-wrap'), typeInput = $('#confirm-type'); $('#confirm-title').textContent = title; $('#confirm-copy').textContent = copy; $('#confirm-action').textContent = action; $('#confirm-error').textContent = ''; checkWrap.hidden = !breaking; check.checked = false; typeWrap.hidden = !typeMatch; typeInput.value = ''; if (typeMatch) $('#confirm-type-label').textContent = `Type the ${typeLabel} to confirm`; const valid = () => !typeMatch || typeInput.value === typeMatch; const close = event => { dialog.removeEventListener('close', close); resolve(dialog.returnValue === 'confirm' && (!breaking || check.checked) && valid()); }; form.onsubmit = event => { if (event.submitter?.value !== 'confirm') return; if (breaking && !check.checked) { event.preventDefault(); $('#confirm-error').textContent = 'Acknowledge the breaking client-facing change first.'; return; } if (typeMatch && !valid()) { event.preventDefault(); $('#confirm-error').textContent = `Type the ${typeLabel} exactly to confirm.`; } }; dialog.addEventListener('close', close); dialog.showModal(); if (typeMatch) setTimeout(() => typeInput.focus(), 0); }); }
 
-function selectSecretText() { const node = $('#secret-value'); const sel = window.getSelection(); sel.removeAllRanges(); const range = document.createRange(); range.selectNodeContents(node); sel.addRange(range); }
-function showSecret(secret) { $('#secret-value').textContent = secret; const secure = window.isSecureContext && navigator.clipboard?.writeText; $('#copy-secret').hidden = !secure; $('#copy-state').textContent = ''; $('#secret-dialog').showModal(); if (!secure) { selectSecretText(); $('#copy-state').textContent = 'Key selected — press Ctrl/Cmd+C to copy it.'; } }
+function selectTextContent(selector) { const node = $(selector); const sel = window.getSelection(); sel.removeAllRanges(); const range = document.createRange(); range.selectNodeContents(node); sel.addRange(range); }
+function selectSecretText() { selectTextContent('#secret-value'); }
+function showSecret(secret) { const secure = window.isSecureContext && navigator.clipboard?.writeText; $('#secret-value').textContent = secret; $('#api-base-url').textContent = `${location.origin}/v1`; $('#copy-secret').hidden = !secure; $('#copy-api-base-url').hidden = !secure; $('#copy-state').textContent = ''; $('#api-base-url-copy-state').textContent = ''; $('#secret-dialog').showModal(); if (!secure) { selectSecretText(); $('#copy-state').textContent = 'Key selected — press Ctrl/Cmd+C to copy it.'; $('#api-base-url-copy-state').textContent = 'Select the URL to copy it manually.'; } }
 $('#copy-secret').onclick = async () => { const text = $('#secret-value').textContent; const state = $('#copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { selectSecretText(); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy it.'; } };
+$('#copy-api-base-url').onclick = async () => { const text = $('#api-base-url').textContent; const state = $('#api-base-url-copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Base URL copied to clipboard.'; } catch { selectTextContent('#api-base-url'); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy the URL.'; } };
 $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#secret-dialog').close(); };
 
 document.addEventListener('keydown', event => { if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) { event.preventDefault(); const input = $(`#view-${state.view} input[type="search"]`); input?.focus(); } });
@@ -2275,7 +3087,7 @@ function renderMobileActivity() {
   const list = $('#mobile-activity-body');
   if (!list) return;
   $('#mobile-activity-empty').hidden = entries.length > 0;
-  list.innerHTML = entries.map(entry => `<article class="live-activity-card"><div class="live-activity-top"><span class="live-pulse" aria-hidden="true"></span><strong>${h(entry.client)}</strong><span class="live-activity-state">${entry.streaming ? 'Streaming' : 'In flight'}</span></div><div class="live-activity-chain"><span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.route)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span></div>${entry.targets.length > 1 ? `<p class="live-activity-note">${entry.targets.length} upstream targets active</p>` : ''}<button class="btn btn-small btn-secondary" data-live-activity-client="${h(entry.client)}">View details</button></article>`).join('');
+  list.innerHTML = entries.map(entry => { const sameRoute = entry.requested === entry.route; const chain = sameRoute ? `<span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span>` : `<span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.route)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span>`; return `<article class="live-activity-card"><div class="live-activity-top"><span class="live-pulse" aria-hidden="true"></span><strong>${h(entry.client)}</strong><span class="live-activity-state">${entry.streaming ? 'Streaming' : 'In flight'}</span></div><div class="live-activity-chain">${chain}</div>${entry.targets.length > 1 ? `<p class="live-activity-note">${entry.targets.length} upstream targets active</p>` : ''}<button class="btn btn-small btn-secondary" data-live-activity-client="${h(entry.client)}">View details</button></article>`; }).join('');
   $$('[data-live-activity-client]', list).forEach(button => button.onclick = () => {
     const client = data.clients.find(item => item.name === button.dataset.liveActivityClient);
     if (client) openActivity(client);
@@ -2329,27 +3141,41 @@ function markChanged(el) {
 // text or class actually moved. The cell itself is never replaced, so
 // repeated updates cannot nest .tok .tok and a token value reverting to
 // zero always clears stale Mtok/cache markup.
-function patchTokenCell(cell, tokens, pct) {
+function patchTokenCell(cell, tokens, pct, cost = null) {
+  const row = cell.closest('[data-client-id], [data-model-id], [data-virtual-id]');
+  const window = cell.dataset.window;
+  let costs;
+  if (row?.dataset.clientId) costs = state.usage?.client_cost?.[row.dataset.clientId];
+  else if (row?.dataset.modelId) costs = state.usage?.real_cost?.[state.models.find(m => m.id === row.dataset.modelId)?.canonical_model_id];
+  else if (row?.dataset.virtualId) costs = state.usage?.virtual_cost?.[state.virtualModels.find(m => m.id === row.dataset.virtualId)?.canonical_model_id];
+  if (costs && !costs.estimated?.[window]) cell.dataset.costExact = 'true';
+  else delete cell.dataset.costExact;
   // Once usage has arrived, a still-unknown cell is a genuine empty state, not
   // loading. Rebuild from the loading spinner to the "—"/populated structure.
   if (cell.querySelector('.tok-loading')) {
-    if (tokLoading(tokens, pct)) return;
+    if (tokLoading(tokens, pct, cost)) return;
     cell.removeAttribute('aria-busy');
-    cell.innerHTML = renderTokInner(tokens, pct);
+    cell.innerHTML = renderTokInner(tokens, pct, false, cost);
     const first = $('b', cell);
     if (first) markChanged(first);
     return;
   }
-  const populated = Boolean(tokens) || (pct != null && !isNaN(pct));
-  const numEl = $('b', cell);
+  const costText = fmtCost(cost);
+  const populated = Boolean(tokens) || (pct != null && !isNaN(pct)) || Boolean(costText);
+  const numEl = cell.querySelector(':scope > b');
   const cacheEl = $('.cache-hit b', cell);
+  const costEl = $('.tok-cost b', cell);
   const hasStructured = Boolean(numEl) || Boolean(cacheEl);
-  if (populated !== hasStructured) {
-    cell.innerHTML = renderTokInner(tokens, pct);
+  // When only a cost is present, the structure differs from the token shape;
+  // rebuild so the cost line appears without a spurious Mtok/cache block.
+  if (populated !== hasStructured || Boolean(costText) !== Boolean(costEl)) {
+    cell.innerHTML = renderTokInner(tokens, pct, false, cost);
     const newNum = $('b', cell);
     if (newNum) markChanged(newNum);
     const newCache = $('.cache-hit b', cell);
     if (newCache) markChanged(newCache);
+    const newCost = $('.tok-cost b', cell);
+    if (newCost) markChanged(newCost);
     return;
   }
   if (!populated) return;
@@ -2363,6 +3189,12 @@ function patchTokenCell(cell, tokens, pct) {
     cacheEl.textContent = cache;
     markChanged(cacheEl);
   }
+  if (costEl && costEl.textContent !== costText) {
+    costEl.textContent = costText;
+    markChanged(costEl);
+  }
+  const costLabel = $('.tok-cost small', cell);
+  if (costLabel && costs) costLabel.textContent = costs.estimated?.[window] ? 'est.' : 'reported';
 }
 
 // Patch the resolution icon for one target line from the current state.
@@ -2396,10 +3228,10 @@ function reconcileLive() {
   // a usage sort while usage was unknown is in catalogue order. Re-sort only if
   // the models view is active and the active sort is usage-based; a
   // canonical/provider sort needs no correction. If the view is elsewhere, drop
-  // the flag — the next loadModels() renders already-sorted with usage present.
+  // the flag — the next drawer render uses the current usage snapshot.
   if (modelsResortPending) {
     modelsResortPending = false;
-    if (liveViewActive('models') && MODEL_USAGE_SORTS.has(sortState.column)) reorderModelRows();
+    if (liveViewActive('providers') && $('#provider-drawer').classList.contains('open') && MODEL_USAGE_SORTS.has(sortState.column)) renderModels();
   }
   if (liveViewActive('virtual')) {
     state.virtualModels.forEach(model => {
@@ -2413,21 +3245,27 @@ function reconcileLive() {
       const canonical = model.canonical_model_id;
       ['1h', '24h', '7d'].forEach(window => {
         const cell = $(`.tok[data-window="${window}"]`, row);
-        if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window]);
+        if (cell) patchTokenCell(cell, state.usage?.virtual_models?.[canonical]?.[window], state.usage?.virtual_cache?.[canonical]?.[window], state.usage?.virtual_cost?.[canonical]?.[window]);
       });
       patchVirtualSpinner(row, routeActivity(model.id));
     });
   }
-  if (liveViewActive('models')) {
-    state.models.forEach(model => {
-      const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
-      if (!row) return;
-      const canonical = model.canonical_model_id;
-      ['1h', '24h', '7d'].forEach(window => {
-        const cell = $(`.tok[data-window="${window}"]`, row);
-        if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window]);
+  if (liveViewActive('providers')) {
+    // Provider-card usage blocks (quota bars + router cost) depend on both the
+    // quota snapshots and the usage envelope; re-render them whenever either
+    // arrives so ordering never leaves a card blank.
+    renderProviderUsage();
+    if ($('#provider-drawer').classList.contains('open')) {
+      state.models.forEach(model => {
+        const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
+        if (!row) return;
+        const canonical = model.canonical_model_id;
+        ['1h', '24h', '7d'].forEach(window => {
+          const cell = $(`.tok[data-window="${window}"]`, row);
+          if (cell) patchTokenCell(cell, state.usage?.real_models?.[canonical]?.[window], state.usage?.real_cache?.[canonical]?.[window], state.usage?.real_cost?.[canonical]?.[window]);
+        });
       });
-    });
+    }
   }
   if (liveViewActive('clients')) {
     state.clients.forEach(client => {
@@ -2435,7 +3273,7 @@ function reconcileLive() {
       if (row) {
         ['1h', '24h', '7d'].forEach(window => {
           const cell = $(`.tok[data-window="${window}"]`, row);
-          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window]);
+          if (cell) patchTokenCell(cell, state.usage?.client_keys?.[client.id]?.[window], state.usage?.client_cache?.[client.id]?.[window], state.usage?.client_cost?.[client.id]?.[window]);
         });
         applyClientRoundel($('.status-roundel', row), client, state.liveRequests[client.id]);
       }
@@ -2445,7 +3283,7 @@ function reconcileLive() {
           const cells = $$(`.tok[data-window="${window}"]`, card);
           const values = state.usage?.client_keys?.[client.id]?.[window];
           const caches = state.usage?.client_cache?.[client.id]?.[window];
-          cells.forEach(cell => patchTokenCell(cell, values, caches));
+          cells.forEach(cell => patchTokenCell(cell, values, caches, state.usage?.client_cost?.[client.id]?.[window]));
         });
         applyClientRoundel($('.status-roundel', card), client, state.liveRequests[client.id]);
       }
@@ -2484,7 +3322,7 @@ live.on('outcome', payload => {
 
 live.on('snapshot', payload => {
   if (!state.usage) state.usage = {};
-  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache'].forEach(key => {
+  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'tokens_estimated'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
   // The SSE baseline snapshot already carries the usage envelope, so mark it
@@ -2583,7 +3421,7 @@ $$('dialog').forEach(dialog => dialog.addEventListener('close', () => {
 const liveNavigate = navigate;
 navigate = function (view) {
   liveNavigate(view);
-  if (liveViewActive('models', 'virtual', 'clients')) reconcileLive();
+    if (liveViewActive('providers', 'virtual', 'clients')) reconcileLive();
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
     try { noteActivityCatalogueMiss(activityGraphModule.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs })); } catch { /* pane update is best-effort */ }
     try { activityGraphModule.onCooldowns(state.usage?.target_cooldown || {}); } catch { /* pane update is best-effort */ }
@@ -2593,16 +3431,70 @@ navigate = function (view) {
 function liveStart() { live.start(); }
 function liveStop() { live.stop(); }
 
+// Analytics consent is stored client-side only. The analytics script is never
+// requested until the visitor explicitly accepts; declining is remembered so
+// the banner is not shown again. The script origin is a server-side CSP
+// concern (see securityHeaders), so this layer only decides whether to load it.
+const ANALYTICS_CONSENT_KEY = 'tiller_analytics_consent';
+
+function storedAnalyticsConsent() {
+  try {
+    const value = localStorage.getItem(ANALYTICS_CONSENT_KEY);
+    return value === 'accepted' || value === 'declined' ? value : null;
+  } catch { return null; }
+}
+
+function setStoredAnalyticsConsent(choice) {
+  try { localStorage.setItem(ANALYTICS_CONSENT_KEY, choice); } catch { /* storage unavailable */ }
+}
+
+function loadAnalyticsScript(options) {
+  if (!options || !options.script_url) return;
+  if (document.querySelector('script[data-tiller-analytics]')) return;
+  const script = document.createElement('script');
+  script.src = options.script_url;
+  script.async = true;
+  script.defer = true;
+  script.dataset.tillerAnalytics = '1';
+  const siteID = String(options.site_id || '').trim();
+  if (options.provider === 'umami' && siteID) script.setAttribute('data-website-id', siteID);
+  else if (options.provider === 'plausible' && siteID) script.setAttribute('data-domain', siteID);
+  document.head.appendChild(script);
+}
+
+async function setupAnalyticsConsent() {
+  let options;
+  try { options = await api('/api/analytics/options'); } catch { return; }
+  if (!options || !options.enabled) return;
+  const decision = storedAnalyticsConsent();
+  if (decision === 'accepted') { loadAnalyticsScript(options); return; }
+  if (decision === 'declined') return;
+  const banner = $('#analytics-consent');
+  if (!banner) return;
+  banner.hidden = false;
+  $('#analytics-accept').onclick = () => { setStoredAnalyticsConsent('accepted'); banner.hidden = true; loadAnalyticsScript(options); };
+  $('#analytics-decline').onclick = () => { setStoredAnalyticsConsent('declined'); banner.hidden = true; };
+}
+
 (async function initialise() {
   try {
+    if (sessionHint()) showBootSkeleton();
     const runtime = await fetch('/api/runtime', { credentials: 'same-origin' }).then(res => res.json());
     runtimeMode = runtime.mode === 'hosted' ? 'hosted' : 'local';
     if (runtimeMode === 'hosted') {
       $('#login-identity-label').firstChild.textContent = 'Email ';
       $('#login-submit').textContent = 'Sign in';
       try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
-      $('#google-signin').hidden = !hostedAuthOptions.google_enabled;
+      await setupAnalyticsConsent();
+    } else {
+      runtimeSetupRequired = Boolean(runtime.setup_required);
+      runtimeWizardEnabled = Boolean(runtime.wizard_enabled);
+      runtimePasskeysEnabled = Boolean(runtime.passkeys_enabled);
     }
+    applyAccountTabVisibility();
+    // A first-run local instance shows the credential page instead of login;
+    // skip the session probe entirely so a stale cookie cannot bounce to login.
+    if (runtimeSetupRequired) { showLogin(); return; }
     const path = location.pathname;
     const query = new URLSearchParams(location.search);
     const token = query.get('token');
@@ -2610,9 +3502,11 @@ function liveStop() { live.stop(); }
       try {
         const session = await api('/api/platform/session');
         state.csrf = session.csrf_token;
+        setSessionHint(true);
+        hideBoot();
         $('#login-shell').hidden = true;
         $('#platform-shell').hidden = false;
-        await loadPlatformDashboard();
+        await selectPlatformTab(platformTabFromHash(), { push: false });
       } catch { showLogin(); }
       return;
     }
@@ -2650,12 +3544,43 @@ function liveStop() { live.stop(); }
       const authError = runtimeMode === 'hosted' ? query.get('auth_error') : '';
       const googleLinked = runtimeMode === 'hosted' && query.get('google_linked') === '1';
       const googleReauth = runtimeMode === 'hosted' && query.get('google_reauth') === '1';
+      const googleAction = sessionStorage.getItem('googleReauthAction') || '';
+      if (googleReauth) googleReauthConfirmedAt = Date.now();
       if (authError || googleLinked || googleReauth) history.replaceState(null, '', location.pathname + location.hash);
       try {
         const session = await api(sessionPath);
+        if (googleReauth && googleAction === 'delete') {
+          state.csrf = session.csrf_token;
+          setSessionHint(true);
+          const profile = await api('/api/auth/account');
+          accountEmailForDelete = profile.email;
+          showAccountDeleteConfirmation({ email: profile.email, google: true });
+          history.replaceState(null, '', '/#settings/account');
+          return;
+        }
         showApp(session);
         if (googleLinked) flash('Google is linked to your account.');
-        else if (googleReauth) flash('Google confirmed your identity. Complete the account change within five minutes.');
+        else if (googleReauth) {
+          flash('Google confirmed your identity.');
+          if (googleAction === 'unlink') {
+            try {
+              await api('/api/auth/account/google', { method: 'DELETE' });
+              flash('Google was unlinked. Password sign-in is restored.');
+            } catch (error) { $('#account-google-error').textContent = `${errorMessage(error, 'Google could not be unlinked.')} Start Unlink Google again to confirm with Google.`; }
+          }
+          if (googleAction === 'email') {
+            const newEmail = sessionStorage.getItem('googleReauthEmail') || '';
+            try {
+              const result = await api('/api/auth/account/email', { method: 'POST', body: JSON.stringify({ new_email: newEmail, password: '' }) });
+              $('#account-email-form').reset();
+              $('#account-email-error').style.color = 'var(--green)';
+              $('#account-email-error').textContent = result.message || 'Check the new address for a confirmation link.';
+            } catch (error) { $('#account-email-error').textContent = `${errorMessage(error, 'Could not start the email change.')} Confirm with Google again and retry.`; }
+            sessionStorage.removeItem('googleReauthEmail');
+          }
+          if (googleAction === 'unlink') await loadAccount();
+          sessionStorage.removeItem('googleReauthAction');
+        }
         else if (authError) flash(googleAuthErrorMessage(authError), 'error');
       } catch {
         showLogin();
@@ -2670,7 +3595,8 @@ function googleAuthErrorMessage(code) {
     google_failed: 'Google sign-in could not be completed. Try again.',
     google_expired: 'That Google sign-in link expired. Start again.',
     google_unavailable: 'Google sign-in is temporarily unavailable.',
-    google_link_required: 'This Google email already has a Tiller account. Sign in to it, then link Google in Account settings.',
+    google_link_required: 'This Google email already has a Tiller account. Sign in to that account first, then try Google sign-in again.',
+    google_link_challenge_required: 'This Google email already has a Tiller account. Sign in with your password to continue, and we will offer to link Google.',
     google_already_linked: 'That Google account is already linked to a Tiller account.',
     google_session_expired: 'Your Tiller session expired. Sign in and try again.',
     signup_unavailable: 'Signup is currently unavailable.',
@@ -2678,20 +3604,98 @@ function googleAuthErrorMessage(code) {
   return messages[code] || 'Google sign-in could not be completed. Try again.';
 }
 
-async function loadPlatformDashboard() {
-  const token = ++state.platformUsersLoadToken;
+async function loadPlatformDashboard(tab = state.platformTab) {
+  if (tab === 'overview') {
+    $('#platform-overview-error').textContent = '';
+    $('#platform-overview-metrics').innerHTML = [
+      metric('…', 'Accounts'), metric('…', 'Active accounts'), metric('…', 'Pending accounts'),
+      metric('…', 'Suspended accounts'), metric('…', 'Users'), metric('…', 'Requests · 24h'),
+      metric('…', 'Tokens · 24h'), metric('…', 'Requests · 7d'), metric('…', 'Tokens · 7d'),
+    ].join('');
+    const stats = await api('/api/platform/stats');
+    const accounts = stats.accounts || {};
+    const usage = stats.usage || {};
+    const usageValue = value => stats.usage_available === false ? 'Unavailable' : formatCount(value);
+    const accountValue = value => value == null ? '—' : formatCount(value);
+    $('#platform-overview-metrics').innerHTML = [
+      metric(accountValue(accounts.accounts), 'Accounts'),
+      metric(accountValue(accounts.active_accounts), 'Active accounts'),
+      metric(accountValue(accounts.pending_accounts), 'Pending accounts'),
+      metric(accountValue(accounts.suspended_accounts), 'Suspended accounts'),
+      metric(accountValue(accounts.users), 'Users'),
+      metric(usageValue(usage.requests_24h), 'Requests · 24h'),
+      metric(stats.usage_available === false ? 'Unavailable' : formatMetricTotal(usage.tokens_24h), 'Tokens · 24h'),
+      metric(usageValue(usage.requests_7d), 'Requests · 7d'),
+      metric(stats.usage_available === false ? 'Unavailable' : formatMetricTotal(usage.tokens_7d), 'Tokens · 7d'),
+    ].join('');
+    $('#platform-overview-error').textContent = stats.usage_available === false ? 'Request and token totals are unavailable because the Activity store could not be read.' : '';
+    return;
+  }
+  if (tab === 'users') {
+    const token = ++state.platformUsersLoadToken;
+    if (!state.platformPlanData.length) await loadPlatformPlans();
+    if (token !== state.platformUsersLoadToken) return;
+    const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });
+    if (state.platformUsersSearch) params.set('search', state.platformUsersSearch);
+    const users = await api(`/api/platform/users?${params}`);
+    if (token !== state.platformUsersLoadToken) return;
+    const userRows = users.data || [];
+    const userStats = users.stats || [];
+    $('#platform-users-list').innerHTML = userRows.map((user, index) => {
+      const stats = userStats[index] || {};
+      const usage = stats.usage || {};
+      const usageValues = stats.usage_available === false
+        ? '<span class="platform-user-usage-unavailable">Usage unavailable</span>'
+        : [
+            `1h ${formatCount(usage.requests_1h)} req · ${formatCount(usage.tokens_1h)} tok`,
+            `24h ${formatCount(usage.requests_24h)} req · ${formatCount(usage.tokens_24h)} tok`,
+            `7d ${formatCount(usage.requests_7d)} req · ${formatCount(usage.tokens_7d)} tok`,
+          ].join(' · ');
+      const resourceValues = [
+        `${formatCount(stats.providers)} providers`,
+        `${formatCount(stats.client_keys)} client keys`,
+        `${formatCount(stats.virtual_models)} virtual models`,
+        `${formatCount(stats.models)} models`,
+      ].join(' · ');
+      const statsLine = `<div class="platform-user-stats"><small>${resourceValues}</small><small>${usageValues}</small></div>`;
+      return `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small>${statsLine}<div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<span class="plan-assign"><select class="plan-select" data-account-plan="${h(user.account_id)}" aria-label="Plan for ${h(user.email)}">${planOptionList(user.plan)}</select><button class="btn btn-small btn-secondary" data-account-plan-save="${h(user.account_id)}">Save plan</button></span><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`;
+    }).join('') || '<p class="meta-line">No hosted users.</p>';
+    $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
+    $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
+    $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || !users.has_more;
+    $('#platform-users-error').textContent = '';
+    return;
+  }
+  if (tab === 'plans') { await loadPlatformPlans(); return; }
+  if (tab === 'mail') { await loadPlatformMail(); return; }
+  if (tab === 'logs') { await loadPlatformAudit(); return; }
+  if (tab === 'legal') { await loadPlatformLegal(); return; }
+  if (tab === 'settings') { await Promise.all([loadPlatformSettings(), loadPlatformAnalytics()]); return; }
+}
+
+function setPlatformStatsUnavailable(message) {
+  $('#platform-overview-metrics').innerHTML = [
+    metric('—', 'Accounts'), metric('—', 'Active accounts'), metric('—', 'Pending accounts'),
+    metric('—', 'Suspended accounts'), metric('—', 'Users'), metric('Unavailable', 'Requests · 24h'),
+    metric('Unavailable', 'Tokens · 24h'), metric('Unavailable', 'Requests · 7d'), metric('Unavailable', 'Tokens · 7d'),
+  ].join('');
+  $('#platform-overview-error').textContent = message;
+}
+
+function formatMetricTotal(value) {
+  const formatted = formatCount(value);
+  return formatted === '—' ? formatted : `${formatted} tokens`;
+}
+
+function formatCount(value) {
+  return value == null ? '—' : new Intl.NumberFormat().format(value);
+}
+
+async function loadPlatformSettings() {
   const settings = await api('/api/platform/settings');
-  $('#backup-card').hidden = true;
   const form = $('#platform-settings-form');
   form.elements.hosted_signup_enabled.checked = !!settings.hosted_signup_enabled;
   form.elements.audit_retention_days.value = settings.audit_retention_days;
-  form.elements.mail_provider.value = settings.mail?.provider || '';
-  applyMailProviderVisibility(settings.mail?.provider || '');
-  form.elements.mail_from.value = settings.mail?.from || '';
-   form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
-   form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
-   form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
-  form.elements.mail_smtp_mode.value = settings.mail?.smtp_mode || 'starttls';
   form.elements.google_signin_enabled.checked = !!settings.google?.enabled;
   form.elements.google_client_id.value = settings.google?.client_id || '';
   form.elements.google_client_secret.value = '';
@@ -2702,37 +3706,138 @@ async function loadPlatformDashboard() {
   form.elements.clear_turnstile_secret.checked = false;
   $('#google-settings-status').textContent = `Client secret ${settings.google?.secret_configured ? 'stored' : 'missing'}. Redirect URI: ${settings.google?.redirect_uri || ''}`;
   $('#turnstile-settings-status').textContent = `Secret key ${settings.turnstile?.secret_configured ? 'stored' : 'missing'}. Challenge hostname: ${settings.turnstile?.hostname || ''}`;
-  $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
-  const params = new URLSearchParams({ limit: '100', offset: String(state.platformUsersOffset) });
-  if (state.platformUsersSearch) params.set('search', state.platformUsersSearch);
-  const users = await api(`/api/platform/users?${params}`);
-  if (token !== state.platformUsersLoadToken) return;
-  const userRows = users.data || [];
-  $('#platform-users-list').innerHTML = userRows.map(user => `<div class="platform-list-item"><strong>${h(user.email)}</strong><small>${h(user.account_id)} · ${h(user.plan)} · <span class="platform-status ${user.account_status === 'active' ? 'good' : 'bad'}">${h(user.account_status)}</span></small><div class="platform-list-actions">${user.account_status === 'deleting' ? `<button class="btn btn-small btn-danger" data-account-retry="${h(user.account_id)}">Retry deletion</button>` : `<button class="btn btn-small btn-secondary" data-account-plan="${h(user.account_id)}" data-current-plan="${h(user.plan)}">Plan</button><button class="btn btn-small btn-secondary" data-account-status="${h(user.account_id)}" data-status="${user.account_status === 'suspended' ? 'active' : 'suspended'}">${user.account_status === 'suspended' ? 'Unsuspend' : 'Suspend'}</button><button class="btn btn-small btn-danger" data-account-delete="${h(user.account_id)}">Delete</button>`}</div></div>`).join('') || '<p class="meta-line">No hosted users.</p>';
-  $('#platform-users-count').textContent = userRows.length ? `${state.platformUsersOffset + 1}–${state.platformUsersOffset + userRows.length}` : '0 results';
-  $('#platform-users-prev').disabled = state.platformUsersOffset === 0;
-  $('#platform-users-next').disabled = state.platformUsersOffset >= 10000 || userRows.length < 100;
-  const audit = await api('/api/platform/audit?limit=100');
-  $('#platform-audit-list').innerHTML = (audit.data || []).map(row => `<div class="platform-list-item"><strong>${h(row.event)}</strong><small>${h(row.created_at)} · ${h(row.target_id || '')}</small></div>`).join('') || '<p class="meta-line">No platform events.</p>';
-  try {
-    const queue = await api('/api/platform/mail/queue');
-    $('#platform-mail-queued').textContent = queue.queued;
-    $('#platform-mail-dead').textContent = queue.dead_recent;
-    $('#platform-mail-error').textContent = '';
-  } catch (error) {
-    $('#platform-mail-error').textContent = errorMessage(error, 'Could not load the mail queue.');
-  }
-  await loadPlatformPlans();
-  await loadPlatformLegal();
+  $('#platform-settings-error').textContent = '';
 }
 
-// loadPlatformPlans renders the entitlements catalogue as editable rows.
+async function loadPlatformAnalytics() {
+  const settings = await api('/api/platform/settings');
+  const form = $('#platform-analytics-form');
+  form.elements.analytics_enabled.checked = !!settings.analytics?.enabled;
+  form.elements.analytics_provider.value = settings.analytics?.provider || 'umami';
+  form.elements.analytics_script_url.value = settings.analytics?.script_url || '';
+  form.elements.analytics_site_id.value = settings.analytics?.site_id || '';
+  applyAnalyticsProviderVisibility(form.elements.analytics_provider.value);
+  $('#platform-analytics-status').textContent = settings.analytics?.enabled ? 'Analytics is enabled and consent-gated on hosted pages.' : 'Analytics is disabled.';
+  $('#platform-analytics-error').textContent = '';
+}
+
+// applyAnalyticsProviderVisibility hides the site ID field for the custom
+// provider, which carries no provider-specific data attribute.
+function applyAnalyticsProviderVisibility(provider) {
+  const form = $('#platform-analytics-form');
+  if (!form) return;
+  const label = form.elements.analytics_site_id.closest('label');
+  if (label) label.hidden = provider === 'custom';
+}
+
+async function loadPlatformMail() {
+  const settings = await api('/api/platform/settings');
+  const form = $('#platform-mail-settings-form');
+  form.elements.mail_provider.value = settings.mail?.provider || '';
+  applyMailProviderVisibility(settings.mail?.provider || '');
+  form.elements.mail_from.value = settings.mail?.from || '';
+  form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
+  form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
+  form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
+  form.elements.mail_smtp_mode.value = settings.mail?.smtp_mode || 'starttls';
+  form.elements.mail_resend_api_key.value = '';
+  form.elements.mail_brevo_api_key.value = '';
+  form.elements.mail_smtp_password.value = '';
+  $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
+  const queue = await api('/api/platform/mail/queue');
+  $('#platform-mail-queued').textContent = queue.queued;
+  $('#platform-mail-sent').textContent = queue.sent_recent;
+  $('#platform-mail-dead').textContent = queue.dead_recent;
+  $('#platform-mail-log').innerHTML = (queue.log || []).map(row => {
+    const attempts = Number(row.attempts) === 1 ? '1 attempt' : `${h(row.attempts)} attempts`;
+    const timestampLabel = row.sent_at ? 'sent' : row.dead_at ? 'failed' : 'queued';
+    const timestamp = row.sent_at || row.dead_at || row.created_at;
+    const providerID = row.provider_message_id ? `<small>Provider message ID: ${h(row.provider_message_id)}</small>` : '';
+    return `<div class="platform-list-item"><strong>${h(mailTypeLabel(row.type))}</strong><small>${h(row.recipient)} · ${h(row.status)} · ${attempts} · ${timestampLabel} ${h(date(timestamp))}</small>${providerID}</div>`;
+  }).join('') || '<p class="meta-line">No recent mail.</p>';
+  $('#platform-mail-error').textContent = '';
+  $('#platform-mail-settings-error').textContent = '';
+}
+
+async function loadPlatformAudit() {
+  const audit = await api(`/api/platform/audit?limit=100&offset=${state.platformAuditOffset}`);
+  const rows = audit.data || [];
+  $('#platform-audit-list').innerHTML = rows.map(row => `<div class="platform-list-item"><strong>${h(row.event)}</strong><small>${h(row.created_at)} · ${h(row.actor_type)}${row.target_type ? ` · ${h(row.target_type)}: ${h(row.target_id || '')}` : ''} · ${h(row.outcome)}</small><small>${h(formatAuditMetadata(row.metadata))}</small></div>`).join('') || '<p class="meta-line">No platform events.</p>';
+  $('#platform-audit-count').textContent = rows.length ? `${state.platformAuditOffset + 1}–${state.platformAuditOffset + rows.length}` : '0 events';
+  $('#platform-audit-prev').disabled = state.platformAuditOffset === 0;
+  $('#platform-audit-next').disabled = state.platformAuditOffset >= 10000 || !audit.has_more;
+  $('#platform-audit-error').textContent = '';
+}
+
+function formatAuditMetadata(raw) {
+  try {
+    const metadata = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    if (!metadata || typeof metadata !== 'object') return '';
+    return Object.entries(metadata).map(([key, value]) => `${key}: ${value}`).join(' · ');
+  } catch { return ''; }
+}
+
+// mailTypeLabel turns a mail_outbox type into a short human label for the
+// operator log; unknown types fall through to the raw value.
+function mailTypeLabel(type) {
+  const labels = { verify_email: 'Verification', password_reset: 'Password reset', email_change_confirm: 'Email change', email_change_warning: 'Email change warning' };
+  return labels[type] || type;
+}
+
+// planOptionList builds the <option> set for an account's plan dropdown from
+// the loaded plan catalogue, keeping the account's current plan selected even if
+// it is no longer in the catalogue.
+function planOptionList(current) {
+  const names = state.platformPlans.slice();
+  if (current && !names.includes(current)) names.push(current);
+  return names.map(name => `<option value="${h(name)}"${name === current ? ' selected' : ''}>${h(name)}</option>`).join('');
+}
+
+// PLAN_FIELDS drives both the caps dialog and the row summary.
+const PLAN_FIELDS = [['max_providers', 'Providers'], ['max_client_keys', 'Client keys'], ['max_virtual_models', 'Virtual models'], ['max_concurrent_streams', 'Streams'], ['activity_retention_days', 'Retention days'], ['monthly_requests', 'Monthly requests']];
+
+// planSummary is the compact one-line cap readout shown on each plan row.
+function planSummary(plan) {
+  return PLAN_FIELDS.map(([key, label]) => `${plan[key] === -1 ? '∞' : h(plan[key])} ${h(label.toLowerCase())}`).join(' · ');
+}
+
+// openPlanEditor opens the shared entity dialog to add or edit a plan. The name
+// is renameable on edit (the backend repoints account assignments); add
+// requires a lowercase slug. Cancel comes from the dialog itself.
+function openPlanEditor(plan) {
+  const editing = Boolean(plan);
+  const nameRules = editing ? '' : ' pattern="[a-z0-9][a-z0-9_-]{0,63}" title="Lowercase letters, digits, dashes or underscores" required';
+  const nameField = `<label>Name<input name="name" type="text" value="${editing ? h(plan.name) : ''}" placeholder="e.g. pro"${nameRules} autocomplete="off" spellcheck="false"></label>`;
+  const caps = PLAN_FIELDS.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${editing ? h(plan[key]) : '-1'}"></label>`).join('');
+  openEntity({
+    eyebrow: editing ? 'EDIT PLAN' : 'NEW PLAN',
+    title: editing ? `Edit ${plan.name}` : 'Add plan',
+    fields: nameField + `<div class="platform-plan-fields">${caps}</div>`,
+    submit: editing ? 'Save plan' : 'Add plan',
+    onSubmit: async form => {
+      const values = new FormData(form);
+      const name = String(values.get('name') || '').trim();
+      if (!name) throw new Error('Enter a plan name.');
+      const payload = { name };
+      for (const [key] of PLAN_FIELDS) payload[key] = Number(values.get(key));
+      if (editing) await api(`/api/platform/plans/${encodeURIComponent(plan.name)}`, { method: 'PUT', body: JSON.stringify(payload) });
+      else await api('/api/platform/plans', { method: 'POST', body: JSON.stringify(payload) });
+      flash(editing ? 'Plan saved.' : 'Plan added.');
+      await loadPlatformDashboard('plans');
+    },
+  });
+}
+
+// loadPlatformPlans renders the entitlements catalogue as compact rows. A row
+// (or its Edit button) opens the caps dialog; Delete is guarded server-side.
 async function loadPlatformPlans() {
   const list = $('#platform-plans-list'); if (!list) return;
   try {
     const result = await api('/api/platform/plans');
-    const fields = [['max_providers', 'Providers'], ['max_client_keys', 'Client keys'], ['max_virtual_models', 'Virtual models'], ['max_concurrent_streams', 'Streams'], ['activity_retention_days', 'Retention days'], ['monthly_requests', 'Monthly requests']];
-    list.innerHTML = (result.data || []).map(plan => `<form class="platform-plan-form" data-plan="${h(plan.name)}"><strong>${h(plan.name)}</strong><div class="platform-plan-fields">${fields.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${h(plan[key])}"></label>`).join('')}</div><button class="btn btn-small btn-secondary" type="submit">Save</button></form>`).join('') || '<p class="meta-line">No plans.</p>';
+    const plans = result.data || [];
+    state.platformPlans = plans.map(plan => plan.name);
+    state.platformPlanData = plans;
+    list.innerHTML = plans.map(plan => `<div class="platform-list-item platform-plan-row" data-plan="${h(plan.name)}" role="button" tabindex="0"><div><strong>${h(plan.name)}</strong><small>${planSummary(plan)}</small></div><div class="platform-list-actions"><button class="btn btn-small btn-secondary" type="button" data-plan-edit="${h(plan.name)}">Edit</button><button class="btn btn-small btn-danger" type="button" data-plan-delete="${h(plan.name)}">Delete</button></div></div>`).join('') || '<p class="meta-line">No plans.</p>';
     $('#platform-plans-error').textContent = '';
   } catch (error) {
     $('#platform-plans-error').textContent = errorMessage(error, 'Could not load plans.');
@@ -2751,12 +3856,23 @@ async function loadPlatformLegal() {
   }
 }
 
-$('#platform-plans-list').addEventListener('submit', async event => {
-  const form = event.target.closest('.platform-plan-form'); if (!form) return;
-  event.preventDefault(); const data = new FormData(form);
-  const payload = { max_providers: Number(data.get('max_providers')), max_client_keys: Number(data.get('max_client_keys')), max_virtual_models: Number(data.get('max_virtual_models')), max_concurrent_streams: Number(data.get('max_concurrent_streams')), activity_retention_days: Number(data.get('activity_retention_days')), monthly_requests: Number(data.get('monthly_requests')) };
-  try { await api(`/api/platform/plans/${encodeURIComponent(form.dataset.plan)}`, { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-plans-error').textContent = 'Saved.'; $('#platform-plans-error').style.color = 'var(--green)'; }
-  catch (error) { $('#platform-plans-error').style.color = ''; $('#platform-plans-error').textContent = errorMessage(error, 'Could not save the plan.'); }
+function planForRow(el) { return state.platformPlanData.find(plan => plan.name === el.dataset.plan) || null; }
+$('#platform-plan-add').addEventListener('click', () => openPlanEditor(null));
+$('#platform-plans-list').addEventListener('click', async event => {
+  const edit = event.target.closest('[data-plan-edit]');
+  const del = event.target.closest('[data-plan-delete]');
+  const row = event.target.closest('.platform-plan-row');
+  try {
+    if (edit) { const plan = state.platformPlanData.find(item => item.name === edit.dataset.planEdit); if (plan) openPlanEditor(plan); return; }
+    if (del) { const name = del.dataset.planDelete; if (!await confirmAction({ title: `Delete ${name}?`, copy: 'Accounts still on this plan must be moved first. This cannot be undone.', action: 'Delete plan', typeMatch: name, typeLabel: 'plan name' })) return; await api(`/api/platform/plans/${encodeURIComponent(name)}`, { method: 'DELETE' }); flash('Plan deleted.'); await loadPlatformDashboard('plans'); return; }
+    if (row) { const plan = planForRow(row); if (plan) openPlanEditor(plan); }
+  } catch (error) { $('#platform-plans-error').style.color = ''; $('#platform-plans-error').textContent = errorMessage(error, 'Plan operation failed.'); }
+});
+$('#platform-plans-list').addEventListener('keydown', event => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  if (event.target.closest('[data-plan-edit],[data-plan-delete]')) return;
+  const row = event.target.closest('.platform-plan-row'); if (!row) return;
+  event.preventDefault(); const plan = planForRow(row); if (plan) openPlanEditor(plan);
 });
 $('#platform-legal-list').addEventListener('submit', async event => {
   const form = event.target.closest('.platform-legal-form'); if (!form) return;
@@ -2765,15 +3881,297 @@ $('#platform-legal-list').addEventListener('submit', async event => {
   catch (error) { $('#platform-legal-error').style.color = ''; $('#platform-legal-error').textContent = errorMessage(error, 'Could not publish the document.'); }
 });
 function applyMailProviderVisibility(provider) {
-  document.querySelectorAll('#platform-settings-form [data-mail-when]').forEach(el => {
+  document.querySelectorAll('#platform-mail-settings-form [data-mail-when]').forEach(el => {
     el.hidden = provider === '' || (el.dataset.mailWhen !== 'any' && el.dataset.mailWhen !== provider);
   });
 }
-document.querySelector('#platform-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
-$('#platform-settings-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const payload = { hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on', audit_retention_days: Number(form.get('audit_retention_days')), mail_provider: form.get('mail_provider'), mail_from: form.get('mail_from'), mail_smtp_host: form.get('mail_smtp_host'), mail_smtp_port: Number(form.get('mail_smtp_port')) || 0, mail_smtp_mode: form.get('mail_smtp_mode'), mail_smtp_username: form.get('mail_smtp_username'), google_signin_enabled: form.get('google_signin_enabled') === 'on', google_client_id: form.get('google_client_id'), clear_google_client_secret: form.get('clear_google_client_secret') === 'on', turnstile_enabled: form.get('turnstile_enabled') === 'on', turnstile_site_key: form.get('turnstile_site_key'), clear_turnstile_secret: form.get('clear_turnstile_secret') === 'on' }; const resendKey = String(form.get('mail_resend_api_key') || ''); const brevoKey = String(form.get('mail_brevo_api_key') || ''); const smtpPassword = String(form.get('mail_smtp_password') || ''); const googleSecret = String(form.get('google_client_secret') || ''); const turnstileSecret = String(form.get('turnstile_secret') || ''); if (resendKey) payload.mail_resend_api_key = resendKey; if (brevoKey) payload.mail_brevo_api_key = brevoKey; if (smtpPassword) payload.mail_smtp_password = smtpPassword; if (googleSecret) payload.google_client_secret = googleSecret; if (turnstileSecret) payload.turnstile_secret = turnstileSecret; try { await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) }); $('#platform-settings-error').textContent = 'Saved.'; $('#platform-settings-error').style.color = 'var(--green)'; await loadPlatformDashboard(); } catch (error) { showAuthError('platform-settings-error', error, 'Could not save platform settings.'); } });
-$('#platform-users-list').addEventListener('click', async event => { const status = event.target.closest('[data-account-status]'); const deletion = event.target.closest('[data-account-delete], [data-account-retry]'); const planButton = event.target.closest('[data-account-plan]'); try { if (status) { await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' }); await loadPlatformDashboard(); } if (deletion) { const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry; if (deletion.dataset.accountRetry || window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) }); await loadPlatformDashboard(); } } if (planButton) { const accountID = planButton.dataset.accountPlan; const plan = window.prompt('Plan name for this account:', planButton.dataset.currentPlan || 'free'); if (plan) { await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) }); await loadPlatformDashboard(); } } } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); } });
-  $('#platform-users-prev').onclick = () => { state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100); loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
-$('#platform-users-next').onclick = () => { state.platformUsersOffset += 100; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); };
-filterInput('#platform-user-search', value => { state.platformUsersSearch = value.trim(); state.platformUsersOffset = 0; loadPlatformDashboard().catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); }); });
+document.querySelector('#platform-mail-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
+document.querySelector('#platform-settings-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on',
+    audit_retention_days: Number(form.get('audit_retention_days')),
+    google_signin_enabled: form.get('google_signin_enabled') === 'on',
+    google_client_id: form.get('google_client_id'),
+    clear_google_client_secret: form.get('clear_google_client_secret') === 'on',
+    turnstile_enabled: form.get('turnstile_enabled') === 'on',
+    turnstile_site_key: form.get('turnstile_site_key'),
+    clear_turnstile_secret: form.get('clear_turnstile_secret') === 'on',
+  };
+  const googleSecret = String(form.get('google_client_secret') || '');
+  const turnstileSecret = String(form.get('turnstile_secret') || '');
+  if (googleSecret) payload.google_client_secret = googleSecret;
+  if (turnstileSecret) payload.turnstile_secret = turnstileSecret;
+  try {
+    await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#platform-settings-error').textContent = 'Saved.';
+    $('#platform-settings-error').style.color = 'var(--green)';
+    await loadPlatformSettings();
+  } catch (error) {
+    $('#platform-settings-error').style.color = '';
+    $('#platform-settings-error').textContent = errorMessage(error, 'Could not save platform settings.');
+  }
+});
+$('#platform-mail-settings-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    mail_provider: form.get('mail_provider'),
+    mail_from: form.get('mail_from'),
+    mail_smtp_host: form.get('mail_smtp_host'),
+    mail_smtp_port: Number(form.get('mail_smtp_port')) || 0,
+    mail_smtp_mode: form.get('mail_smtp_mode'),
+    mail_smtp_username: form.get('mail_smtp_username'),
+  };
+  for (const field of ['mail_resend_api_key', 'mail_brevo_api_key', 'mail_smtp_password']) {
+    const value = String(form.get(field) || '');
+    if (value) payload[field] = value;
+  }
+  try {
+    await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#platform-mail-settings-error').textContent = 'Saved.';
+    $('#platform-mail-settings-error').style.color = 'var(--green)';
+    await loadPlatformMail();
+  } catch (error) {
+    $('#platform-mail-settings-error').style.color = '';
+    $('#platform-mail-settings-error').textContent = errorMessage(error, 'Could not save mail settings.');
+  }
+});
+$('#platform-analytics-form').addEventListener('change', event => {
+  if (event.target.name === 'analytics_provider') applyAnalyticsProviderVisibility(event.target.value);
+});
+$('#platform-analytics-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const payload = {
+    analytics_enabled: form.get('analytics_enabled') === 'on',
+    analytics_provider: form.get('analytics_provider'),
+    analytics_script_url: form.get('analytics_script_url'),
+    analytics_site_id: form.get('analytics_site_id'),
+  };
+  try {
+    await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
+    $('#platform-analytics-error').textContent = 'Saved.';
+    $('#platform-analytics-error').style.color = 'var(--green)';
+    await loadPlatformAnalytics();
+  } catch (error) {
+    $('#platform-analytics-error').style.color = '';
+    $('#platform-analytics-error').textContent = errorMessage(error, 'Could not save analytics settings.');
+  }
+});
+$('#platform-user-search').addEventListener('input', event => {
+  state.platformUsersSearch = event.target.value.trim();
+  state.platformUsersOffset = 0;
+  loadPlatformDashboard('users').catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); });
+});
+$('#platform-users-prev').onclick = () => {
+  state.platformUsersOffset = Math.max(0, state.platformUsersOffset - 100);
+  loadPlatformDashboard('users').catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); });
+};
+$('#platform-users-next').onclick = () => {
+  state.platformUsersOffset += 100;
+  loadPlatformDashboard('users').catch(error => { $('#platform-users-error').textContent = errorMessage(error, 'Could not load hosted users.'); });
+};
+$('#platform-users-list').addEventListener('click', async event => {
+  const status = event.target.closest('[data-account-status]');
+  const deletion = event.target.closest('[data-account-delete], [data-account-retry]');
+  const planSave = event.target.closest('[data-account-plan-save]');
+  try {
+    if (status) await api(`/api/platform/accounts/${encodeURIComponent(status.dataset.accountStatus)}/${status.dataset.status === 'active' ? 'unsuspend' : 'suspend'}`, { method: 'POST', body: '{}' });
+    if (deletion) {
+      const accountID = deletion.dataset.accountDelete || deletion.dataset.accountRetry;
+      if (!deletion.dataset.accountRetry && !window.confirm(`Delete account ${accountID}? This is immediate and irreversible.`)) return;
+      await api(`/api/platform/accounts/${encodeURIComponent(accountID)}`, { method: 'DELETE', body: JSON.stringify({ confirm: accountID }) });
+    }
+    if (planSave) {
+      const accountID = planSave.dataset.accountPlanSave;
+      const plan = planSave.closest('.plan-assign')?.querySelector('select')?.value;
+      if (plan) await api(`/api/platform/accounts/${encodeURIComponent(accountID)}/plan`, { method: 'POST', body: JSON.stringify({ plan }) });
+    }
+    if (status || deletion || planSave) await loadPlatformDashboard('users');
+  } catch (error) { $('#platform-users-error').textContent = errorMessage(error, 'Platform operation failed.'); }
+});
 
-function updateEncryptionState(enc) { const el = $('#encryption-state'); if (!el) return; const st = (enc && enc.state) || 'disabled'; el.dataset.state = st; if (st === 'enabled') { el.textContent = 'Enabled — provider credentials are encrypted at rest.'; } else if (st === 'locked') { el.textContent = 'LOCKED — the master key is missing or does not match. Credential-bearing providers are unavailable until it is restored.'; } else { el.textContent = 'Disabled.'; } }
+/* ---- Passkeys (WebAuthn) ----
+   Two flows share this module: passkey sign-in on the login card and passkey
+   management (add/list/rename/delete, plus making a passkey the only method) on
+   the hosted account settings card. All policy lives on the server; this is only
+   the browser ceremony glue. */
+(function () {
+  // Set up front so the login view can tell a browser without WebAuthn to keep
+  // the passkey button hidden rather than rendering a dead control. The IIFE
+  // still runs on unsupported browsers so the account card can list existing
+  // passkeys and remove them (management is plain HTTP); only the ceremonies
+  // are gated.
+  window.__passkeySupported = !!(window.PublicKeyCredential && navigator.credentials);
+
+  const b64urlToBuf = value => {
+    const pad = value.length % 4 === 0 ? '' : '='.repeat(4 - (value.length % 4));
+    const raw = atob((value + pad).replace(/-/g, '+').replace(/_/g, '/'));
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    return buf.buffer;
+  };
+  const bufToB64url = buf => {
+    const bytes = new Uint8Array(buf);
+    let str = '';
+    for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+    return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  };
+  const prepCreate = options => {
+    options.challenge = b64urlToBuf(options.challenge);
+    options.user.id = b64urlToBuf(options.user.id);
+    (options.excludeCredentials || []).forEach(c => { c.id = b64urlToBuf(c.id); });
+    return options;
+  };
+  const prepGet = options => {
+    options.challenge = b64urlToBuf(options.challenge);
+    (options.allowCredentials || []).forEach(c => { c.id = b64urlToBuf(c.id); });
+    return options;
+  };
+  const credentialToJSON = cred => {
+    const r = cred.response;
+    const out = { id: cred.id, rawId: bufToB64url(cred.rawId), type: cred.type, response: {}, clientExtensionResults: cred.getClientExtensionResults ? cred.getClientExtensionResults() : {} };
+    out.response.clientDataJSON = bufToB64url(r.clientDataJSON);
+    if (r.attestationObject !== undefined) out.response.attestationObject = bufToB64url(r.attestationObject);
+    if (r.authenticatorData !== undefined) out.response.authenticatorData = bufToB64url(r.authenticatorData);
+    if (r.signature !== undefined) out.response.signature = bufToB64url(r.signature);
+    if (r.userHandle !== undefined && r.userHandle !== null) out.response.userHandle = bufToB64url(r.userHandle);
+    return out;
+  };
+  const postJSON = (url, body, token) => fetch(url, {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', 'X-WebAuthn-Challenge': token || '', ...(state.csrf ? { 'X-CSRF-Token': state.csrf } : {}) },
+    body: JSON.stringify(body),
+  }).then(async res => {
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { const err = new Error(data?.error?.message || data?.message || 'Request failed.'); err.code = data?.error?.code; err.status = res.status; throw err; }
+    return data;
+  });
+  if (window.__passkeySupported) {
+    // A passkey assertion used as re-authentication before a sensitive account
+    // operation. It returns a one-use grant the subsequent operation spends.
+    window.__confirmWithPasskey = async function (statusEl) {
+      const begin = await api('/api/auth/account/passkeys/reauth/begin', { method: 'POST', body: '{}' });
+      const publicKey = prepGet(begin.options.publicKey || begin.options);
+      const cred = await navigator.credentials.get({ publicKey });
+      if (!cred) throw new Error('No credential returned.');
+      if (statusEl) statusEl.textContent = 'Confirming…';
+      await postJSON('/api/auth/account/passkeys/reauth/finish', credentialToJSON(cred), begin.challenge_token);
+      return true;
+    };
+
+    // Sign-in.
+    const signin = $('#passkey-signin');
+    if (signin) {
+      signin.addEventListener('click', async () => {
+        const status = $('#passkey-signin-status'); status.textContent = 'Waiting for your device…'; status.className = 'setting-tip';
+        signin.disabled = true;
+        try {
+          const begin = await api('/api/auth/passkey/begin', { method: 'POST', body: '{}' });
+          const publicKey = prepGet(begin.options.publicKey || begin.options);
+          const cred = await navigator.credentials.get({ publicKey });
+          if (!cred) throw new Error('No credential returned.');
+          const session = await postJSON('/api/auth/passkey/finish', credentialToJSON(cred), begin.challenge_token);
+          if (session.pending_google_link) { showGoogleLinkPrompt(session); return; }
+          showApp(session);
+        } catch (error) {
+          status.textContent = errorMessage(error, 'Passkey sign-in failed.');
+          status.className = 'form-error';
+          signin.disabled = false;
+        }
+      });
+    }
+    // Account management for a supported browser.
+    const add = $('#account-passkey-add');
+    if (add) {
+      add.addEventListener('click', async () => {
+        const status = $('#account-passkeys-status');
+        // Prompt first; a cancel should not leave a "Waiting for your device…"
+        // message behind.
+        const name = prompt('Name this passkey', 'Passkey');
+        if (name == null) return;
+        status.textContent = 'Waiting for your device…'; status.className = 'setting-tip';
+        add.disabled = true;
+        let makeOnly = false;
+        // Offer to make it the only sign-in method only when password sign-in
+        // is actually enabled (and not Google-linked, which hides the card).
+        // Local installs always keep password sign-in as the recovery path, so
+        // the option is hosted-only.
+        const passwordEnabled = runtimeMode === 'hosted' && !!lastAccountProfile?.password_enabled && !lastAccountProfile?.google_linked;
+        if (passwordEnabled) makeOnly = confirm('Use this passkey as your only sign-in method? Your password will be disabled.');
+        try {
+          const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: '{}' });
+          const publicKey = prepCreate(begin.options.publicKey || begin.options);
+          const cred = await navigator.credentials.create({ publicKey });
+          if (!cred) throw new Error('No credential returned.');
+          const url = '/api/auth/account/passkeys/register/finish?name=' + encodeURIComponent(name) + (makeOnly ? '&only=1' : '');
+          const result = await postJSON(url, credentialToJSON(cred), begin.challenge_token);
+          flash(result.password_only ? 'Passkey added; password sign-in disabled.' : 'Passkey added.', 'success');
+          status.textContent = '';
+          await loadAccount();
+        } catch (error) {
+          status.textContent = errorMessage(error, 'Passkey setup failed.');
+          status.className = 'form-error';
+        } finally {
+          add.disabled = false;
+        }
+      });
+    }
+  }
+
+  // Account management.
+  const fmtPasskeyDate = value => value ? new Date(value).toLocaleString() : '—';
+  let lastAccountProfile = null;
+  function renderPasskeysCard(profile) {
+    const card = $('#account-passkeys-card'); if (!card) return;
+    const enabled = !!profile.passkeys_enabled;
+    card.hidden = !enabled;
+    if (!enabled) { lastAccountProfile = null; return; }
+    lastAccountProfile = profile;
+    // A browser without WebAuthn cannot run any ceremony: hide Add and the
+    // re-enable toggle rather than leaving controls that would fail, and say
+    // why. Existing passkeys can still be listed and removed (plain HTTP).
+    const addButton = $('#account-passkey-add');
+    if (addButton) addButton.hidden = !window.__passkeySupported;
+    if (!window.__passkeySupported) {
+      const status = $('#account-passkeys-status');
+      status.textContent = 'This browser does not support passkey setup. You can still manage passkeys created elsewhere.';
+      status.className = 'setting-tip';
+    }
+    const passkeys = profile.passkeys || [];
+    const list = $('#account-passkeys-list');
+    list.innerHTML = passkeys.length
+      ? passkeys.map(p => `<div class="setting-row" data-passkey="${h(p.id)}"><span class="setting-label">${h(p.name)}<small class="meta-line">Added ${h(fmtPasskeyDate(p.created_at))} · Last used ${h(fmtPasskeyDate(p.last_used_at))}</small></span><div class="setting-control"><button class="btn btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button> <button class="btn btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
+      : '<p class="meta-line">No passkeys yet.</p>';
+    list.querySelectorAll('[data-passkey-rename]').forEach(btn => btn.addEventListener('click', async () => {
+      const name = prompt('Name this passkey', btn.dataset.passkeyName || 'Passkey');
+      if (name == null) return;
+      try { await api('/api/auth/account/passkeys/rename', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRename, name }) }); flash('Passkey renamed.', 'success'); await loadAccount(); }
+      catch (error) { flash(errorMessage(error, 'Could not rename the passkey.'), 'error'); }
+    }));
+    list.querySelectorAll('[data-passkey-remove]').forEach(btn => btn.addEventListener('click', async () => {
+      if (!confirm('Remove this passkey?')) return;
+      try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
+      catch (error) { flash(errorMessage(error, 'Could not remove the passkey.'), 'error'); }
+    }));
+    // Password sign-in toggle: offer to turn it back on when disabled. Hidden
+    // for Google-linked accounts: linking Google disables password sign-in by
+    // design and the server refuses to re-enable it, so the control would only
+    // produce an error. Local installs never disable password sign-in, so the
+    // toggle is hosted-only.
+    const toggle = $('#account-password-signin-toggle');
+    const passwordEnabled = !!profile.password_enabled;
+    const googleLinked = !!profile.google_linked;
+    toggle.hidden = runtimeMode !== 'hosted' || passwordEnabled || googleLinked;
+    toggle.textContent = 'Re-enable password sign-in';
+    toggle.onclick = async () => {
+      try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }
+      catch (error) { flash(errorMessage(error, 'Could not update password sign-in.'), 'error'); }
+    };
+  }
+
+  // Expose for loadAccount.
+  window.__renderPasskeysCard = renderPasskeysCard;
+})();

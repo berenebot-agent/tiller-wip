@@ -86,6 +86,33 @@ func translateRequest(body []byte, from, to providers.Protocol, model string, mo
 	return nil, errors.New("unsupported protocol translation")
 }
 
+// clientExplicitlyNonStreaming reports whether the client explicitly sent
+// `"stream": false`. All three client protocols (Chat Completions, Anthropic
+// Messages, Responses) use the same top-level `stream` boolean, so the read is
+// uniform; the protocol argument is kept for clarity at the call site.
+//
+// Only an explicit false counts. The field is deliberately NOT treated as
+// false when omitted: a request without `stream` is left on the historical
+// relay path, where a target whose native protocol is SSE (notably the Codex
+// Responses target) is allowed to stream to the client. Treating an omitted
+// field as non-streaming would break that incremental relay. A client that
+// wants a single JSON object for such a target must say `"stream": false`.
+// The value is read from the original request body before any translation, so
+// a Codex target's forced upstream `stream:true` never changes the client's
+// framing.
+func clientExplicitlyNonStreaming(body []byte, protocol providers.Protocol) bool {
+	_ = protocol
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return false
+	}
+	if _, present := request["stream"]; !present {
+		return false
+	}
+	stream, _ := request["stream"].(bool)
+	return !stream
+}
+
 // extractReasoningSelector extracts a canonical reasoning selector from the
 // incoming request body according to its protocol. Returns a zero-value
 // selector with Present=false when no reasoning control is found.
@@ -1043,8 +1070,32 @@ func responsesInstructionText(value any) string {
 	return ""
 }
 
-func translateResponse(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r io.Reader, incoming, target providers.Protocol, route resolvedRoute, usage *usageCapture) error {
-	return translateResponseObserved(w, keepalive, r, incoming, target, route, usage, nil)
+// translateNonstreamBody reads and translates a complete non-streaming JSON
+// body WITHOUT writing anything to the client. It exists so the caller can
+// commit the upstream status only after translation succeeds: translating
+// after WriteHeader meant a malformed or non-representable body was delivered
+// as an HTTP success with no error, because the status was already on the wire.
+//
+// It returns ok=false when the body is not a JSON object/array (the caller
+// should treat it as SSE).
+func translateNonstreamBody(r *bufio.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) (translated []byte, ok bool, err error) {
+	prefix, err := r.Peek(1)
+	if err != nil {
+		return nil, false, err
+	}
+	if prefix[0] != '{' && prefix[0] != '[' {
+		return nil, false, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(r, 64<<20))
+	if err != nil {
+		return nil, true, err
+	}
+	extractUsage(body, usage)
+	translated, err = translateNonstreamResponse(body, incoming, target, model)
+	if err != nil {
+		return nil, true, err
+	}
+	return translated, true, nil
 }
 
 // translateResponseObserved is translateResponse with an optional observer that
@@ -1065,6 +1116,15 @@ func translateResponseObserved(w http.ResponseWriter, keepalive *sseKeepaliveWri
 		translated, err := translateNonstreamResponse(body, incoming, target, route.RequestedModel)
 		if err != nil {
 			return err
+		}
+		// If the client stream was already committed (ordered-fallback probing
+		// selected an earlier streaming target), a later non-streaming target's
+		// JSON must be synthesized as SSE on the single keepalive writer rather
+		// than written raw to the committed 200 stream.
+		if keepalive != nil {
+			writeNonstreamAsSSE(keepalive, incoming, route.RequestedModel, translated)
+			keepalive.Flush()
+			return nil
 		}
 		_, err = w.Write(translated)
 		return err
@@ -1318,6 +1378,238 @@ func writeStreamFailure(w io.Writer, protocol providers.Protocol, code, id, mode
 	}
 }
 
+// errUpstreamStreamError marks an SSE stream that carried an explicit upstream
+// failure, so callers can classify it separately from a read error.
+var errUpstreamStreamError = errors.New("upstream stream reported failure")
+
+// relayNonstreamFromSSE reads an upstream SSE stream and aggregates it into a
+// single non-streaming JSON response for the client. It exists because a target
+// (e.g. Codex) may be forced to stream upstream while the client sent
+// stream:false; the client must still get one JSON object, never SSE.
+//
+// The SSE is read with the same bounds as the translating relay
+// (maxSSELineBytes / maxAccumulatedTextBytes) via readSSEEvent and
+// canonicalDeltas. Output is the appropriate non-stream shape for the incoming
+// protocol (Chat completion, Messages message, Responses response). Usage is
+// captured for token accounting. An explicit upstream stream error returns an
+// error so the caller can surface an inferenceError.
+func relayNonstreamFromSSE(w http.ResponseWriter, r io.Reader, incoming, target providers.Protocol, model string, usage *usageCapture) error {
+	reader := bufio.NewReader(r)
+	state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model, reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
+	finish := "stop"
+	for {
+		event, err := readSSEEvent(reader)
+		data := event.Data
+		if len(data) > 0 {
+			if string(data) == "[DONE]" {
+				break
+			}
+			var payload map[string]any
+			if json.Unmarshal(data, &payload) == nil {
+				captureStreamUsage(payload, target, usage)
+				deltas, done := canonicalDeltas(event.Name, payload, target, state)
+				for _, delta := range deltas {
+					if delta.Kind == "error" {
+						return errUpstreamStreamError
+					}
+					if delta.Kind == "usage" {
+						continue
+					}
+					if delta.Kind == "finish" && delta.Finish != "" {
+						finish = delta.Finish
+						continue
+					}
+					if err := state.applyDelta(delta); err != nil {
+						return err
+					}
+				}
+				if done {
+					break
+				}
+			}
+		}
+		if err != nil {
+			if err == io.EOF {
+				// A stream that ends without [DONE] is accepted as long as it
+				// produced something; a truly empty stream yields an empty
+				// completion, matching the non-streaming contract.
+				break
+			}
+			return err
+		}
+	}
+	body := state.aggregatedNonstreamChat(incoming, model, finish, usage)
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, err = w.Write(encoded)
+	return err
+}
+
+// applyDelta folds a canonical delta into the accumulating stream state, using
+// the same tool-call bookkeeping as the translating relay but without emitting
+// any wire frames.
+func (state *streamState) applyDelta(delta canonicalDelta) error {
+	switch delta.Kind {
+	case "text":
+		if len(delta.Text) > maxAccumulatedTextBytes-state.accumulatedBytes {
+			return errors.New("translated stream text exceeds limit")
+		}
+		state.accumulated.WriteString(delta.Text)
+		state.accumulatedBytes += len(delta.Text)
+	case "reasoning":
+		if len(delta.Text) > maxAccumulatedTextBytes-state.reasoningAccumulated.Len() {
+			return errors.New("translated stream reasoning exceeds limit")
+		}
+		state.reasoningAccumulated.WriteString(delta.Text)
+	case "reasoning_state":
+		// Opaque state is accumulated, not emitted mid-stream: it can only be
+		// attached to a completed reasoning block, and the target protocol's
+		// converter needs the whole set to rebuild one.
+		if details, ok := delta.Detail["details"].([]any); ok {
+			state.reasoningDetails = append(state.reasoningDetails, details...)
+		}
+	case "tool":
+		if _, err := state.applyToolDelta(delta); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// aggregatedNonstreamChat builds the canonical Chat completion object from the
+// accumulated stream state, then converts it to the client's protocol. The
+// intermediate is always Chat-shaped so the existing Messages/Responses
+// converters (chatResponseToMessages / chatResponseToResponses) can be reused.
+func (state *streamState) aggregatedNonstreamChat(incoming providers.Protocol, model, finish string, usage *usageCapture) map[string]any {
+	message := map[string]any{"role": "assistant", "content": state.accumulated.String()}
+	if text := state.reasoningAccumulated.String(); text != "" {
+		message["reasoning_content"] = text
+	}
+	// Opaque reasoning state accumulated during the stream must survive
+	// aggregation too: a Responses client on a stream:false request (Codex
+	// forces stream:true upstream) needs the encrypted blob to replay the turn,
+	// and the Chat/Messages converters below understand this field.
+	if len(state.reasoningDetails) > 0 {
+		message["reasoning_details"] = state.reasoningDetails
+	}
+	if len(state.toolCalls) > 0 {
+		calls := make([]any, 0, len(state.toolCalls))
+		for _, call := range state.toolCalls {
+			calls = append(calls, map[string]any{
+				"id": call.callID, "type": "function",
+				"function": map[string]any{"name": call.name, "arguments": call.arguments.String()},
+			})
+		}
+		message["tool_calls"] = calls
+		if finish == "stop" || finish == "" {
+			finish = "tool_calls"
+		}
+	}
+	outUsage := map[string]any{}
+	if usage != nil {
+		if usage.inputTokens != nil {
+			outUsage["prompt_tokens"] = *usage.inputTokens
+			outUsage["input_tokens"] = *usage.inputTokens
+		}
+		if usage.outputTokens != nil {
+			outUsage["completion_tokens"] = *usage.outputTokens
+			outUsage["output_tokens"] = *usage.outputTokens
+		}
+		if usage.inputTokens != nil && usage.outputTokens != nil {
+			outUsage["total_tokens"] = *usage.inputTokens + *usage.outputTokens
+		}
+		if usage.cacheReadInputTokens != nil {
+			outUsage["cache_read_input_tokens"] = *usage.cacheReadInputTokens
+		}
+		if usage.cacheCreationInputTokens != nil {
+			outUsage["cache_creation_input_tokens"] = *usage.cacheCreationInputTokens
+		}
+	}
+	chat := map[string]any{
+		"id": state.id, "object": "chat.completion", "created": time.Now().Unix(), "model": model,
+		"choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": normalizeFinish(finish)}},
+		"usage":   outUsage,
+	}
+	switch incoming {
+	case providers.ProtocolMessages:
+		return chatResponseToMessages(chat, model)
+	case providers.ProtocolResponses:
+		return chatResponseToResponses(chat, model)
+	default:
+		return chat
+	}
+}
+
+// writeNonstreamAsSSE converts a non-streaming JSON response body (already in
+// the client's incoming protocol shape) into synthesized SSE frames on w. It is
+// used when the client stream has already been committed (ordered-fallback
+// probing) but the serving target returned a non-streaming body: writing raw
+// JSON onto a committed 200 SSE stream would corrupt the framing, so the JSON
+// is re-emitted as a single logical stream through the one keepalive writer.
+func writeNonstreamAsSSE(w io.Writer, incoming providers.Protocol, model string, body []byte) {
+	var source map[string]any
+	if json.Unmarshal(body, &source) != nil {
+		// A body that cannot be parsed still completes the stream cleanly so
+		// the client is not left hanging.
+		state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model, reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
+		state.completed = true
+		writeStreamDone(w, incoming, state)
+		return
+	}
+	chat := responseToChat(source, incoming, model)
+	state := &streamState{id: "tiller_" + fmt.Sprint(time.Now().UnixNano()), model: model, reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
+	if id, ok := chat["id"].(string); ok && id != "" {
+		state.id = id
+	}
+	var choice map[string]any
+	if choices := asSlice(chat["choices"]); len(choices) > 0 {
+		choice, _ = choices[0].(map[string]any)
+	}
+	message, _ := choice["message"].(map[string]any)
+	finish, _ := choice["finish_reason"].(string)
+	emit := func(delta canonicalDelta) {
+		_ = writeTranslatedEvent(w, incoming, state, delta)
+	}
+	if reasoning, _ := message["reasoning_content"].(string); reasoning != "" {
+		emit(canonicalDelta{Kind: "reasoning", Text: reasoning})
+	}
+	if text := messageText(message["content"]); text != "" {
+		emit(canonicalDelta{Kind: "text", Text: text})
+	}
+	for index, raw := range asSlice(message["tool_calls"]) {
+		call, _ := raw.(map[string]any)
+		fn, _ := call["function"].(map[string]any)
+		emit(canonicalDelta{Kind: "tool", UpstreamIndex: index, HasUpstreamIndex: true, CallID: strField(call["id"]), Name: strField(fn["name"]), Arguments: strField(fn["arguments"])})
+	}
+	if finish == "" {
+		finish = "stop"
+	}
+	emit(canonicalDelta{Kind: "finish", Finish: finish})
+	state.completed = true
+	writeStreamDone(w, incoming, state)
+}
+
+// messageText flattens a Chat message content value (string or content-part
+// array) into its visible text.
+func messageText(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	var builder strings.Builder
+	for _, raw := range asSlice(value) {
+		block, _ := raw.(map[string]any)
+		if text, ok := block["text"].(string); ok {
+			builder.WriteString(text)
+		}
+	}
+	return builder.String()
+}
+
 const (
 	maxAccumulatedTextBytes         = 8 * 1024 * 1024
 	maxAccumulatedToolArgumentBytes = 8 * 1024 * 1024
@@ -1345,6 +1637,14 @@ type streamState struct {
 	outputTokens                                               int64
 	hasInputTokens                                             bool
 	hasOutputTokens                                            bool
+	// reasoningDetails accumulates opaque reasoning state carried by Chat
+	// upstreams in `delta.reasoning_details` (Claude signatures, OpenAI
+	// encrypted reasoning). It is converted at block close into the client's
+	// protocol so a reasoning/tool follow-up can replay the state instead of
+	// losing it. Only Chat upstreams deliver state in this shape; signed
+	// Messages thinking and encrypted Responses reasoning are rejected by
+	// validateReasoningRepresentability when the target protocol differs.
+	reasoningDetails []any
 }
 type toolCallState struct {
 	callID    string
@@ -1412,6 +1712,13 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			} else if text, ok := delta["reasoning"].(string); ok && text != "" {
 				out = append(out, canonicalDelta{Kind: "reasoning", Text: text})
 			}
+			// Opaque state (Claude signatures, OpenAI encrypted reasoning)
+			// rides in reasoning_details. Carry it through the canonical delta so
+			// the encoder can convert it for the client protocol; without this
+			// the readable thinking survived but its replay state was dropped.
+			if details := asSlice(delta["reasoning_details"]); len(details) > 0 {
+				out = append(out, canonicalDelta{Kind: "reasoning_state", Detail: map[string]any{"details": details}})
+			}
 			for index, callRaw := range asSlice(delta["tool_calls"]) {
 				call, _ := callRaw.(map[string]any)
 				fn, _ := call["function"].(map[string]any)
@@ -1445,8 +1752,18 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				}
 			}
 		case "content_block_start":
-			if block, ok := payload["content_block"].(map[string]any); ok && block["type"] == "tool_use" {
-				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), HasUpstreamIndex: true, CallID: strField(block["id"]), Name: strField(block["name"])})
+			if block, ok := payload["content_block"].(map[string]any); ok {
+				if block["type"] == "tool_use" {
+					out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), HasUpstreamIndex: true, CallID: strField(block["id"]), Name: strField(block["name"])})
+				}
+				// A thinking block whose state arrived inline (redacted thinking
+				// carries its data on the start event) is converted to Chat
+				// reasoning details so it survives a target-protocol change.
+				if block["type"] == "thinking" || block["type"] == "redacted_thinking" {
+					if detail, derr := anthropicReasoningToChatDetails(block, int(coerceOrDefault(payload["index"], 0))); derr == nil {
+						out = append(out, canonicalDelta{Kind: "reasoning_state", Detail: map[string]any{"details": []any{detail}}})
+					}
+				}
 			}
 		case "content_block_delta":
 			if delta, ok := payload["delta"].(map[string]any); ok {
@@ -1455,6 +1772,13 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				}
 				if thinking, ok := delta["thinking"].(string); ok && thinking != "" {
 					out = append(out, canonicalDelta{Kind: "reasoning", Text: thinking})
+				}
+				// Anthropic streams a thinking block's signature as its own
+				// delta, after the thinking text. Carry it as opaque state so a
+				// Chat/Responses target receives a replayable block.
+				if sig, ok := delta["signature"].(string); ok && sig != "" {
+					detail := map[string]any{"type": "reasoning.text", "text": "", "signature": sig, "format": "anthropic-claude-v1", "index": int(coerceOrDefault(payload["index"], 0))}
+					out = append(out, canonicalDelta{Kind: "reasoning_state", Detail: map[string]any{"details": []any{detail}}})
 				}
 				if partial, ok := delta["partial_json"].(string); ok {
 					out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(coerceOrDefault(payload["index"], 0)), HasUpstreamIndex: true, Arguments: partial})
@@ -1490,10 +1814,21 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 	case "response.function_call_arguments.delta":
 		index, hasIndex := coerceInt64(payload["output_index"])
 		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"])})
-	case "response.output_item.added":
-		if item, ok := payload["item"].(map[string]any); ok && item["type"] == "function_call" {
-			index, hasIndex := coerceInt64(payload["output_index"])
-			out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(item["call_id"]), ItemID: strField(item["id"]), Name: strField(item["name"])})
+	case "response.output_item.added", "response.output_item.done":
+		if item, ok := payload["item"].(map[string]any); ok {
+			if item["type"] == "function_call" {
+				index, hasIndex := coerceInt64(payload["output_index"])
+				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(item["call_id"]), ItemID: strField(item["id"]), Name: strField(item["name"])})
+			}
+			// A reasoning item carrying encrypted content is opaque state the
+			// client needs to replay the turn. Capture it whether it arrives on
+			// the added or the done event.
+			if item["type"] == "reasoning" {
+				details := responsesReasoningToChatDetails(item)
+				if len(details) > 0 {
+					out = append(out, canonicalDelta{Kind: "reasoning_state", Detail: map[string]any{"details": details}})
+				}
+			}
 		}
 	case "response.failed", "response.incomplete", "error":
 		return []canonicalDelta{{Kind: "error", Text: "upstream stream error"}}, false
@@ -1513,6 +1848,14 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 }
 
 func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *streamState, delta canonicalDelta) error {
+	// Accumulate opaque state for the terminal emissions (Responses carries it
+	// on the completed reasoning item). The live relay calls this function
+	// directly rather than applyDelta, so accumulation must happen here.
+	if delta.Kind == "reasoning_state" {
+		if details, ok := delta.Detail["details"].([]any); ok {
+			state.reasoningDetails = append(state.reasoningDetails, details...)
+		}
+	}
 	if incoming == providers.ProtocolChat {
 		payload := map[string]any{"id": state.id, "object": "chat.completion.chunk", "created": time.Now().Unix(), "model": state.model}
 		choice := map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": nil}
@@ -1526,6 +1869,14 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			d["content"] = delta.Text
 		case "reasoning":
 			d["reasoning_content"] = delta.Text
+		case "reasoning_state":
+			// A Chat client receives the opaque state verbatim: it is the same
+			// shape it would see from the provider directly, and the request
+			// path passes it back through unchanged. Only this delta's own
+			// details are emitted, so a state fragment is never sent twice.
+			if details, ok := delta.Detail["details"].([]any); ok && len(details) > 0 {
+				d["reasoning_details"] = details
+			}
 		case "tool":
 			call, err := state.applyToolDelta(delta)
 			if err != nil {
@@ -1571,6 +1922,33 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 				state.reasoningStarted = true
 			}
 			writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "thinking_delta", "thinking": delta.Text}})
+		case "reasoning_state":
+			// Convert the accumulated opaque state into Anthropic thinking
+			// blocks. A signature is emitted as a signature_delta into the open
+			// thinking block so the client can echo the block back verbatim for
+			// a tool continuation. Redacted (encrypted) state has no readable
+			// text, so it opens its own block.
+			deltaDetails, _ := delta.Detail["details"].([]any)
+			blocks, err := chatReasoningDetailsToAnthropic(deltaDetails)
+			if err != nil {
+				return err
+			}
+			for _, raw := range blocks {
+				block, _ := raw.(map[string]any)
+				if block == nil {
+					continue
+				}
+				if sig, ok := block["signature"].(string); ok && sig != "" && state.activeKind == "reasoning" {
+					writeSSE(w, "content_block_delta", map[string]any{"type": "content_block_delta", "index": state.activeIndex, "delta": map[string]any{"type": "signature_delta", "signature": sig}})
+					continue
+				}
+				closeMessagesBlock(w, state)
+				state.activeIndex = state.nextIndex
+				state.nextIndex++
+				writeSSE(w, "content_block_start", map[string]any{"type": "content_block_start", "index": state.activeIndex, "content_block": block})
+				state.activeKind = "reasoning"
+				state.reasoningStarted = true
+			}
 		case "tool":
 			if _, err := state.applyToolDelta(delta); err != nil {
 				return err
@@ -1621,6 +1999,18 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 	switch delta.Kind {
 	case "error":
 		return errors.New("upstream stream reported failure")
+	case "reasoning_state":
+		// A Responses client receives this state on the completed reasoning
+		// item rather than an incremental frame, so nothing is emitted here.
+		// Validate now: if the state cannot be represented the stream must fail
+		// loudly, and failing here is better than at completion because
+		// reasoning leads the response and no output may have been committed
+		// yet. The validation mirrors what writeStreamDone will do.
+		deltaDetails, _ := delta.Detail["details"].([]any)
+		if _, err := chatReasoningDetailsToResponses(deltaDetails); err != nil {
+			return err
+		}
+		return nil
 	case "text":
 		if state.contentStarted == false {
 			state.outputIndex = state.nextIndex
@@ -1774,7 +2164,37 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		text := state.reasoningAccumulated.String()
 		writeSSE(w, "response.reasoning_summary_text.done", map[string]any{"type": "response.reasoning_summary_text.done", "output_index": state.reasoningIndex, "summary_index": 0, "text": text})
 		writeSSE(w, "response.content_part.done", map[string]any{"type": "response.content_part.done", "output_index": state.reasoningIndex, "content_index": 0, "part": map[string]any{"type": "summary_text", "text": text}})
-		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.reasoningIndex, "item": map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": text}}}})
+		item := map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": text}}}
+		// A Responses client replaying this turn needs the encrypted reasoning
+		// blob, which arrives on the reasoning item rather than its summary.
+		// Rebuild it from the accumulated Chat details.
+		if items, err := chatReasoningDetailsToResponses(state.reasoningDetails); err == nil {
+			for _, raw := range items {
+				if candidate, ok := raw.(map[string]any); ok {
+					if enc, ok := candidate["encrypted_content"].(string); ok && enc != "" {
+						item["encrypted_content"] = enc
+					}
+				}
+			}
+		}
+		writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.reasoningIndex, "item": item})
+	} else if len(state.reasoningDetails) > 0 {
+		// State arrived without readable reasoning text (for example an
+		// encrypted-only reasoning item). Emit the item so the client still
+		// receives the replayable state.
+		item := map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "completed", "summary": []any{}}
+		if items, err := chatReasoningDetailsToResponses(state.reasoningDetails); err == nil {
+			for _, raw := range items {
+				if candidate, ok := raw.(map[string]any); ok {
+					if enc, ok := candidate["encrypted_content"].(string); ok && enc != "" {
+						item["encrypted_content"] = enc
+					}
+				}
+			}
+		}
+		if _, ok := item["encrypted_content"]; ok {
+			writeSSE(w, "response.output_item.done", map[string]any{"type": "response.output_item.done", "output_index": state.nextIndex, "item": item})
+		}
 	}
 	if len(state.toolCalls) > 0 {
 		for _, call := range state.toolCalls {
@@ -1793,6 +2213,12 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 	}
 	if state.reasoningStarted || len(state.toolCalls) > 0 {
 		reasoningItem := map[string]any{"id": "rs_" + state.id, "type": "reasoning", "status": "completed", "summary": []any{map[string]any{"type": "summary_text", "text": state.reasoningAccumulated.String()}}}
+		// The response.completed event is what SDKs use for the final object, so
+		// the encrypted reasoning state must be on THIS item, not only on the
+		// incremental output_item.done event.
+		if enc := responsesEncryptedFromDetails(state.reasoningDetails); enc != "" {
+			reasoningItem["encrypted_content"] = enc
+		}
 		if len(state.outputOrder) > 1 {
 			output = nil
 			for _, item := range state.outputOrder {
@@ -2100,4 +2526,21 @@ func normalizeAnthropicFinish(value string) string {
 		return "tool_use"
 	}
 	return value
+}
+
+// responsesEncryptedFromDetails extracts the encrypted reasoning blob from
+// accumulated Chat reasoning details, for the Responses output item. Returns ""
+// when there is no encrypted state (plain text reasoning has none).
+func responsesEncryptedFromDetails(details []any) string {
+	items, err := chatReasoningDetailsToResponses(details)
+	if err != nil {
+		return ""
+	}
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		if enc, ok := item["encrypted_content"].(string); ok && enc != "" {
+			return enc
+		}
+	}
+	return ""
 }

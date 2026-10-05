@@ -21,6 +21,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/mailoutbox"
+
+	"github.com/go-webauthn/webauthn/webauthn"
 )
 
 const (
@@ -49,6 +51,11 @@ var (
 	ErrBootstrapCollision = errors.New("identity: hosted bootstrap email already exists")
 	ErrBootstrapRequired  = errors.New("identity: hosted customer bootstrap credentials are required for an existing local installation")
 	ErrAccountDeleting    = errors.New("identity: account is deleting")
+	// ErrStaleAuthentication is returned when a session is created against a
+	// generation that no longer matches the stored one, i.e. a credential
+	// change or revocation landed between authentication and session
+	// creation. Handlers map it to a generic authentication failure.
+	ErrStaleAuthentication = errors.New("identity: authentication is stale")
 )
 
 // User is the authenticated hosted identity and its one owned account.
@@ -60,6 +67,11 @@ type User struct {
 	AccountStatus   string
 	VerifiedAt      sql.NullString
 	PasswordEnabled bool
+	// AuthGeneration is the user's current authentication/recovery generation,
+	// as read from users.auth_generation. Session creation only succeeds when
+	// the database still holds this value, so a credential change that lands
+	// between authentication and session creation fails closed.
+	AuthGeneration int64
 }
 
 func (u User) Verified() bool { return u.VerifiedAt.Valid && u.VerifiedAt.String != "" }
@@ -111,6 +123,15 @@ type PlatformUserRow struct {
 	CreatedAt     string `json:"created_at"`
 }
 
+// PlatformCounts is the platform-wide identity summary shown to an operator.
+type PlatformCounts struct {
+	Accounts  int64 `json:"accounts"`
+	Active    int64 `json:"active_accounts"`
+	Pending   int64 `json:"pending_accounts"`
+	Suspended int64 `json:"suspended_accounts"`
+	Users     int64 `json:"users"`
+}
+
 // Store owns hosted identity and platform-admin persistence.
 type Store struct {
 	db                 *sql.DB
@@ -129,6 +150,11 @@ type Store struct {
 	maxEntries         int
 	renewHook          func()
 	mailQueue          MailQueue
+	// webauthn and challenges implement passkeys. Both are nil until
+	// ConfigureWebAuthn installs relying-party configuration, so deployments
+	// without a public origin (and tests) simply have no passkey endpoints.
+	webauthn   *webauthn.WebAuthn
+	challenges *challengeStore
 }
 
 type userSessionCacheEntry struct {
@@ -182,6 +208,19 @@ func (s *Store) SetCacheTTL(d time.Duration) {
 	s.mu.Unlock()
 }
 
+// SetPlatformSessionTTL overrides the platform-operator session lifetime. It is
+// called once at construction time; the platform console is the
+// highest-privilege session and gets a shorter window than customer sessions
+// (docs/pre_saas_release_review.md TR-010).
+func (s *Store) SetPlatformSessionTTL(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.platformSessionTTL = d
+	s.mu.Unlock()
+}
+
 func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int) ([]PlatformUserRow, error) {
 	pattern := "%" + strings.TrimSpace(search) + "%"
 	rows, err := s.db.QueryContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,a.plan,u.created_at FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email LIKE ? OR u.id LIKE ? OR a.id LIKE ? ORDER BY u.created_at DESC LIMIT ? OFFSET ?`, pattern, pattern, pattern, limit, offset)
@@ -200,6 +239,37 @@ func (s *Store) ListUsers(ctx context.Context, search string, limit, offset int)
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// PlatformCounts returns aggregate counts from platform-global identity tables.
+func (s *Store) PlatformCounts(ctx context.Context) (PlatformCounts, error) {
+	var counts PlatformCounts
+	err := s.db.QueryRowContext(ctx, `SELECT
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL),
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL AND status='active'),
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL AND status='pending'),
+		(SELECT count(*) FROM accounts WHERE owner_user_id IS NOT NULL AND status='suspended'),
+		(SELECT count(*) FROM users)`).Scan(&counts.Accounts, &counts.Active, &counts.Pending, &counts.Suspended, &counts.Users)
+	return counts, err
+}
+
+// PlatformAccountIDs returns hosted account identifiers for operator-level
+// aggregate jobs. Callers must use each ID only to obtain account-scoped data.
+func (s *Store) PlatformAccountIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM accounts WHERE owner_user_id IS NOT NULL AND status <> 'deleting' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var accountIDs []string
+	for rows.Next() {
+		var accountID string
+		if err := rows.Scan(&accountID); err != nil {
+			return nil, err
+		}
+		accountIDs = append(accountIDs, accountID)
+	}
+	return accountIDs, rows.Err()
 }
 
 func (s *Store) SetAccountStatus(ctx context.Context, accountID, status string) error {
@@ -297,65 +367,139 @@ func ValidatePassword(password string) error {
 	return nil
 }
 
+// HostedBootstrapOutcome reports what BootstrapHostedCustomer did, so the
+// caller can log the branches that leave no other trace: a fresh hosted install
+// deliberately creates no customer, and a migration that succeeds is otherwise
+// silent.
+type HostedBootstrapOutcome int
+
+const (
+	// HostedBootstrapSkipped means a previous bootstrap already ran.
+	HostedBootstrapSkipped HostedBootstrapOutcome = iota
+	// HostedBootstrapFresh means a fresh hosted install created no customer by
+	// design; the TILLER_USERNAME/TILLER_PASSWORD values are not provisioning
+	// input and were ignored.
+	HostedBootstrapFresh
+	// HostedBootstrapMigrated means the existing local account was converted
+	// into a verified hosted customer.
+	HostedBootstrapMigrated
+)
+
 // BootstrapHostedCustomer converts the local account into a normal hosted
 // customer exactly once. freshInstall comes from the database migration state;
 // it prevents an existing local database from being mistaken for a new hosted
 // install when the legacy credentials are omitted. The caller must run this
 // before syncing the hosted platform credential.
-func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password string, freshInstall bool) error {
+//
+// ONE-TIME UPGRADE GUARD (see docs/back_compat.md): the
+// 'hosted_bootstrap_complete' marker is a deliberate one-time migration gate,
+// not recurring compat. It stays permanently so an install started before
+// hosted identity existed can convert exactly once. It recognises two subjects:
+// a pre-tenancy account with owner_user_id IS NULL (claim the account by
+// inserting a user), and a unified local operator row (convert that user in
+// place so its users.id — and any passkeys bound to it — survives the switch to
+// hosted).
+//
+// On a fresh hosted install it creates NOTHING, even when email and password are
+// set: TILLER_USERNAME/TILLER_PASSWORD are one-time migration input for an
+// existing local database, not provisioning input for a new one. It reports
+// which branch it took so the caller can say so out loud.
+func (s *Store) BootstrapHostedCustomer(ctx context.Context, email, password string, freshInstall bool) (HostedBootstrapOutcome, error) {
 	var complete string
 	err := s.db.QueryRowContext(ctx, `SELECT value FROM platform_settings WHERE key='hosted_bootstrap_complete'`).Scan(&complete)
 	if err == nil {
-		return nil
+		return HostedBootstrapSkipped, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	email = NormalizeEmail(email)
 	if email == "" && password == "" && freshInstall {
-		return s.markHostedBootstrapComplete(ctx)
+		return HostedBootstrapFresh, s.markHostedBootstrapComplete(ctx)
 	}
 	if email == "" && password == "" {
-		return ErrBootstrapRequired
+		return HostedBootstrapSkipped, ErrBootstrapRequired
 	}
 	if !validBootstrapEmail(email) || ValidatePassword(password) != nil {
-		return ErrBootstrapInvalid
+		return HostedBootstrapSkipped, ErrBootstrapInvalid
 	}
 	if _, err := s.userByEmail(ctx, email); err == nil {
-		return ErrBootstrapCollision
+		return HostedBootstrapSkipped, ErrBootstrapCollision
 	} else if !errors.Is(err, ErrNotFound) {
-		return err
+		return HostedBootstrapSkipped, err
 	}
+	// A local install that has already booted on the unified credential model
+	// owns LocalAccountID through the local operator users row. That row is the
+	// migration subject: convert it in place (same users.id, so any passkeys
+	// bound to it survive) instead of inserting a second user, which the
+	// owner_user_id IS NULL gate would then reject as a collision.
+	localUserID, err := s.LocalOperatorUserID(ctx)
+	if err != nil {
+		return HostedBootstrapSkipped, err
+	}
+	// Hosted accounts authenticate with a bare-password hash (no username-bound
+	// material), so the migrated row is re-hashed with the supplied hosted
+	// password rather than reusing the local username+password fingerprint.
 	passwordHash, err := s.passwordHasher.Hash(password)
 	if err != nil {
-		return err
-	}
-	userID, err := id.New()
-	if err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,'active',?,?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now), formatTime(now)); err != nil {
-		return err
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE accounts SET owner_user_id=?,updated_at=? WHERE id=? AND owner_user_id IS NULL`, userID, formatTime(now), database.LocalAccountID)
-	if err != nil {
-		return err
-	}
-	if count, err := result.RowsAffected(); err != nil {
-		return err
-	} else if count != 1 {
-		return ErrBootstrapCollision
+	migratedExisting := false
+	if localUserID != "" {
+		var owner string
+		if err := tx.QueryRowContext(ctx, `SELECT owner_user_id FROM accounts WHERE id=?`, database.LocalAccountID).Scan(&owner); err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if owner != localUserID {
+			// The marker names a user that does not own the local account;
+			// refuse rather than rewriting an unrelated identity.
+			return HostedBootstrapSkipped, ErrBootstrapCollision
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE users SET email=?,password_hash=?,password_auth_enabled=1,status='active',email_verified_at=?,auth_generation=auth_generation+1,updated_at=? WHERE id=?`,
+			email, passwordHash, formatTime(now), formatTime(now), localUserID)
+		if err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			return HostedBootstrapSkipped, err
+		} else if count != 1 {
+			return HostedBootstrapSkipped, ErrBootstrapCollision
+		}
+		migratedExisting = true
+	} else {
+		userID, err := id.New()
+		if err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,email_verified_at,created_at,updated_at) VALUES(?,?,?,'active',?,?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now), formatTime(now)); err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE accounts SET owner_user_id=?,updated_at=? WHERE id=? AND owner_user_id IS NULL`, userID, formatTime(now), database.LocalAccountID)
+		if err != nil {
+			return HostedBootstrapSkipped, err
+		}
+		if count, err := result.RowsAffected(); err != nil {
+			return HostedBootstrapSkipped, err
+		} else if count != 1 {
+			return HostedBootstrapSkipped, ErrBootstrapCollision
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO platform_settings(key,value,updated_at) VALUES('hosted_bootstrap_complete','1',?)`, formatTime(now)); err != nil {
-		return err
+		return HostedBootstrapSkipped, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return HostedBootstrapSkipped, err
+	}
+	if migratedExisting {
+		s.InvalidateAccount(database.LocalAccountID)
+	}
+	return HostedBootstrapMigrated, nil
 }
 
 func (s *Store) markHostedBootstrapComplete(ctx context.Context) error {
@@ -471,8 +615,8 @@ func (s *Store) UserByEmail(ctx context.Context, email string) (User, error) {
 
 func (s *Store) userByEmail(ctx context.Context, email string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email=?`, email).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled,u.auth_generation FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.email=?`, email).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled, &u.AuthGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -596,6 +740,12 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 
 // IssuePasswordReset replaces prior reset tokens for a known user. Missing
 // users return no token without an error for enumeration-resistant handlers.
+//
+// A passkey-only account (password sign-in disabled, no Google link) is
+// deliberately eligible: the reset flow is the account-recovery path when every
+// registered passkey is lost, and it restores password sign-in alongside the
+// new password. Google-linked accounts are not eligible — Google disables
+// password auth by design and is its own recovery route.
 func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, string, error) {
 	u, err := s.userByEmail(ctx, NormalizeEmail(email))
 	if errors.Is(err, ErrNotFound) {
@@ -604,7 +754,11 @@ func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, str
 	if err != nil {
 		return User{}, "", err
 	}
-	if !u.PasswordEnabled {
+	var googleLinked bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider='google')`, u.ID).Scan(&googleLinked); err != nil {
+		return User{}, "", err
+	}
+	if googleLinked {
 		return User{}, "", nil
 	}
 	raw, selector, hash, err := newOpaqueToken(s.tokenHasher)
@@ -620,7 +774,7 @@ func (s *Store) IssuePasswordReset(ctx context.Context, email string) (User, str
 	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, u.ID); err != nil {
 		return User{}, "", err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO password_reset_tokens(id,user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?,?)`, selector, u.ID, hash, formatTime(now), formatTime(now.Add(resetTTL))); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO password_reset_tokens(id,user_id,token_hash,created_at,expires_at,auth_generation) VALUES(?,?,?,?,?,?)`, selector, u.ID, hash, formatTime(now), formatTime(now.Add(resetTTL)), u.AuthGeneration); err != nil {
 		return User{}, "", err
 	}
 	if err := s.enqueueMail(ctx, tx, mailoutbox.QueuedMessage{UserID: u.ID, Type: mailoutbox.TypePasswordReset, Recipient: u.Email, Token: raw}); err != nil {
@@ -644,11 +798,21 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 		return User{}, ErrInvalidToken
 	}
 	var userID, hash, expires string
-	if err := s.db.QueryRowContext(ctx, `SELECT t.user_id,t.token_hash,t.expires_at FROM password_reset_tokens t JOIN users u ON u.id=t.user_id AND u.password_auth_enabled=1 WHERE t.id=? AND t.used_at IS NULL`, selector).Scan(&userID, &hash, &expires); err != nil {
+	var tokenGeneration, currentGeneration int64
+	// The token is not conditional on password_auth_enabled: a passkey-only
+	// account is issued a reset token precisely to restore password sign-in,
+	// so requiring the flag to already be set would make that recovery
+	// impossible. Eligibility is enforced at issue time.
+	if err := s.db.QueryRowContext(ctx, `SELECT t.user_id,t.token_hash,t.expires_at,t.auth_generation,u.auth_generation FROM password_reset_tokens t JOIN users u ON u.id=t.user_id WHERE t.id=? AND t.used_at IS NULL`, selector).Scan(&userID, &hash, &expires, &tokenGeneration, &currentGeneration); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrInvalidToken
 		}
 		return User{}, err
+	}
+	// A token issued before a sensitive credential change carries the older
+	// generation and is stale: reject it rather than let it reset the password.
+	if tokenGeneration != currentGeneration {
+		return User{}, ErrInvalidToken
 	}
 	if !s.tokenHasher.Verify(secret, hash) {
 		return User{}, ErrInvalidToken
@@ -674,10 +838,24 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=? WHERE id=?`, newHash, formatTime(now), userID); err != nil {
+	// The Google guard is enforced here as the authoritative race backstop:
+	// if a Google identity was linked after the token was issued, the reset
+	// must not resurrect password auth. A zero-row update means the guard
+	// fired; fail the whole reset rather than deleting sessions and reporting
+	// success for a password that was never changed.
+	updated, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,password_auth_enabled=1,updated_at=?,auth_generation=auth_generation+1 WHERE id=? AND NOT EXISTS(SELECT 1 FROM user_identities WHERE user_id=? AND provider='google')`, newHash, formatTime(now), userID, userID)
+	if err != nil {
 		return User{}, err
 	}
+	if n, _ := updated.RowsAffected(); n != 1 {
+		return User{}, ErrInvalidToken
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM user_sessions WHERE user_id=?`, userID); err != nil {
+		return User{}, err
+	}
+	// A token issued before this reset must not survive it: the generation
+	// bump above makes any other outstanding reset link stale.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM password_reset_tokens WHERE user_id=?`, userID); err != nil {
 		return User{}, err
 	}
 	// A password reset cancels any outstanding email change: the warning mail
@@ -694,7 +872,10 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, raw, password string) 
 }
 
 // CreateUserSession creates a server-side customer session for an active,
-// verified account.
+// verified account. The insert is conditional on the user's auth_generation
+// still matching the value observed at authentication time, so a credential
+// change or revocation that commits in between yields ErrStaleAuthentication
+// instead of minting a session from stale credentials.
 func (s *Store) CreateUserSession(ctx context.Context, u User) (UserSession, error) {
 	if u.Status != "active" || !u.Verified() {
 		return UserSession{}, ErrNotVerified
@@ -712,8 +893,18 @@ func (s *Store) CreateUserSession(ctx context.Context, u User) (UserSession, err
 	}
 	now := time.Now().UTC()
 	expires := now.Add(s.userSessionTTL)
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO user_sessions(id,user_id,account_id,token_hash,csrf_token,created_at,expires_at,last_used_at) VALUES(?,?,?,?,?,?,?,?)`, selector, u.ID, u.AccountID, hash, csrf, formatTime(now), formatTime(expires), formatTime(now)); err != nil {
+	result, err := s.db.ExecContext(ctx, `INSERT INTO user_sessions(id,user_id,account_id,token_hash,csrf_token,created_at,expires_at,last_used_at)
+		SELECT ?,?,?,?,?,?,?,?
+		WHERE EXISTS(SELECT 1 FROM users u JOIN accounts a ON a.owner_user_id=u.id
+			WHERE u.id=? AND u.auth_generation=? AND u.status='active' AND a.status='active' AND u.email_verified_at IS NOT NULL)`,
+		selector, u.ID, u.AccountID, hash, csrf, formatTime(now), formatTime(expires), formatTime(now), u.ID, u.AuthGeneration)
+	if err != nil {
 		return UserSession{}, err
+	}
+	if n, rowsErr := result.RowsAffected(); rowsErr != nil {
+		return UserSession{}, rowsErr
+	} else if n != 1 {
+		return UserSession{}, ErrStaleAuthentication
 	}
 	return UserSession{Token: raw, CSRFToken: csrf, ExpiresAt: expires, User: u}, nil
 }
@@ -797,8 +988,8 @@ func (s *Store) loadUserSession(ctx context.Context, selector, secret string, no
 	var hash, expires string
 	var status, accountStatus string
 	var passwordEnabled bool
-	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status,u.password_auth_enabled FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id AND a.owner_user_id=u.id WHERE us.id=?`, selector).
-		Scan(&session.CSRFToken, &hash, &expires, &session.User.ID, &session.User.Email, &status, &session.User.VerifiedAt, &session.User.AccountID, &accountStatus, &passwordEnabled); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT us.csrf_token,us.token_hash,us.expires_at,u.id,u.email,u.status,u.email_verified_at,us.account_id,a.status,u.password_auth_enabled,u.auth_generation FROM user_sessions us JOIN users u ON u.id=us.user_id JOIN accounts a ON a.id=us.account_id AND a.owner_user_id=u.id WHERE us.id=?`, selector).
+		Scan(&session.CSRFToken, &hash, &expires, &session.User.ID, &session.User.Email, &status, &session.User.VerifiedAt, &session.User.AccountID, &accountStatus, &passwordEnabled, &session.User.AuthGeneration); err != nil {
 		return UserSession{}, false
 	}
 	session.User.Status, session.User.AccountStatus = status, accountStatus
@@ -1115,12 +1306,21 @@ func (s *Store) ensurePlatformCacheRoomLocked(now time.Time) {
 
 func (s *Store) userByID(ctx context.Context, userID string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
-		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.email,u.status,u.email_verified_at,a.id,a.status,u.password_auth_enabled,u.auth_generation FROM users u JOIN accounts a ON a.owner_user_id=u.id WHERE u.id=?`, userID).
+		Scan(&u.ID, &u.Email, &u.Status, &u.VerifiedAt, &u.AccountID, &u.AccountStatus, &u.PasswordEnabled, &u.AuthGeneration)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
 	return u, err
+}
+
+// UserByID re-reads a user's current credential state. Callers that mutate a
+// credential and then need to create a session for that user (account linking
+// disables password auth and bumps the auth generation) must use this rather
+// than a snapshot captured before the mutation, which carries the old
+// generation and would be rejected as stale by CreateUserSession.
+func (s *Store) UserByID(ctx context.Context, userID string) (User, error) {
+	return s.userByID(ctx, userID)
 }
 
 func newOpaqueToken(hasher auth.SecretHasher) (raw, selector, hash string, err error) {

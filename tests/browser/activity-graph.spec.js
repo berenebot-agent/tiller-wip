@@ -60,15 +60,15 @@ test('activity graph starts empty, lights live legs, and settles on outcome', as
   await graphNode('activity-graph-client').click();
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await expect(page.locator('#activity-title')).toHaveText('activity-graph-client activity');
-  await page.getByRole('button', { name: 'Done' }).click();
+  await page.locator('#done-activity').click();
   await graphNode('activity-graph-group/graph').click();
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await expect(page.locator('#activity-title')).toHaveText('activity-graph-group/graph activity');
-  await page.getByRole('button', { name: 'Done' }).click();
+  await page.locator('#done-activity').click();
   await graphNode(`${providerName}/mock-model-b`).click();
   await expect(page.locator('#activity-dialog')).toBeVisible();
   await expect(page.locator('#activity-title')).toHaveText(`${providerName}/mock-model-b activity`);
-  await page.getByRole('button', { name: 'Done' }).click();
+  await page.locator('#done-activity').click();
   // The served target roundel settles green; the failed target turns red.
   // A failed ordered-fallback target can open a cooldown, which the pane paints
   // as a solid red skipped dot (ring hidden), so accept either red outcome.

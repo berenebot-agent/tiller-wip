@@ -9,7 +9,7 @@ function mockCatalogue(page, { models = [], virtualModels = [], groups = [], pro
     const body = url.pathname === '/api/admin/models' ? response(models)
       : url.pathname === '/api/admin/virtual-models' ? response(virtualModels)
         : url.pathname === '/api/admin/virtual-groups' ? response(groups)
-          : url.pathname === '/api/admin/providers' ? response(providers)
+            : url.pathname === '/api/admin/providers' ? response(providers.map(provider => ({ available_model_count: models.filter(model => model.provider_id === provider.id && model.available).length, model_count: models.filter(model => model.provider_id === provider.id).length, base_url: 'https://provider.example/v1', last_refresh_at: '', protocols: ['chat'], ...provider })))
             : url.pathname === '/api/admin/usage' ? { target_last_outcome: {}, target_health: {} }
               : null;
     if (body) return route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) });
@@ -58,7 +58,8 @@ async function openRealFixture(page, model) {
   await page.addInitScript(() => { window.EventSource = class { addEventListener() {} close() {} }; });
   await openAdmin(page);
   await mockCatalogue(page, { providers: [{ id: 'provider-capability', name: 'forge', enabled: true }], models: [model] });
-  await page.getByRole('link', { name: 'Real Models' }).click();
+  await page.getByRole('link', { name: 'Providers' }).click();
+  await page.getByRole('button', { name: 'Browse forge models' }).click();
   const row = page.locator(`#models-body tr[data-model-id="${model.id}"]`);
   await expect(row.locator(`[data-model-capabilities="${model.id}"]`)).toBeVisible();
   await row.locator(`[data-model-capabilities="${model.id}"]`).click();
@@ -112,7 +113,7 @@ async function mockDeferredUsageCatalogue(page, usageDelayMs) {
       });
     }
     if (path === '/api/admin/models') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: sortModels, limit: 200, offset: 0 }) });
-    if (path === '/api/admin/providers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'p1', name: 'forge', enabled: true, protocols: ['chat'] }], limit: 200, offset: 0 }) });
+    if (path === '/api/admin/providers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'p1', name: 'forge', enabled: true, protocols: ['chat'], available_model_count: sortModels.filter(model => model.available).length, model_count: sortModels.length }], limit: 200, offset: 0 }) });
     return route.continue();
   });
 }
@@ -124,7 +125,8 @@ async function mockDeferredUsageCatalogue(page, usageDelayMs) {
 test('models table re-sorts by usage once the deferred envelope arrives', async ({ page }) => {
   await mockDeferredUsageCatalogue(page, 1200);
   await openAdmin(page);
-  await page.getByRole('link', { name: 'Real Models' }).click();
+  await page.getByRole('link', { name: 'Providers' }).click();
+  await page.getByRole('button', { name: 'Browse forge models' }).click();
   const rows = page.locator('#models-body tr[data-model-id]');
   await expect(rows).toHaveCount(2);
   // Default sort is 1h desc: the high-usage model must lead once usage arrives,
@@ -139,7 +141,8 @@ test('models table re-sorts by usage once the deferred envelope arrives', async 
 test('models table does not override a user-chosen sort when usage arrives', async ({ page }) => {
   await mockDeferredUsageCatalogue(page, 3000);
   await openAdmin(page);
-  await page.getByRole('link', { name: 'Real Models' }).click();
+  await page.getByRole('link', { name: 'Providers' }).click();
+  await page.getByRole('button', { name: 'Browse forge models' }).click();
   const rows = page.locator('#models-body tr[data-model-id]');
   await expect(rows).toHaveCount(2);
 
@@ -184,11 +187,12 @@ test('models table cascades usage sort through longer windows', async ({ page })
       }),
     });
     if (path === '/api/admin/models') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: cascadeModels, limit: 200, offset: 0 }) });
-    if (path === '/api/admin/providers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'p1', name: 'forge', enabled: true, protocols: ['chat'] }], limit: 200, offset: 0 }) });
+    if (path === '/api/admin/providers') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ data: [{ id: 'p1', name: 'forge', enabled: true, protocols: ['chat'], available_model_count: cascadeModels.filter(model => model.available).length, model_count: cascadeModels.length }], limit: 200, offset: 0 }) });
     return route.continue();
   });
   await openAdmin(page);
-  await page.getByRole('link', { name: 'Real Models' }).click();
+  await page.getByRole('link', { name: 'Providers' }).click();
+  await page.getByRole('button', { name: 'Browse forge models' }).click();
   const rows = page.locator('#models-body tr[data-model-id]');
   await expect(rows).toHaveCount(3);
   await expect(rows.nth(0)).toHaveAttribute('data-model-id', 'model-gamma');

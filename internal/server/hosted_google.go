@@ -7,6 +7,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -38,6 +39,9 @@ func (s *Server) googleConfig(ctx context.Context) (hostedauth.GoogleConfig, err
 }
 
 func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.oauthStartLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
@@ -47,7 +51,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
 	if !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "google_signin") {
@@ -69,12 +73,17 @@ func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword string `json:"current_password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		respondDecodeError(w, err)
 		return
 	}
-	if err := s.identity.VerifyPassword(r.Context(), session.User.ID, input.CurrentPassword); err != nil {
-		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Your current password is incorrect.")
-		return
+	// A password is the normal proof. A short-lived link grant replaces it when
+	// the user has just authenticated with their password and accepted the
+	// link prompt, so the factor is not demanded twice.
+	if !s.hasLinkAuth(rawUserSessionToken(r)) {
+		if err := s.identity.VerifyPassword(r.Context(), session.User.ID, input.CurrentPassword); err != nil {
+			adminError(w, http.StatusUnauthorized, "invalid_credentials", "Your current password is incorrect.")
+			return
+		}
 	}
 	if err := s.beginGoogleFlow(w, r, hostedauth.IntentLink, rawUserSessionToken(r), true); err != nil {
 		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google linking is temporarily unavailable.")
@@ -191,6 +200,25 @@ func (s *Server) completeGoogleSignIn(w http.ResponseWriter, r *http.Request, cl
 		return
 	}
 	if _, err := s.identity.UserByEmail(r.Context(), claims.Email); err == nil {
+		if !claims.EmailVerified {
+			s.googleCallbackError(w, r, "google_failed")
+			return
+		}
+		pendingClaims := hostedauth.SignupClaims{Subject: claims.Subject, Email: claims.Email, Authoritative: claims.AuthoritativeEmail()}
+		pendingToken, ok := s.googlePending.Put(pendingClaims)
+		if !ok {
+			s.googleCallbackError(w, r, "google_unavailable")
+			return
+		}
+		expires := time.Now().Add(hostedauth.FlowTTL)
+		http.SetCookie(w, &http.Cookie{Name: googleSignupCookie, Value: pendingToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: maxAge(expires)})
+		// Only an authoritative email may link an existing account in one step.
+		// A third-party address that merely carries email_verified must sign in
+		// to the account first; the sign-in response then offers the link.
+		if !pendingClaims.Authoritative {
+			s.googleCallbackError(w, r, "google_link_challenge_required")
+			return
+		}
 		s.googleCallbackError(w, r, "google_link_required")
 		return
 	} else if !errors.Is(err, identity.ErrNotFound) {
@@ -212,6 +240,119 @@ func (s *Server) completeGoogleSignIn(w http.ResponseWriter, r *http.Request, cl
 	http.Redirect(w, r, "/login?google_signup=1", http.StatusSeeOther)
 }
 
+// completeGoogleGSI handles sign-in from Google Identity Services (the rendered
+// "Sign in with Google" button and One Tap). Unlike the redirect flow it
+// receives a Google-issued ID token (credential) directly from the browser, so
+// there is no PKCE state to consume. The credential's signature, audience and
+// email_verified claims are checked by ValidateIDToken; the Google-issued token
+// replaces the Turnstile check for this path (One Tap cannot be gated behind a
+// pre-flight captcha), with rate limiting as the abuse control.
+func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
+	key := clientIP(r, s.config.TrustedProxy)
+	if !s.oauthStartLimiter.allowAttempt(key) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
+		return
+	}
+	var input struct {
+		Credential string `json:"credential"`
+	}
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+		respondDecodeError(w, err)
+		return
+	}
+	config, err := s.googleConfig(r.Context())
+	if err != nil {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	claims, err := s.googleVerifier.ValidateIDToken(r.Context(), input.Credential, config.ClientID, "")
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Warn("google id token validation failed", "error_class", fmt.Sprintf("%T", err))
+		}
+		// A signing-key fetch failure is a provider availability problem, not a
+		// bad credential; report it as such so the client retries rather than
+		// concluding the account is unusable.
+		if errors.Is(err, hostedauth.ErrGoogleResponse) {
+			adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+			return
+		}
+		adminError(w, http.StatusUnauthorized, "google_failed", "Google sign-in could not be completed. Try again.")
+		return
+	}
+	s.platformSettingsMu.Lock()
+	defer s.platformSettingsMu.Unlock()
+	current, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
+	if err != nil || !current.GoogleEnabled || current.GoogleClientID != config.ClientID || current.GoogleClientSecret != config.ClientSecret {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	s.completeGoogleGSISignIn(w, r, claims)
+}
+
+// completeGoogleGSISignIn mirrors completeGoogleSignIn but answers with JSON
+// rather than a redirect, since the GSI callback runs in-page. Signup is still
+// handed off to the consent form via the pending-signup cookie.
+func (s *Server) completeGoogleGSISignIn(w http.ResponseWriter, r *http.Request, claims hostedauth.GoogleIdentity) {
+	u, err := s.identity.GoogleUserBySubject(r.Context(), claims.Subject)
+	if err == nil {
+		session, sessionErr := s.identity.CreateUserSession(r.Context(), u)
+		if sessionErr != nil {
+			adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
+			return
+		}
+		s.setUserSessionCookie(w, r, session.Token, session.ExpiresAt)
+		s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.login", ActorType: "user", ActorID: u.ID, Metadata: map[string]string{"method": "google"}})
+		writeJSON(w, http.StatusOK, userSessionPayload(session))
+		return
+	}
+	if !errors.Is(err, identity.ErrNotFound) {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	if _, err := s.identity.UserByEmail(r.Context(), claims.Email); err == nil {
+		if !claims.EmailVerified {
+			adminError(w, http.StatusUnauthorized, "google_failed", "Google sign-in could not be completed. Try again.")
+			return
+		}
+		pendingClaims := hostedauth.SignupClaims{Subject: claims.Subject, Email: claims.Email, Authoritative: claims.AuthoritativeEmail()}
+		pendingToken, ok := s.googlePending.Put(pendingClaims)
+		if !ok {
+			adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+			return
+		}
+		expires := time.Now().Add(hostedauth.FlowTTL)
+		http.SetCookie(w, &http.Cookie{Name: googleSignupCookie, Value: pendingToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: maxAge(expires)})
+		if !pendingClaims.Authoritative {
+			// Third-party address: no one-click link. The user signs in to the
+			// existing account and is offered the link there.
+			writeJSON(w, http.StatusOK, map[string]any{"link_challenge_required": true, "email": claims.Email})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"link_required": true, "email": claims.Email})
+		return
+	} else if !errors.Is(err, identity.ErrNotFound) {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	enabled, err := s.storeHandle().HostedSignupEnabled(r.Context())
+	if err != nil || !enabled {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
+	}
+	pendingToken, ok := s.googlePending.Put(hostedauth.SignupClaims{Subject: claims.Subject, Email: claims.Email})
+	if !ok {
+		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	expires := time.Now().Add(hostedauth.FlowTTL)
+	http.SetCookie(w, &http.Cookie{Name: googleSignupCookie, Value: pendingToken, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode, Expires: expires, MaxAge: maxAge(expires)})
+	writeJSON(w, http.StatusOK, map[string]any{"signup_required": true, "email": claims.Email})
+}
+
 func (s *Server) completeGoogleLink(w http.ResponseWriter, r *http.Request, flow hostedauth.Flow, claims hostedauth.GoogleIdentity) {
 	session, ok := s.identity.GetUserSession(r.Context(), flow.SessionToken)
 	if !ok {
@@ -226,7 +367,30 @@ func (s *Server) completeGoogleLink(w http.ResponseWriter, r *http.Request, flow
 		}
 		return
 	}
-	s.setUserSessionCookie(w, r, flow.SessionToken, session.ExpiresAt)
+	// Linking revokes the user's sessions (LinkGoogleIdentity -> InvalidateUser)
+	// because it disables password authentication, and it bumps the auth
+	// generation. The initiating session is among those revoked, so it must be
+	// replaced: re-issuing the old token would hand the browser a cookie whose
+	// session row no longer exists. The user is re-read first because the
+	// snapshot taken before the link carries the pre-link generation, which
+	// CreateUserSession would correctly reject as stale.
+	linked, readErr := s.identity.UserByID(r.Context(), session.User.ID)
+	if readErr != nil {
+		s.googleCallbackError(w, r, "google_unavailable")
+		return
+	}
+	fresh, sessionErr := s.identity.CreateUserSession(r.Context(), linked)
+	if sessionErr != nil {
+		s.googleCallbackError(w, r, "google_session_expired")
+		return
+	}
+	s.setUserSessionCookie(w, r, fresh.Token, fresh.ExpiresAt)
+	// The link is complete; drop any pending signup/link claim so the client
+	// stops offering the interstitial and the claim cannot be replayed.
+	if cookie, cookieErr := r.Cookie(googleSignupCookie); cookieErr == nil {
+		s.googlePending.Take(cookie.Value)
+	}
+	s.clearCookie(w, googleSignupCookie)
 	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.google_linked", ActorType: "user", ActorID: session.User.ID})
 	http.Redirect(w, r, "/?google_linked=1#settings/account", http.StatusSeeOther)
 }
@@ -249,20 +413,20 @@ func (s *Server) completeGoogleReauth(w http.ResponseWriter, r *http.Request, fl
 }
 
 func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	key := clientIP(r, s.config.TrustedProxy)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
 	}
 	var input struct {
-		AcceptTerms bool `json:"accept_terms"`
+		AcceptTerms  bool `json:"accept_terms"`
+		LinkExisting bool `json:"link_existing"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if !input.AcceptTerms {
-		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
+		respondDecodeError(w, err)
 		return
 	}
 	cookie, err := r.Cookie(googleSignupCookie)
@@ -270,9 +434,13 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "google_signup_expired", "Start Google sign-in again to continue.")
 		return
 	}
-	claims, ok := s.googlePending.Take(cookie.Value)
-	s.clearCookie(w, googleSignupCookie)
+	// Peek, do not Take: a refusal or a retryable failure must leave the claim
+	// intact so the user is not forced through the Google round trip again. The
+	// claim is consumed only once a terminal action (account creation or an
+	// accepted link) has actually committed.
+	claims, ok := s.googlePending.Peek(cookie.Value)
 	if !ok {
+		s.clearCookie(w, googleSignupCookie)
 		adminError(w, http.StatusBadRequest, "google_signup_expired", "Start Google sign-in again to continue.")
 		return
 	}
@@ -281,6 +449,64 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 	authSettings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
 	if err != nil || !authSettings.GoogleEnabled || authSettings.GoogleClientID == "" || authSettings.GoogleClientSecret == "" {
 		adminError(w, http.StatusServiceUnavailable, "google_unavailable", "Google sign-in is temporarily unavailable.")
+		return
+	}
+	if input.LinkExisting {
+		if claims.Subject == "" || claims.Email == "" {
+			adminError(w, http.StatusUnauthorized, "google_failed", "Google sign-in could not be completed. Try again.")
+			return
+		}
+		// The one-click link is permitted only when Google is authoritative for
+		// the address. For a third-party address, email_verified does not prove
+		// current mailbox control, so the user must authenticate to the existing
+		// account first: that flow links through the authenticated Google
+		// redirect callback (completeGoogleLink), never here.
+		if !claims.Authoritative {
+			adminError(w, http.StatusConflict, "google_link_challenge_required", "Sign in to the existing Tiller account, then link Google from the account settings.")
+			return
+		}
+		u, lookupErr := s.identity.UserByEmail(r.Context(), claims.Email)
+		if lookupErr != nil {
+			adminError(w, http.StatusConflict, "google_link_expired", "The account could not be linked. Start Google sign-in again.")
+			return
+		}
+		if err := s.identity.LinkGoogleIdentity(r.Context(), u.ID, claims.Subject, claims.Email); err != nil {
+			if errors.Is(err, identity.ErrGoogleIdentityTaken) {
+				adminError(w, http.StatusConflict, "google_already_linked", "That Google account is already linked to a Tiller account.")
+				return
+			}
+			adminError(w, http.StatusConflict, "google_link_failed", "Google could not be linked to this account. Start Google sign-in again.")
+			return
+		}
+		s.googlePending.Take(cookie.Value)
+		s.clearCookie(w, googleSignupCookie)
+		// Re-read after linking: the link bumped the auth generation, so the
+		// pre-link snapshot would be rejected as stale by CreateUserSession.
+		linked, readErr := s.identity.UserByID(r.Context(), u.ID)
+		if readErr != nil {
+			adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
+			return
+		}
+		session, sessionErr := s.identity.CreateUserSession(r.Context(), linked)
+		if sessionErr != nil {
+			adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
+			return
+		}
+		s.setUserSessionCookie(w, r, session.Token, session.ExpiresAt)
+		s.clients.InvalidateAccount(u.AccountID)
+		s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.google_linked", ActorType: "user", ActorID: u.ID})
+
+		writeJSON(w, http.StatusOK, userSessionPayload(session))
+		return
+	}
+	if !input.AcceptTerms {
+		adminError(w, http.StatusBadRequest, "terms_not_accepted", "You must accept the Terms of Service and Privacy Policy.")
+		return
+	}
+	// Per-address budget: the Google identity's proved email is charged like a
+	// password signup, so rotating IPs cannot re-run the enrollment mail fast.
+	if !s.signupEmailLimiter.allowAttempt(s.authRateLimitEmailKey(claims.Email)) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
 	}
 	enabled, err := s.storeHandle().HostedSignupEnabled(r.Context())
@@ -308,6 +534,8 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
+	s.googlePending.Take(cookie.Value)
+	s.clearCookie(w, googleSignupCookie)
 	session, err := s.identity.CreateUserSession(r.Context(), u)
 	if err != nil {
 		adminError(w, http.StatusInternalServerError, "session_failed", "Could not create a sign-in session.")
@@ -321,25 +549,19 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) unlinkGoogle(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(userSessionKey).(identity.UserSession)
-	var input struct {
-		Password string `json:"password"`
-	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
+	if !s.consumeGoogleReauth(rawUserSessionToken(r)) {
 		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password or Google before unlinking Google.")
 		return
 	}
 	if err := s.identity.UnlinkGoogleIdentity(r.Context(), session.User.ID); err != nil {
 		if errors.Is(err, identity.ErrLastIdentity) {
-			adminError(w, http.StatusConflict, "last_signin_method", "Set a password before removing Google as your sign-in method.")
+			adminError(w, http.StatusConflict, "last_signin_method", "Set a password sign-in before unlinking Google.")
 			return
 		}
 		adminError(w, http.StatusConflict, "google_unavailable", "Google could not be unlinked from this account.")
 		return
 	}
+	s.clients.InvalidateAccount(session.User.AccountID)
 	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.google_unlinked", ActorType: "user", ActorID: session.User.ID})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -383,12 +605,82 @@ func (s *Server) reauthenticateSensitive(r *http.Request, userID, password strin
 	err := s.identity.VerifyPassword(r.Context(), userID, password)
 	if err == nil {
 		s.consumeGoogleReauth(rawUserSessionToken(r))
+		s.consumePasskeyReauth(rawUserSessionToken(r))
+		s.clearLinkAuth(rawUserSessionToken(r))
 		return false, nil
 	}
-	if s.consumeGoogleReauth(rawUserSessionToken(r)) {
+	sessionToken := rawUserSessionToken(r)
+	// A passkey assertion or a Google re-auth completed earlier in this session
+	// stands in for the password. Each grant is single-use and short-lived.
+	if s.consumePasskeyReauth(sessionToken) {
+		return false, nil
+	}
+	if s.consumeGoogleReauth(sessionToken) {
 		return true, nil
 	}
 	return false, err
+}
+
+// clearLinkAuth drops any outstanding link grant for a session. It runs when a
+// successful password reauthentication supersedes an older grant, so a grant
+// cannot be replayed after the session re-proves a factor by another route.
+func (s *Server) clearLinkAuth(sessionToken string) {
+	if sessionToken == "" {
+		return
+	}
+	key := linkAuthKey(sessionToken)
+	s.linkAuthMu.Lock()
+	delete(s.linkAuth, key)
+	s.linkAuthMu.Unlock()
+}
+
+// linkAuthKey scopes a grant to one session and one purpose.
+func linkAuthKey(sessionToken string) [32]byte {
+	return sha256.Sum256([]byte("link\x00" + sessionToken))
+}
+
+// grantLinkAuth records that this session recently proved a factor and may
+// start the account-link flow without re-entering the password. It is
+// deliberately short-lived: the grant exists only to bridge the gap between a
+// successful password login and the user confirming the link prompt.
+func (s *Server) grantLinkAuth(sessionToken string) {
+	if sessionToken == "" {
+		return
+	}
+	key := linkAuthKey(sessionToken)
+	now := time.Now()
+	s.linkAuthMu.Lock()
+	defer s.linkAuthMu.Unlock()
+	for existing, expires := range s.linkAuth {
+		if !now.Before(expires) {
+			delete(s.linkAuth, existing)
+		}
+	}
+	if len(s.linkAuth) >= 100000 {
+		for existing := range s.linkAuth {
+			delete(s.linkAuth, existing)
+			break
+		}
+	}
+	s.linkAuth[key] = now.Add(googleReauthTTL)
+}
+
+// hasLinkAuth reports whether a valid link grant exists for this session. Link
+// grants are intentionally NOT single-use: the user can cancel or fail the
+// intervening Google round trip and click Link Google again, and forcing a
+// password re-entry for that would be worse than the narrow replay surface of
+// an already-authenticated session. The grant expires in googleReauthTTL and
+// dies with the session.
+func (s *Server) hasLinkAuth(sessionToken string) bool {
+	if sessionToken == "" {
+		return false
+	}
+	key := linkAuthKey(sessionToken)
+	now := time.Now()
+	s.linkAuthMu.Lock()
+	defer s.linkAuthMu.Unlock()
+	expires, ok := s.linkAuth[key]
+	return ok && now.Before(expires)
 }
 
 func newGoogleRandomValue() (string, error) {

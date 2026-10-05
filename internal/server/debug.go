@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/tiller-router/tiller-router/internal/config"
 	"net/http"
 	"os"
 	"runtime"
@@ -54,6 +55,13 @@ func (s *Server) debugPprof(w http.ResponseWriter, r *http.Request) {
 	cloned := r.Clone(r.Context())
 	cloned.URL.Path = "/debug/pprof/" + strings.TrimPrefix(r.URL.Path, debugPprofPrefix)
 	http.DefaultServeMux.ServeHTTP(w, cloned)
+}
+
+func (s *Server) requireDebugAdmin(next http.Handler) http.Handler {
+	if s.config.Mode == config.ModeHosted {
+		return s.requirePlatform(next)
+	}
+	return s.requireAdmin(next)
 }
 
 func envOrUnset(key string) string {

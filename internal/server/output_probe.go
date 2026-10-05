@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -14,7 +15,49 @@ import (
 // decide whether an ordered-fallback target actually produced assistant output.
 // Beyond this the probe is inconclusive and the caller commits to the target
 // (never guesses a fallback), so buffering stays bounded.
+//
+// The budget is enforced at the reader boundary, not just between SSE events:
+// every byte the probe consumes — including SSE comment/blank lines that
+// readSSEEvent skips forever, and any buffered read-ahead inside the
+// bufio.Reader — is counted by probeBudgetReader. Without that boundary a
+// comment-only stream would grow the recorded buffer without bound while
+// readSSEEvent never returned.
 const maxOutputProbeBytes int64 = 1 << 20
+
+// probeBudgetSlack lets the reader boundary tolerate one over-budget read
+// (the read that crosses the cap) without misclassifying an exactly-at-budget
+// stream. The recorded-buffer check below remains the authoritative decision.
+const probeBudgetSlack int64 = 64 << 10
+
+// errProbeBudgetExceeded is the sentinel returned by probeBudgetReader once the
+// cumulative bytes read pass the probe budget. The probe maps it to the
+// documented bounded fallback (probeInconclusive, nil).
+var errProbeBudgetExceeded = errors.New("output probe budget exceeded")
+
+// probeBudgetReader counts every byte read from the wrapped upstream body and
+// refuses to read past the budget. It sits between resp.Body and the
+// bufio.Reader/TeeReader so the counter sees comment lines and buffered
+// read-ahead too, not only the bytes that become an SSE event.
+type probeBudgetReader struct {
+	reader io.Reader
+	budget int64
+	read   int64
+}
+
+func (r *probeBudgetReader) Read(p []byte) (int, error) {
+	if r.read > r.budget {
+		return 0, errProbeBudgetExceeded
+	}
+	n, err := r.reader.Read(p)
+	r.read += int64(n)
+	if r.read > r.budget {
+		// Report the bytes just read so the caller can record them, then
+		// surface the sentinel on the next call. The probe treats hitting the
+		// budget as inconclusive rather than an upstream failure.
+		return n, errProbeBudgetExceeded
+	}
+	return n, err
+}
 
 type probeOutcome int
 
@@ -46,7 +89,11 @@ func probeUpstreamOutput(resp *http.Response, target providers.Protocol) (probeO
 
 	recorded := &bytes.Buffer{}
 	underlying := resp.Body
-	reader := bufio.NewReader(io.TeeReader(underlying, recorded))
+	// The budget reader wraps the raw body before bufio/Tee so comment lines
+	// and bufio read-ahead are counted too. `underlying` still refers to the
+	// raw body so the deferred rewind replays recorded bytes + remainder.
+	budgeted := &probeBudgetReader{reader: underlying, budget: maxOutputProbeBytes + probeBudgetSlack}
+	reader := bufio.NewReader(io.TeeReader(budgeted, recorded))
 	defer func() {
 		resp.Body = bufferedReadCloser{
 			Reader: io.MultiReader(bytes.NewReader(recorded.Bytes()), underlying),
@@ -82,6 +129,12 @@ func probeUpstreamOutput(resp *http.Response, target providers.Protocol) (probeO
 			}
 		}
 		if err != nil {
+			if errors.Is(err, errProbeBudgetExceeded) {
+				// The comment-only / read-ahead budget was exhausted before a
+				// decision. Bounded fallback: commit to the target rather than
+				// buffering without limit.
+				return probeInconclusive, nil
+			}
 			if err == io.EOF {
 				// The stream ended without a terminal event. Output already
 				// observed returns above; otherwise treat it as empty.
@@ -94,11 +147,16 @@ func probeUpstreamOutput(resp *http.Response, target providers.Protocol) (probeO
 
 // probeDeltaHasOutput reports whether a canonical delta carries client-visible
 // assistant output. Reasoning counts: a reasoning-only reply is a valid
-// (non-empty) completion even when no visible text follows.
+// (non-empty) completion even when no visible text follows. Opaque reasoning
+// state counts too: an encrypted-only reasoning item is a real completion whose
+// state the client needs, not an empty response.
 func probeDeltaHasOutput(delta canonicalDelta) bool {
 	switch delta.Kind {
 	case "text", "reasoning":
 		return delta.Text != ""
+	case "reasoning_state":
+		details, _ := delta.Detail["details"].([]any)
+		return len(details) > 0
 	case "tool":
 		return delta.CallID != "" || delta.Name != "" || delta.Arguments != ""
 	}

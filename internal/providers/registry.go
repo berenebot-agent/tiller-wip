@@ -47,6 +47,11 @@ type Descriptor struct {
 	Protocols        []Protocol `json:"protocols"`
 	MinOutputTokens  int        `json:"min_output_tokens,omitempty"`
 	Discovery        string     `json:"-"`
+	// HostedDisabled marks a provider type that hosted Tiller's admin UI must
+	// not offer when adding a provider. It is a presentation-level policy flag
+	// only; see docs/provider_terms_review.md. Existing providers of this type
+	// are unaffected, and the create endpoint does not yet enforce it.
+	HostedDisabled bool `json:"hosted_disabled,omitempty"`
 }
 
 var descriptors = []Descriptor{
@@ -77,7 +82,7 @@ var descriptors = []Descriptor{
 	{Type: "minimax", Label: "MiniMax", DefaultBaseURL: "https://api.minimax.io/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "opencode-zen", Label: "OpenCode Zen", DefaultBaseURL: "https://opencode.ai/zen/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
 	{Type: "opencode-go", Label: "OpenCode Go", DefaultBaseURL: "https://opencode.ai/zen/go/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "opencode"},
-	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, MinOutputTokens: 16, Discovery: "opencode"},
+	{Type: "opencode-free", Label: "OpenCode Free", DefaultBaseURL: "https://opencode.ai/zen/v1", Protocols: []Protocol{ProtocolChat, ProtocolResponses}, MinOutputTokens: 16, Discovery: "opencode", HostedDisabled: true},
 	{Type: "commandcode", Label: "Command Code", DefaultBaseURL: "https://api.commandcode.ai/provider/v1", CredentialNeeded: true, Protocols: []Protocol{ProtocolChat, ProtocolResponses, ProtocolMessages}, Discovery: "commandcode"},
 	{Type: "generic-openai", Label: "Generic OpenAI-compatible", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 	{Type: "vllm", Label: "vLLM", BaseURLRequired: true, Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
@@ -149,12 +154,16 @@ type ReasoningOption struct {
 // empty Options list means the source explicitly reported no configurable
 // selector.
 type ReasoningCapabilities struct {
-	Options        []ReasoningOption `json:"options"`
-	ThinkingModes  []string          `json:"thinking_modes,omitempty"`
-	DefaultEffort  string            `json:"default_effort,omitempty"`
-	Mandatory      *bool             `json:"mandatory,omitempty"`
-	DefaultEnabled *bool             `json:"default_enabled,omitempty"`
-	Parameters     []string          `json:"parameters,omitempty"`
+	Options []ReasoningOption `json:"options"`
+	// ClientEfforts optionally narrows the effort values advertised to clients
+	// when the provider's wire-level values include backend-only aliases or
+	// implementation details. Nil means advertise the values in Options.
+	ClientEfforts  *[]string `json:"client_efforts,omitempty"`
+	ThinkingModes  []string  `json:"thinking_modes,omitempty"`
+	DefaultEffort  string    `json:"default_effort,omitempty"`
+	Mandatory      *bool     `json:"mandatory,omitempty"`
+	DefaultEnabled *bool     `json:"default_enabled,omitempty"`
+	Parameters     []string  `json:"parameters,omitempty"`
 	// EffortAliases maps a client-selectable effort alias (e.g. Codex "ultra")
 	// to the upstream wire effort the provider actually accepts (e.g. "max").
 	EffortAliases map[string]string `json:"effort_aliases,omitempty"`
@@ -666,8 +675,10 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		var reasoning *ReasoningCapabilities
 		if len(efforts) > 0 {
 			aliases := codexEffortAliases(efforts, derefString(item.MultiAgentReasoningEffort))
+			clientEfforts := codexClientEfforts(efforts)
 			reasoning = &ReasoningCapabilities{
 				Options:       []ReasoningOption{{Type: ReasoningOptionEffort, Values: SortEfforts(efforts)}},
+				ClientEfforts: &clientEfforts,
 				EffortAliases: aliases,
 				DefaultEffort: resolveCodexEffort(derefString(item.DefaultReasoningLevel), aliases),
 			}
@@ -686,6 +697,22 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 	}
 	sort.Slice(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	return models, nil
+}
+
+// codexClientEfforts returns the effort vocabulary Codex clients can select.
+// Codex discovery also reports backend wire levels; when both "ultra" and
+// "max" are advertised, "ultra" is the native client option and "max" is an
+// upstream implementation level. Keep "max" in Options for wire validation,
+// but don't expose it as a separate client-selectable variant.
+func codexClientEfforts(levels []string) []string {
+	clientEfforts := make([]string, 0, len(levels))
+	for _, level := range levels {
+		if level == "max" {
+			continue
+		}
+		clientEfforts = append(clientEfforts, level)
+	}
+	return SortEfforts(clientEfforts)
 }
 
 // derefString returns the pointed-to string, or "" when the pointer is nil.
@@ -899,16 +926,38 @@ func copilotNativeProtocol(endpoints []string) Protocol {
 // metadata is reported by the provider. supportedParams is the top-level
 // supported_parameters array from the model entry (used as fallback for
 // parameter hints when the reasoning object omits them).
-func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesObj any, supportedParams []string) *ReasoningCapabilities {
+func parseReasoningCapabilities(providerType string, reasoningObj, capabilitiesObj any, supportedParams []string, reasoningOptions *[]map[string]any) *ReasoningCapabilities {
 	if providerType == "anthropic" || providerType == "claude-subscription" {
 		return anthropicReasoning(capabilitiesObj)
 	}
+	var parsed *ReasoningCapabilities
 	if reasoningObj != nil {
-		if rc := openRouterReasoning(reasoningObj, supportedParams); rc != nil {
-			return rc
+		parsed = openRouterReasoning(reasoningObj, supportedParams)
+	}
+	if reasoningOptions == nil {
+		return parsed
+	}
+	options := parseModelsDevReasoningOptions(*reasoningOptions)
+	if options == nil {
+		return parsed
+	}
+	if parsed == nil {
+		return options
+	}
+	// The nested `reasoning` object carries the defaults/flags; the flat
+	// `reasoning_options` list carries the selector mechanisms. Merge the
+	// mechanisms the nested object did not already describe (e.g. toggle and
+	// budget), keyed by option type, so both survive a Tiller-to-Tiller hop.
+	present := make(map[ReasoningOptionType]bool, len(parsed.Options))
+	for _, option := range parsed.Options {
+		present[option.Type] = true
+	}
+	for _, option := range options.Options {
+		if !present[option.Type] {
+			parsed.Options = append(parsed.Options, option)
 		}
 	}
-	return nil
+	return parsed
 }
 
 // openRouterReasoning parses an OpenRouter-style `reasoning` object from a
@@ -1079,7 +1128,11 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 					MaxCompletionTokens int `json:"max_completion_tokens"`
 				} `json:"top_provider"`
 				SupportedParameters []string `json:"supported_parameters"`
-				Architecture        struct {
+				// Tiller-compatible catalogues publish the selector mechanisms as
+				// a flat `reasoning_options` list alongside the OpenRouter-style
+				// nested `reasoning` object.
+				ReasoningOptions *[]map[string]any `json:"reasoning_options"`
+				Architecture     struct {
 					InputModalities  []string `json:"input_modalities"`
 					OutputModalities []string `json:"output_modalities"`
 				} `json:"architecture"`
@@ -1113,7 +1166,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 			}
 			sp := item.SupportedParameters
 			arch := item.Architecture
-			reasoningCaps := parseReasoningCapabilities(provider.Type, item.Reasoning, item.Capabilities, sp)
+			reasoningCaps := parseReasoningCapabilities(provider.Type, item.Reasoning, item.Capabilities, sp, item.ReasoningOptions)
 			result = append(result, Model{
 				ID: modelID, DisplayName: display,
 				ContextLength:            firstPositive(item.ContextLength, item.ContextWindow, item.MaxModelLen, item.MaxInputTokens),

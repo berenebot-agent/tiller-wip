@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiller_gateway"
+version = "0.1.0"
+description = "Native Chat-first Tiller and OpenRouter gateway client"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = ["httpx>=0.28,<1"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+tiller_gateway = ["py.typed"]
