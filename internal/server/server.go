@@ -840,6 +840,17 @@ func (s *Server) adminUsername() string {
 // authenticated request keeps the browser cookie's MaxAge in sync with the
 // server-side sliding expiry, so active use extends the session across browser
 // reopen rather than the cookie expiring 30 days after login.
+//
+// CodeQL: the conditional Secure flag below is an accepted, intentional local
+// HTTP-compatibility decision (CWE-614), not an oversight. This cookie is the
+// standalone/local-mode authentication boundary, and plain-HTTP LAN
+// deployments are deliberately supported, so Secure=true unconditionally would
+// break login there. Secure is set when the request is actually secure —
+// direct TLS, or X-Forwarded-Proto=https from a configured TrustedProxy peer
+// (see secureRequest) — or when TILLER_ADMIN_COOKIE_SECURE=true forces it.
+// Hosted authentication does not use this cookie: __Host-tiller_session,
+// __Host-tiller_platform_session and the hosted Google cookies always set
+// Secure=true unconditionally.
 func (s *Server) setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.secureRequest(r) || s.config.AdminCookieSecure, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: int(time.Until(expires).Seconds())})
 }
@@ -852,6 +863,9 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookie); err == nil {
 		s.sessions.Delete(cookie.Value)
 	}
+	// The Secure flag must match setSessionCookie so the browser also clears a
+	// Secure cookie; see setSessionCookie for why it is conditional (accepted
+	// CWE-614 local HTTP-compatibility decision).
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: s.secureRequest(r) || s.config.AdminCookieSecure, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	w.WriteHeader(http.StatusNoContent)
 }
