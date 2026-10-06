@@ -778,7 +778,9 @@ function providerQuotaHTML(provider) {
   const rows = windows.map(w => {
     const pct = w.used_percent == null ? null : Math.max(0, Math.min(100, Number(w.used_percent)));
     const minutes = w.resets_at ? Math.max(0, Math.ceil((new Date(w.resets_at) - Date.now()) / 60000)) : null;
-    const reset = minutes == null ? '' : ` · ${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
+    const reset = minutes == null ? '' : minutes >= 1440
+      ? ` · ${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h left`
+      : ` · ${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
     const detail = pct == null ? 'Unlimited' : `${Math.round(pct)}% used`;
     return `<div class="provider-quota-window"><strong>${h(w.label)}</strong>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<span>${detail}${h(reset)}</span></div>`;
   });
