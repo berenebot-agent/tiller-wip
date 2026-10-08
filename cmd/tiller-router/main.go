@@ -17,6 +17,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/config"
 	cryptosecret "github.com/tiller-router/tiller-router/internal/crypto"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/dnsfallback"
 	"github.com/tiller-router/tiller-router/internal/privdrop"
 	"github.com/tiller-router/tiller-router/internal/server"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -141,6 +142,10 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		return err
 	}
 	logger.Info("tiller-router starting", "version", buildversion.Version, "commit", buildversion.Commit)
+	// Install before any outbound clients or background goroutines capture the
+	// default resolver. Hosted transports still validate every resolved address.
+	net.DefaultResolver = dnsfallback.New(cfg.DNSFallbackServers)
+	logger.Info("DNS fallback configured", "servers", cfg.DNSFallbackServers)
 	app, err := server.New(cfg, db, logger, server.WithSecretCipher(cipher))
 	if err != nil {
 		return err

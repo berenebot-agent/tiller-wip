@@ -79,6 +79,11 @@ services:
       # Never leave enabled on an exposed deployment.
       TILLER_DEBUG_PPROF: ${TILLER_DEBUG_PPROF:-false}
 
+      # Keep supplied DNS first. On DNS transport/server failures only, try
+      # Cloudflare then Google. Set "off" to use only supplied DNS, or provide
+      # a comma-separated list of fallback IPs (optional IP:port).
+      TILLER_DNS_FALLBACK_SERVERS: ${TILLER_DNS_FALLBACK_SERVERS:-}
+
       # In-memory auth-cache TTLs. Verified client keys/sessions are cached and
       # renewed on use; any key/session mutation invalidates immediately, so a
       # longer window only reduces hash-verification work. Defaults: client key
