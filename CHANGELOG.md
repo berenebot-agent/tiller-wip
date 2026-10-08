@@ -6,6 +6,39 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-10-09
+
+Fourth public beta. Re-publishes the 0.1.0-beta.3 feature set with a release-gate
+fix so the multi-architecture image and `latest` tag publish correctly, plus the
+changes below accumulated since beta.3.
+
+### Added
+
+- **DNS resolver fallback.** When the configured DNS transport or servers fail,
+  the router can retry resolution against an ordered fallback list (Cloudflare
+  then Google by default) via `TILLER_DNS_FALLBACK_SERVERS`. Valid replies —
+  including NXDOMAIN and empty answers — never fall through; only transport or
+  server failures do. Set to `off` to disable, or to a comma-separated list of
+  `IP`/`IP:port` resolvers to override.
+
+### Changed
+
+- **First-run docs and compose simplification.** README first-run guidance now
+  points at the browser setup wizard as the primary path, and the compose example
+  is trimmed accordingly.
+
+### Fixed
+
+- **Quota reset countdown over 24h.** Reset windows longer than a day now render
+  as `Nd Yh left` instead of a large hour count (e.g. `30h 0m left`).
+- **Release gate failing on the hosted pprof config test.** The test wrote to
+  the default `/data` directory, which is not writable on the CI runner, so the
+  `v0.1.0-beta.3` release gate failed at `go test` and the image-publish job was
+  skipped — `latest` stayed pinned to beta.2. The test now uses `t.TempDir()`.
+- **CI masking non-zero test/vet/build exits.** The `go test`, `go vet`, and
+  `go build` steps piped output through `tee` without `pipefail`, so a failing
+  step reported `tee`'s success. CI now fails correctly on a red gate.
+
 ## [0.1.0-beta.3] - 2026-10-05
 
 Third public beta. Highlights: a hosted multi-tenant product shell with plans
