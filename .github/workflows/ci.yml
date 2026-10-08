@@ -39,11 +39,16 @@ jobs:
               exit 1
             fi
           } 2>&1 | tee ci-logs/gofmt.log
+      # Tee-ing the output must not swallow a non-zero exit: without pipefail
+      # the step reports tee's status (0) and a red test/vet/build merges green.
       - name: Test
+        shell: bash
         run: go test ./... 2>&1 | tee ci-logs/test.log
       - name: Vet
+        shell: bash
         run: go vet ./... 2>&1 | tee ci-logs/vet.log
       - name: Build
+        shell: bash
         run: go build ./cmd/tiller-router 2>&1 | tee ci-logs/build.log
       - name: Upload logs
         if: always()
