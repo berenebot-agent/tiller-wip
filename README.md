@@ -146,22 +146,16 @@ Provider support varies because upstream APIs vary. The beta should be treated a
 
 2. **Create a `docker-compose.yml`:**
 
-   ```yaml
-   services:
-     tiller-router:
-       # Set TILLER_CONTAINER_NAME=tiller-hosted for a parallel instance.
-       container_name: ${TILLER_CONTAINER_NAME:-tiller-router}
-       image: ghcr.io/dellarb/tiller-router:latest
-       ports:
-         - "8080:8080"
-       environment:
-         # Optional: omit both to use first-run setup in the browser instead.
-         TILLER_USERNAME: admin
-         TILLER_PASSWORD: replace-this-with-a-long-random-password
-       volumes:
-         - ./data:/data
-       restart: unless-stopped
-   ```
+    ```yaml
+    services:
+      tiller-router:
+        image: ghcr.io/dellarb/tiller-router:latest
+        ports:
+          - "8080:8080"
+        volumes:
+          - ./data:/data
+        restart: unless-stopped
+    ```
 
    
 
@@ -171,7 +165,9 @@ Provider support varies because upstream APIs vary. The beta should be treated a
    docker compose up -d
    ```
 
-   Then open `http://localhost:8080`. With no `TILLER_USERNAME` / `TILLER_PASSWORD` set, the first visitor gets a one-time **setup page** to create the administrator credential (8+ characters) and is signed straight in to a guided onboarding wizard. Once configured, the setup page is gone permanently — sign in from the login screen. Setting the environment credentials instead skips setup entirely and the onboarding wizard stays hidden, exactly as before. While an instance is unclaimed the router logs a warning on every boot; claim it (or set the env credentials) before exposing it to an untrusted network. To rotate or recover a wizard-created credential, set `TILLER_USERNAME` / `TILLER_PASSWORD` and restart: the environment values become the new credential and existing sessions are revoked.
+    Then open `http://localhost:8080`. The first visitor gets a one-time setup page to create the administrator credential (8+ characters) and is signed straight in to a guided onboarding wizard. Once configured, the setup page is gone permanently — sign in from the login screen.
+
+    To rotate or recover a wizard-created credential, set `TILLER_USERNAME` / `TILLER_PASSWORD` and restart: the environment values become the new credential and existing sessions are revoked.
 
    For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
 
@@ -193,6 +189,31 @@ docker compose up -d --build
 The repository's `docker-compose.yml` builds locally instead of pulling an image; everything else (healthcheck, adoption-first posture, volumes) is identical to the prebuilt option above.
 
 The service starts as root to self-fix `./data` ownership, then drops to a non-root user before serving.
+
+### DNS recovery after restarts
+
+Tiller uses system/Docker DNS first. If those servers fail (for example, Docker
+restores a container before DHCP supplies upstream DNS), it tries Cloudflare
+(`1.1.1.1`, then `1.0.0.1`), followed by Google (`8.8.8.8`, then `8.8.4.4`).
+This is built into the application and works with either deployment option;
+no host-specific DNS override, privileged access, or rebuild is needed to recover
+from a later DNS failure.
+
+Successful replies, including private/LAN addresses, are retained. Valid
+NXDOMAIN (name does not exist) and NODATA (no record of the requested type)
+replies do **not** trigger public fallback. Hosts-file entries and the native
+resolver's search-domain and UDP/TCP handling are retained. Each lookup starts
+with supplied DNS again, so recovery does not permanently switch DNS servers.
+Hosted mode still validates every destination address before connecting.
+
+Set `TILLER_DNS_FALLBACK_SERVERS` to a comma-separated list of IP addresses
+(optionally with ports; IPv6 with a port uses `[address]:port`) to change the
+fallback order. Empty/unset uses the defaults above. Set it to `off` to use only
+supplied DNS, for example on networks where DNS queries must remain internal.
+When fallback is enabled, failed queries can be sent to the fallback servers;
+this includes private names/search-domain queries if their supplied DNS fails.
+Only DNS failures trigger failover; HTTP errors and provider connection failures
+do not select another DNS server or retry a provider request.
 
 ### Hosted Compose networking
 
