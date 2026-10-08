@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/tiller-router/tiller-router/internal/dnsfallback"
 )
 
 // Mode is the deployment mode. Local is the default and preserves the
@@ -79,6 +81,9 @@ type Config struct {
 	TrustedProxy                netip.Prefix
 	ModelsDevEnabled            bool
 	LogLevel                    string
+	// DNSFallbackServers are tried after supplied DNS servers fail. A nil
+	// list disables failover; valid positive/negative replies never fall back.
+	DNSFallbackServers []string
 	// DebugPprof enables the admin-gated memory/pprof debug endpoints. It is
 	// off by default and only turns on when TILLER_DEBUG_PPROF is explicitly
 	// true, so a normal deployment never exposes profiling surfaces.
@@ -143,6 +148,11 @@ func Load() (Config, error) {
 		MasterKeyFile:     os.Getenv("TILLER_MASTER_KEY_FILE"),
 	}
 	c.Deprecations = append(c.Deprecations, resolveLegacyCredentials(&c)...)
+	servers, err := dnsfallback.ParseServers(os.Getenv("TILLER_DNS_FALLBACK_SERVERS"))
+	if err != nil {
+		return Config{}, fmt.Errorf("TILLER_DNS_FALLBACK_SERVERS: %w", err)
+	}
+	c.DNSFallbackServers = servers
 	switch c.LogLevel = strings.ToLower(c.LogLevel); c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
