@@ -781,7 +781,12 @@ function providerQuotaHTML(provider) {
     const reset = minutes == null ? '' : minutes >= 1440
       ? ` · ${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h left`
       : ` · ${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
-    const detail = pct == null ? 'Unlimited' : `${Math.round(pct)}% used`;
+    // A window with no percentage but a remaining amount (e.g. Ollama purchased
+    // credit balance, in USD) shows "$N.NN left" instead of a bar; only a window
+    // with neither is treated as unlimited.
+    let detail = 'Unlimited';
+    if (pct != null) detail = `${Math.round(pct)}% used`;
+    else if (w.remaining != null) detail = `$${Number(w.remaining).toFixed(2)} left`;
     return `<div class="provider-quota-window"><strong>${h(w.label)}</strong>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<span>${detail}${h(reset)}</span></div>`;
   });
   // Show up to three bars inline (5h/weekly/monthly for plan providers);
