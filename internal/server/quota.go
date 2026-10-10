@@ -67,6 +67,13 @@ func (s *Server) startQuotaPoller(ctx context.Context) {
 	// runtime).
 	s.registerQuotaProviders(ctx)
 	go func() {
+		// Poll once on boot so the snapshot cache is warm within seconds rather
+		// than waiting a full background interval, or an admin opening the
+		// Providers page. It runs in this goroutine (not before it) so a cold
+		// provider endpoint cannot delay startup. A provider still shows
+		// "loading" until this completes; a transient failure is then retried on
+		// the short FailureRetry cadence.
+		s.refreshQuotaProviders(ctx)
 		ticker := time.NewTicker(providerquota.ActiveInterval)
 		defer ticker.Stop()
 		for {

@@ -18,6 +18,12 @@ var (
 	// including on-view refreshes. It prevents an admin reload from stampeding
 	// the provider endpoint.
 	MinInterval = 30 * time.Second
+	// FailureRetry is how soon a provider whose last poll failed is retried,
+	// overriding the normal (background/active/forced) interval. A transient
+	// failure (cold DNS/TLS at boot, a provider rate-limit, a busy database)
+	// must not leave the card unavailable for a whole background interval; it is
+	// still a floor so repeated views cannot stampede a genuinely-down endpoint.
+	FailureRetry = 15 * time.Second
 	// ActiveWindow is how recently a provider must have served traffic to be
 	// considered active.
 	ActiveWindow = time.Minute
@@ -61,6 +67,10 @@ type Poller struct {
 	// can tighten to ActiveInterval while it is in use. It is in-memory only and
 	// resets on restart, matching the live/telemetry posture.
 	active map[string]time.Time
+	// failed marks a provider whose most recent poll produced no usable
+	// snapshot, so it is retried on the short FailureRetry cadence instead of a
+	// full background/active interval. In-memory only, like active.
+	failed map[string]bool
 }
 
 func NewPoller(client *http.Client, hydrate Hydrate) *Poller {
@@ -73,6 +83,7 @@ func NewPoller(client *http.Client, hydrate Hydrate) *Poller {
 		gen:      map[string]uint64{},
 		inflight: map[string]bool{},
 		active:   map[string]time.Time{},
+		failed:   map[string]bool{},
 	}
 }
 
@@ -158,6 +169,7 @@ func (p *Poller) Reconcile(refs []ProviderRef) {
 		delete(p.snap, k)
 		delete(p.last, k)
 		delete(p.inflight, k)
+		delete(p.failed, k)
 		p.gen[k]++
 	}
 }
@@ -170,6 +182,7 @@ func (p *Poller) Unregister(accountID, providerID string) {
 	delete(p.snap, k)
 	delete(p.last, k)
 	delete(p.inflight, k)
+	delete(p.failed, k)
 	p.gen[k]++
 	p.mu.Unlock()
 }
@@ -212,10 +225,20 @@ func (p *Poller) RefreshIfDue(ctx context.Context, accountID, providerID string,
 	if p.activeWithin(k, now) {
 		interval = ActiveInterval
 	}
+	// A provider whose last poll failed is retried sooner so a transient blip
+	// (cold DNS/TLS at boot, a provider rate-limit) does not leave the card
+	// unavailable for a whole background interval.
+	if p.failed[k] {
+		interval = FailureRetry
+	}
 	last := p.last[k]
 	due := last.IsZero() || now.Sub(last) >= interval
 	if force {
-		due = last.IsZero() || now.Sub(last) >= MinInterval
+		floor := MinInterval
+		if p.failed[k] {
+			floor = FailureRetry
+		}
+		due = last.IsZero() || now.Sub(last) >= floor
 	}
 	if !due || p.inflight[k] {
 		cached := p.snap[k]
@@ -238,6 +261,9 @@ func (p *Poller) RefreshIfDue(ctx context.Context, accountID, providerID string,
 	if p.gen[k] == generation {
 		p.last[k] = now
 		p.snap[k] = snap
+		// Track whether this poll yielded a usable snapshot so a failed poll is
+		// retried on the short FailureRetry cadence.
+		p.failed[k] = !snap.Available
 	} else {
 		// Registration changed mid-poll: drop the result and any cached state
 		// so a subsequent Snapshot call does not serve the obsolete value.
