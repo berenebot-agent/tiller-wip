@@ -641,9 +641,20 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 
 	var payload struct {
 		Models []struct {
-			Slug                      string   `json:"slug"`
-			DisplayName               string   `json:"display_name"`
+			Slug        string `json:"slug"`
+			DisplayName string `json:"display_name"`
+			// Codex returns two context fields and they mean different things.
+			// `context_window` is the SESSION DEFAULT (272000 for the GPT-6/
+			// 5.6 family) — the point where Codex's own client compacts, tuned
+			// to OpenAI's 272K billing tier. `max_context_window` is the real
+			// ceiling the backend accepts for the model (872000), and is what
+			// a gateway should advertise: clients size their compaction from
+			// this number, so serving the session default makes them compact
+			// far earlier than the model requires. Codex documents the max as
+			// "Maximum context window allowed for config overrides" and clamps
+			// a user override to it (`context_window.min(max_context_window)`).
 			ContextWindow             int      `json:"context_window"`
+			MaxContextWindow          int      `json:"max_context_window"`
 			SupportedInAPI            *bool    `json:"supported_in_api"`
 			Visibility                string   `json:"visibility"`
 			InputModalities           []string `json:"input_modalities"`
@@ -687,9 +698,17 @@ func (r *Registry) discoverCodex(ctx context.Context, provider Instance) ([]Mode
 		if displayName == "" {
 			displayName = item.Slug
 		}
+		// Advertise the model's real ceiling, not Codex's session default.
+		// Fall back to `context_window` so a payload that omits the max (or a
+		// backend that only sends one field) cannot regress to zero, which
+		// would leave clients with no limit to compact against.
+		contextLength := item.MaxContextWindow
+		if contextLength == 0 {
+			contextLength = item.ContextWindow
+		}
 		models = append(models, Model{
 			ID: item.Slug, DisplayName: displayName,
-			ContextLength: item.ContextWindow, NativeProtocol: ProtocolResponses,
+			ContextLength: contextLength, NativeProtocol: ProtocolResponses,
 			SupportsVision:        triBool(len(item.InputModalities) > 0, slices.Contains(item.InputModalities, "image")),
 			SupportsReasoning:     triBool(len(efforts) > 0, len(efforts) > 0),
 			ReasoningCapabilities: reasoning, InputModalities: item.InputModalities,
