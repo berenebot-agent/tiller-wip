@@ -6,6 +6,23 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Management API tokens (local mode).** Settings → Management API lets you
+  mint `mt-tr-` bearer tokens that drive the same JSON REST API the dashboard
+  uses, so scripts and agents (for example a Hermes agent) can manage providers,
+  models, virtual routes, client keys, settings, and monitoring without a
+  browser session. Each token carries per-area access with escalating levels —
+  read ⊂ write ⊂ delete — across Providers, Virtual models, Client keys,
+  Settings, and Monitoring. Tokens are bcrypt-hash-only and shown once; they
+  support optional expiry, rotation, revocation, and revoke-all. Token
+  management itself is browser-only (a token can only introspect itself), and
+  backup export, identity operations, setup, debug endpoints, and the live SSE
+  stream are never token-reachable. Local mode only; hosted instances have no
+  token routes. A built-in usage guide is served at `/api/admin` (and `/api`) —
+  rendered HTML for people, `text/markdown` for agents that request it — and the
+  one-time secret dialog links straight to it.
+
 ## [0.1.0-beta.4] - 2026-10-09
 
 Fourth public beta. Re-publishes the 0.1.0-beta.3 feature set with a release-gate

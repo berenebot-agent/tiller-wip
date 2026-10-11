@@ -493,6 +493,9 @@ type auditActor struct {
 }
 
 func (s *Server) auditActorFor(r *http.Request) auditActor {
+	if token, ok := r.Context().Value(managementTokenKey).(auth.ManagementTokenIdentity); ok && token.ID != "" {
+		return auditActor{id: token.Name, actorType: "api_token"}
+	}
 	if s.config.Mode == config.ModeHosted {
 		if user, ok := r.Context().Value(userKey).(identity.User); ok {
 			return auditActor{id: user.ID, actorType: "user"}

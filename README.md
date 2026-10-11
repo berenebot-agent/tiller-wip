@@ -52,6 +52,41 @@ Capability metadata is informational: `/v1/models` includes `context_length` and
 
 ---
 
+## Management API
+
+The web interface is a pure client of a JSON REST API under `/api/admin/*`. In local mode you can drive that same API from scripts and agents (for example a Hermes agent) with a **management API token**: create one under **Settings → Management API**, and authenticate with `Authorization: Bearer mt-tr-…`. No cookie or CSRF token is involved.
+
+Each token carries per-area access with three escalating levels — `read` ⊂ `write` ⊂ `delete`:
+
+| Area | read | write | delete |
+|---|---|---|---|
+| Providers | inspect providers, models, OAuth status | create/edit providers, swap credentials, refresh discovery, connect OAuth, add manual models | delete providers/models, disconnect OAuth |
+| Virtual models | inspect routes | create/edit groups and virtual models | delete groups and virtual models |
+| Client keys | list keys and permissions | create/edit/rotate keys, edit permissions | delete keys |
+| Settings | read settings | change logging, fallback, and notification settings, send a test notification | — |
+| Monitoring | usage, quota, activity (+CSV exports), cooldown status, health | — | clear activity, clear cooldown |
+
+Notes:
+
+- Tokens are shown **once** at creation; only a bcrypt hash is stored. Rotate or revoke at any time; expiry is optional (presets or a custom date).
+- Token management itself is browser-only: a token can never list, mint, or edit tokens. It can introspect itself (`GET /api/admin/api-tokens/self`).
+- Permanently out of reach for tokens: backup/account export, identity (password, passkeys, email, account deletion, sessions), onboarding, debug endpoints, and the live SSE stream.
+- Tokens survive admin credential changes; revoke compromised tokens explicitly in the Management API tab.
+- A built-in usage guide is served at `/api/admin` (and `/api`): open it in a browser for a rendered reference, or fetch it with `Accept: text/markdown` to hand an agent the entire guide as plain text.
+
+```bash
+# Create a token in Settings → Management API, then:
+curl -H "Authorization: Bearer mt-tr-..." \
+  https://your-router.example.com/api/admin/providers
+
+# Create a virtual model (the canonical id becomes <group>/<name>)
+curl -H "Authorization: Bearer mt-tr-..." -H "Content-Type: application/json" \
+  -d '{"group_name":"main","name":"coding","targets":[{"provider_model_id":"...","enabled":true}]}' \
+  https://your-router.example.com/api/admin/virtual-models
+```
+
+---
+
 ## Virtual models
 
 A virtual model gives a stable client-facing identity to one or more upstream targets. For example, `main/coding` might resolve to:
