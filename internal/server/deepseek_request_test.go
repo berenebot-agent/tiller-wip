@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -109,9 +110,27 @@ func TestNormalizeDeepSeekRequestBackfillsReasoningContent(t *testing.T) {
 			wantAnnotated: 0,
 		},
 		{
-			name:          "reasoning_details present means no placeholder",
+			name:          "foreign reasoning_details still needs native placeholder",
 			body:          `{"model":"x","tools":` + tools + `,"messages":[{"role":"assistant","content":"b","reasoning_details":[{"type":"reasoning.text"}]}]}`,
-			wantAnnotated: 0,
+			wantAnnotated: 1,
+		},
+		{
+			name:          "text reasoning details need native placeholder",
+			body:          `{"tools":` + tools + `,"messages":[{"role":"assistant","reasoning_details":[{"type":"reasoning.text","text":"foreign"}]}]}`,
+			wantAnnotated: 1,
+		},
+		{
+			name:          "opaque reasoning details need native placeholder",
+			body:          `{"tools":` + tools + `,"messages":[{"role":"assistant","reasoning_details":[{"type":"reasoning.encrypted","data":"opaque"}]}]}`,
+			wantAnnotated: 1,
+		},
+		{
+			name: "native reasoning with foreign details is preserved",
+			body: `{"tools":` + tools + `,"messages":[{"role":"assistant","reasoning_content":"native","reasoning_details":[{"type":"reasoning.text","text":"foreign"}]}]}`,
+		},
+		{
+			name: "foreign details without tools are untouched",
+			body: `{"messages":[{"role":"assistant","reasoning_details":[{"type":"reasoning.text","text":"foreign"}]}]}`,
 		},
 	}
 	for _, tc := range cases {
@@ -127,6 +146,9 @@ func TestNormalizeDeepSeekRequestBackfillsReasoningContent(t *testing.T) {
 			var before map[string]any
 			if err := json.Unmarshal([]byte(tc.body), &before); err != nil {
 				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(assistantValues(body, "reasoning_details"), assistantValues(before, "reasoning_details")) {
+				t.Fatal("foreign reasoning details changed")
 			}
 			if got, want := assistantValues(body, "reasoning_content"), assistantValues(before, "reasoning_content"); len(got) != len(want)+tc.wantAnnotated {
 				t.Fatalf("assistant reasoning_content values %d, want %d (input had %d, backfill %d) in %s", len(got), len(want)+tc.wantAnnotated, len(want), tc.wantAnnotated, result)

@@ -106,12 +106,8 @@ func backfillDeepSeekReasoningContent(request map[string]any) bool {
 		if _, exists := message["reasoning_content"]; exists {
 			continue
 		}
-		// reasoning_details is the OpenRouter-style carrier; if it is present
-		// the turn already holds reasoning for this provider and needs no
-		// placeholder.
-		if details, exists := message["reasoning_details"]; exists && details != nil {
-			continue
-		}
+		// Foreign reasoning_details (including opaque/encrypted blocks) do
+		// not satisfy DeepSeek's native reasoning_content contract.
 		message["reasoning_content"] = ""
 		changed = true
 	}

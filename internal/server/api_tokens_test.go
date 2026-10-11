@@ -547,3 +547,95 @@ func TestAdminAPIKeyCountsAsConfigured(t *testing.T) {
 		t.Fatal("a management API boot seed must count as configured")
 	}
 }
+
+func TestManagementTokenEmptyAuthorizationNeverFallsBack(t *testing.T) {
+	api, _, _ := newManagementHarness(t)
+	for _, present := range []bool{false, true} {
+		req, err := http.NewRequest("GET", api.base+"/api/admin/providers", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if present {
+			req.Header.Set("Authorization", "")
+		}
+		resp, err := api.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		want := http.StatusOK
+		if present {
+			want = http.StatusUnauthorized
+			if resp.Header.Get("WWW-Authenticate") == "" {
+				t.Fatal("empty authorization did not select bearer authentication")
+			}
+		}
+		if resp.StatusCode != want {
+			t.Fatalf("header present %v: status %d, want %d", present, resp.StatusCode, want)
+		}
+	}
+}
+
+func TestAdminAPIKeyEnvironmentManagedLifecycle(t *testing.T) {
+	api, db, app := newManagementHarness(t)
+	seed := "mt-tr-B9HQyF1IQyLu.NJh92J65MNar2AZWWJU6rzFB8eHTYAabB6SYEHF7rLA"
+	app.config.AdminAPIKey = seed
+	if err := app.seedManagementToken(seed); err != nil {
+		t.Fatal(err)
+	}
+	for _, mutation := range []struct {
+		method string
+		path   string
+		body   map[string]any
+	}{
+		{"PATCH", "/api/admin/api-tokens/boot-admin", map[string]any{"enabled": false}},
+		{"PATCH", "/api/admin/api-tokens/boot-admin", map[string]any{"scopes": map[string]int{"providers": auth.ScopeRead}}},
+		{"PATCH", "/api/admin/api-tokens/boot-admin", map[string]any{"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339)}},
+		{"PATCH", "/api/admin/api-tokens/boot-admin", map[string]any{"name": "renamed", "description": "changed"}},
+		{"POST", "/api/admin/api-tokens/boot-admin/rotate", nil},
+		{"DELETE", "/api/admin/api-tokens/boot-admin", nil},
+	} {
+		status, payload, _ := api.request(mutation.method, mutation.path, mutation.body)
+		if status != 409 || errorCode(payload) != "environment_managed_token" {
+			t.Fatalf("%s %s: %d", mutation.method, mutation.path, status)
+		}
+	}
+	status, self, _ := bearerRequest(t, api.base, seed, "GET", "/api/admin/api-tokens/self", nil)
+	if status != 200 || self["environment_managed"] != true {
+		t.Fatal("bootstrap identity not marked environment-managed")
+	}
+	_, ordinary := createManagementToken(t, api, "ordinary", map[string]int{"providers": auth.ScopeRead}, "")
+	status, result, _ := api.request("POST", "/api/admin/api-tokens/revoke-all", nil)
+	if status != 200 || result["revoked"] != float64(1) || result["environment_managed_excluded"] != true {
+		t.Fatalf("bulk revoke result: %d %v", status, result)
+	}
+	if status, _, _ := bearerRequest(t, api.base, ordinary, "GET", "/api/admin/providers", nil); status != 401 {
+		t.Fatal("ordinary token survived bulk revocation")
+	}
+	if status, _, _ := bearerRequest(t, api.base, seed, "GET", "/api/admin/providers", nil); status != 200 {
+		t.Fatal("bootstrap token was revoked by bulk revocation")
+	}
+	_, retained := createManagementToken(t, api, "retained", map[string]int{"providers": auth.ScopeRead}, "")
+	for _, configured := range []string{seed, ""} {
+		cfg := app.config
+		cfg.AdminAPIKey = configured
+		restarted, err := New(cfg, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		router := httptest.NewServer(restarted.Handler())
+		want := 200
+		if configured == "" {
+			want = 401
+		}
+		status, _, _ := bearerRequest(t, router.URL, seed, "GET", "/api/admin/providers", nil)
+		retainedStatus, _, _ := bearerRequest(t, router.URL, retained, "GET", "/api/admin/providers", nil)
+		router.Close()
+		if status != want {
+			t.Fatalf("restart with key configured %v: %d, want %d", configured != "", status, want)
+		}
+		if retainedStatus != 200 {
+			t.Fatal("configuration change revoked a browser-managed token")
+		}
+	}
+}

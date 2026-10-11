@@ -108,7 +108,7 @@ test('create an API token with provider access, use it headlessly, rotate and de
   await expect(page.locator('#api-tokens-empty')).toBeVisible();
 });
 
-test('revoke all invalidates every token', async ({ page }) => {
+test('bulk revocation invalidates browser-managed tokens', async ({ page }) => {
   await openManagementApi(page);
 
   for (const name of ['e2e bulk one', 'e2e bulk two']) {
@@ -124,4 +124,21 @@ test('revoke all invalidates every token', async ({ page }) => {
   await page.locator('#confirm-action').click();
   await expect(page.locator('#api-tokens-body tr')).toHaveCount(0);
   await expect(page.locator('#api-tokens-empty')).toBeVisible();
+});
+
+test('environment-managed token has no lifecycle controls and bulk copy is explicit', async ({ page }) => {
+  await page.route('**/api/admin/api-tokens', async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const response = await route.fetch();
+    const body = await response.json();
+    body.data.push({ id: 'boot-admin', name: 'boot-admin', description: 'Environment-managed credential', fingerprint: 'fixture', scopes: { providers: 3 }, enabled: true, environment_managed: true, created_at: new Date().toISOString() });
+    await route.fulfill({ response, json: body });
+  });
+  await openManagementApi(page);
+  const row = page.locator('#api-tokens-body tr').filter({ hasText: 'boot-admin' });
+  await expect(row).toContainText('Environment-managed');
+  await expect(row.locator('button')).toHaveCount(0);
+  await expect(page.locator('#revoke-all-api-tokens')).toHaveText('Revoke browser-managed tokens');
+  await page.locator('#revoke-all-api-tokens').click();
+  await expect(page.locator('#confirm-dialog')).toContainText('environment-managed bootstrap token is excluded');
 });

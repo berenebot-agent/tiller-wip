@@ -500,6 +500,12 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		if logger != nil {
 			logger.Info("seeded the management API boot token from TILLER_ADMIN_API_KEY; rotate it by changing the value and restarting")
 		}
+	} else {
+		// Configuration is authoritative: removing both key sources revokes
+		// the persisted environment credential before requests are served.
+		if _, err := s.scopeFor(database.LocalAccountID).DeleteManagementToken(context.Background(), bootManagementTokenID); err != nil {
+			return nil, fmt.Errorf("remove unconfigured management API token: %w", err)
+		}
 	}
 	return s, nil
 }
@@ -980,7 +986,7 @@ func (s *Server) requireManage(area string, tier int, next http.Handler) http.Ha
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Any Authorization header selects the token path, even a non-Bearer
 		// one: a request must never silently downgrade to cookie auth.
-		if r.Header.Get("Authorization") == "" {
+		if _, present := r.Header["Authorization"]; !present {
 			s.requireAdmin(next).ServeHTTP(w, r)
 			return
 		}

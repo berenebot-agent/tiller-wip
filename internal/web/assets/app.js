@@ -2635,8 +2635,8 @@ async function deleteApiToken(token) {
 }
 
 async function revokeAllApiTokens() {
-  if (!await confirmAction({ title: 'Revoke all API tokens?', copy: 'Every API token is invalidated immediately, including tokens used by running automations.', action: 'Revoke all tokens' })) return;
-  try { await api('/api/admin/api-tokens/revoke-all', { method: 'POST' }); flash('All API tokens revoked.'); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
+  if (!await confirmAction({ title: 'Revoke browser-managed API tokens?', copy: 'All browser-managed API tokens are invalidated immediately, including tokens used by running automations. The environment-managed bootstrap token is excluded; remove its configured key and restart to revoke it.', action: 'Revoke browser-managed tokens' })) return;
+  try { const result = await api('/api/admin/api-tokens/revoke-all', { method: 'POST' }); flash(result.environment_managed_excluded ? 'Browser-managed API tokens revoked. The environment-managed token remains active.' : 'Browser-managed API tokens revoked.'); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
 }
 
 async function loadManagementTokens() {
@@ -2661,7 +2661,8 @@ function renderManagementTokens() {
   $('#api-tokens-body').innerHTML = rows.map(row => {
     const status = !row.enabled ? 'Disabled' : row.expired ? 'Expired' : 'Active';
     const expires = !row.expires_at ? 'Never' : row.expired ? `Expired ${date(row.expires_at)}` : date(row.expires_at);
-    return `<tr><td><strong>${h(row.name)}</strong>${row.description ? `<span class="meta-line">${h(row.description)}</span>` : ''}</td><td>${managementScopeBadges(row.scopes)}</td><td><code class="secret-fingerprint">mt-tr-••••••••.${h(row.fingerprint)}</code></td><td><span class="meta-line">${date(row.created_at)}</span></td><td><span class="meta-line">${expires}</span></td><td><span class="meta-line">${row.last_used_at ? date(row.last_used_at) : 'Never'}</span></td><td><span class="meta-line">${status}</span></td><td><div class="actions"><button class="btn btn-small btn-secondary" data-api-token-edit="${h(row.id)}">Edit</button><button class="btn btn-small btn-secondary" data-api-token-rotate="${h(row.id)}">Rotate</button><button class="btn btn-small btn-danger" data-api-token-delete="${h(row.id)}">Delete</button></div></td></tr>`;
+    const actions = row.environment_managed ? '<span class="meta-line">Environment-managed</span>' : `<div class="actions"><button class="btn btn-small btn-secondary" data-api-token-edit="${h(row.id)}">Edit</button><button class="btn btn-small btn-secondary" data-api-token-rotate="${h(row.id)}">Rotate</button><button class="btn btn-small btn-danger" data-api-token-delete="${h(row.id)}">Delete</button></div>`;
+    return `<tr><td><strong>${h(row.name)}</strong>${row.description ? `<span class="meta-line">${h(row.description)}</span>` : ''}</td><td>${managementScopeBadges(row.scopes)}</td><td><code class="secret-fingerprint">mt-tr-••••••••.${h(row.fingerprint)}</code></td><td><span class="meta-line">${date(row.created_at)}</span></td><td><span class="meta-line">${expires}</span></td><td><span class="meta-line">${row.last_used_at ? date(row.last_used_at) : 'Never'}</span></td><td><span class="meta-line">${status}</span></td><td>${actions}</td></tr>`;
   }).join('');
 }
 
