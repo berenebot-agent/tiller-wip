@@ -2365,7 +2365,31 @@ document.addEventListener('keydown', event => { if (event.key !== 'Enter' && eve
 }
  filterInput('#activity-search', value => { activityFeed.setSearch(value); });
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
-$('#export-activity').onclick = () => $('#export-dialog').showModal();
+// exportTarget captures which activity feed the export dialog is acting on. It
+// is set when the dialog opens (per-client/model dialog, or the global card)
+// and read by triggerActivityExport to pick the endpoint and search term.
+let exportTarget = { kind: '', client: null, modelID: '', search: '' };
+function openExportDialog(target) {
+  exportTarget = target;
+  $('#export-range-error').textContent = '';
+  $('#export-from').value = '';
+  $('#export-to').value = '';
+  $('#export-dialog').showModal();
+}
+function triggerActivityExport(params) {
+  const base = exportTarget.kind === 'client' ? `/api/admin/client-keys/${exportTarget.client.id}/activity/export` : exportTarget.kind === 'real' ? `/api/admin/models/${exportTarget.modelID}/activity/export` : exportTarget.kind === 'virtual' ? `/api/admin/virtual-models/${exportTarget.modelID}/activity/export` : '/api/admin/activity/export';
+  const query = new URLSearchParams(params);
+  query.set('search', exportTarget.search || '');
+  const a = document.createElement('a');
+  a.href = `${base}?${query.toString()}`;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  $('#export-dialog').close();
+}
+$('#export-activity').onclick = () => openExportDialog({ kind: activityState.kind, client: activityState.client, modelID: activityState.modelID, search: activityState.search });
+$('#export-global-activity').onclick = () => openExportDialog({ kind: '', client: null, modelID: '', search: globalActivityState.search });
 $('#clear-activity').onclick = async () => {
   if (activityState.kind !== 'client' || !activityState.client) return;
   if (!await confirmAction({ title: `Clear ${activityState.client.name} activity?`, copy: 'All recorded request metadata for this client will be permanently deleted.', action: 'Clear activity' })) return;
@@ -2379,7 +2403,23 @@ $('#clear-activity').onclick = async () => {
   finally { button.disabled = false; }
 };
 $('#close-export').onclick = () => $('#export-dialog').close();
-$$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick = () => { const period = button.dataset.exportPeriod; const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity/export` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity/export` : `/api/admin/virtual-models/${activityState.modelID}/activity/export`; const url = `${base}?period=${period}&search=${encodeURIComponent(activityState.search || '')}`; const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); $('#export-dialog').close(); });
+$$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick = () => triggerActivityExport({ period: button.dataset.exportPeriod }));
+// Custom range: the admin picks local calendar days; the browser converts them
+// to RFC3339 instants (local midnight start, exclusive local midnight of the
+// day after the end) so the bounds line up with the Activity "When" column.
+$('#export-custom').onclick = () => {
+  const error = $('#export-range-error');
+  error.textContent = '';
+  const parseDay = value => { const [y, m, d] = value.split('-').map(Number); return new Date(y, m - 1, d); };
+  const fromValue = $('#export-from').value;
+  const toValue = $('#export-to').value;
+  if (!fromValue && !toValue) { error.textContent = 'Choose a start date, an end date, or both.'; return; }
+  const params = {};
+  if (fromValue) params.from = parseDay(fromValue).toISOString();
+  if (toValue) { const end = parseDay(toValue); end.setDate(end.getDate() + 1); params.to = end.toISOString(); }
+  if (params.from && params.to && params.from >= params.to) { error.textContent = 'Start date must be before end date.'; return; }
+  triggerActivityExport(params);
+};
 
 // Global activity is a read-only section in the Settings view, distinct from
 // the per-client Activity dialog. It shows metadata across all client keys and
