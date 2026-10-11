@@ -167,6 +167,18 @@ func isContextLimitError(d upstreamErrorDetail) bool {
 	return false
 }
 
+// isReasoningRoundtripError recognizes a provider rejecting a request because
+// reasoning state from a previous turn was not passed back. DeepSeek's thinking
+// mode requires this when a request carries tools, and returns it as a 400 with
+// code invalid_request_error. The condition belongs to the request shape, not
+// the target's health: treating it as a generic http_400 would open a cooldown
+// and hide a working model from every client. The raw body has already been
+// reduced to bounded, sanitized metadata by the parser.
+func isReasoningRoundtripError(d upstreamErrorDetail) bool {
+	message := strings.ToLower(d.Message)
+	return strings.Contains(message, "reasoning_content") && strings.Contains(message, "must be passed back")
+}
+
 // redactProviderSecrets removes every known active secret for the provider
 // instance from text. Only secrets the router actually sent for this instance
 // are redacted (the API key/OAuth token, OAuth provider-data token values, and
@@ -240,6 +252,8 @@ func exhaustedRouteMessage(attempts []requestAttempt) string {
 				reason += " " + attempt.clientError
 			}
 			lines = append(lines, fmt.Sprintf("%s: %s", route, reason))
+		case attempt.failureClass == "reasoning_roundtrip_required":
+			lines = append(lines, fmt.Sprintf("%s: %s", route, fixedUpstreamErrorMessage(attempt.failureClass)))
 		case attempt.result == "failed" && attempt.clientError != "":
 			prefix := ""
 			if attempt.httpStatus > 0 {

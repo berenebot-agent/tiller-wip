@@ -925,6 +925,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				codexEffort = codexRequestEffort(attemptBody)
 			}
+			if candidate.Provider.Type == "deepseek" && target == providers.ProtocolChat {
+				attemptBody, err = normalizeDeepSeekRequest(attemptBody)
+				if err != nil {
+					row.httpStatus = 400
+					row.errorText = strPtr("invalid_request")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
+					inferenceError(w, 400, "invalid_request_error", "invalid_request", "The DeepSeek request could not be normalized.", incoming == providers.ProtocolMessages)
+					return
+				}
+			}
 			if minOut := candidate.Provider.MinOutputTokens; minOut > 0 {
 				var compatible bool
 				attemptBody, compatible, err = checkMinOutputTokens(attemptBody, minOut, target)
@@ -1131,6 +1141,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					detail = parseUpstreamErrorDetail(upstreamErrorBody, response.Header.Get("Content-Type"))
 					if isContextLimitError(detail) {
 						class = "context_limit_exceeded"
+					} else if isReasoningRoundtripError(detail) {
+						class = "reasoning_roundtrip_required"
 					}
 				}
 				attempt := requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, result: "failed", httpStatus: response.StatusCode, failureClass: class, errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage(class)), latencyMs: time.Since(attemptStart).Milliseconds()}
@@ -1201,12 +1213,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					row.httpStatus = response.StatusCode
 					errorCode := "upstream_error"
 					message := fmt.Sprintf("Upstream provider returned HTTP %d.", response.StatusCode)
-					if class == "context_limit_exceeded" {
+					if class == "context_limit_exceeded" || class == "reasoning_roundtrip_required" {
 						row.errorText = strPtr(class)
 						row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 						errorCode = class
 						message = fixedUpstreamErrorMessage(class)
-						if attempt.clientError != "" {
+						if attempt.clientError != "" && class == "context_limit_exceeded" {
 							message += " " + attempt.clientError
 						}
 					} else if freeTierRejection {
@@ -1414,6 +1426,16 @@ routeDone:
 				return
 			}
 			inferenceError(w, 400, "invalid_request_error", "context_limit_exceeded", fixedUpstreamErrorMessage("context_limit_exceeded"), incoming == providers.ProtocolMessages)
+			return
+		}
+		if route.Virtual && allAttemptsFailureClass(row.attempts, "reasoning_roundtrip_required") {
+			row.httpStatus = 400
+			row.errorText = strPtr("reasoning_roundtrip_required")
+			row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("reasoning_roundtrip_required"))
+			if failAfterCommit("reasoning_roundtrip_required") {
+				return
+			}
+			inferenceError(w, 400, "invalid_request_error", "reasoning_roundtrip_required", fixedUpstreamErrorMessage("reasoning_roundtrip_required"), incoming == providers.ProtocolMessages)
 			return
 		}
 		if route.Virtual && allSkippedUnsupportedFeature(row.attempts) {
@@ -2242,10 +2264,12 @@ func checkMinOutputTokens(body []byte, minOut int, protocol providers.Protocol) 
 // 422, 405, 413 and 415 commonly reflect the individual request (context,
 // conflict, validation, wrong method, oversized payload, unsupported media)
 // rather than the health or availability of the upstream model, and must not
-// hide a working model chain-wide for other clients. upstream_response_too_large is a
+// hide a working model chain-wide for other clients. reasoning_roundtrip_required
+// is likewise request-shaped: the provider rejected this history, not its own
+// availability. upstream_response_too_large is a
 // router-side guard and never reaches this helper as a status.
 func cooldownTrigger(class string, httpStatus int) bool {
-	if class == "context_limit_exceeded" {
+	if class == "context_limit_exceeded" || class == "reasoning_roundtrip_required" {
 		return false
 	}
 	switch class {
