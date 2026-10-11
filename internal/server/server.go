@@ -51,9 +51,13 @@ type Server struct {
 	// secretCipher is the resolved recoverable-secret cipher. nil means the
 	// passthrough default; it is reported as "disabled" to the admin status
 	// API. Locked is reported when the cipher holds no usable key.
-	secretCipher      store.SecretCipher
-	clients           *auth.ClientAuthenticator
-	sessions          *auth.SessionStore
+	secretCipher store.SecretCipher
+	clients      *auth.ClientAuthenticator
+	sessions     *auth.SessionStore
+	// tokens authenticates management API tokens (`mt-tr-`, local mode only).
+	// It is a separate credential family from clients: a client key can never
+	// reach the admin surface and a management token can never reach /v1.
+	tokens            *auth.ManagementTokenAuthenticator
 	identity          *identity.Store
 	authClient        *http.Client
 	googleVerifier    *hostedauth.GoogleVerifier
@@ -160,9 +164,14 @@ type Server struct {
 	authRateLimitHashKey  [32]byte
 	clientSelectorLimiter *loginLimiter
 	clientAddressLimiter  *loginLimiter
-	oauthStartLimiter     *loginLimiter
-	oauthCallbackLimiter  *loginLimiter
-	backgroundCtx         context.Context
+	// managementToken{Selector,Address}Limiter throttle failed management-token
+	// authentication. They are separate from the client-key limiters so a
+	// token-guessing flood cannot lock inference keys out (and vice versa).
+	managementTokenSelectorLimiter *loginLimiter
+	managementTokenAddressLimiter  *loginLimiter
+	oauthStartLimiter              *loginLimiter
+	oauthCallbackLimiter           *loginLimiter
+	backgroundCtx                  context.Context
 	// lastOutcome holds the most recent request outcome per real model, keyed
 	// by account + provider_model_id. It lives in RAM (never persisted) so it
 	// is cleared on restart. Written on each routed request; read by the admin
@@ -245,6 +254,9 @@ const (
 	platformSessionKey contextKey = "platform-session"
 	userKey            contextKey = "user"
 	clientKey          contextKey = "client"
+	// managementTokenKey carries the verified management-token principal for a
+	// request authenticated with a bearer `mt-tr-` token.
+	managementTokenKey contextKey = "management-token"
 	// accountKey carries the verified AccountID for the request. It is set by
 	// the authentication middleware from the authenticated principal only —
 	// never from request input.
@@ -316,6 +328,10 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		}
 	}
 	clients, err := auth.NewClientAuthenticatorWithHasher(db.SQL, options.tokenHasher)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := auth.NewManagementTokenAuthenticatorWithHasher(db.SQL, options.tokenHasher)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +477,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			}
 		}
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, tokens: tokens, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementTokenSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), managementTokenAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
@@ -491,6 +507,7 @@ func (s *Server) StartBackground(ctx context.Context) {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
 	s.clients.StartSweeper(ctx)
+	s.tokens.StartSweeper(ctx)
 	if s.sessions != nil {
 		s.sessions.StartSweeper(ctx)
 	}
@@ -666,57 +683,79 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	}
-	mux.Handle("GET /api/admin/provider-types", s.requireAdmin(http.HandlerFunc(s.providerTypes)))
-	mux.Handle("GET /api/admin/providers", s.requireAdmin(http.HandlerFunc(s.listProviders)))
-	mux.Handle("POST /api/admin/providers", s.requireAdmin(http.HandlerFunc(s.createProvider)))
-	mux.Handle("PATCH /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.updateProvider)))
-	mux.Handle("DELETE /api/admin/providers/{id}", s.requireAdmin(http.HandlerFunc(s.deleteProvider)))
-	mux.Handle("PUT /api/admin/providers/{id}/credential", s.requireAdmin(http.HandlerFunc(s.replaceProviderCredential)))
-	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireAdmin(http.HandlerFunc(s.startProviderOAuth)))
-	mux.Handle("POST /api/admin/providers/{id}/oauth/callback", s.requireAdmin(http.HandlerFunc(s.completeProviderOAuth)))
-	mux.Handle("GET /api/admin/providers/{id}/oauth/status", s.requireAdmin(http.HandlerFunc(s.providerOAuthStatus)))
-	mux.Handle("DELETE /api/admin/providers/{id}/oauth", s.requireAdmin(http.HandlerFunc(s.disconnectProviderOAuth)))
+	if s.config.Mode != config.ModeHosted {
+		// Management API token lifecycle. Cookie-only by design: an API token
+		// can never list, mint, re-scope, rotate, or revoke tokens, including
+		// itself. The self endpoint is the one token-accessible route with no
+		// scope requirement (read-only introspection).
+		mux.Handle("GET /api/admin/api-tokens", s.requireAdmin(http.HandlerFunc(s.listManagementTokens)))
+		mux.Handle("POST /api/admin/api-tokens", s.requireAdmin(http.HandlerFunc(s.createManagementToken)))
+		mux.Handle("POST /api/admin/api-tokens/revoke-all", s.requireAdmin(http.HandlerFunc(s.revokeAllManagementTokens)))
+		mux.Handle("GET /api/admin/api-tokens/self", s.requireManage("", 0, http.HandlerFunc(s.managementTokenSelf)))
+		mux.Handle("PATCH /api/admin/api-tokens/{id}", s.requireAdmin(http.HandlerFunc(s.updateManagementToken)))
+		mux.Handle("DELETE /api/admin/api-tokens/{id}", s.requireAdmin(http.HandlerFunc(s.deleteManagementToken)))
+		mux.Handle("POST /api/admin/api-tokens/{id}/rotate", s.requireAdmin(http.HandlerFunc(s.rotateManagementToken)))
+		// Public usage guide for the management API, served at the API base
+		// itself so a copied "API path" always lands somewhere useful (HTML
+		// for humans, markdown for agents that request text/markdown).
+		mux.HandleFunc("GET /api", s.managementGuide)
+		mux.HandleFunc("GET /api/admin", s.managementGuide)
+	}
+	// Resource-management surface. requireManage accepts the browser admin
+	// session (with CSRF) or a management API token with the required scope
+	// (local mode). Identity, backup-export, debug, setup, and the live SSE
+	// route stay plain requireAdmin: management tokens can never reach them.
+	mux.Handle("GET /api/admin/provider-types", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.providerTypes)))
+	mux.Handle("GET /api/admin/providers", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.listProviders)))
+	mux.Handle("POST /api/admin/providers", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.createProvider)))
+	mux.Handle("PATCH /api/admin/providers/{id}", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.updateProvider)))
+	mux.Handle("DELETE /api/admin/providers/{id}", s.requireManage("providers", auth.ScopeDelete, http.HandlerFunc(s.deleteProvider)))
+	mux.Handle("PUT /api/admin/providers/{id}/credential", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.replaceProviderCredential)))
+	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.startProviderOAuth)))
+	mux.Handle("POST /api/admin/providers/{id}/oauth/callback", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.completeProviderOAuth)))
+	mux.Handle("GET /api/admin/providers/{id}/oauth/status", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.providerOAuthStatus)))
+	mux.Handle("DELETE /api/admin/providers/{id}/oauth", s.requireManage("providers", auth.ScopeDelete, http.HandlerFunc(s.disconnectProviderOAuth)))
 
-	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireAdmin(http.HandlerFunc(s.refreshProvider)))
-	mux.Handle("POST /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.addManualModel)))
-	mux.Handle("GET /api/admin/providers/{id}/models", s.requireAdmin(http.HandlerFunc(s.listProviderModels)))
-	mux.Handle("GET /api/admin/providers/{id}/models/lookup", s.requireAdmin(http.HandlerFunc(s.lookupManualModel)))
-	mux.Handle("DELETE /api/admin/models/{id}", s.requireAdmin(http.HandlerFunc(s.deleteManualModel)))
-	mux.Handle("GET /api/admin/models", s.requireAdmin(http.HandlerFunc(s.listAllModels)))
-	mux.Handle("GET /api/admin/virtual-groups", s.requireAdmin(http.HandlerFunc(s.listVirtualGroups)))
-	mux.Handle("POST /api/admin/virtual-groups", s.requireAdmin(http.HandlerFunc(s.createVirtualGroup)))
-	mux.Handle("PATCH /api/admin/virtual-groups/{id}", s.requireAdmin(http.HandlerFunc(s.updateVirtualGroup)))
-	mux.Handle("DELETE /api/admin/virtual-groups/{id}", s.requireAdmin(http.HandlerFunc(s.deleteVirtualGroup)))
-	mux.Handle("GET /api/admin/virtual-models", s.requireAdmin(http.HandlerFunc(s.listVirtualModels)))
-	mux.Handle("POST /api/admin/virtual-models", s.requireAdmin(http.HandlerFunc(s.createVirtualModel)))
-	mux.Handle("PATCH /api/admin/virtual-models/{id}", s.requireAdmin(http.HandlerFunc(s.updateVirtualModel)))
-	mux.Handle("DELETE /api/admin/virtual-models/{id}", s.requireAdmin(http.HandlerFunc(s.deleteVirtualModel)))
-	mux.Handle("GET /api/admin/client-keys", s.requireAdmin(http.HandlerFunc(s.listClientKeys)))
-	mux.Handle("POST /api/admin/client-keys", s.requireAdmin(http.HandlerFunc(s.createClientKey)))
-	mux.Handle("PATCH /api/admin/client-keys/{id}", s.requireAdmin(http.HandlerFunc(s.updateClientKey)))
-	mux.Handle("DELETE /api/admin/client-keys/{id}", s.requireAdmin(http.HandlerFunc(s.deleteClientKey)))
-	mux.Handle("POST /api/admin/client-keys/{id}/rotate", s.requireAdmin(http.HandlerFunc(s.rotateClientKey)))
-	mux.Handle("GET /api/admin/client-keys/{id}/permissions", s.requireAdmin(http.HandlerFunc(s.getPermissions)))
-	mux.Handle("PUT /api/admin/client-keys/{id}/permissions", s.requireAdmin(http.HandlerFunc(s.updatePermissions)))
-	mux.Handle("GET /api/admin/client-keys/{id}/activity", s.requireAdmin(http.HandlerFunc(s.listActivity)))
-	mux.Handle("GET /api/admin/client-keys/{id}/activity/export", s.requireAdmin(http.HandlerFunc(s.exportClientActivityCSV)))
-	mux.Handle("DELETE /api/admin/client-keys/{id}/activity", s.requireAdmin(http.HandlerFunc(s.clearActivity)))
-	mux.Handle("GET /api/admin/virtual-models/{id}/activity", s.requireAdmin(http.HandlerFunc(s.listVirtualActivity)))
-	mux.Handle("GET /api/admin/virtual-models/{id}/activity/export", s.requireAdmin(http.HandlerFunc(s.exportVirtualActivityCSV)))
-	mux.Handle("GET /api/admin/models/{id}/activity", s.requireAdmin(http.HandlerFunc(s.listRealModelActivity)))
-	mux.Handle("GET /api/admin/models/{id}/activity/export", s.requireAdmin(http.HandlerFunc(s.exportRealModelActivityCSV)))
-	mux.Handle("GET /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.getSettings)))
-	mux.Handle("PUT /api/admin/settings", s.requireAdmin(http.HandlerFunc(s.updateSettings)))
-	mux.Handle("POST /api/admin/notifications/test", s.requireAdmin(http.HandlerFunc(s.sendTestNotification)))
-	mux.Handle("GET /api/admin/usage", s.requireAdmin(http.HandlerFunc(s.usage)))
-	mux.Handle("GET /api/admin/quota", s.requireAdmin(http.HandlerFunc(s.quotaEndpoint)))
+	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.refreshProvider)))
+	mux.Handle("POST /api/admin/providers/{id}/models", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.addManualModel)))
+	mux.Handle("GET /api/admin/providers/{id}/models", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.listProviderModels)))
+	mux.Handle("GET /api/admin/providers/{id}/models/lookup", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.lookupManualModel)))
+	mux.Handle("DELETE /api/admin/models/{id}", s.requireManage("providers", auth.ScopeDelete, http.HandlerFunc(s.deleteManualModel)))
+	mux.Handle("GET /api/admin/models", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.listAllModels)))
+	mux.Handle("GET /api/admin/virtual-groups", s.requireManage("virtual", auth.ScopeRead, http.HandlerFunc(s.listVirtualGroups)))
+	mux.Handle("POST /api/admin/virtual-groups", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.createVirtualGroup)))
+	mux.Handle("PATCH /api/admin/virtual-groups/{id}", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.updateVirtualGroup)))
+	mux.Handle("DELETE /api/admin/virtual-groups/{id}", s.requireManage("virtual", auth.ScopeDelete, http.HandlerFunc(s.deleteVirtualGroup)))
+	mux.Handle("GET /api/admin/virtual-models", s.requireManage("virtual", auth.ScopeRead, http.HandlerFunc(s.listVirtualModels)))
+	mux.Handle("POST /api/admin/virtual-models", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.createVirtualModel)))
+	mux.Handle("PATCH /api/admin/virtual-models/{id}", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.updateVirtualModel)))
+	mux.Handle("DELETE /api/admin/virtual-models/{id}", s.requireManage("virtual", auth.ScopeDelete, http.HandlerFunc(s.deleteVirtualModel)))
+	mux.Handle("GET /api/admin/client-keys", s.requireManage("client_keys", auth.ScopeRead, http.HandlerFunc(s.listClientKeys)))
+	mux.Handle("POST /api/admin/client-keys", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.createClientKey)))
+	mux.Handle("PATCH /api/admin/client-keys/{id}", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.updateClientKey)))
+	mux.Handle("DELETE /api/admin/client-keys/{id}", s.requireManage("client_keys", auth.ScopeDelete, http.HandlerFunc(s.deleteClientKey)))
+	mux.Handle("POST /api/admin/client-keys/{id}/rotate", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.rotateClientKey)))
+	mux.Handle("GET /api/admin/client-keys/{id}/permissions", s.requireManage("client_keys", auth.ScopeRead, http.HandlerFunc(s.getPermissions)))
+	mux.Handle("PUT /api/admin/client-keys/{id}/permissions", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.updatePermissions)))
+	mux.Handle("GET /api/admin/client-keys/{id}/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listActivity)))
+	mux.Handle("GET /api/admin/client-keys/{id}/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportClientActivityCSV)))
+	mux.Handle("DELETE /api/admin/client-keys/{id}/activity", s.requireManage("monitoring", auth.ScopeDelete, http.HandlerFunc(s.clearActivity)))
+	mux.Handle("GET /api/admin/virtual-models/{id}/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listVirtualActivity)))
+	mux.Handle("GET /api/admin/virtual-models/{id}/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportVirtualActivityCSV)))
+	mux.Handle("GET /api/admin/models/{id}/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listRealModelActivity)))
+	mux.Handle("GET /api/admin/models/{id}/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportRealModelActivityCSV)))
+	mux.Handle("GET /api/admin/settings", s.requireManage("settings", auth.ScopeRead, http.HandlerFunc(s.getSettings)))
+	mux.Handle("PUT /api/admin/settings", s.requireManage("settings", auth.ScopeWrite, http.HandlerFunc(s.updateSettings)))
+	mux.Handle("POST /api/admin/notifications/test", s.requireManage("settings", auth.ScopeWrite, http.HandlerFunc(s.sendTestNotification)))
+	mux.Handle("GET /api/admin/usage", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.usage)))
+	mux.Handle("GET /api/admin/quota", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.quotaEndpoint)))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
-	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
-	mux.Handle("GET /api/admin/activity/export", s.requireAdmin(http.HandlerFunc(s.exportGlobalActivityCSV)))
-	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))
-	mux.Handle("GET /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.cooldownStatus)))
-	mux.Handle("DELETE /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.clearCooldown)))
-	mux.Handle("GET /api/admin/health", s.requireAdmin(http.HandlerFunc(s.adminHealth)))
+	mux.Handle("GET /api/admin/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listGlobalActivity)))
+	mux.Handle("GET /api/admin/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportGlobalActivityCSV)))
+	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listRequestAttempts)))
+	mux.Handle("GET /api/admin/cooldown", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.cooldownStatus)))
+	mux.Handle("DELETE /api/admin/cooldown", s.requireManage("monitoring", auth.ScopeDelete, http.HandlerFunc(s.clearCooldown)))
+	mux.Handle("GET /api/admin/health", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.adminHealth)))
 	mux.Handle("GET /api/admin/debug/memory", s.requireDebugAdmin(http.HandlerFunc(s.debugMemory)))
 	if s.config.DebugPprof {
 		mux.Handle("GET "+debugPprofPrefix, s.requireDebugAdmin(http.HandlerFunc(s.debugPprof)))
@@ -904,6 +943,104 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		stampRequestPrincipal(r, "admin", accountID)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// requireManage wraps a resource-management route so it accepts either the
+// browser admin session (cookie + CSRF, exactly as before) or a management API
+// token (`Authorization: Bearer mt-tr-…`, local mode only).
+//
+// The two authentication paths are exclusive:
+//   - no Authorization header: the existing cookie path runs unchanged,
+//     including CSRF and same-origin checks;
+//   - an Authorization header: the token path runs exclusively. An invalid,
+//     expired, or disabled token is terminal — it never falls back to cookie
+//     authentication, and the token path never reads or refreshes cookies.
+//     CSRF is skipped because a bearer credential is not browser-ambient: an
+//     attacker cannot set the header without already holding the token.
+//
+// area is the required resource area and tier the Scope* constant. An empty
+// area means the route requires a valid token but no scope grant (used only by
+// the self-introspection endpoint).
+//
+// Hosted mode has no management tokens: the wrapper is exactly requireAdmin
+// there (which delegates to requireUser).
+func (s *Server) requireManage(area string, tier int, next http.Handler) http.Handler {
+	if s.config.Mode == config.ModeHosted {
+		return s.requireAdmin(next)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Any Authorization header selects the token path, even a non-Bearer
+		// one: a request must never silently downgrade to cookie auth.
+		if r.Header.Get("Authorization") == "" {
+			s.requireAdmin(next).ServeHTTP(w, r)
+			return
+		}
+		s.requireManagementToken(w, r, area, tier, next)
+	})
+}
+
+// requireManagementToken is the bearer-only half of requireManage. It is
+// reachable only when an Authorization header was present.
+func (s *Server) requireManagementToken(w http.ResponseWriter, r *http.Request, area string, tier int, next http.Handler) {
+	raw := bearerToken(r.Header.Get("Authorization"))
+	selector, _, parsed := auth.ParseManagementToken(raw)
+	address := s.requestClientIP(r)
+	unauthorized := func(code, message string) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="tiller-management"`)
+		adminError(w, 401, code, message)
+	}
+	if !parsed || s.managementTokenSelectorLimiter.locked(selector) || s.managementTokenAddressLimiter.locked(address) {
+		unauthorized("invalid_api_token", "Invalid API token.")
+		return
+	}
+	identity, err := s.tokens.AuthenticateContext(r.Context(), raw)
+	switch {
+	case errors.Is(err, auth.ErrManagementTokenExpired):
+		unauthorized("token_expired", "This API token has expired.")
+		return
+	case errors.Is(err, auth.ErrManagementTokenInvalid):
+		locked := s.managementTokenSelectorLimiter.recordFailure(selector)
+		locked = s.managementTokenAddressLimiter.recordFailure(address) || locked
+		if locked {
+			w.Header().Set("Retry-After", "60")
+			adminError(w, http.StatusTooManyRequests, "authentication_rate_limited", "Too many failed authentication attempts. Try again later.")
+			return
+		}
+		unauthorized("invalid_api_token", "Invalid API token.")
+		return
+	case err != nil:
+		w.Header().Set("Retry-After", "1")
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Authentication temporarily unavailable.")
+		return
+	}
+	s.managementTokenSelectorLimiter.success(selector)
+	s.managementTokenAddressLimiter.success(address)
+	if area != "" && !identity.Allows(area, tier) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{
+			"code":     "insufficient_scope",
+			"message":  "This API token does not have the required access.",
+			"required": area + ":" + managementTierName(tier),
+		}})
+		return
+	}
+	ctx := context.WithValue(r.Context(), managementTokenKey, identity)
+	ctx = context.WithValue(ctx, accountKey, identity.AccountID)
+	stampRequestPrincipal(r, "api_token", identity.AccountID)
+	next.ServeHTTP(w, r.WithContext(ctx))
+}
+
+// managementTierName names a scope tier for the insufficient_scope error.
+func managementTierName(tier int) string {
+	switch tier {
+	case auth.ScopeRead:
+		return "read"
+	case auth.ScopeWrite:
+		return "write"
+	case auth.ScopeDelete:
+		return "delete"
+	default:
+		return "none"
+	}
 }
 
 // requireAdminUser resolves the authenticated administrator to the identity

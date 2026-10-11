@@ -101,6 +101,22 @@ no security effect, and the sliding cache exists to keep hash-verification cost
 proportional to the rate of distinct/expired keys rather than request volume.
 Both caches are periodically swept and capped so they cannot grow unbounded.
 
+**Management API tokens (local mode).** Local operators can mint management
+tokens (`mt-tr-<selector>.<secret>`, 256-bit secrets, bcrypt-hash-only, shown
+once) that authenticate the admin REST surface with `Authorization: Bearer`
+instead of the session cookie. The token and cookie paths are exclusive: a
+request carrying an `Authorization` header is decided by the token alone and
+can never fall back to cookie authentication; CSRF is skipped only for that
+path because a bearer credential is not browser-ambient. Tokens carry per-area
+ceilings (read/write/delete) enforced per route; token lifecycle management
+itself is cookie-only, so a compromised token cannot mint siblings or widen its
+own scopes. Backup export, account export, identity operations, setup, debug
+endpoints, and the live SSE stream are never token-reachable. Failed token
+authentication is rate-limited per selector and per address; rotate/delete/
+scope changes invalidate the verification cache synchronously. Tokens survive
+admin credential changes — revoke them explicitly on suspected compromise. In
+hosted mode the feature is disabled (routes 404, no bearer path exists).
+
 **Hosted identity.** `TILLER_MODE=hosted` enables email/password accounts. Human
 passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
 single-use, short-lived, and hash-only at rest. Customer sessions and platform
