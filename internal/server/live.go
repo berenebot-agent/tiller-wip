@@ -127,6 +127,7 @@ type liveSnapshot struct {
 	VirtualTokens     map[string]tokenTypeWindows       `json:"virtual_tokens"`
 	RealTokens        map[string]tokenTypeWindows       `json:"real_tokens"`
 	TokensEstimated   map[string]bool                   `json:"tokens_estimated"`
+	ClientKeyNames    map[string]string                 `json:"client_key_names"`
 	// Modules carries current aggregate state for live UI modules, including
 	// in-flight virtual-model requests.
 	Modules map[string]any `json:"modules"`
