@@ -73,6 +73,39 @@ Notes:
 - Permanently out of reach for tokens: backup/account export, identity (password, passkeys, email, account deletion, sessions), onboarding, debug endpoints, and the live SSE stream.
 - Tokens survive admin credential changes; revoke compromised tokens explicitly in the Management API tab.
 - A built-in usage guide is served at `/api/admin` (and `/api`): open it in a browser for a rendered reference, or fetch it with `Accept: text/markdown` to hand an agent the entire guide as plain text.
+- A machine-readable discovery document is served at `/api.json` (or `/api` with `Accept: application/json`), so a host SDK can probe the instance — name, API base, auth scheme, key prefix, scopes, capabilities, and limits.
+
+### Embedding Tiller
+
+Because the control plane is a plain JSON API, Tiller can run headless inside
+another application as its LLM gateway and protocol translator, with the host
+owning the front end. Set `TILLER_ADMIN_API_KEY` (or `TILLER_ADMIN_API_KEY_FILE`)
+to a management token and the router seeds a single full-power token named
+`boot-admin` at boot — the host provisions providers, models, routes, and client
+keys entirely over the API, with no browser:
+
+```bash
+# 1. Create a management token in any Tiller's Settings → Management API,
+#    or generate a fresh instance's seed by copying it from there once.
+# 2. Boot the embedded instance with that token:
+TILLER_ADMIN_API_KEY=mt-tr-... docker compose up -d
+# 3. Point your host application's SDK at the instance:
+curl -H "Authorization: Bearer mt-tr-..." http://tiller:8080/api/admin/providers
+```
+
+Notes for embedders:
+
+- The seed is **full power** (every area at the delete ceiling) and never
+  logged. Rotate it by changing the env value and restarting — the fixed
+  identity replaces the old credential and invalidates it immediately.
+- A seed key counts as "configured": the instance does not report itself as
+  needing first-run browser setup.
+- Reach the management API over the bearer token; the token-lifecycle endpoints
+  themselves remain browser/cookie-only, so the seed is the one credential the
+  host manages out of band. Bind the instance to a private network/loopback and
+  let the host application own all external access.
+- Activity still records by default; turn it off per client key (`logging_enabled`)
+  or account-wide (`default_logging_enabled`) if the host wants no history.
 
 ```bash
 # Create a token in Settings → Management API, then:

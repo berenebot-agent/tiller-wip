@@ -1,8 +1,11 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/tiller-router/tiller-router/internal/auth"
 )
 
 // managementGuide serves the management API usage guide at GET /api and
@@ -17,8 +20,53 @@ func (s *Server) managementGuide(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(renderManagementGuideMarkdown()))
 		return
 	}
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		s.managementDiscovery(w, r)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte(renderManagementGuideHTML()))
+}
+
+// managementDiscovery serves the machine-readable discovery document. It is
+// reachable at GET /api.json and at GET /api when the client asks for JSON
+// (Accept: application/json), so a host SDK can probe the instance and learn
+// how to talk to it with no out-of-band knowledge.
+func (s *Server) managementDiscovery(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	payload := map[string]any{
+		"name":        "Tiller Router",
+		"api_version": "v1",
+		"api_base":    "/api/admin",
+		"auth": map[string]string{
+			"scheme":     "bearer",
+			"header":     "Authorization",
+			"key_prefix": auth.ManagementTokenPrefix,
+		},
+		"agent_guide": "/api/admin",
+		"reference":   "/api/admin",
+		"scopes":      map[string]any{"areas": auth.ManagementScopeAreas(), "tiers": []string{"read", "write", "delete"}},
+		"capabilities": []string{
+			"providers", "models", "virtual-models", "virtual-groups",
+			"client-keys", "client-key-permissions", "settings",
+			"usage", "activity", "cooldown", "health",
+		},
+		"endpoints": "see GET /api/admin (text/markdown) for the full route reference",
+		"limits":    s.discoveryLimits(),
+	}
+	_ = json.NewEncoder(w).Encode(payload)
+}
+
+// discoveryLimits advertises the bounds a client needs to page and retry
+// safely. The values come from the same constants the server enforces, so the
+// advertised numbers cannot drift from behaviour.
+func (s *Server) discoveryLimits() map[string]any {
+	return map[string]any{
+		"page_size_default":               50,
+		"page_size_max":                   200,
+		"request_body_bytes":              32 << 20,
+		"activity_retention_days_default": 30,
+	}
 }
 
 // managementGuideScope is one row of the area × tier scope table.

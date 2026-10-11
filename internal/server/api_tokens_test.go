@@ -5,14 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
 func newManagementHarness(t *testing.T) (*testAPI, *database.DB, *Server) {
@@ -463,5 +467,83 @@ func TestManagementTokenInvalidScopesRejected(t *testing.T) {
 		if status != 400 || errorCode(payload) != "invalid_scopes" {
 			t.Fatalf("scopes %v = %d %v", scopes, status, payload)
 		}
+	}
+}
+
+// TestAdminAPIKeyBootSeed creates a full-power token from the environment seed
+// and proves it authenticates the admin surface, and that a re-seed with a new
+// value replaces the old credential.
+func TestAdminAPIKeyBootSeed(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	first := "mt-tr-B9HQyF1IQyLu.NJh92J65MNar2AZWWJU6rzFB8eHTYAabB6SYEHF7rLA"
+	app, err := New(config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), AdminAPIKey: first}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.liveHub.timings = testLiveTimings
+	router := httptest.NewServer(app.Handler())
+	t.Cleanup(router.Close)
+
+	// A fresh seed token authenticates with full provider write/delete power.
+	status, _, _ := bearerRequest(t, router.URL, first, "GET", "/api/admin/providers", nil)
+	if status != 200 {
+		t.Fatalf("seed token read = %d", status)
+	}
+	status, _, _ = bearerRequest(t, router.URL, first, "GET", "/api/admin/settings", nil)
+	if status != 200 {
+		t.Fatalf("seed token settings read (full power) = %d", status)
+	}
+
+	// The store holds exactly one token, named boot-admin.
+	var name string
+	if err := db.SQL.QueryRow(`SELECT name FROM api_tokens WHERE id='boot-admin'`).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "boot-admin" {
+		t.Fatalf("seed token name = %q", name)
+	}
+
+	// Re-seed with a different value (simulating a restart after rotation):
+	// the fixed id replaces the credential and the old value stops working.
+	second := "mt-tr-B6jSqFaAl2ll.0qqcglnGU-1uqIueba2qmMXvWXnNE5KWaSy_bkTRzQA"
+	app2, err := New(config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), AdminAPIKey: second}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app2.liveHub.timings = testLiveTimings
+	router2 := httptest.NewServer(app2.Handler())
+	t.Cleanup(router2.Close)
+
+	if status, _, _ := bearerRequest(t, router2.URL, first, "GET", "/api/admin/providers", nil); status != 401 {
+		t.Fatalf("old seed token after re-seed = %d, want 401", status)
+	}
+	if status, _, _ := bearerRequest(t, router2.URL, second, "GET", "/api/admin/providers", nil); status != 200 {
+		t.Fatalf("new seed token after re-seed = %d", status)
+	}
+	var rows int
+	if err := db.SQL.QueryRow(`SELECT count(*) FROM api_tokens`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Fatalf("token rows after re-seed = %d, want 1", rows)
+	}
+}
+
+func TestAdminAPIKeyCountsAsConfigured(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	// No username/password; only the seed key. The instance must not report
+	// itself as needing first-run setup.
+	app := newTestServer(t, config.Config{DataDir: t.TempDir(), AdminAPIKey: "mt-tr-B9HQyF1IQyLu.NJh92J65MNar2AZWWJU6rzFB8eHTYAabB6SYEHF7rLA"}, db)
+	if app.setupRequired() {
+		t.Fatal("a management API boot seed must count as configured")
 	}
 }

@@ -493,6 +493,13 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 		} else if logger != nil {
 			logger.Warn("analytics settings load failed", "error_class", fmt.Sprintf("%T", loadErr))
 		}
+	} else if cfg.AdminAPIKey != "" {
+		if err := s.seedManagementToken(cfg.AdminAPIKey); err != nil {
+			return nil, fmt.Errorf("seed management API token: %w", err)
+		}
+		if logger != nil {
+			logger.Info("seeded the management API boot token from TILLER_ADMIN_API_KEY; rotate it by changing the value and restarting")
+		}
 	}
 	return s, nil
 }
@@ -700,6 +707,8 @@ func (s *Server) Handler() http.Handler {
 		// for humans, markdown for agents that request text/markdown).
 		mux.HandleFunc("GET /api", s.managementGuide)
 		mux.HandleFunc("GET /api/admin", s.managementGuide)
+		// Machine-readable discovery for host SDKs and embedding probes.
+		mux.HandleFunc("GET /api.json", s.managementDiscovery)
 	}
 	// Resource-management surface. requireManage accepts the browser admin
 	// session (with CSRF) or a management API token with the required scope

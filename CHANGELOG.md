@@ -21,7 +21,15 @@ behavior may still change before a stable `1.0`.
   stream are never token-reachable. Local mode only; hosted instances have no
   token routes. A built-in usage guide is served at `/api/admin` (and `/api`) —
   rendered HTML for people, `text/markdown` for agents that request it — and the
-  one-time secret dialog links straight to it.
+  one-time secret dialog links straight to it. A machine-readable discovery
+  document is served at `/api.json` (or `/api` with `Accept: application/json`).
+- **Headless embedding bootstrap.** Setting `TILLER_ADMIN_API_KEY` (or
+  `TILLER_ADMIN_API_KEY_FILE`) seeds a single full-power management token named
+  `boot-admin` at boot, so a host application can run Tiller as an embedded LLM
+  gateway and provision it entirely over the API with no browser. The seed is
+  never logged; rotating the env value and restarting replaces and immediately
+  invalidates the previous credential. Local mode only; a seed key counts as a
+  configured instance for first-run setup purposes.
 
 ## [0.1.0-beta.4] - 2026-10-09
 
