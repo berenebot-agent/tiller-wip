@@ -70,6 +70,96 @@ func TestNormalizeDeepSeekRequestMapsToggleToThinkingType(t *testing.T) {
 	}
 }
 
+func TestNormalizeDeepSeekRequestBackfillsReasoningContent(t *testing.T) {
+	tools := `[{"type":"function","function":{"name":"get_time"}}]`
+	noTools := `[]`
+	cases := []struct {
+		name          string
+		body          string
+		wantAnnotated int // assistant turns expected to gain reasoning_content
+	}{
+		{
+			name:          "tools with assistant turns missing reasoning_content are backfilled",
+			body:          `{"model":"x","tools":` + tools + `,"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"},{"role":"tool","content":"r"}]}`,
+			wantAnnotated: 1,
+		},
+		{
+			name:          "tools with tool_calls turn missing reasoning_content are backfilled",
+			body:          `{"model":"x","tools":` + tools + `,"messages":[{"role":"assistant","content":"","tool_calls":[{"id":"c1"}]}]}`,
+			wantAnnotated: 1,
+		},
+		{
+			name:          "no tools is left untouched",
+			body:          `{"model":"x","tools":` + noTools + `,"messages":[{"role":"assistant","content":"b"}]}`,
+			wantAnnotated: 0,
+		},
+		{
+			name:          "absent tools is left untouched",
+			body:          `{"model":"x","messages":[{"role":"assistant","content":"b"}]}`,
+			wantAnnotated: 0,
+		},
+		{
+			name:          "existing reasoning_content is preserved",
+			body:          `{"model":"x","tools":` + tools + `,"messages":[{"role":"assistant","content":"b","reasoning_content":"kept"}]}`,
+			wantAnnotated: 0,
+		},
+		{
+			name:          "existing empty reasoning_content counts as present",
+			body:          `{"model":"x","tools":` + tools + `,"messages":[{"role":"assistant","content":"b","reasoning_content":""}]}`,
+			wantAnnotated: 0,
+		},
+		{
+			name:          "reasoning_details present means no placeholder",
+			body:          `{"model":"x","tools":` + tools + `,"messages":[{"role":"assistant","content":"b","reasoning_details":[{"type":"reasoning.text"}]}]}`,
+			wantAnnotated: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := normalizeDeepSeekRequest([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(result, &body); err != nil {
+				t.Fatal(err)
+			}
+			var before map[string]any
+			if err := json.Unmarshal([]byte(tc.body), &before); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := assistantValues(body, "reasoning_content"), assistantValues(before, "reasoning_content"); len(got) != len(want)+tc.wantAnnotated {
+				t.Fatalf("assistant reasoning_content values %d, want %d (input had %d, backfill %d) in %s", len(got), len(want)+tc.wantAnnotated, len(want), tc.wantAnnotated, result)
+			}
+			for i, want := range assistantValues(before, "reasoning_content") {
+				if assistantValues(body, "reasoning_content")[i] != want {
+					t.Fatalf("existing reasoning_content at %d changed from %v to %v in %s", i, want, assistantValues(body, "reasoning_content")[i], result)
+				}
+			}
+			if tc.wantAnnotated > 0 {
+				if v := assistantValues(body, "reasoning_content"); v[len(v)-1] != "" {
+					t.Fatalf("backfilled reasoning_content = %v, want empty string in %s", v[len(v)-1], result)
+				}
+			}
+		})
+	}
+}
+
+func assistantValues(body map[string]any, key string) []any {
+	messages, _ := body["messages"].([]any)
+	values := []any{}
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		if message["role"] != "assistant" {
+			continue
+		}
+		if value, exists := message[key]; exists {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
 func TestIsReasoningRoundtripError(t *testing.T) {
 	cases := []struct {
 		message string
