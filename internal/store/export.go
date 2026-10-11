@@ -284,5 +284,5 @@ func (s *Scope) CountAccountAuditRows(ctx context.Context) (int, error) {
 // first, in bounded pages. It reuses the same paging logic as the client and
 // virtual Activity exports, so no tenant transaction spans the stream.
 func (s *Scope) ExportAccountActivity(ctx context.Context, fn func(ActivityRow) error) error {
-	return s.exportActivity(ctx, "1=1", nil, "", fn)
+	return s.exportActivity(ctx, "1=1", nil, ActivityExportRange{}, fn)
 }

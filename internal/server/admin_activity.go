@@ -217,9 +217,13 @@ func (s *Server) exportClientActivityCSV(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
-	cutoff := periodCutoffString(r.URL.Query().Get("period"))
+	rng, err := activityExportRange(r)
+	if err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(name)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
-		return sc.ExportClientActivity(r.Context(), clientID, search, cutoff, fn)
+		return sc.ExportClientActivity(r.Context(), clientID, search, rng, fn)
 	}); err != nil && s.logger != nil {
 		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
@@ -240,9 +244,13 @@ func (s *Server) exportVirtualActivityCSV(w http.ResponseWriter, r *http.Request
 		return
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
-	cutoff := periodCutoffString(r.URL.Query().Get("period"))
+	rng, err := activityExportRange(r)
+	if err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(canonical)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
-		return sc.ExportVirtualActivity(r.Context(), modelID, canonical, search, cutoff, fn)
+		return sc.ExportVirtualActivity(r.Context(), modelID, canonical, search, rng, fn)
 	}); err != nil && s.logger != nil {
 		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
@@ -263,9 +271,34 @@ func (s *Server) exportRealModelActivityCSV(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	search := strings.TrimSpace(r.URL.Query().Get("search"))
-	cutoff := periodCutoffString(r.URL.Query().Get("period"))
+	rng, err := activityExportRange(r)
+	if err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
 	if err := s.writeActivityCSV(w, r, "tiller-"+sanitizeFilename(provider+"/"+upstream)+"-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
-		return sc.ExportRealActivity(r.Context(), modelID, provider, upstream, search, cutoff, fn)
+		return sc.ExportRealActivity(r.Context(), modelID, provider, upstream, search, rng, fn)
+	}); err != nil && s.logger != nil {
+		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
+	}
+}
+
+// exportGlobalActivityCSV streams a CSV of activity across every client key in
+// the account, honouring the active search filter and timestamp range.
+func (s *Server) exportGlobalActivityCSV(w http.ResponseWriter, r *http.Request) {
+	sc := s.scope(r)
+	if !sc.ActivityAvailable() {
+		activityReadError(w, store.ErrActivityUnavailable, "Could not export activity.")
+		return
+	}
+	search := strings.TrimSpace(r.URL.Query().Get("search"))
+	rng, err := activityExportRange(r)
+	if err != nil {
+		adminError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := s.writeActivityCSV(w, r, "tiller-activity-"+time.Now().UTC().Format("2006-01-02")+".csv", func(fn func(store.ActivityRow) error) error {
+		return sc.ExportGlobalActivity(r.Context(), search, rng, fn)
 	}); err != nil && s.logger != nil {
 		s.logger.Warn("activity export failed", "error_class", fmt.Sprintf("%T", err))
 	}
@@ -418,17 +451,52 @@ func neutralizeCSVField(s string) string {
 	return s
 }
 
-// periodCutoffString returns the UTC cutoff for a CSV export period as an
-// RFC3339Nano string, or "" when no period filter applies.
-func periodCutoffString(period string) string {
-	switch strings.TrimSpace(period) {
-	case "24h":
-		return time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
-	case "7d":
-		return time.Now().UTC().Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
-	case "30d":
-		return time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano)
-	default:
-		return ""
+// activityExportRange resolves the CSV export time bounds from the query. A
+// named period (24h/7d/30d, else unbounded) sets only the lower bound. A custom
+// range uses the "from" and "to" query params, RFC3339 timestamps produced by
+// the browser from the admin's local calendar days; "from" is inclusive and
+// "to" is exclusive. Malformed or inverted custom bounds return an error so the
+// handler can respond 400 rather than silently exporting everything.
+func activityExportRange(r *http.Request) (store.ActivityExportRange, error) {
+	period := strings.TrimSpace(r.URL.Query().Get("period"))
+	from := strings.TrimSpace(r.URL.Query().Get("from"))
+	to := strings.TrimSpace(r.URL.Query().Get("to"))
+	if from == "" && to == "" {
+		var rng store.ActivityExportRange
+		switch period {
+		case "24h":
+			rng.From = time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339Nano)
+		case "7d":
+			rng.From = time.Now().UTC().Add(-7 * 24 * time.Hour).Format(time.RFC3339Nano)
+		case "30d":
+			rng.From = time.Now().UTC().Add(-30 * 24 * time.Hour).Format(time.RFC3339Nano)
+		}
+		return rng, nil
 	}
+	var fromTime, toTime time.Time
+	if from != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, from)
+		if err != nil {
+			return store.ActivityExportRange{}, errors.New("Invalid start date.")
+		}
+		fromTime = parsed.UTC()
+	}
+	if to != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, to)
+		if err != nil {
+			return store.ActivityExportRange{}, errors.New("Invalid end date.")
+		}
+		toTime = parsed.UTC()
+	}
+	if !fromTime.IsZero() && !toTime.IsZero() && !fromTime.Before(toTime) {
+		return store.ActivityExportRange{}, errors.New("Start date must be before end date.")
+	}
+	rng := store.ActivityExportRange{}
+	if !fromTime.IsZero() {
+		rng.From = fromTime.Format(time.RFC3339Nano)
+	}
+	if !toTime.IsZero() {
+		rng.To = toTime.Format(time.RFC3339Nano)
+	}
+	return rng, nil
 }

@@ -129,6 +129,63 @@ func TestClientActivityCSVExportPeriodFilter(t *testing.T) {
 	}
 }
 
+func TestClientActivityCSVExportCustomRange(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	insertLogRow(t, db, "row-old", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-old", nil, "2026-01-01T00:00:00Z")
+	insertLogRow(t, db, "row-mid", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-mid", nil, "2026-02-01T00:00:00Z")
+	insertLogRow(t, db, "row-new", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-new", nil, "2026-03-01T00:00:00Z")
+
+	// Inclusive from, exclusive to: only the February row survives.
+	status, body := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export?from=2026-02-01T00:00:00Z&to=2026-03-01T00:00:00Z")
+	if status != 200 {
+		t.Fatalf("custom range export: %d", status)
+	}
+	records, _ := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if len(records) != 2 { // header + 1 row
+		t.Fatalf("custom range export should have header + 1 row, got %d", len(records))
+	}
+	if records[1][0] != "2026-02-01T00:00:00Z" {
+		t.Fatalf("custom range exported wrong row: %v", records[1])
+	}
+}
+
+func TestClientActivityCSVExportCustomRangeInvalid(t *testing.T) {
+	api, _, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	// Reversed bounds.
+	if status, _ := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export?from=2026-03-01T00:00:00Z&to=2026-02-01T00:00:00Z"); status != 400 {
+		t.Fatalf("reversed range: got %d, want 400", status)
+	}
+	// Malformed timestamp.
+	if status, _ := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export?from=not-a-date"); status != 400 {
+		t.Fatalf("malformed from: got %d, want 400", status)
+	}
+}
+
+func TestGlobalActivityCSVExport(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	client2ID, _ := createClientWithModel(t, api, "global second client")
+	insertLogRow(t, db, "row-a", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
+	insertLogRow(t, db, "row-b", client2ID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 20, int64Ptr(2), int64Ptr(2), "upstream-b", "req-b", nil, "2026-01-01T00:00:02Z")
+
+	status, body := getCSV(t, api, "/api/admin/activity/export")
+	if status != 200 {
+		t.Fatalf("global export: %d", status)
+	}
+	records, _ := csv.NewReader(strings.NewReader(body)).ReadAll()
+	if len(records) != 3 { // header + 2 rows across both clients
+		t.Fatalf("global export should have header + 2 rows, got %d", len(records))
+	}
+	// Search still narrows the global export.
+	status, body = getCSV(t, api, "/api/admin/activity/export?search=req-a")
+	if status != 200 {
+		t.Fatalf("global export search: %d", status)
+	}
+	records, _ = csv.NewReader(strings.NewReader(body)).ReadAll()
+	if len(records) != 2 {
+		t.Fatalf("global export search should have header + 1 row, got %d", len(records))
+	}
+}
+
 func TestClientActivityCSVExportRequiresAdmin(t *testing.T) {
 	api, _, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	req, _ := http.NewRequest("GET", api.base+"/api/admin/client-keys/"+clientID+"/activity/export", nil)

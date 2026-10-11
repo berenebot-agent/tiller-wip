@@ -221,10 +221,22 @@ func (s *Scope) ListRealModelActivity(ctx context.Context, modelID, provider, up
 
 const activityExportBatchSize = 256
 
-func (s *Scope) exportActivity(ctx context.Context, where string, args []any, cutoff string, fn func(ActivityRow) error) error {
-	if cutoff != "" {
+// ActivityExportRange bounds a CSV export by request timestamps. Both bounds are
+// optional RFC3339Nano strings; From is inclusive and To is exclusive. An empty
+// value means unbounded on that side.
+type ActivityExportRange struct {
+	From string
+	To   string
+}
+
+func (s *Scope) exportActivity(ctx context.Context, where string, args []any, rng ActivityExportRange, fn func(ActivityRow) error) error {
+	if rng.From != "" {
 		where += ` AND rl.created_at >= ?`
-		args = append(args, cutoff)
+		args = append(args, rng.From)
+	}
+	if rng.To != "" {
+		where += ` AND rl.created_at < ?`
+		args = append(args, rng.To)
 	}
 	beforeCreated, beforeID := "", ""
 	for {
@@ -263,7 +275,7 @@ func (s *Scope) exportActivity(ctx context.Context, where string, args []any, cu
 }
 
 // ExportClientActivity streams one client key's activity, newest first.
-func (s *Scope) ExportClientActivity(ctx context.Context, clientID, search, cutoff string, fn func(ActivityRow) error) error {
+func (s *Scope) ExportClientActivity(ctx context.Context, clientID, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
 	where := `rl.client_key_id=?`
 	args := []any{clientID}
 	if search != "" {
@@ -271,29 +283,45 @@ func (s *Scope) ExportClientActivity(ctx context.Context, clientID, search, cuto
 		where += ` AND ` + searchClause
 		args = append(args, searchArgs...)
 	}
-	return s.exportActivity(ctx, where, args, cutoff, fn)
+	return s.exportActivity(ctx, where, args, rng, fn)
 }
 
 // ExportVirtualActivity streams activity attributable to a virtual model.
-func (s *Scope) ExportVirtualActivity(ctx context.Context, virtualID, canonical, search, cutoff string, fn func(ActivityRow) error) error {
+func (s *Scope) ExportVirtualActivity(ctx context.Context, virtualID, canonical, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
 	where, args := virtualAttribution(virtualID, canonical)
 	if search != "" {
 		searchClause, searchArgs := activitySearchClause("rl.", "%"+search+"%")
 		where += ` AND ` + searchClause
 		args = append(args, searchArgs...)
 	}
-	return s.exportActivity(ctx, where, args, cutoff, fn)
+	return s.exportActivity(ctx, where, args, rng, fn)
 }
 
 // ExportRealActivity streams activity attributable to a real model.
-func (s *Scope) ExportRealActivity(ctx context.Context, modelID, provider, upstream, search, cutoff string, fn func(ActivityRow) error) error {
+func (s *Scope) ExportRealActivity(ctx context.Context, modelID, provider, upstream, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
 	where, args := realAttribution(modelID, provider, upstream)
 	if search != "" {
 		searchClause, searchArgs := activitySearchClause("rl.", "%"+search+"%")
 		where += ` AND ` + searchClause
 		args = append(args, searchArgs...)
 	}
-	return s.exportActivity(ctx, where, args, cutoff, fn)
+	return s.exportActivity(ctx, where, args, rng, fn)
+}
+
+// ExportGlobalActivity streams activity across every client key in the account,
+// newest first, honouring an optional search filter and timestamp range.
+func (s *Scope) ExportGlobalActivity(ctx context.Context, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
+	where := `1=1`
+	var args []any
+	if search != "" {
+		pattern := "%" + search + "%"
+		searchClause, searchArgs := activitySearchClause("rl.", pattern)
+		searchClause = "(rl.client_name LIKE ? OR " + searchClause + ")"
+		searchArgs = append([]any{pattern}, searchArgs...)
+		where += ` AND ` + searchClause
+		args = append(args, searchArgs...)
+	}
+	return s.exportActivity(ctx, where, args, rng, fn)
 }
 
 // ClearClientActivity deletes a client key's request logs.

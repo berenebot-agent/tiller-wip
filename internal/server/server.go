@@ -712,6 +712,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/quota", s.requireAdmin(http.HandlerFunc(s.quotaEndpoint)))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
 	mux.Handle("GET /api/admin/activity", s.requireAdmin(http.HandlerFunc(s.listGlobalActivity)))
+	mux.Handle("GET /api/admin/activity/export", s.requireAdmin(http.HandlerFunc(s.exportGlobalActivityCSV)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireAdmin(http.HandlerFunc(s.listRequestAttempts)))
 	mux.Handle("GET /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.cooldownStatus)))
 	mux.Handle("DELETE /api/admin/cooldown", s.requireAdmin(http.HandlerFunc(s.clearCooldown)))
