@@ -132,3 +132,49 @@ func TestRevokeAllManagementTokensCounts(t *testing.T) {
 		t.Fatalf("rows after revoke-all = %d", len(rows))
 	}
 }
+
+func TestClientKeyNames(t *testing.T) {
+	store, db := newAPITokenStore(t)
+	ctx := context.Background()
+	scopeA := store.For("account-a")
+	scopeB := store.For("account-b")
+
+	now := database.Now()
+	for _, k := range []struct{ id, name string }{{"k1", "alpha"}, {"k2", "beta"}} {
+		if _, err := db.SQL.Exec(`INSERT INTO client_keys(id,account_id,name,selector,secret_hash,secret_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+			k.id, "account-a", k.name, "sel-"+k.id, "hash", "fp", now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO client_keys(id,account_id,name,selector,secret_hash,secret_fingerprint,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`,
+		"kb", "account-b", "other", "sel-kb", "hash", "fp", now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	namesA, err := scopeA.ClientKeyNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(namesA) != 2 || namesA["k1"] != "alpha" || namesA["k2"] != "beta" {
+		t.Fatalf("account A names = %v", namesA)
+	}
+	if _, leaked := namesA["kb"]; leaked {
+		t.Fatal("account A saw account B's client key")
+	}
+
+	namesB, err := scopeB.ClientKeyNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(namesB) != 1 || namesB["kb"] != "other" {
+		t.Fatalf("account B names = %v", namesB)
+	}
+
+	empty, err := store.For("account-empty").ClientKeyNames(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("empty account names = %v", empty)
+	}
+}

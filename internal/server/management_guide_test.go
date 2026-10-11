@@ -40,7 +40,7 @@ func TestManagementGuideServedLocally(t *testing.T) {
 			t.Fatalf("GET %s content-type = %q", path, ct)
 		}
 		page := string(body)
-		for _, want := range []string{"Management API", "Authorization: Bearer mt-tr-", "/api/admin/providers", "insufficient_scope", "api-tokens/self"} {
+		for _, want := range []string{"Management API", "Authorization: Bearer mt-tr-", "/api/admin/providers", "insufficient_scope", "api-tokens/self", "client_key_names"} {
 			if !strings.Contains(page, want) {
 				t.Fatalf("GET %s guide missing %q", path, want)
 			}

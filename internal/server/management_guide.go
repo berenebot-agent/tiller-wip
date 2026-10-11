@@ -188,7 +188,15 @@ func renderManagementGuideMarkdown() string {
 			b.WriteString("| " + ep.Method + " | `" + ep.Path + "` | " + ep.Tier + " |\n")
 		}
 	}
-	b.WriteString("\n## Errors\n\n")
+	b.WriteString("\n## Reading usage\n\n")
+	b.WriteString("`GET /api/admin/usage` groups token, cache, and cost figures by client key id,\n")
+	b.WriteString("virtual model, and real model (`provider/model`). Virtual- and real-model keys\n")
+	b.WriteString("are already display names; client-key aggregates are keyed by the opaque\n")
+	b.WriteString("`client_key_id`. The same response carries `client_key_names`, a `{id: name}`\n")
+	b.WriteString("map, so you can label client rows without a second request. An id missing from\n")
+	b.WriteString("that map belongs to a client key that has since been deleted (its history is\n")
+	b.WriteString("retained).\n\n")
+	b.WriteString("## Errors\n\n")
 	b.WriteString("Failures use the envelope `{\"error\":{\"code\":\"...\",\"message\":\"...\"}}`:\n\n")
 	b.WriteString("- `401 invalid_api_token` — missing, unknown, disabled, or malformed token.\n")
 	b.WriteString("- `401 token_expired` — the token's expiry has passed.\n")
@@ -248,6 +256,8 @@ func renderManagementGuideHTML() string {
 		b.WriteString("</tbody></table>\n")
 	}
 
+	b.WriteString("<h2>Reading usage</h2>\n")
+	b.WriteString("<p><code>GET /api/admin/usage</code> groups token, cache, and cost figures by client key id, virtual model, and real model (<code>provider/model</code>). Virtual- and real-model keys are already display names; client-key aggregates are keyed by the opaque <code>client_key_id</code>. The same response carries <code>client_key_names</code>, a <code>{id: name}</code> map, so you can label client rows without a second request. An id missing from that map belongs to a client key that has since been deleted (its history is retained).</p>\n")
 	b.WriteString("<h2>Errors</h2>\n")
 	b.WriteString("<p>Failures use the envelope <code>{\"error\":{\"code\":\"...\",\"message\":\"...\"}}</code>:</p>\n")
 	b.WriteString("<ul>\n<li><code>401 invalid_api_token</code> — missing, unknown, disabled, or malformed token.</li>\n<li><code>401 token_expired</code> — the token's expiry has passed.</li>\n<li><code>403 insufficient_scope</code> — the token's ceiling is below the route's tier.</li>\n<li><code>429 authentication_rate_limited</code> — too many failed attempts; retry after <code>Retry-After</code> seconds.</li>\n</ul>\n")

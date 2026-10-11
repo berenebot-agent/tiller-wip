@@ -46,6 +46,7 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		"real_tokens":         snap.RealTokens,
 		"tokens_estimated":    snap.TokensEstimated,
 		"target_last_outcome": snap.TargetLastOutcome,
+		"client_key_names":    snap.ClientKeyNames,
 	})
 }
 
@@ -77,6 +78,11 @@ type usageAggregates struct {
 	// TokensEstimated marks client keys with at least one estimated-input row in
 	// the widest window, so the UI can flag estimated totals.
 	TokensEstimated map[string]bool
+	// ClientKeyNames maps a client key id (the key space of every client-keyed
+	// aggregate above) to its display name, so a consumer of the usage envelope
+	// can label client rows without a second request. A usage id absent from
+	// this map belongs to a deleted client key.
+	ClientKeyNames map[string]string
 }
 
 // buildUsageSnapshot computes the full usage/health envelope shared by the
@@ -108,6 +114,7 @@ func (s *Server) buildUsageSnapshot(ctx context.Context, accountID string) (live
 		VirtualTokens:     agg.VirtualTokens,
 		RealTokens:        agg.RealTokens,
 		TokensEstimated:   agg.TokensEstimated,
+		ClientKeyNames:    agg.ClientKeyNames,
 		Modules: map[string]any{
 			"inflight_clients":       s.inflight.clientSnapshot(accountID),
 			"inflight_client_routes": s.inflight.clientRouteSnapshot(accountID),
@@ -221,6 +228,10 @@ func (s *Server) computeUsageAggregates(ctx context.Context, accountID string, n
 	if err != nil {
 		return usageAggregates{}, err
 	}
+	clientKeyNames, err := sc.ClientKeyNames(ctx)
+	if err != nil {
+		return usageAggregates{}, err
+	}
 	return usageAggregates{
 		TargetHealth:    targetHealth,
 		VirtualModels:   virtualModels,
@@ -236,6 +247,7 @@ func (s *Server) computeUsageAggregates(ctx context.Context, accountID string, n
 		VirtualTokens:   virtualTokens,
 		RealTokens:      realTokens,
 		TokensEstimated: tokensEstimated,
+		ClientKeyNames:  clientKeyNames,
 	}, nil
 }
 

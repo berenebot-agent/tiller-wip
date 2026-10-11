@@ -108,6 +108,39 @@ func TestUsageEndpointEmpty(t *testing.T) {
 	if len(payload["client_keys"].(map[string]any)) != 0 || len(payload["virtual_models"].(map[string]any)) != 0 || len(payload["real_models"].(map[string]any)) != 0 {
 		t.Fatalf("expected empty usage, got %v", payload)
 	}
+	// The name map is present even when there is no usage yet.
+	if payload["client_key_names"] == nil {
+		t.Fatalf("client_key_names missing from usage envelope: %v", payload)
+	}
+}
+
+// TestUsageClientKeyNames proves the usage envelope resolves its client-keyed
+// aggregates to display names: the client_key_id key space of the aggregate
+// maps is covered by client_key_names.
+func TestUsageClientKeyNames(t *testing.T) {
+	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,route_kind,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"log-names-1", clientID, "provider-a/model-a", "real", "", "provider-a", "model-a", "chat", 0, 200, 12, 1000, 2000, "req-names-1", now); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
+	if status != 200 {
+		t.Fatalf("usage: %d %v", status, payload)
+	}
+	names, ok := payload["client_key_names"].(map[string]any)
+	if !ok {
+		t.Fatalf("client_key_names type = %T", payload["client_key_names"])
+	}
+	if names[clientID] != "test client" {
+		t.Fatalf("client_key_names[%s] = %v, want %q", clientID, names[clientID], "test client")
+	}
+	// Every id that appears in the client-keyed aggregate maps is resolvable.
+	for id := range payload["client_keys"].(map[string]any) {
+		if _, ok := names[id]; !ok {
+			t.Fatalf("usage client_keys id %q has no name entry", id)
+		}
+	}
 }
 
 // TestUsageTargetLastOutcome verifies that a routed request records its outcome

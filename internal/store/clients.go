@@ -187,6 +187,28 @@ func (s *Scope) ClientKeyName(ctx context.Context, id string) (string, error) {
 	return name, err
 }
 
+// ClientKeyNames returns id→name for every client key in the scope's account.
+// It lets the usage envelope label its client-keyed aggregates (client_keys,
+// client_cache, client_cost, client_tokens) without a per-row join. A usage
+// entry whose id is absent here belongs to a client key that has since been
+// deleted (Activity history is retained after key deletion by design).
+func (s *Scope) ClientKeyNames(ctx context.Context) (map[string]string, error) {
+	rows, err := s.q.QueryContext(ctx, `SELECT id, name FROM client_keys WHERE account_id=?`, s.accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
 // SingleBindingRow is a client key's single-model binding.
 type SingleBindingRow struct {
 	ModelName      string
