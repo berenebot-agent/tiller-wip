@@ -11,6 +11,9 @@ import (
 // means "not visible to this account" for the caller.
 var ErrManagementTokenNotFound = errors.New("store: management token not found")
 
+// EnvironmentManagementTokenID is reserved for the local environment-managed credential.
+const EnvironmentManagementTokenID = "boot-admin"
+
 // ManagementTokenRow is one management-token row. The secret hash is never
 // included; only the display fingerprint.
 type ManagementTokenRow struct {
@@ -178,10 +181,10 @@ func (s *Scope) DeleteManagementToken(ctx context.Context, id string) (bool, err
 	return n > 0, nil
 }
 
-// RevokeAllManagementTokens removes every token in the scope's account and
+// RevokeAllManagementTokens removes every browser-managed token in the scope's account and
 // returns how many were removed.
 func (s *Scope) RevokeAllManagementTokens(ctx context.Context) (int64, error) {
-	res, err := s.q.ExecContext(ctx, `DELETE FROM api_tokens WHERE account_id=?`, s.accountID)
+	res, err := s.q.ExecContext(ctx, `DELETE FROM api_tokens WHERE account_id=? AND id<>?`, s.accountID, EnvironmentManagementTokenID)
 	if err != nil {
 		return 0, err
 	}
@@ -190,9 +193,8 @@ func (s *Scope) RevokeAllManagementTokens(ctx context.Context) (int64, error) {
 
 // UpsertManagementToken inserts or replaces a named management token in one
 // account. It is used only by the environment boot seed, where re-seeding on a
-// changed value must be idempotent: the fixed name is the identity, so a
-// restart with the same seed value is a no-op row-wise, and a restart with a
-// new value replaces the selector/hash together.
+// changed value must be idempotent: the fixed ID is the identity. Each startup
+// restores the configured credential and its full scopes together.
 func (s *Scope) UpsertManagementToken(ctx context.Context, in CreateManagementTokenInput) error {
 	now := now()
 	_, err := s.q.ExecContext(ctx, `INSERT INTO api_tokens(id,account_id,name,description,selector,secret_hash,secret_fingerprint,scopes,enabled,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)

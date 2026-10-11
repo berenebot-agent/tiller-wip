@@ -96,8 +96,13 @@ curl -H "Authorization: Bearer mt-tr-..." http://tiller:8080/api/admin/providers
 Notes for embedders:
 
 - The seed is **full power** (every area at the delete ceiling) and never
-  logged. Rotate it by changing the env value and restarting — the fixed
+  logged. It is environment-managed and cannot be edited, rotated, or revoked
+  in the browser/token lifecycle API; bulk revocation excludes it. Rotate it
+  by changing the configured key and restarting — the fixed
   identity replaces the old credential and invalidates it immediately.
+- Permanently revoke it by removing both `TILLER_ADMIN_API_KEY` and
+  `TILLER_ADMIN_API_KEY_FILE` and restarting; startup removes its stored row.
+  The key file takes precedence when configured.
 - A seed key counts as "configured": the instance does not report itself as
   needing first-run browser setup.
 - Reach the management API over the bearer token; the token-lifecycle endpoints

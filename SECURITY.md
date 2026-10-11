@@ -127,6 +127,15 @@ credential: the operator is expected to bind the instance to a private
 network/loopback and let the host application own external access. Hosted mode
 rejects the variable at config load.
 
+The environment key is authoritative, not a one-time seed. `boot-admin` is
+read-only in the browser and token lifecycle API, and bulk revocation excludes
+it. Change the configured key and restart to rotate it. Remove both
+`TILLER_ADMIN_API_KEY` and `TILLER_ADMIN_API_KEY_FILE` and restart to permanently
+revoke it; startup then removes its persisted token row. The file source takes
+precedence, so changing only the environment value while a key file is configured
+does not rotate the credential. Browser-managed tokens are unaffected by these
+configuration changes and remain explicitly revocable.
+
 **Hosted identity.** `TILLER_MODE=hosted` enables email/password accounts. Human
 passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
 single-use, short-lived, and hash-only at rest. Customer sessions and platform

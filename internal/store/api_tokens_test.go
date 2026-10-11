@@ -117,6 +117,7 @@ func TestRevokeAllManagementTokensCounts(t *testing.T) {
 	scope := store.For("account-a")
 	insertStoreManagementToken(t, scope, "tok-1", "one", "sel-1", `{}`, sql.NullString{})
 	insertStoreManagementToken(t, scope, "tok-2", "two", "sel-2", `{}`, sql.NullString{})
+	insertStoreManagementToken(t, scope, EnvironmentManagementTokenID, "environment credential", "sel-env", `{}`, sql.NullString{})
 	count, err := scope.RevokeAllManagementTokens(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -128,7 +129,7 @@ func TestRevokeAllManagementTokensCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 0 {
+	if len(rows) != 1 || rows[0].ID != EnvironmentManagementTokenID {
 		t.Fatalf("rows after revoke-all = %d", len(rows))
 	}
 }

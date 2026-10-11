@@ -21,11 +21,11 @@ import (
 // create, re-scope, rotate, or revoke tokens — it may only introspect itself.
 
 // bootManagementTokenID and bootManagementTokenName are the fixed identity of
-// the environment boot seed. A fixed id makes re-seeding idempotent: a restart
-// with the same value is a row-wise no-op, and a restart with a new value
+// the environment-managed credential. A fixed id makes re-seeding idempotent:
+// a restart restores the configured credential, and a restart with a new value
 // replaces the selector/hash and invalidates the cached old credential.
 const (
-	bootManagementTokenID   = "boot-admin"
+	bootManagementTokenID   = store.EnvironmentManagementTokenID
 	bootManagementTokenName = "boot-admin"
 )
 
@@ -46,7 +46,7 @@ func (s *Server) seedManagementToken(plaintext string) error {
 		return s.scopeFor(database.LocalAccountID).UpsertManagementToken(context.Background(), store.CreateManagementTokenInput{
 			ID:          bootManagementTokenID,
 			Name:        bootManagementTokenName,
-			Description: "Seeded from TILLER_ADMIN_API_KEY; rotate by changing the value and restarting.",
+			Description: "Environment-managed. Change the configured key and restart to rotate; remove both key configuration sources and restart to revoke.",
 			Selector:    selector,
 			Hash:        hash,
 			Fingerprint: fingerprint,
@@ -60,18 +60,19 @@ func (s *Server) seedManagementToken(plaintext string) error {
 // create, re-scope, rotate, or revoke tokens — it may only introspect itself.
 
 type managementTokenView struct {
-	ID          string         `json:"id"`
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	Fingerprint string         `json:"fingerprint"`
-	Scopes      map[string]int `json:"scopes"`
-	Enabled     bool           `json:"enabled"`
-	ExpiresAt   *string        `json:"expires_at"`
-	Expired     bool           `json:"expired"`
-	LastUsedAt  *string        `json:"last_used_at"`
-	CreatedAt   string         `json:"created_at"`
-	RotatedAt   *string        `json:"rotated_at"`
-	UpdatedAt   string         `json:"updated_at"`
+	EnvironmentManaged bool           `json:"environment_managed"`
+	ID                 string         `json:"id"`
+	Name               string         `json:"name"`
+	Description        string         `json:"description"`
+	Fingerprint        string         `json:"fingerprint"`
+	Scopes             map[string]int `json:"scopes"`
+	Enabled            bool           `json:"enabled"`
+	ExpiresAt          *string        `json:"expires_at"`
+	Expired            bool           `json:"expired"`
+	LastUsedAt         *string        `json:"last_used_at"`
+	CreatedAt          string         `json:"created_at"`
+	RotatedAt          *string        `json:"rotated_at"`
+	UpdatedAt          string         `json:"updated_at"`
 }
 
 func managementTokenViewFromRow(row store.ManagementTokenRow) managementTokenView {
@@ -80,14 +81,15 @@ func managementTokenViewFromRow(row store.ManagementTokenRow) managementTokenVie
 		scopes = map[string]int{}
 	}
 	v := managementTokenView{
-		ID:          row.ID,
-		Name:        row.Name,
-		Description: row.Description,
-		Fingerprint: row.Fingerprint,
-		Scopes:      scopes,
-		Enabled:     row.Enabled,
-		CreatedAt:   row.CreatedAt,
-		UpdatedAt:   row.UpdatedAt,
+		EnvironmentManaged: row.ID == bootManagementTokenID,
+		ID:                 row.ID,
+		Name:               row.Name,
+		Description:        row.Description,
+		Fingerprint:        row.Fingerprint,
+		Scopes:             scopes,
+		Enabled:            row.Enabled,
+		CreatedAt:          row.CreatedAt,
+		UpdatedAt:          row.UpdatedAt,
 	}
 	if row.ExpiresAt.Valid {
 		expires := row.ExpiresAt.String
@@ -222,6 +224,9 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
+	if rejectEnvironmentManagementTokenMutation(w, r) {
+		return
+	}
 	var input struct {
 		Name        *string         `json:"name"`
 		Description *string         `json:"description"`
@@ -315,6 +320,9 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) rotateManagementToken(w http.ResponseWriter, r *http.Request) {
+	if rejectEnvironmentManagementTokenMutation(w, r) {
+		return
+	}
 	tokenID := r.PathValue("id")
 	generated, err := auth.GenerateManagementTokenWithHasher(s.secretHasher)
 	if err != nil {
@@ -347,6 +355,9 @@ func (s *Server) rotateManagementToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteManagementToken(w http.ResponseWriter, r *http.Request) {
+	if rejectEnvironmentManagementTokenMutation(w, r) {
+		return
+	}
 	tokenID := r.PathValue("id")
 	name := ""
 	if current, err := s.scope(r).GetManagementToken(r.Context(), tokenID); err == nil {
@@ -393,7 +404,15 @@ func (s *Server) revokeAllManagementTokens(w http.ResponseWriter, r *http.Reques
 		TargetType: "api_token",
 		Metadata:   map[string]string{"count": strconv.FormatInt(count, 10)},
 	})
-	writeJSON(w, 200, map[string]any{"revoked": count})
+	writeJSON(w, 200, map[string]any{"revoked": count, "environment_managed_excluded": s.config.AdminAPIKey != ""})
+}
+
+func rejectEnvironmentManagementTokenMutation(w http.ResponseWriter, r *http.Request) bool {
+	if r.PathValue("id") != bootManagementTokenID {
+		return false
+	}
+	adminError(w, http.StatusConflict, "environment_managed_token", "This token is environment-managed. Change the configured key and restart to rotate; remove TILLER_ADMIN_API_KEY and TILLER_ADMIN_API_KEY_FILE and restart to revoke.")
+	return true
 }
 
 // managementTokenSelf lets a management token introspect itself: name,
