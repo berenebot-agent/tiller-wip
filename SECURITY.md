@@ -117,6 +117,16 @@ scope changes invalidate the verification cache synchronously. Tokens survive
 admin credential changes — revoke them explicitly on suspected compromise. In
 hosted mode the feature is disabled (routes 404, no bearer path exists).
 
+**Headless embedding seed.** Setting `TILLER_ADMIN_API_KEY` /
+`TILLER_ADMIN_API_KEY_FILE` (local mode only) seeds a single full-power
+management token named `boot-admin` at boot, so an embedding host can provision
+the instance over the API with no browser. The value is bcrypt-hash-only and
+never logged; a re-seed replaces and immediately invalidates the previous
+credential. This is a deliberately environment-provisioned super-user
+credential: the operator is expected to bind the instance to a private
+network/loopback and let the host application own external access. Hosted mode
+rejects the variable at config load.
+
 **Hosted identity.** `TILLER_MODE=hosted` enables email/password accounts. Human
 passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
 single-use, short-lived, and hash-only at rest. Customer sessions and platform

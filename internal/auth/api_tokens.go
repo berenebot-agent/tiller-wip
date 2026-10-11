@@ -78,6 +78,33 @@ func ParseManagementScopes(raw string) map[string]int {
 	return scopes
 }
 
+// FullManagementScopes is the scope set the environment boot seed grants: every
+// area at the delete ceiling (which implies write and read). It is the single
+// super-user token type the embed contract exposes.
+func FullManagementScopes() map[string]int {
+	scopes := make(map[string]int, len(managementScopeAreas))
+	for area := range managementScopeAreas {
+		scopes[area] = ScopeDelete
+	}
+	return scopes
+}
+
+// SplitManagementToken splits a plaintext management token into its selector,
+// secret, and hash/fingerprint components so the environment boot seed can
+// store a hash of an operator-supplied value. The plaintext must already parse
+// as a management token.
+func SplitManagementToken(plaintext string, hasher SecretHasher) (selector, hash, fingerprint string, err error) {
+	selector, secret, ok := ParseManagementToken(plaintext)
+	if !ok {
+		return "", "", "", fmt.Errorf("auth: not a valid management token")
+	}
+	phc, herr := hasher.Hash(secret)
+	if herr != nil {
+		return "", "", "", herr
+	}
+	return selector, phc, secret[len(secret)-8:], nil
+}
+
 // GenerateManagementTokenWithHasher generates a management token using the
 // provided hasher. Secrets are high-entropy machine tokens, so production
 // callers use the bcrypt tier (see the server wiring).

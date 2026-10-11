@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -15,6 +16,45 @@ import (
 )
 
 // Management API tokens (local mode). A token authenticates the admin REST
+// surface with `Authorization: Bearer mt-tr-…` instead of the browser session.
+// Token lifecycle management itself is cookie-only: a token can never list,
+// create, re-scope, rotate, or revoke tokens — it may only introspect itself.
+
+// bootManagementTokenID and bootManagementTokenName are the fixed identity of
+// the environment boot seed. A fixed id makes re-seeding idempotent: a restart
+// with the same value is a row-wise no-op, and a restart with a new value
+// replaces the selector/hash and invalidates the cached old credential.
+const (
+	bootManagementTokenID   = "boot-admin"
+	bootManagementTokenName = "boot-admin"
+)
+
+// seedManagementToken stores the environment-supplied management token as the
+// fixed full-power boot token. The plaintext is hashed (never stored) and its
+// hash is published under the authenticator's lock so a re-seed is immediately
+// effective. Only the local account is boot-seeded.
+func (s *Server) seedManagementToken(plaintext string) error {
+	selector, hash, fingerprint, err := auth.SplitManagementToken(plaintext, s.secretHasher)
+	if err != nil {
+		return err
+	}
+	scopesJSON, err := auth.ValidateManagementScopes(auth.FullManagementScopes())
+	if err != nil {
+		return err
+	}
+	return s.tokens.InvalidateWith(bootManagementTokenID, func() error {
+		return s.scopeFor(database.LocalAccountID).UpsertManagementToken(context.Background(), store.CreateManagementTokenInput{
+			ID:          bootManagementTokenID,
+			Name:        bootManagementTokenName,
+			Description: "Seeded from TILLER_ADMIN_API_KEY; rotate by changing the value and restarting.",
+			Selector:    selector,
+			Hash:        hash,
+			Fingerprint: fingerprint,
+			Scopes:      scopesJSON,
+		})
+	})
+}
+
 // surface with `Authorization: Bearer mt-tr-…` instead of the browser session.
 // Token lifecycle management itself is cookie-only: a token can never list,
 // create, re-scope, rotate, or revoke tokens — it may only introspect itself.

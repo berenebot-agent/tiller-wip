@@ -187,3 +187,16 @@ func (s *Scope) RevokeAllManagementTokens(ctx context.Context) (int64, error) {
 	}
 	return res.RowsAffected()
 }
+
+// UpsertManagementToken inserts or replaces a named management token in one
+// account. It is used only by the environment boot seed, where re-seeding on a
+// changed value must be idempotent: the fixed name is the identity, so a
+// restart with the same seed value is a no-op row-wise, and a restart with a
+// new value replaces the selector/hash together.
+func (s *Scope) UpsertManagementToken(ctx context.Context, in CreateManagementTokenInput) error {
+	now := now()
+	_, err := s.q.ExecContext(ctx, `INSERT INTO api_tokens(id,account_id,name,description,selector,secret_hash,secret_fingerprint,scopes,enabled,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name,description=excluded.description,selector=excluded.selector,secret_hash=excluded.secret_hash,secret_fingerprint=excluded.secret_fingerprint,scopes=excluded.scopes,enabled=1,expires_at=excluded.expires_at,updated_at=excluded.updated_at`,
+		in.ID, s.accountID, in.Name, in.Description, in.Selector, in.Hash, in.Fingerprint, in.Scopes, in.ExpiresAt, now, now)
+	return err
+}

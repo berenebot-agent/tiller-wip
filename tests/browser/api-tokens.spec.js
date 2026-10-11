@@ -47,6 +47,12 @@ test('create an API token with provider access, use it headlessly, rotate and de
   expect(guideMd.status()).toBe(200);
   expect(guideMd.headers()['content-type']).toContain('text/markdown');
   expect(await guideMd.text()).toContain('# Tiller Router — Management API');
+  const discovery = await page.request.get('/api.json');
+  expect(discovery.status()).toBe(200);
+  expect(discovery.headers()['content-type']).toContain('application/json');
+  const doc = await discovery.json();
+  expect(doc.api_base).toBe('/api/admin');
+  expect(doc.auth.key_prefix).toBe('mt-tr-');
 
   const row = page.locator('#api-tokens-body tr').filter({ hasText: 'e2e agent' });
   await expect(row).toHaveCount(1);
