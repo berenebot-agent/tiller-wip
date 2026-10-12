@@ -1608,7 +1608,7 @@ routeDone:
 		}
 		if err := translateResponseObserved(w, streamKeepalive, translatedReader, incoming, target, selected, usage, outputObs); err != nil {
 			idle.Stop()
-			class := "translation_error"
+			class := translatedStreamFailureClass(err)
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
 			}
@@ -1623,7 +1623,14 @@ routeDone:
 					streamKeepalive.Flush()
 				}
 			}
-			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
+			s.logger.Warn("protocol translation stream ended",
+				"client_request_id", row.clientRequestID,
+				"provider", selected.Provider.Name,
+				"model", selected.UpstreamModelID,
+				"protocol", incoming,
+				"upstream_protocol", target,
+				"failure_class", class,
+				"error_class", fmt.Sprintf("%T", err))
 		} else {
 			clearSelectedCooldown()
 		}
