@@ -148,9 +148,15 @@ const tokenBreakdownTitle = (types, window) => {
   const n = v => Number(v || 0).toLocaleString();
   return `input ${n(b.input)} · output ${n(b.output)} · cache read ${n(b.cache_read)} · cache write ${n(b.cache_creation)}`;
 };
-// estimatedMark returns the "est." suffix for a client whose totals include at
-// least one locally-estimated input count (the provider omitted usage).
-const estimatedMark = (clientId) => state.usage?.tokens_estimated?.[clientId] ? ' (est.)' : '';
+// estimatedMark returns the "est." suffix for a client whose totals include a
+// locally-estimated input count (the provider omitted usage). It reads the
+// per-source split: any estimated input tokens in the widest window flag the
+// row. Reported-only clients get no suffix.
+const estimatedMark = (clientId) => {
+  const src = state.usage?.client_token_sources?.[clientId];
+  const est = src?.estimated?.['7d'];
+  return est ? ' (est.)' : '';
+};
 // A cell is "loading" only while the usage envelope is unknown AND this cell has
 // no value yet. Once any snapshot/fetch has landed (usageReady), absent data is
 // a genuine empty state ("—").
@@ -170,7 +176,7 @@ const rowCache = (row) => {
   const exact = row.provider_cost_micros;
   const cost = exact ?? row.estimated_cost_micros;
   const costLine = cost == null ? '<small>Cost —</small>' : `<span class="tok-cost"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<small>est.</small>' : ''}</span>`;
-  return `<span class="activity-tokens"><b>${row.input_tokens_estimated ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
+  return `<span class="activity-tokens"><b>${row.input_tokens_source === 'estimated' ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
 };
 const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
 const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return v === 'models' ? 'providers' : VIEWS.includes(v) ? v : 'clients'; };
@@ -676,7 +682,7 @@ async function navigate(view) {
     else history.pushState(null, '', desiredHash);
   }
   $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-  try { if (view === 'providers') await loadProviders(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); } }
+  try { if (view === 'providers') await loadProviders(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); if (settingsTab === 'api') await loadManagementTokens(); } }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
@@ -781,7 +787,12 @@ function providerQuotaHTML(provider) {
     const reset = minutes == null ? '' : minutes >= 1440
       ? ` · ${Math.floor(minutes / 1440)}d ${Math.floor((minutes % 1440) / 60)}h left`
       : ` · ${Math.floor(minutes / 60)}h ${minutes % 60}m left`;
-    const detail = pct == null ? 'Unlimited' : `${Math.round(pct)}% used`;
+    // A window with no percentage but a remaining amount (e.g. Ollama purchased
+    // credit balance, in USD) shows "$N.NN left" instead of a bar; only a window
+    // with neither is treated as unlimited.
+    let detail = 'Unlimited';
+    if (pct != null) detail = `${Math.round(pct)}% used`;
+    else if (w.remaining != null) detail = `$${Number(w.remaining).toFixed(2)} left`;
     return `<div class="provider-quota-window"><strong>${h(w.label)}</strong>${pct == null ? '' : `<progress max="100" value="${pct}" aria-label="${h(w.label)} quota used"></progress>`}<span>${detail}${h(reset)}</span></div>`;
   });
   // Show up to three bars inline (5h/weekly/monthly for plan providers);
@@ -2360,7 +2371,31 @@ document.addEventListener('keydown', event => { if (event.key !== 'Enter' && eve
 }
  filterInput('#activity-search', value => { activityFeed.setSearch(value); });
 $('#close-activity').onclick = $('#done-activity').onclick = () => $('#activity-dialog').close();
-$('#export-activity').onclick = () => $('#export-dialog').showModal();
+// exportTarget captures which activity feed the export dialog is acting on. It
+// is set when the dialog opens (per-client/model dialog, or the global card)
+// and read by triggerActivityExport to pick the endpoint and search term.
+let exportTarget = { kind: '', client: null, modelID: '', search: '' };
+function openExportDialog(target) {
+  exportTarget = target;
+  $('#export-range-error').textContent = '';
+  $('#export-from').value = '';
+  $('#export-to').value = '';
+  $('#export-dialog').showModal();
+}
+function triggerActivityExport(params) {
+  const base = exportTarget.kind === 'client' ? `/api/admin/client-keys/${exportTarget.client.id}/activity/export` : exportTarget.kind === 'real' ? `/api/admin/models/${exportTarget.modelID}/activity/export` : exportTarget.kind === 'virtual' ? `/api/admin/virtual-models/${exportTarget.modelID}/activity/export` : '/api/admin/activity/export';
+  const query = new URLSearchParams(params);
+  query.set('search', exportTarget.search || '');
+  const a = document.createElement('a');
+  a.href = `${base}?${query.toString()}`;
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  $('#export-dialog').close();
+}
+$('#export-activity').onclick = () => openExportDialog({ kind: activityState.kind, client: activityState.client, modelID: activityState.modelID, search: activityState.search });
+$('#export-global-activity').onclick = () => openExportDialog({ kind: '', client: null, modelID: '', search: globalActivityState.search });
 $('#clear-activity').onclick = async () => {
   if (activityState.kind !== 'client' || !activityState.client) return;
   if (!await confirmAction({ title: `Clear ${activityState.client.name} activity?`, copy: 'All recorded request metadata for this client will be permanently deleted.', action: 'Clear activity' })) return;
@@ -2374,7 +2409,23 @@ $('#clear-activity').onclick = async () => {
   finally { button.disabled = false; }
 };
 $('#close-export').onclick = () => $('#export-dialog').close();
-$$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick = () => { const period = button.dataset.exportPeriod; const base = activityState.kind === 'client' ? `/api/admin/client-keys/${activityState.client.id}/activity/export` : activityState.kind === 'real' ? `/api/admin/models/${activityState.modelID}/activity/export` : `/api/admin/virtual-models/${activityState.modelID}/activity/export`; const url = `${base}?period=${period}&search=${encodeURIComponent(activityState.search || '')}`; const a = document.createElement('a'); a.href = url; a.download = ''; document.body.appendChild(a); a.click(); a.remove(); $('#export-dialog').close(); });
+$$('[data-export-period]', $('#export-dialog')).forEach(button => button.onclick = () => triggerActivityExport({ period: button.dataset.exportPeriod }));
+// Custom range: the admin picks local calendar days; the browser converts them
+// to RFC3339 instants (local midnight start, exclusive local midnight of the
+// day after the end) so the bounds line up with the Activity "When" column.
+$('#export-custom').onclick = () => {
+  const error = $('#export-range-error');
+  error.textContent = '';
+  const parseDay = value => { const [y, m, d] = value.split('-').map(Number); return new Date(y, m - 1, d); };
+  const fromValue = $('#export-from').value;
+  const toValue = $('#export-to').value;
+  if (!fromValue && !toValue) { error.textContent = 'Choose a start date, an end date, or both.'; return; }
+  const params = {};
+  if (fromValue) params.from = parseDay(fromValue).toISOString();
+  if (toValue) { const end = parseDay(toValue); end.setDate(end.getDate() + 1); params.to = end.toISOString(); }
+  if (params.from && params.to && params.from >= params.to) { error.textContent = 'Start date must be before end date.'; return; }
+  triggerActivityExport(params);
+};
 
 // Global activity is a read-only section in the Settings view, distinct from
 // the per-client Activity dialog. It shows metadata across all client keys and
@@ -2472,19 +2523,184 @@ function lockTestNotificationButton() {
   setTimeout(() => { button.disabled = false; }, HOSTED_NOTIFICATION_COOLDOWN * 1000);
 }
 
-// Settings tabs. Account is hosted-only; the others carry the existing config
-// cards. The hash reflects the sub-tab (#settings/<tab>) so deep links work.
-const SETTINGS_TABS = ['account', 'routing', 'logging', 'notifications', 'data'];
+// === MANAGEMENT API TOKENS (local mode) ===
+// API tokens address the same REST API the dashboard uses, with per-area
+// ceilings: read ⊂ write ⊂ delete. The grid decides which tiers are offered
+// per area; the server enforces the ceiling on every request. Token lifecycle
+// is browser-only — a token can never mint or edit another token.
+const MANAGEMENT_API_AREAS = [
+  { key: 'providers', label: 'Providers' },
+  { key: 'virtual', label: 'Virtual models' },
+  { key: 'client_keys', label: 'Client keys' },
+  { key: 'settings', label: 'Settings' },
+  { key: 'monitoring', label: 'Monitoring' },
+];
+const MANAGEMENT_API_TIERS = [
+  { key: 'read', level: 1 },
+  { key: 'write', level: 2 },
+  { key: 'delete', level: 3 },
+];
+// Settings has no delete operation; Monitoring has no write. A tier that has
+// no routes is rendered disabled rather than silently grantable.
+const MANAGEMENT_API_AREA_TIERS = { providers: [1, 2, 3], virtual: [1, 2, 3], client_keys: [1, 2, 3], settings: [1, 2], monitoring: [1, 3] };
+let managementTokens = [];
+let managementScopeReader = null;
+
+function managementScopeGrid(scopes = {}) {
+  return `<div class="scope-grid" data-scope-grid>${MANAGEMENT_API_AREAS.map(area => `<div class="scope-row" data-scope-area="${area.key}"><span class="scope-area-label">${h(area.label)}</span><div class="scope-tiers">${MANAGEMENT_API_TIERS.map(tier => { const offered = MANAGEMENT_API_AREA_TIERS[area.key].includes(tier.level); return `<button type="button" class="scope-tier" data-scope-tier="${tier.level}" aria-pressed="false"${offered ? '' : ' disabled'}>${tier.key}</button>`; }).join('')}</div></div>`).join('')}</div>`;
+}
+
+// wireManagementScopeGrid paints the escalating toggles: clicking a tier sets
+// that area's ceiling (all lower tiers light), and clicking the active ceiling
+// drops it one tier. It returns a reader for the granted set.
+function wireManagementScopeGrid(form, scopes = {}) {
+  const grid = $('[data-scope-grid]', form);
+  const ceilings = {};
+  Object.entries(scopes || {}).forEach(([area, level]) => { if (Number(level) > 0) ceilings[area] = Number(level); });
+  const paint = () => { $$('.scope-row', grid).forEach(row => { const ceiling = ceilings[row.dataset.scopeArea] || 0; $$('.scope-tier', row).forEach(btn => { const on = ceiling >= Number(btn.dataset.scopeTier); btn.classList.toggle('active', on); btn.setAttribute('aria-pressed', String(on)); }); }); };
+  grid.addEventListener('click', event => {
+    const btn = event.target.closest('.scope-tier');
+    if (!btn || btn.disabled) return;
+    event.preventDefault();
+    const area = btn.closest('.scope-row').dataset.scopeArea;
+    const level = Number(btn.dataset.scopeTier);
+    const current = ceilings[area] || 0;
+    ceilings[area] = current === level ? Math.max(0, current - 1) : level;
+    paint();
+  });
+  paint();
+  return () => Object.fromEntries(Object.entries(ceilings).filter(([, level]) => level > 0));
+}
+
+function managementScopeBadges(scopes) {
+  const parts = MANAGEMENT_API_AREAS.filter(area => (scopes?.[area.key] || 0) > 0).map(area => `${area.label} · ${MANAGEMENT_API_TIERS[scopes[area.key] - 1].key}`);
+  return parts.length ? parts.map(part => `<span class="scope-chip">${h(part)}</span>`).join('') : '<span class="meta-line">No access</span>';
+}
+
+function managementExpiryFromForm(form) {
+  const choice = form.elements.token_expiry.value;
+  if (choice === 'custom') { const date = form.elements.token_expiry_custom.value; return date ? `${date}T00:00:00Z` : ''; }
+  if (!choice) return '';
+  return new Date(Date.now() + Number(choice) * 86400000).toISOString();
+}
+
+function managementExpiryField(expiresAt) {
+  const custom = !!expiresAt;
+  const options = [['', 'Never'], ['30', '30 days'], ['90', '90 days'], ['365', '365 days'], ['custom', 'Custom date…']]
+    .map(([value, label]) => `<option value="${value}"${(custom ? value === 'custom' : value === '') ? ' selected' : ''}>${label}</option>`).join('');
+  return `<label>Expiry <select name="token_expiry">${options}</select></label><label id="token-expiry-custom-row"${custom ? '' : ' hidden'}>Custom expiry <input type="date" name="token_expiry_custom" value="${h(custom ? expiresAt.slice(0, 10) : '')}"></label>`;
+}
+
+function wireManagementExpiry(form) {
+  form.elements.token_expiry.addEventListener('change', () => { $('#token-expiry-custom-row', form).hidden = form.elements.token_expiry.value !== 'custom'; });
+}
+
+function openCreateApiToken() {
+  openEntity({
+    eyebrow: 'NEW API TOKEN',
+    title: 'Create API token',
+    submit: 'Create token',
+    fields: `<label>Name <input name="token_name" maxlength="100" required placeholder="e.g. Hermes agent"></label><label>Description <textarea name="token_description" rows="2" maxlength="500" placeholder="Optional notes about what uses this token"></textarea></label>${managementExpiryField('')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid({})}</fieldset>`,
+    onMount: form => { managementScopeReader = wireManagementScopeGrid(form, {}); wireManagementExpiry(form); },
+    onSubmit: async form => {
+      const name = String(form.elements.token_name.value || '').trim();
+      if (!name) throw new Error('Give the token a name.');
+      const result = await api('/api/admin/api-tokens', { method: 'POST', body: JSON.stringify({ name, description: form.elements.token_description.value || '', scopes: managementScopeReader(), expires_at: managementExpiryFromForm(form) }) });
+      showSecret(result.token, { baseUrl: `${location.origin}/api/admin`, baseUrlLabel: 'Management API' });
+      flash('API token created.');
+      await loadManagementTokens();
+    },
+  });
+}
+
+function openEditApiToken(token) {
+  openEntity({
+    eyebrow: 'EDIT API TOKEN',
+    title: `Edit ${token.name}`,
+    submit: 'Save token',
+    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="check-label"><input type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
+    onMount: form => { managementScopeReader = wireManagementScopeGrid(form, token.scopes); wireManagementExpiry(form); },
+    onSubmit: async form => {
+      const name = String(form.elements.token_name.value || '').trim();
+      if (!name) throw new Error('Give the token a name.');
+      await api(`/api/admin/api-tokens/${token.id}`, { method: 'PATCH', body: JSON.stringify({ name, description: form.elements.token_description.value || '', scopes: managementScopeReader(), enabled: form.elements.token_enabled.checked, expires_at: managementExpiryFromForm(form) }) });
+      flash('API token updated.');
+      await loadManagementTokens();
+    },
+  });
+}
+
+async function rotateApiToken(token) {
+  if (!await confirmAction({ title: `Rotate ${token.name}?`, copy: 'The current token stops working immediately. Access and settings are preserved and the new token is shown once.', action: 'Rotate token' })) return;
+  try { const result = await api(`/api/admin/api-tokens/${token.id}/rotate`, { method: 'POST' }); showSecret(result.token, { baseUrl: `${location.origin}/api/admin`, baseUrlLabel: 'Management API' }); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
+}
+
+async function deleteApiToken(token) {
+  if (!await confirmAction({ title: `Delete ${token.name}?`, copy: 'The token is invalidated immediately. Anything using it starts failing on its next request.', action: 'Delete token' })) return;
+  try { await api(`/api/admin/api-tokens/${token.id}`, { method: 'DELETE' }); flash('API token deleted.'); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
+}
+
+async function revokeAllApiTokens() {
+  if (!await confirmAction({ title: 'Revoke browser-managed API tokens?', copy: 'All browser-managed API tokens are invalidated immediately, including tokens used by running automations. The environment-managed bootstrap token is excluded; remove its configured key and restart to revoke it.', action: 'Revoke browser-managed tokens' })) return;
+  try { const result = await api('/api/admin/api-tokens/revoke-all', { method: 'POST' }); flash(result.environment_managed_excluded ? 'Browser-managed API tokens revoked. The environment-managed token remains active.' : 'Browser-managed API tokens revoked.'); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
+}
+
+async function loadManagementTokens() {
+  if (runtimeMode === 'hosted') return;
+  const token = ++state.loadToken;
+  $('#api-tokens-error').textContent = '';
+  try {
+    const result = await api('/api/admin/api-tokens');
+    if (token !== state.loadToken) return;
+    managementTokens = result.data || [];
+    renderManagementTokens();
+  } catch (error) {
+    if (token !== state.loadToken) return;
+    $('#api-tokens-error').textContent = errorMessage(error, 'Could not load API tokens.');
+  }
+}
+
+function renderManagementTokens() {
+  const rows = managementTokens;
+  $('#api-tokens-empty').hidden = rows.length > 0;
+  $('#api-tokens-table').hidden = rows.length === 0;
+  $('#api-tokens-body').innerHTML = rows.map(row => {
+    const status = !row.enabled ? 'Disabled' : row.expired ? 'Expired' : 'Active';
+    const expires = !row.expires_at ? 'Never' : row.expired ? `Expired ${date(row.expires_at)}` : date(row.expires_at);
+    const actions = row.environment_managed ? '<span class="meta-line">Environment-managed</span>' : `<div class="actions"><button class="btn btn-small btn-secondary" data-api-token-edit="${h(row.id)}">Edit</button><button class="btn btn-small btn-secondary" data-api-token-rotate="${h(row.id)}">Rotate</button><button class="btn btn-small btn-danger" data-api-token-delete="${h(row.id)}">Delete</button></div>`;
+    return `<tr><td><strong>${h(row.name)}</strong>${row.description ? `<span class="meta-line">${h(row.description)}</span>` : ''}</td><td>${managementScopeBadges(row.scopes)}</td><td><code class="secret-fingerprint">mt-tr-••••••••.${h(row.fingerprint)}</code></td><td><span class="meta-line">${date(row.created_at)}</span></td><td><span class="meta-line">${expires}</span></td><td><span class="meta-line">${row.last_used_at ? date(row.last_used_at) : 'Never'}</span></td><td><span class="meta-line">${status}</span></td><td>${actions}</td></tr>`;
+  }).join('');
+}
+
+function managementTokenById(id) { return managementTokens.find(row => row.id === id); }
+
+$('#create-api-token').addEventListener('click', () => openCreateApiToken());
+$('#revoke-all-api-tokens').addEventListener('click', () => revokeAllApiTokens());
+$('#api-tokens-body').addEventListener('click', event => {
+  const edit = event.target.closest('[data-api-token-edit]');
+  if (edit) { const token = managementTokenById(edit.dataset.apiTokenEdit); if (token) openEditApiToken(token); return; }
+  const rotate = event.target.closest('[data-api-token-rotate]');
+  if (rotate) { const token = managementTokenById(rotate.dataset.apiTokenRotate); if (token) rotateApiToken(token); return; }
+  const remove = event.target.closest('[data-api-token-delete]');
+  if (remove) { const token = managementTokenById(remove.dataset.apiTokenDelete); if (token) deleteApiToken(token); }
+});
+
+// Settings tabs. Account is gated on hosted/passkeys, Management API on local
+// mode; the others carry the existing config cards. The hash reflects the
+// sub-tab (#settings/<tab>) so deep links work.
+const SETTINGS_TABS = ['account', 'routing', 'logging', 'notifications', 'data', 'api'];
 let settingsTab = 'routing';
 function showSettingsTab(tab) {
-  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable())) tab = 'routing';
+  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable()) || (tab === 'api' && runtimeMode === 'hosted')) tab = 'routing';
   settingsTab = tab;
   $$('.settings-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.settingsTab === tab));
   $$('.settings-panel').forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.classList.toggle('active', active); panel.hidden = !active; });
   $('#settings-tab-account').hidden = !accountTabAvailable();
-  // Account actions save themselves; the shared save bar only applies to config.
-  $('#save-settings-top').hidden = tab === 'account';
-  $('#save-settings-bottom').hidden = tab === 'account';
+  $('#settings-tab-api').hidden = runtimeMode === 'hosted';
+  // Account and Management API actions save themselves; the shared save bar
+  // only applies to the config cards.
+  $('#save-settings-top').hidden = tab === 'account' || tab === 'api';
+  $('#save-settings-bottom').hidden = tab === 'account' || tab === 'api';
 }
 // accountTabAvailable reports whether the Settings → Account panel applies:
 // hosted installs always, and local installs only when passkeys are enabled
@@ -2492,12 +2708,13 @@ function showSettingsTab(tab) {
 function accountTabAvailable() {
   return runtimeMode === 'hosted' || runtimePasskeysEnabled;
 }
-$$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSettingsTab(btn.dataset.settingsTab); const hash = btn.dataset.settingsTab === 'routing' ? '#settings' : `#settings/${btn.dataset.settingsTab}`; if (location.hash !== hash) history.pushState(null, '', hash); if (btn.dataset.settingsTab === 'account') loadAccount(); }));
+$$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSettingsTab(btn.dataset.settingsTab); const hash = btn.dataset.settingsTab === 'routing' ? '#settings' : `#settings/${btn.dataset.settingsTab}`; if (location.hash !== hash) history.pushState(null, '', hash); if (btn.dataset.settingsTab === 'account') loadAccount(); if (btn.dataset.settingsTab === 'api') loadManagementTokens(); }));
 // The Account tab is hidden until the runtime probe reports whether this is a
 // hosted install or a local install with passkeys enabled. applyAccountTabVisibility
 // runs once /api/runtime has been parsed (see initialise()).
 function applyAccountTabVisibility() {
   $('#settings-tab-account').hidden = !accountTabAvailable();
+  $('#settings-tab-api').hidden = runtimeMode === 'hosted';
 }
 
 async function loadAccount() {
@@ -2932,7 +3149,7 @@ function confirmAction({ title, copy, action, breaking = false, typeMatch = null
 
 function selectTextContent(selector) { const node = $(selector); const sel = window.getSelection(); sel.removeAllRanges(); const range = document.createRange(); range.selectNodeContents(node); sel.addRange(range); }
 function selectSecretText() { selectTextContent('#secret-value'); }
-function showSecret(secret) { const secure = window.isSecureContext && navigator.clipboard?.writeText; $('#secret-value').textContent = secret; $('#api-base-url').textContent = `${location.origin}/v1`; $('#copy-secret').hidden = !secure; $('#copy-api-base-url').hidden = !secure; $('#copy-state').textContent = ''; $('#api-base-url-copy-state').textContent = ''; $('#secret-dialog').showModal(); if (!secure) { selectSecretText(); $('#copy-state').textContent = 'Key selected — press Ctrl/Cmd+C to copy it.'; $('#api-base-url-copy-state').textContent = 'Select the URL to copy it manually.'; } }
+function showSecret(secret, { baseUrl = `${location.origin}/v1`, baseUrlLabel = 'API Base URL' } = {}) { const secure = window.isSecureContext && navigator.clipboard?.writeText; $('#secret-value').textContent = secret; $('#secret-base-url-block').hidden = !baseUrl; $('#secret-base-url-label').textContent = baseUrlLabel; $('#api-base-url').textContent = baseUrl || ''; $('#copy-secret').hidden = !secure; $('#copy-api-base-url').hidden = !secure; $('#copy-state').textContent = ''; $('#api-base-url-copy-state').textContent = ''; $('#secret-dialog').showModal(); if (!secure) { selectSecretText(); $('#copy-state').textContent = 'Key selected — press Ctrl/Cmd+C to copy it.'; $('#api-base-url-copy-state').textContent = 'Select the URL to copy it manually.'; } }
 $('#copy-secret').onclick = async () => { const text = $('#secret-value').textContent; const state = $('#copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { selectSecretText(); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy it.'; } };
 $('#copy-api-base-url').onclick = async () => { const text = $('#api-base-url').textContent; const state = $('#api-base-url-copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Base URL copied to clipboard.'; } catch { selectTextContent('#api-base-url'); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy the URL.'; } };
 $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#secret-dialog').close(); };
@@ -3324,7 +3541,7 @@ live.on('outcome', payload => {
 
 live.on('snapshot', payload => {
   if (!state.usage) state.usage = {};
-  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'tokens_estimated'].forEach(key => {
+  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'client_token_sources', 'virtual_token_sources', 'real_token_sources'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
   // The SSE baseline snapshot already carries the usage envelope, so mark it

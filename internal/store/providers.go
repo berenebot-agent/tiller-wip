@@ -415,6 +415,7 @@ func (s *Scope) DeleteAccountResources(ctx context.Context) error {
 			`DELETE FROM client_model_permissions WHERE account_id=?`,
 			`DELETE FROM client_group_defaults WHERE account_id=?`,
 			`DELETE FROM client_keys WHERE account_id=?`,
+			`DELETE FROM api_tokens WHERE account_id=?`,
 			`DELETE FROM provider_oauth_tokens WHERE account_id=?`,
 			`DELETE FROM virtual_model_targets WHERE account_id=?`,
 			`DELETE FROM virtual_models WHERE account_id=?`,

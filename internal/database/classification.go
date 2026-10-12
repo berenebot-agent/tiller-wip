@@ -58,6 +58,7 @@ var TableClassification = map[string]TableClass{
 	"client_model_permissions":     ClassTenant,
 	"client_single_bindings":       ClassTenant,
 	"settings":                     ClassTenant,
+	"api_tokens":                   ClassTenant,
 	// Audit events are tenant-owned in the core database. account_id is
 	// historical attribution and deliberately has no FK to accounts, so
 	// retained audit history survives account deletion.

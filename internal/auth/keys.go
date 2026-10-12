@@ -52,6 +52,14 @@ type GeneratedKey struct {
 // The plaintext format, selector/secret lengths, fingerprint, and DB
 // representation are unchanged regardless of hasher.
 func GenerateKeyWithHasher(hasher SecretHasher) (GeneratedKey, error) {
+	return generateKeyWithPrefix(hasher, "sk-tr-")
+}
+
+// generateKeyWithPrefix is the shared generator for client keys and
+// management tokens: a 9-byte selector, a 32-byte secret, bcrypt-family hash,
+// and an 8-character tail fingerprint. The prefix keeps the two credential
+// families from ever being confused for one another.
+func generateKeyWithPrefix(hasher SecretHasher, prefix string) (GeneratedKey, error) {
 	selectorRaw, err := randomBytes(9)
 	if err != nil {
 		return GeneratedKey{}, err
@@ -67,7 +75,7 @@ func GenerateKeyWithHasher(hasher SecretHasher) (GeneratedKey, error) {
 		return GeneratedKey{}, err
 	}
 	return GeneratedKey{
-		Plaintext:   "sk-tr-" + selector + "." + secret,
+		Plaintext:   prefix + selector + "." + secret,
 		Selector:    selector,
 		Hash:        phc,
 		Fingerprint: secret[len(secret)-8:],
@@ -131,10 +139,18 @@ func argon2idVerify(secret, encoded string) bool {
 }
 
 func ParseKey(key string) (selector, secret string, ok bool) {
-	if !strings.HasPrefix(key, "sk-tr-") {
+	return parseKeyWithPrefix(key, "sk-tr-")
+}
+
+// parseKeyWithPrefix validates one credential family's plaintext shape. Both
+// client keys and management tokens use the same selector/secret geometry but
+// distinct prefixes, so a key from one family can never authenticate the
+// other's surface.
+func parseKeyWithPrefix(key, prefix string) (selector, secret string, ok bool) {
+	if !strings.HasPrefix(key, prefix) {
 		return "", "", false
 	}
-	parts := strings.Split(strings.TrimPrefix(key, "sk-tr-"), ".")
+	parts := strings.Split(strings.TrimPrefix(key, prefix), ".")
 	if len(parts) != 2 || len(parts[0]) != 12 || len(parts[1]) != 43 {
 		return "", "", false
 	}

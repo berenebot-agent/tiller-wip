@@ -2,6 +2,8 @@ package config
 
 import (
 	"net/netip"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -623,5 +625,64 @@ func TestNoDeprecationWhenOnlyNewNamesSet(t *testing.T) {
 	}
 	if len(c.Deprecations) != 0 {
 		t.Errorf("Deprecations = %v, want none for new-only config", c.Deprecations)
+	}
+}
+
+func TestAdminAPIKeyBootSeed(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("TILLER_MODE", "local")
+	t.Setenv("TILLER_DATA_DIR", dir)
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_ADMIN_API_KEY_FILE", "")
+
+	seed := "mt-tr-jL3SJahdI8Yq.AGSBNfRhXQuIuXV87bP7wWv5sjBNDUGDLZamkrGVC4I"
+
+	// Inline value is accepted.
+	t.Setenv("TILLER_ADMIN_API_KEY", seed)
+	c, err := Load()
+	if err != nil {
+		t.Fatalf("valid inline seed: %v", err)
+	}
+	if c.AdminAPIKey != seed {
+		t.Fatalf("seed = %q", c.AdminAPIKey)
+	}
+
+	// A malformed value fails at load.
+	t.Setenv("TILLER_ADMIN_API_KEY", "not-a-token")
+	if _, err := Load(); err == nil {
+		t.Fatal("malformed TILLER_ADMIN_API_KEY should fail to load")
+	}
+
+	// The file takes precedence over the inline value.
+	t.Setenv("TILLER_ADMIN_API_KEY", "not-a-token")
+	keyFile := filepath.Join(dir, "admin-key")
+	if err := os.WriteFile(keyFile, []byte(seed+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TILLER_ADMIN_API_KEY_FILE", keyFile)
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("file seed: %v", err)
+	}
+	if c.AdminAPIKey != seed {
+		t.Fatalf("file seed = %q, want trimmed value", c.AdminAPIKey)
+	}
+
+	// A missing file fails loud.
+	t.Setenv("TILLER_ADMIN_API_KEY_FILE", filepath.Join(dir, "missing"))
+	if _, err := Load(); err == nil {
+		t.Fatal("missing TILLER_ADMIN_API_KEY_FILE should fail to load")
+	}
+}
+
+func TestAdminAPIKeyRejectedInHostedMode(t *testing.T) {
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://tiller.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "127.0.0.1/32")
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_ADMIN_API_KEY_FILE", "")
+	t.Setenv("TILLER_ADMIN_API_KEY", "mt-tr-jL3SJahdI8Yq.AGSBNfRhXQuIuXV87bP7wWv5sjBNDUGDLZamkrGVC4I")
+	if _, err := Load(); err == nil {
+		t.Fatal("TILLER_ADMIN_API_KEY must be rejected in hosted mode")
 	}
 }

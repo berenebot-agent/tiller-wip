@@ -12,12 +12,12 @@ permissions:
 jobs:
   go:
     name: Go checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -52,7 +52,7 @@ jobs:
         run: go build ./cmd/tiller-router 2>&1 | tee ci-logs/build.log
       - name: Upload logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ci-logs
           path: ci-logs/
@@ -60,10 +60,10 @@ jobs:
 
   compose:
     name: Compose config
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       # Fail if the Compose files have invalid YAML, bad interpolation, or a
       # required variable without a safe dummy value. No container is started.
       - name: Validate docker-compose.yml
@@ -99,10 +99,10 @@ jobs:
 
   container-regressions:
     name: Browser and runtime checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Run browser checks
         run: ./tests/browser/run.sh
       - name: Run read-only runtime checks

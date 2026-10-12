@@ -26,11 +26,17 @@ type CacheWindows struct {
 // These are display estimates from published model prices, or exact
 // provider-reported costs where the provider supplied one — never a billing
 // figure. See docs/roadmap_usage_cost_quota.md.
+//
+// EstimatedRows is the count of rows in the widest window whose cost is a
+// models.dev-derived estimate rather than a provider-reported exact cost. It is
+// a *cost* provenance count — not a token provenance count (see the token source
+// aggregates in this file for those) — and is named for that so it can never be
+// mistaken for the token-side flag it replaced.
 type CostWindows struct {
-	H1        *int64       `json:"1h"`
-	H24       *int64       `json:"24h"`
-	D7        *int64       `json:"7d"`
-	Estimated UsageWindows `json:"estimated"`
+	H1            *int64       `json:"1h"`
+	H24           *int64       `json:"24h"`
+	D7            *int64       `json:"7d"`
+	EstimatedRows UsageWindows `json:"estimated"`
 }
 
 // usageTypeWindows holds per-type token sums (input/output/cache-read/
@@ -110,26 +116,108 @@ sum(CASE WHEN created_at >= ? THEN coalesce(provider_cost_micros, estimated_cost
 sum(CASE WHEN created_at >= ? THEN coalesce(provider_cost_micros, estimated_cost_micros) END),
 sum(CASE WHEN provider_cost_micros IS NULL AND estimated_cost_micros IS NOT NULL THEN 1 ELSE 0 END)`
 
-// EstimatedClients returns the client key IDs that have at least one row whose
-// input tokens are a local estimate (the provider omitted usage) within the
-// widest window. The UI marks these so an estimated total is never mistaken
-// for provider-reported accounting.
-func (s *Scope) EstimatedClients(ctx context.Context, c7 string) (map[string]bool, error) {
-	out := map[string]bool{}
+// TokenSourceWindows splits a group's input-token total by provenance for the
+// three lookback windows. Reported is the sum of provider-reported input counts;
+// Estimated is the sum of locally-estimated input counts. Together they equal
+// the input total in TokenTypeWindows, so the headline number is unchanged and
+// merely explained. Output tokens are always provider-reported today, so only
+// input is split.
+type TokenSourceWindows struct {
+	Reported  UsageWindows `json:"reported"`
+	Estimated UsageWindows `json:"estimated"`
+}
+
+// tokenSourceSelect sums input tokens partitioned by input_tokens_source, in the
+// order reported(1h,24h,7d) then estimated(1h,24h,7d). A row whose source is NULL
+// (no input count at all) contributes to neither.
+const tokenSourceSelect = `coalesce(sum(CASE WHEN created_at >= ? AND input_tokens_source='provider' THEN coalesce(input_tokens,0) ELSE 0 END),0),
+coalesce(sum(CASE WHEN created_at >= ? AND input_tokens_source='provider' THEN coalesce(input_tokens,0) ELSE 0 END),0),
+coalesce(sum(CASE WHEN created_at >= ? AND input_tokens_source='provider' THEN coalesce(input_tokens,0) ELSE 0 END),0),
+coalesce(sum(CASE WHEN created_at >= ? AND input_tokens_source='estimated' THEN coalesce(input_tokens,0) ELSE 0 END),0),
+coalesce(sum(CASE WHEN created_at >= ? AND input_tokens_source='estimated' THEN coalesce(input_tokens,0) ELSE 0 END),0),
+coalesce(sum(CASE WHEN created_at >= ? AND input_tokens_source='estimated' THEN coalesce(input_tokens,0) ELSE 0 END),0)`
+
+func tokenSourceArgs(c1, c24, c7 string) []any {
+	args := make([]any, 0, 6)
+	for i := 0; i < 2; i++ {
+		args = append(args, c1, c24, c7)
+	}
+	return args
+}
+
+func scanTokenSources(rows *sql.Rows, keyCols int) (map[string]TokenSourceWindows, error) {
+	defer rows.Close()
+	out := map[string]TokenSourceWindows{}
+	for rows.Next() {
+		var key, provider, model string
+		var vals [6]int64
+		dest := make([]any, 0, keyCols+6)
+		if keyCols == 1 {
+			dest = append(dest, &provider, &model)
+		} else {
+			dest = append(dest, &key)
+		}
+		for i := range vals {
+			dest = append(dest, &vals[i])
+		}
+		if err := rows.Scan(dest...); err != nil {
+			return nil, err
+		}
+		if keyCols == 1 {
+			key = provider + "/" + model
+		}
+		out[key] = TokenSourceWindows{
+			Reported:  UsageWindows{H1: vals[0], H24: vals[1], D7: vals[2]},
+			Estimated: UsageWindows{H1: vals[3], H24: vals[4], D7: vals[5]},
+		}
+	}
+	return out, rows.Err()
+}
+
+// TokenSourcesByClient returns the per-source input split per client key.
+func (s *Scope) TokenSourcesByClient(ctx context.Context, c1, c24, c7 string) (map[string]TokenSourceWindows, error) {
+	var out map[string]TokenSourceWindows
 	err := s.withActivity(ctx, func(q querier) error {
-		rows, err := q.QueryContext(ctx, `SELECT DISTINCT client_key_id FROM request_logs WHERE account_id=? AND created_at >= ? AND input_tokens_estimated=1`, s.accountID, c7)
+		args := append([]any{}, tokenSourceArgs(c1, c24, c7)...)
+		args = append(args, s.accountID, c7)
+		rows, err := q.QueryContext(ctx, `SELECT client_key_id, `+tokenSourceSelect+` FROM request_logs WHERE account_id=? AND created_at >= ? GROUP BY client_key_id`, args...)
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				return err
-			}
-			out[id] = true
+		out, err = scanTokenSources(rows, 0)
+		return err
+	})
+	return out, err
+}
+
+// TokenSourcesByVirtual returns the per-source input split per virtual model.
+func (s *Scope) TokenSourcesByVirtual(ctx context.Context, c1, c24, c7 string) (map[string]TokenSourceWindows, error) {
+	var out map[string]TokenSourceWindows
+	err := s.withActivity(ctx, func(q querier) error {
+		args := append([]any{}, tokenSourceArgs(c1, c24, c7)...)
+		args = append(args, s.accountID, c7)
+		rows, err := q.QueryContext(ctx, `SELECT route_model, `+tokenSourceSelect+` FROM request_logs WHERE account_id=? AND created_at >= ? AND `+virtualAttributionFilter+` GROUP BY route_model`, args...)
+		if err != nil {
+			return err
 		}
-		return rows.Err()
+		out, err = scanTokenSources(rows, 0)
+		return err
+	})
+	return out, err
+}
+
+// TokenSourcesByReal returns the per-source input split per real model.
+func (s *Scope) TokenSourcesByReal(ctx context.Context, c1, c24, c7 string) (map[string]TokenSourceWindows, error) {
+	var out map[string]TokenSourceWindows
+	err := s.withActivity(ctx, func(q querier) error {
+		args := append([]any{}, tokenSourceArgs(c1, c24, c7)...)
+		args = append(args, s.accountID, c7)
+		rows, err := q.QueryContext(ctx, `SELECT resolved_provider, resolved_model, `+tokenSourceSelect+` FROM request_logs WHERE account_id=? AND created_at >= ? AND resolved_provider IS NOT NULL GROUP BY resolved_provider, resolved_model`, args...)
+		if err != nil {
+			return err
+		}
+		out, err = scanTokenSources(rows, 1)
+		return err
 	})
 	return out, err
 }
@@ -158,7 +246,7 @@ func scanCost(rows *sql.Rows, keyCols int) (map[string]CostWindows, error) {
 		if h1.Valid {
 			w.H1 = &h1.Int64
 		}
-		w.Estimated = UsageWindows{H1: estimates, H24: estimates, D7: estimates}
+		w.EstimatedRows = UsageWindows{H1: estimates, H24: estimates, D7: estimates}
 		if h24.Valid {
 			w.H24 = &h24.Int64
 		}

@@ -42,6 +42,11 @@ services:
       TILLER_ADMIN_USERNAME: ${TILLER_ADMIN_USERNAME:-}
       TILLER_ADMIN_PASSWORD: ${TILLER_ADMIN_PASSWORD:-}
 
+      # Optional management API boot seed (local mode only). Seeds a full-power
+      # "boot-admin" token at boot for headless/embedded provisioning.
+      TILLER_ADMIN_API_KEY: ${TILLER_ADMIN_API_KEY:-}
+      TILLER_ADMIN_API_KEY_FILE: ${TILLER_ADMIN_API_KEY_FILE:-}
+
       # Hosted mode is opt-in. Leave unset for the existing local appliance.
       TILLER_MODE: ${TILLER_MODE:-local}
       TILLER_PUBLIC_URL: ${TILLER_PUBLIC_URL:-}
