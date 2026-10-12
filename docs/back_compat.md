@@ -88,6 +88,20 @@ query against the normalised shape.
   `internal/store/usage.go` `virtualAttributionFilter` and the per-target usage
   query) no longer carry the `(route_kind IS NULL AND route_status='legacy')`
   disjunct. Historical rows are normalised at boot instead (§1).
+- `request_logs.input_tokens_estimated`: the input-only boolean flag was replaced
+  by the per-direction `input_tokens_source` / `output_tokens_source` enum
+  (`internal/database/activity.go` upgrade `004_token_provenance_columns`,
+  backfill `005_token_provenance_backfill`, drop
+  `006_drop_input_tokens_estimated`). This was an **approved breaking change** to
+  the Activity export and the `/api/admin/usage` envelope: the CSV columns
+  `input_tokens_estimated` and the JSON envelope field `tokens_estimated` were
+  removed outright (no deprecated mirror), replaced by `input_tokens_source` /
+  `output_tokens_source` in the export and `client_token_sources` /
+  `virtual_token_sources` / `real_token_sources` in the envelope. The upgrade
+  layer carries a historical row's flagged value into `input_tokens_source` once
+  at boot, so no compat branch remains in any query path. Token totals are
+  unchanged: they still include estimated counts, and the source split only
+  explains them.
 
 ## Deleting a compat path
 Before removing anything in §2–§5, confirm:

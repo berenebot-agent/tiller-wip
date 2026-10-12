@@ -148,9 +148,15 @@ const tokenBreakdownTitle = (types, window) => {
   const n = v => Number(v || 0).toLocaleString();
   return `input ${n(b.input)} · output ${n(b.output)} · cache read ${n(b.cache_read)} · cache write ${n(b.cache_creation)}`;
 };
-// estimatedMark returns the "est." suffix for a client whose totals include at
-// least one locally-estimated input count (the provider omitted usage).
-const estimatedMark = (clientId) => state.usage?.tokens_estimated?.[clientId] ? ' (est.)' : '';
+// estimatedMark returns the "est." suffix for a client whose totals include a
+// locally-estimated input count (the provider omitted usage). It reads the
+// per-source split: any estimated input tokens in the widest window flag the
+// row. Reported-only clients get no suffix.
+const estimatedMark = (clientId) => {
+  const src = state.usage?.client_token_sources?.[clientId];
+  const est = src?.estimated?.['7d'];
+  return est ? ' (est.)' : '';
+};
 // A cell is "loading" only while the usage envelope is unknown AND this cell has
 // no value yet. Once any snapshot/fetch has landed (usageReady), absent data is
 // a genuine empty state ("—").
@@ -170,7 +176,7 @@ const rowCache = (row) => {
   const exact = row.provider_cost_micros;
   const cost = exact ?? row.estimated_cost_micros;
   const costLine = cost == null ? '<small>Cost —</small>' : `<span class="tok-cost"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<small>est.</small>' : ''}</span>`;
-  return `<span class="activity-tokens"><b>${row.input_tokens_estimated ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
+  return `<span class="activity-tokens"><b>${row.input_tokens_source === 'estimated' ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
 };
 const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
 const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return v === 'models' ? 'providers' : VIEWS.includes(v) ? v : 'clients'; };
@@ -3535,7 +3541,7 @@ live.on('outcome', payload => {
 
 live.on('snapshot', payload => {
   if (!state.usage) state.usage = {};
-  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'tokens_estimated'].forEach(key => {
+  ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'client_token_sources', 'virtual_token_sources', 'real_token_sources'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
   });
   // The SSE baseline snapshot already carries the usage envelope, so mark it

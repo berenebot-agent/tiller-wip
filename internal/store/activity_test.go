@@ -218,12 +218,20 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 			pt = &providerType
 		}
 		pm := "model-a"
+		var src *string
+		if input != nil {
+			s := "provider"
+			if estimated {
+				s = "estimated"
+			}
+			src = &s
+		}
 		if err := sc.InsertRequestLog(ctx, store.RequestLogInsert{
 			ID: id, ClientKeyID: "ck", ClientName: "ck", RequestedModel: "model-a",
 			Protocol: "chat", HTTPStatus: 200, LatencyMs: 1, ClientRequestID: id, CreatedAt: now,
 			ResolvedProvider: pt, ResolvedModel: &pm,
 			InputTokens: input, OutputTokens: output, CacheReadInputTokens: &cr,
-			EstimatedCostMicros: estCost, ProviderCostMicros: provCost, InputTokensEstimated: estimated,
+			EstimatedCostMicros: estCost, ProviderCostMicros: provCost, InputTokensSource: src,
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -250,12 +258,16 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 		t.Fatalf("cost total = %v, want 7000000", costs["ck"].D7)
 	}
 
-	estimated, err := sc.EstimatedClients(ctx, c1)
+	// The token totals are unchanged and still include the estimated row (by
+	// design); the new source split explains how much of that total was
+	// provider-reported. r1 is provider-reported, r2 is estimated.
+	sources, err := sc.TokenSourcesByClient(ctx, c1, c1, c1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !estimated["ck"] {
-		t.Fatal("client with an estimated row should be flagged")
+	src := sources["ck"]
+	if src.Reported.D7 != 100 || src.Estimated.D7 != 100 {
+		t.Fatalf("token sources = %+v, want reported=100 estimated=100", src)
 	}
 }
 

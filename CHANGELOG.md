@@ -52,6 +52,22 @@ DeepSeek.
 - **Usage API.** `GET /api/admin/usage` (and the live SSE snapshot) now includes a
   `client_key_names {id: name}` map so client-keyed aggregates can be labelled in
   one request instead of cross-referencing `/api/admin/client-keys`.
+- **Activity export token provenance (breaking).** Token counts now carry their
+  source. The Activity CSV replaces the single `input_tokens_estimated` boolean
+  with `input_tokens_source` and `output_tokens_source`, each `provider` (the
+  upstream reported it) or `estimated` (a local heuristic used because the
+  provider omitted usage), or blank when the request recorded no count of that
+  kind. `/api/admin/usage` replaces `tokens_estimated` with `client_token_sources`,
+  `virtual_token_sources`, and `real_token_sources`, each splitting a group's
+  input total into `reported` and `estimated` windows (1h/24h/7d). **This is a
+  breaking change to the export and usage envelope** — the old
+  `input_tokens_estimated` column and `tokens_estimated` field are removed. Token
+  totals are unchanged: they still include estimated counts; the source fields
+  only make the mix transparent so an export can separate provider-reported
+  accounting from local estimates. The `estimated_cost_micros` /
+  `provider_cost_micros` cost provenance is unaffected, and its cost-side count
+  field is renamed internally (`CostWindows.EstimatedRows`) purely to stop the
+  name colliding with the new token-side term.
 
 ### Fixed
 

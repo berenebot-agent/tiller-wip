@@ -766,8 +766,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 	if _, err := db.SQL.Exec(`UPDATE client_keys SET name=? WHERE id=?`, "align-client", clientID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_message,request_body,request_body_truncated,error_body,error_body_truncated,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		"row-align", clientID, "align-client", "main", "main", "virtual", "vm-1", "vm-1/main", "prov-a", "model-a", "chat", 1, 200, 10, int64Ptr(5), int64Ptr(3), int64Ptr(1), int64Ptr(2), "upstream-align", "req-align", "boom", "the request body", 1, "the error body", 1, "2026-01-01T00:00:01Z"); err != nil {
+	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,provider_request_id,client_request_id,error_message,request_body,request_body_truncated,error_body,error_body_truncated,input_tokens_source,output_tokens_source,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		"row-align", clientID, "align-client", "main", "main", "virtual", "vm-1", "vm-1/main", "prov-a", "model-a", "chat", 1, 200, 10, int64Ptr(5), int64Ptr(3), int64Ptr(1), int64Ptr(2), "upstream-align", "req-align", "boom", "the request body", 1, "the error body", 1, "provider", "provider", "2026-01-01T00:00:01Z"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -783,8 +783,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		t.Fatalf("expected header + 1 row, got %d records", len(records))
 	}
 	header := records[0]
-	if len(header) != 30 {
-		t.Fatalf("expected 30 columns, got %d", len(header))
+	if len(header) != 31 {
+		t.Fatalf("expected 31 columns, got %d", len(header))
 	}
 	for _, h := range header {
 		if h == "warning_code" {
@@ -832,6 +832,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		{"provider_request_id", "upstream-align"},
 		{"client_request_id", "req-align"},
 		{"route_kind", "virtual"},
+		{"input_tokens_source", "provider"},
+		{"output_tokens_source", "provider"},
 	}
 	for _, c := range checks {
 		if got := row[indexOf(c.header)]; got != c.value {

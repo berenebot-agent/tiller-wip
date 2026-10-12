@@ -661,6 +661,99 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 	}
 }
 
+// TestTokenSourceProvenanceExported verifies the token-count provenance
+// contract end to end: a provider-reported count is stored/exported as
+// "provider", a count recovered by the missing-usage fallback is "estimated",
+// and both remain in the token totals (the totals are unchanged by design — the
+// source columns only explain them). It also pins that the retired
+// input_tokens_estimated boolean is gone from the Activity payload.
+func TestTokenSourceProvenanceExported(t *testing.T) {
+	// First response reports usage; the second omits it entirely so the
+	// missing-usage fallback estimates the input from the request body.
+	var served int
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		served++
+		if served == 1 {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"id": "resp-1", "object": "chat.completion", "model": "model-a",
+				"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+				"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
+			})
+			return
+		}
+		// No usage block at all.
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id": "resp-2", "object": "chat.completion", "model": "model-a",
+			"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": "ok"}, "finish_reason": "stop"}},
+		})
+	})
+	api, _, clientID, secret := loggingTestHarness(t, upstream)
+	for i := 0; i < 2; i++ {
+		resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello world, this is a test message"}}})
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("request %d status = %d", i, resp.StatusCode)
+		}
+	}
+	status, payload, _ := api.request("GET", "/api/admin/client-keys/"+clientID+"/activity?limit=10", nil)
+	if status != http.StatusOK {
+		t.Fatalf("activity: %d %v", status, payload)
+	}
+	data := payload["data"].([]any)
+	if len(data) != 2 {
+		t.Fatalf("expected 2 activity rows, got %d", len(data))
+	}
+	// Newest first: row 0 is the usage-omitting request (estimated), row 1 is
+	// the provider-reported one.
+	estimated := data[0].(map[string]any)
+	reported := data[1].(map[string]any)
+	if estimated["input_tokens_source"] != "estimated" {
+		t.Fatalf("fallback row input_tokens_source = %v, want estimated", estimated["input_tokens_source"])
+	}
+	if reported["input_tokens_source"] != "provider" {
+		t.Fatalf("provider row input_tokens_source = %v, want provider", reported["input_tokens_source"])
+	}
+	if reported["output_tokens_source"] != "provider" {
+		t.Fatalf("provider row output_tokens_source = %v, want provider", reported["output_tokens_source"])
+	}
+	if estimated["output_tokens_source"] != nil {
+		t.Fatalf("fallback row has no output count, output_tokens_source should be null, got %v", estimated["output_tokens_source"])
+	}
+	// The estimated row still carries an input count in the totals.
+	if estimated["input_tokens"] == nil || estimated["input_tokens"].(float64) <= 0 {
+		t.Fatalf("fallback row should still carry an estimated input count, got %v", estimated["input_tokens"])
+	}
+	// The retired boolean is gone.
+	if _, present := reported["input_tokens_estimated"]; present {
+		t.Fatal("retired input_tokens_estimated field is still present in the Activity payload")
+	}
+	// The usage envelope exposes the source split, and the totals are unchanged
+	// (still the sum of both sources).
+	status, usage, _ := api.request("GET", "/api/admin/usage", nil)
+	if status != http.StatusOK {
+		t.Fatalf("usage: %d %v", status, usage)
+	}
+	sources, _ := usage["client_token_sources"].(map[string]any)
+	srcRow, _ := sources[clientID].(map[string]any)
+	if srcRow == nil {
+		t.Fatalf("client_token_sources missing an entry for the client: %v", usage["client_token_sources"])
+	}
+	rep, _ := srcRow["reported"].(map[string]any)
+	est, _ := srcRow["estimated"].(map[string]any)
+	if rep == nil || est == nil || rep["7d"] == nil || est["7d"] == nil {
+		t.Fatalf("token source split incomplete: %v", srcRow)
+	}
+	if _, present := usage["tokens_estimated"]; present {
+		t.Fatal("retired tokens_estimated envelope field is still present")
+	}
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := json.Marshal(value)

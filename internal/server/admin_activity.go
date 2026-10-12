@@ -77,7 +77,8 @@ type activityView struct {
 	CacheCreationInputTokens *int64  `json:"cache_creation_input_tokens"`
 	EstimatedCostMicros      *int64  `json:"estimated_cost_micros"`
 	ProviderCostMicros       *int64  `json:"provider_cost_micros"`
-	InputTokensEstimated     bool    `json:"input_tokens_estimated"`
+	InputTokensSource        *string `json:"input_tokens_source"`
+	OutputTokensSource       *string `json:"output_tokens_source"`
 	ProviderRequestID        *string `json:"provider_request_id"`
 	ClientRequestID          string  `json:"client_request_id"`
 	ErrorText                *string `json:"error_text"`
@@ -113,7 +114,8 @@ func activityViewFromStore(row store.ActivityRow) activityView {
 		CacheCreationInputTokens: row.CacheCreationInputTokens,
 		EstimatedCostMicros:      row.EstimatedCostMicros,
 		ProviderCostMicros:       row.ProviderCostMicros,
-		InputTokensEstimated:     row.InputTokensEstimated,
+		InputTokensSource:        row.InputTokensSource,
+		OutputTokensSource:       row.OutputTokensSource,
 		ProviderRequestID:        row.ProviderRequestID,
 		ClientRequestID:          row.ClientRequestID,
 		ErrorText:                row.ErrorText,
@@ -327,7 +329,7 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 		"streaming", "http_status", "latency_ms", "input_tokens", "output_tokens",
 		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message", "request_body", "request_body_truncated", "error_body", "error_body_truncated",
 		"provider_request_id", "client_request_id", "route_kind",
-		"estimated_cost_micros", "provider_cost_micros", "input_tokens_estimated",
+		"estimated_cost_micros", "provider_cost_micros", "input_tokens_source", "output_tokens_source",
 	}); err != nil {
 		return err
 	}
@@ -349,7 +351,7 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)), strconv.FormatBool(row.RequestBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)), strconv.FormatBool(row.ErrorBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID, strPtrOrEmpty(row.RouteKind),
-			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), strconv.FormatBool(row.InputTokensEstimated),
+			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), strPtrOrEmpty(row.InputTokensSource), strPtrOrEmpty(row.OutputTokensSource),
 		}); err != nil {
 			return err
 		}
