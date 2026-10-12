@@ -188,21 +188,36 @@ func OpenActivity(ctx context.Context, path string) (*sql.DB, error) {
 // SQLite has no "ADD COLUMN IF NOT EXISTS", hence the PRAGMA probe. The
 // version row is recorded only when at least one column was actually added, so
 // it is bookkeeping rather than the guard.
+//
+// A column may also declare skipIfVersion: once that version has been recorded,
+// the column is never re-added. This exists for the retired
+// input_tokens_estimated column, which would otherwise be re-added by
+// 002_cost_and_estimate on every boot and then dropped again by
+// 006_drop_input_tokens_estimated — and SQLite's DROP COLUMN rewrites the whole
+// table, so that churn would cost a full table copy on every startup.
 var activityUpgrades = []struct {
 	version string
-	columns []struct{ table, column, ddl string }
+	columns []struct {
+		table, column, ddl string
+		// skipIfVersion, when non-empty, suppresses this column once the named
+		// migration version is recorded in activity_schema_migrations.
+		skipIfVersion string
+	}
 }{
 	{
 		version: "002_cost_and_estimate",
-		columns: []struct{ table, column, ddl string }{
-			{"request_logs", "estimated_cost_micros", `ALTER TABLE request_logs ADD COLUMN estimated_cost_micros INTEGER`},
-			{"request_logs", "provider_cost_micros", `ALTER TABLE request_logs ADD COLUMN provider_cost_micros INTEGER`},
-			// Retained so this already-shipped step stays immutable. On a fresh
-			// database it re-adds the column (the monolithic schema no longer
-			// defines it) and 006_drop_input_tokens_estimated removes it again;
-			// on a deployed database it is the historical column that the
-			// provenance backfill reads.
-			{"request_logs", "input_tokens_estimated", `ALTER TABLE request_logs ADD COLUMN input_tokens_estimated INTEGER NOT NULL DEFAULT 0`},
+		columns: []struct {
+			table, column, ddl string
+			skipIfVersion      string
+		}{
+			{"request_logs", "estimated_cost_micros", `ALTER TABLE request_logs ADD COLUMN estimated_cost_micros INTEGER`, ""},
+			{"request_logs", "provider_cost_micros", `ALTER TABLE request_logs ADD COLUMN provider_cost_micros INTEGER`, ""},
+			// Retained so this already-shipped step stays immutable. It is the
+			// historical column the provenance backfill reads, and is dropped by
+			// 006_drop_input_tokens_estimated; once that drop has completed this
+			// entry is skipped, so a steady-state boot neither re-adds it nor
+			// pays for another table rewrite.
+			{"request_logs", "input_tokens_estimated", `ALTER TABLE request_logs ADD COLUMN input_tokens_estimated INTEGER NOT NULL DEFAULT 0`, "006_drop_input_tokens_estimated"},
 		},
 	},
 	{
@@ -214,9 +229,12 @@ var activityUpgrades = []struct {
 		// but the column order is deliberate: add first, backfill, then drop in
 		// a later step so a partial upgrade still reads.
 		version: "004_token_provenance_columns",
-		columns: []struct{ table, column, ddl string }{
-			{"request_logs", "input_tokens_source", `ALTER TABLE request_logs ADD COLUMN input_tokens_source TEXT CHECK (input_tokens_source IN ('provider','estimated'))`},
-			{"request_logs", "output_tokens_source", `ALTER TABLE request_logs ADD COLUMN output_tokens_source TEXT CHECK (output_tokens_source IN ('provider','estimated'))`},
+		columns: []struct {
+			table, column, ddl string
+			skipIfVersion      string
+		}{
+			{"request_logs", "input_tokens_source", `ALTER TABLE request_logs ADD COLUMN input_tokens_source TEXT CHECK (input_tokens_source IN ('provider','estimated'))`, ""},
+			{"request_logs", "output_tokens_source", `ALTER TABLE request_logs ADD COLUMN output_tokens_source TEXT CHECK (output_tokens_source IN ('provider','estimated'))`, ""},
 		},
 	},
 }
@@ -287,6 +305,15 @@ func upgradeActivitySchema(ctx context.Context, db *sql.DB) error {
 	for _, up := range activityUpgrades {
 		changed := false
 		for _, col := range up.columns {
+			if col.skipIfVersion != "" {
+				applied, err := activityVersionApplied(ctx, db, col.skipIfVersion)
+				if err != nil {
+					return err
+				}
+				if applied {
+					continue
+				}
+			}
 			exists, err := activityColumnExists(ctx, db, col.table, col.column)
 			if err != nil {
 				return err
@@ -345,16 +372,15 @@ func upgradeActivityData(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// dropActivityColumns enforces the retired-column invariant on every boot: a
-// column listed here must not exist, so if it is present it is dropped. The
-// column probe — never the recorded version row — is the guard, deliberately.
-// An earlier design skipped the drop once its version was recorded, but the
-// additive 002_cost_and_estimate step is re-evaluated every startup and
-// recreates input_tokens_estimated whenever it is absent, so a version-row
-// guard would let the retired column return on the second boot and stay. Keying
-// the drop on the column itself keeps the invariant true no matter what any
-// other upgrade step does. This runs after upgradeActivityData so the backfill
-// that reads the old column always precedes its removal.
+// dropActivityColumns enforces the retired-column invariant: a column listed
+// here must not exist, so if it is present it is dropped. The column probe is
+// the guard — deliberately, so an unexpected legacy column is always cleaned up.
+// On a steady-state boot the probe finds nothing (the 002 gate stops
+// input_tokens_estimated from being re-added) so no table rewrite happens;
+// SQLite's DROP COLUMN rewrites the whole table, which is why the re-add must be
+// suppressed rather than the drop relied on to tidy up every boot. This runs
+// after upgradeActivityData so the backfill that reads the old column always
+// precedes its removal.
 func dropActivityColumns(ctx context.Context, db *sql.DB) error {
 	for _, drop := range activityColumnDrops {
 		exists, err := activityColumnExists(ctx, db, drop.table, drop.column)
@@ -365,8 +391,8 @@ func dropActivityColumns(ctx context.Context, db *sql.DB) error {
 			if _, err := db.ExecContext(ctx, `ALTER TABLE `+drop.table+` DROP COLUMN `+drop.column); err != nil {
 				return fmt.Errorf("activity column drop %s (%s.%s): %w", drop.version, drop.table, drop.column, err)
 			}
-			// Record the version only once the column has actually been removed,
-			// so the migration ledger reflects a real state change. It is
+			// Record the version once the column has actually been removed, so
+			// the migration ledger reflects a real state change. It is
 			// bookkeeping, not the guard (see above).
 			if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO activity_schema_migrations(version,applied_at) VALUES(?,?)`, drop.version, Now()); err != nil {
 				return err
@@ -374,6 +400,16 @@ func dropActivityColumns(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// activityVersionApplied reports whether a migration version has been recorded
+// in activity_schema_migrations.
+func activityVersionApplied(ctx context.Context, db *sql.DB, version string) (bool, error) {
+	var applied int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM activity_schema_migrations WHERE version=?`, version).Scan(&applied); err != nil {
+		return false, fmt.Errorf("activity version check %s: %w", version, err)
+	}
+	return applied != 0, nil
 }
 
 // activityColumnExists reports whether table has the named column.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -115,12 +116,20 @@ INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,st
 	defer adb2.Close()
 }
 
-// TestActivityRetiredColumnStaysDropped is the regression for the reviewer's
-// finding that a retired column could return on a later boot: the additive
-// 002_cost_and_estimate step re-adds input_tokens_estimated whenever it is
-// absent, so an earlier design that skipped the drop once its version was
-// recorded would recreate the column on the second startup and keep it. This
-// opens the same database several times and asserts the column never comes back.
+// TestActivityRetiredColumnStaysDropped is the regression for two review
+// findings about the retired input_tokens_estimated column:
+//
+//  1. It must not return on a later boot. The additive 002_cost_and_estimate
+//     step re-adds the column whenever it is absent, so an earlier design that
+//     used the drop's own version row as the guard recreated it on the second
+//     startup. It is now gated so it is never re-added once
+//     006_drop_input_tokens_estimated has completed.
+//  2. Reaching steady state must not rewrite the table on every boot. SQLite's
+//     DROP COLUMN rewrites the whole table, so the column probe plus a re-add
+//     would cost a full table copy per startup. The test asserts the schema is
+//     unchanged across subsequent opens (the recorded migration set and the
+//     stored CREATE TABLE text for request_logs), which fails if any schema
+//     mutation runs on a steady-state boot.
 func TestActivityRetiredColumnStaysDropped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ActivityFileName)
 	ctx := context.Background()
@@ -151,6 +160,45 @@ INSERT INTO activity_schema_migrations(version,applied_at) VALUES('001','2026-01
 	}
 	raw.Close()
 
+	// snapshot captures everything that must be identical on a steady-state
+	// boot: the recorded migration set and the database's persisted schema
+	// version. SQLite's PRAGMA schema_version is stored in the database header
+	// and incremented by any DDL — including a DROP COLUMN's table rebuild and an
+	// identical ADD/DROP round-trip — so it is the direct signal that no schema
+	// mutation ran, and it survives across connections. Comparing sqlite_master
+	// text alone would miss a re-add/drop that reproduces the same CREATE TABLE
+	// text.
+	type snapshot struct {
+		versions      string
+		schemaVersion int
+	}
+	read := func(adb *sql.DB, open int) snapshot {
+		t.Helper()
+		rows, err := adb.QueryContext(ctx, `SELECT version FROM activity_schema_migrations ORDER BY version`)
+		if err != nil {
+			t.Fatalf("open %d: versions: %v", open, err)
+		}
+		var versions []string
+		for rows.Next() {
+			var v string
+			if err := rows.Scan(&v); err != nil {
+				rows.Close()
+				t.Fatalf("open %d: scan version: %v", open, err)
+			}
+			versions = append(versions, v)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			t.Fatalf("open %d: versions: %v", open, err)
+		}
+		var schemaVersion int
+		if err := adb.QueryRowContext(ctx, `PRAGMA schema_version`).Scan(&schemaVersion); err != nil {
+			t.Fatalf("open %d: schema_version: %v", open, err)
+		}
+		return snapshot{versions: strings.Join(versions, ","), schemaVersion: schemaVersion}
+	}
+
+	var first snapshot
 	for i := 0; i < 3; i++ {
 		adb, err := OpenActivity(ctx, path)
 		if err != nil {
@@ -165,7 +213,18 @@ INSERT INTO activity_schema_migrations(version,applied_at) VALUES('001','2026-01
 			adb.Close()
 			t.Fatalf("open %d: retired column input_tokens_estimated reappeared", i)
 		}
+		got := read(adb, i)
 		adb.Close()
+		if i == 0 {
+			first = got
+			continue
+		}
+		if got.versions != first.versions {
+			t.Fatalf("open %d: migration set changed: %q -> %q", i, first.versions, got.versions)
+		}
+		if got.schemaVersion != first.schemaVersion {
+			t.Fatalf("open %d: schema_version changed (%d -> %d): a DDL mutation ran on a steady-state boot", i, first.schemaVersion, got.schemaVersion)
+		}
 	}
 }
 
