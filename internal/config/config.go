@@ -116,6 +116,14 @@ type Config struct {
 	// <DataDir>/master.key or generated there (see internal/crypto).
 	MasterKey     string
 	MasterKeyFile string
+	// AdminAPIKey and AdminAPIKeyFile are the optional management API boot
+	// seed (env TILLER_ADMIN_API_KEY / TILLER_ADMIN_API_KEY_FILE; the file
+	// takes precedence). When set in local mode, the router seeds a single
+	// full-power management token at boot so an embedding host can provision
+	// the instance entirely over the API with no browser. The seed value is
+	// never logged. Hosted mode ignores it.
+	AdminAPIKey     string
+	AdminAPIKeyFile string
 	// Deprecations lists configuration notices to surface at startup: a
 	// legacy env var that was honoured, or a legacy var that was ignored
 	// because the new name was also set. Load always succeeds; the caller
@@ -146,6 +154,8 @@ func Load() (Config, error) {
 		BackupRetention:   7 * 24 * time.Hour,
 		MasterKey:         os.Getenv("TILLER_MASTER_KEY"),
 		MasterKeyFile:     os.Getenv("TILLER_MASTER_KEY_FILE"),
+		AdminAPIKey:       os.Getenv("TILLER_ADMIN_API_KEY"),
+		AdminAPIKeyFile:   os.Getenv("TILLER_ADMIN_API_KEY_FILE"),
 	}
 	c.Deprecations = append(c.Deprecations, resolveLegacyCredentials(&c)...)
 	servers, err := dnsfallback.ParseServers(os.Getenv("TILLER_DNS_FALLBACK_SERVERS"))
@@ -202,6 +212,24 @@ func Load() (Config, error) {
 	c.Mail = mail
 	if c.Mode == ModeHosted && c.PublicURL == "" {
 		return Config{}, errors.New("TILLER_PUBLIC_URL is required in hosted mode")
+	}
+	if c.Mode == ModeHosted && (c.AdminAPIKey != "" || c.AdminAPIKeyFile != "") {
+		return Config{}, errors.New("TILLER_ADMIN_API_KEY / TILLER_ADMIN_API_KEY_FILE are local-mode only; hosted instances have no management API tokens")
+	}
+	// Resolve the management API boot seed up front, mirroring the master-key
+	// precedence (file over env). The value is never logged.
+	if c.Mode == ModeLocal {
+		if f := strings.TrimSpace(c.AdminAPIKeyFile); f != "" {
+			raw, err := os.ReadFile(f)
+			if err != nil {
+				return Config{}, fmt.Errorf("read TILLER_ADMIN_API_KEY_FILE: %w", err)
+			}
+			c.AdminAPIKey = strings.TrimSpace(string(raw))
+			c.AdminAPIKeyFile = f
+		}
+		if c.AdminAPIKey != "" && !looksLikeManagementToken(c.AdminAPIKey) {
+			return Config{}, errors.New("TILLER_ADMIN_API_KEY is not a valid management token (expected mt-tr-<selector>.<secret>)")
+		}
 	}
 	if raw := os.Getenv("TILLER_ADMIN_COOKIE_SECURE"); raw != "" {
 		v, err := strconv.ParseBool(raw)
@@ -492,6 +520,18 @@ func clampCacheTTL(v time.Duration) time.Duration {
 		return maxTTL
 	}
 	return v
+}
+
+// looksLikeManagementToken is a cheap structural check on the boot-seed token
+// so a typo fails at config load rather than at first authentication. The
+// authoritative parse happens in the auth package.
+func looksLikeManagementToken(raw string) bool {
+	const prefix = "mt-tr-"
+	if !strings.HasPrefix(raw, prefix) {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(raw, prefix), ".")
+	return len(parts) == 2 && len(parts[0]) == 12 && len(parts[1]) == 43
 }
 
 func envDefault(key, fallback string) string {

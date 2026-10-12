@@ -103,12 +103,18 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 
 // setupRequired reports whether the instance still needs first-run credential
 // setup: local mode, no environment admin, and no stored credential. It is the
-// gate for both the setup endpoint and runtime's setup_required signal.
+// gate for both the setup endpoint and runtime's setup_required signal. A
+// management API boot seed also counts as configured: an embedding host that
+// provisions the instance via TILLER_ADMIN_API_KEY does not use the browser
+// setup page, so the instance must not report itself as unclaimed.
 func (s *Server) setupRequired() bool {
 	if s.config.Mode == config.ModeHosted || s.sessions == nil {
 		return false
 	}
 	if s.config.TillerUser != "" || s.config.TillerUserPassword != "" {
+		return false
+	}
+	if s.config.AdminAPIKey != "" {
 		return false
 	}
 	return !s.sessions.CredentialConfigured()

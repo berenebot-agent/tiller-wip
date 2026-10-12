@@ -210,3 +210,69 @@ test('activity pagination handles empty results and the exact-page boundary', as
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
 });
+
+// The Export CSV button sits on the right of the activity toolbar next to Clear
+// activity (not centred), and the export dialog offers both presets and a
+// custom from/to range that downloads a CSV. Also covers the Global activity
+// card's own Export CSV button.
+test('activity export button sits beside clear and custom range downloads CSV', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAdmin(page);
+  const csrf = await adminCsrf(page);
+  await clearActivity(page, csrf);
+  const client = await createClient(page, csrf, 'export-range-client');
+  seedActivity(client.id, 5);
+
+  await page.getByRole('link', { name: 'Clients' }).click();
+  const clientRow = page.locator('#clients-body tr', { hasText: client.name });
+  await expect(clientRow).toBeVisible();
+  await clientRow.getByRole('button', { name: 'Activity' }).click();
+  await expect(page.locator('#activity-dialog')).toBeVisible();
+
+  // Export CSV is right-aligned: its right edge matches Clear activity's right
+  // edge, and it sits to the left of Clear, well past the toolbar midpoint.
+  const exportBox = await page.locator('#export-activity').boundingBox();
+  const clearBox = await page.locator('#clear-activity').boundingBox();
+  const toolbarBox = await page.locator('#activity-dialog .activity-toolbar').boundingBox();
+  expect(exportBox).not.toBeNull();
+  expect(clearBox).not.toBeNull();
+  expect(toolbarBox).not.toBeNull();
+  expect(Math.abs((exportBox.x + exportBox.width) - clearBox.x)).toBeLessThan(20);
+  expect(exportBox.x).toBeGreaterThan(toolbarBox.x + toolbarBox.width / 2);
+
+  // Custom range export: a wide window downloads a CSV with a header and rows.
+  await page.locator('#export-activity').click();
+  await expect(page.locator('#export-dialog')).toBeVisible();
+  await expect(page.locator('#export-from')).toBeVisible();
+  await expect(page.locator('#export-range-error')).toHaveText('');
+  await page.locator('#export-from').fill('2020-01-01');
+  await page.locator('#export-to').fill('2099-01-01');
+  const download = page.waitForEvent('download');
+  await page.locator('#export-custom').click();
+  const file = await download;
+  expect(file.suggestedFilename()).toContain('activity');
+  await expect(page.locator('#export-dialog')).toBeHidden();
+
+  // Reversed range is rejected client-side without closing the dialog.
+  await page.locator('#export-activity').click();
+  await page.locator('#export-from').fill('2099-01-01');
+  await page.locator('#export-to').fill('2020-01-01');
+  await page.locator('#export-custom').click();
+  await expect(page.locator('#export-range-error')).not.toHaveText('');
+  await expect(page.locator('#export-dialog')).toBeVisible();
+  await page.locator('#close-export').click();
+  await page.getByRole('button', { name: 'Done' }).click();
+  await expect(page.locator('#activity-dialog')).toBeHidden();
+
+  // Global activity card has its own Export CSV button that downloads the
+  // account-wide CSV.
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="data"]').click();
+  await expect(page.locator('#export-global-activity')).toBeVisible();
+  await page.locator('#export-global-activity').click();
+  await expect(page.locator('#export-dialog')).toBeVisible();
+  const globalDownload = page.waitForEvent('download');
+  await page.locator('[data-export-period="all"]').click();
+  const globalFile = await globalDownload;
+  expect(globalFile.suggestedFilename()).toContain('activity');
+});

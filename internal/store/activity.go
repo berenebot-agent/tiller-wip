@@ -55,7 +55,8 @@ type ActivityRow struct {
 	CacheCreationInputTokens *int64
 	EstimatedCostMicros      *int64
 	ProviderCostMicros       *int64
-	InputTokensEstimated     bool
+	InputTokensSource        *string
+	OutputTokensSource       *string
 	ProviderRequestID        *string
 	ClientRequestID          string
 	ErrorText                *string
@@ -88,11 +89,11 @@ type RequestAttemptRow struct {
 	CreatedAt          string
 }
 
-const activityColumns = `rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.account_id=rl.account_id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_estimated`
+const activityColumns = `rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.account_id=rl.account_id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_source,rl.output_tokens_source`
 
 // activityCostColumns appends numeric accounting metadata to each SELECT.
 func activityCostColumns(columns string) string {
-	return columns + `,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_estimated`
+	return columns + `,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_source,rl.output_tokens_source`
 }
 
 func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName bool) ([]ActivityRow, error) {
@@ -102,8 +103,7 @@ func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName b
 		var v ActivityRow
 		var streaming, fallback, bodyTruncated, errorTruncated int
 		dest := []any{&v.ID, &v.RequestedModel, &v.ExposedModel, &v.RouteKind, &v.RouteModelID, &v.RouteModel, &v.ResolvedProvider, &v.ResolvedModel, &v.Protocol, &streaming, &v.HTTPStatus, &v.LatencyMs, &v.InputTokens, &v.OutputTokens, &v.CacheReadInputTokens, &v.CacheCreationInputTokens, &v.ProviderRequestID, &v.ClientRequestID, &v.ErrorText, &v.ErrorMessage, &v.RequestBody, &bodyTruncated, &v.ErrorBody, &errorTruncated, &v.AttemptCount, &v.AttemptRows, &fallback, &v.FallbackReason, &v.CreatedAt}
-		var estimated bool
-		dest = append(dest, &v.EstimatedCostMicros, &v.ProviderCostMicros, &estimated)
+		dest = append(dest, &v.EstimatedCostMicros, &v.ProviderCostMicros, &v.InputTokensSource, &v.OutputTokensSource)
 		if withClientKey {
 			dest = append(dest, &v.ClientKeyID)
 		}
@@ -114,7 +114,6 @@ func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName b
 			return nil, err
 		}
 		v.Streaming = streaming != 0
-		v.InputTokensEstimated = estimated
 		v.FallbackUsed = fallback != 0
 		v.RequestBodyTruncated = bodyTruncated != 0
 		v.ErrorBodyTruncated = errorTruncated != 0
@@ -221,10 +220,22 @@ func (s *Scope) ListRealModelActivity(ctx context.Context, modelID, provider, up
 
 const activityExportBatchSize = 256
 
-func (s *Scope) exportActivity(ctx context.Context, where string, args []any, cutoff string, fn func(ActivityRow) error) error {
-	if cutoff != "" {
+// ActivityExportRange bounds a CSV export by request timestamps. Both bounds are
+// optional RFC3339Nano strings; From is inclusive and To is exclusive. An empty
+// value means unbounded on that side.
+type ActivityExportRange struct {
+	From string
+	To   string
+}
+
+func (s *Scope) exportActivity(ctx context.Context, where string, args []any, rng ActivityExportRange, fn func(ActivityRow) error) error {
+	if rng.From != "" {
 		where += ` AND rl.created_at >= ?`
-		args = append(args, cutoff)
+		args = append(args, rng.From)
+	}
+	if rng.To != "" {
+		where += ` AND rl.created_at < ?`
+		args = append(args, rng.To)
 	}
 	beforeCreated, beforeID := "", ""
 	for {
@@ -263,7 +274,7 @@ func (s *Scope) exportActivity(ctx context.Context, where string, args []any, cu
 }
 
 // ExportClientActivity streams one client key's activity, newest first.
-func (s *Scope) ExportClientActivity(ctx context.Context, clientID, search, cutoff string, fn func(ActivityRow) error) error {
+func (s *Scope) ExportClientActivity(ctx context.Context, clientID, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
 	where := `rl.client_key_id=?`
 	args := []any{clientID}
 	if search != "" {
@@ -271,29 +282,45 @@ func (s *Scope) ExportClientActivity(ctx context.Context, clientID, search, cuto
 		where += ` AND ` + searchClause
 		args = append(args, searchArgs...)
 	}
-	return s.exportActivity(ctx, where, args, cutoff, fn)
+	return s.exportActivity(ctx, where, args, rng, fn)
 }
 
 // ExportVirtualActivity streams activity attributable to a virtual model.
-func (s *Scope) ExportVirtualActivity(ctx context.Context, virtualID, canonical, search, cutoff string, fn func(ActivityRow) error) error {
+func (s *Scope) ExportVirtualActivity(ctx context.Context, virtualID, canonical, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
 	where, args := virtualAttribution(virtualID, canonical)
 	if search != "" {
 		searchClause, searchArgs := activitySearchClause("rl.", "%"+search+"%")
 		where += ` AND ` + searchClause
 		args = append(args, searchArgs...)
 	}
-	return s.exportActivity(ctx, where, args, cutoff, fn)
+	return s.exportActivity(ctx, where, args, rng, fn)
 }
 
 // ExportRealActivity streams activity attributable to a real model.
-func (s *Scope) ExportRealActivity(ctx context.Context, modelID, provider, upstream, search, cutoff string, fn func(ActivityRow) error) error {
+func (s *Scope) ExportRealActivity(ctx context.Context, modelID, provider, upstream, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
 	where, args := realAttribution(modelID, provider, upstream)
 	if search != "" {
 		searchClause, searchArgs := activitySearchClause("rl.", "%"+search+"%")
 		where += ` AND ` + searchClause
 		args = append(args, searchArgs...)
 	}
-	return s.exportActivity(ctx, where, args, cutoff, fn)
+	return s.exportActivity(ctx, where, args, rng, fn)
+}
+
+// ExportGlobalActivity streams activity across every client key in the account,
+// newest first, honouring an optional search filter and timestamp range.
+func (s *Scope) ExportGlobalActivity(ctx context.Context, search string, rng ActivityExportRange, fn func(ActivityRow) error) error {
+	where := `1=1`
+	var args []any
+	if search != "" {
+		pattern := "%" + search + "%"
+		searchClause, searchArgs := activitySearchClause("rl.", pattern)
+		searchClause = "(rl.client_name LIKE ? OR " + searchClause + ")"
+		searchArgs = append([]any{pattern}, searchArgs...)
+		where += ` AND ` + searchClause
+		args = append(args, searchArgs...)
+	}
+	return s.exportActivity(ctx, where, args, rng, fn)
 }
 
 // ClearClientActivity deletes a client key's request logs.

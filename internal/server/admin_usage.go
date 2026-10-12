@@ -16,6 +16,7 @@ type usageWindows = store.UsageWindows
 type cacheWindows = store.CacheWindows
 type costWindows = store.CostWindows
 type tokenTypeWindows = store.TokenTypeWindows
+type tokenSourceWindows = store.TokenSourceWindows
 type targetResolutionHealth = store.TargetHealth
 
 // usage returns token totals per client key, virtual model, and real model for
@@ -30,22 +31,25 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{
-		"client_keys":         snap.ClientKeys,
-		"virtual_models":      snap.VirtualModels,
-		"target_health":       snap.TargetHealth,
-		"target_cooldown":     snap.TargetCooldown,
-		"real_models":         snap.RealModels,
-		"client_cache":        snap.ClientCache,
-		"virtual_cache":       snap.VirtualCache,
-		"real_cache":          snap.RealCache,
-		"client_cost":         snap.ClientCost,
-		"virtual_cost":        snap.VirtualCost,
-		"real_cost":           snap.RealCost,
-		"client_tokens":       snap.ClientTokens,
-		"virtual_tokens":      snap.VirtualTokens,
-		"real_tokens":         snap.RealTokens,
-		"tokens_estimated":    snap.TokensEstimated,
-		"target_last_outcome": snap.TargetLastOutcome,
+		"client_keys":           snap.ClientKeys,
+		"virtual_models":        snap.VirtualModels,
+		"target_health":         snap.TargetHealth,
+		"target_cooldown":       snap.TargetCooldown,
+		"real_models":           snap.RealModels,
+		"client_cache":          snap.ClientCache,
+		"virtual_cache":         snap.VirtualCache,
+		"real_cache":            snap.RealCache,
+		"client_cost":           snap.ClientCost,
+		"virtual_cost":          snap.VirtualCost,
+		"real_cost":             snap.RealCost,
+		"client_tokens":         snap.ClientTokens,
+		"virtual_tokens":        snap.VirtualTokens,
+		"real_tokens":           snap.RealTokens,
+		"client_token_sources":  snap.ClientTokenSources,
+		"virtual_token_sources": snap.VirtualTokenSources,
+		"real_token_sources":    snap.RealTokenSources,
+		"target_last_outcome":   snap.TargetLastOutcome,
+		"client_key_names":      snap.ClientKeyNames,
 	})
 }
 
@@ -74,9 +78,18 @@ type usageAggregates struct {
 	ClientTokens  map[string]tokenTypeWindows
 	VirtualTokens map[string]tokenTypeWindows
 	RealTokens    map[string]tokenTypeWindows
-	// TokensEstimated marks client keys with at least one estimated-input row in
-	// the widest window, so the UI can flag estimated totals.
-	TokensEstimated map[string]bool
+	// ClientTokenSources / VirtualTokenSources / RealTokenSources split each
+	// group's input-token total by provenance (provider-reported vs locally
+	// estimated). The headline totals above still include both; this exists so a
+	// consumer can tell how much of a total was provider-reported.
+	ClientTokenSources  map[string]tokenSourceWindows
+	VirtualTokenSources map[string]tokenSourceWindows
+	RealTokenSources    map[string]tokenSourceWindows
+	// ClientKeyNames maps a client key id (the key space of every client-keyed
+	// aggregate above) to its display name, so a consumer of the usage envelope
+	// can label client rows without a second request. A usage id absent from
+	// this map belongs to a deleted client key.
+	ClientKeyNames map[string]string
 }
 
 // buildUsageSnapshot computes the full usage/health envelope shared by the
@@ -91,23 +104,26 @@ func (s *Server) buildUsageSnapshot(ctx context.Context, accountID string) (live
 		return liveSnapshot{}, err
 	}
 	return liveSnapshot{
-		GeneratedAt:       now.Format(time.RFC3339Nano),
-		TargetLastOutcome: s.lastOutcomeSnapshot(accountID),
-		TargetCooldown:    s.cooldown.snapshot(accountID, now),
-		TargetHealth:      agg.TargetHealth,
-		VirtualModels:     agg.VirtualModels,
-		ClientKeys:        agg.ClientKeys,
-		RealModels:        agg.RealModels,
-		VirtualCache:      agg.VirtualCache,
-		ClientCache:       agg.ClientCache,
-		RealCache:         agg.RealCache,
-		ClientCost:        agg.ClientCost,
-		VirtualCost:       agg.VirtualCost,
-		RealCost:          agg.RealCost,
-		ClientTokens:      agg.ClientTokens,
-		VirtualTokens:     agg.VirtualTokens,
-		RealTokens:        agg.RealTokens,
-		TokensEstimated:   agg.TokensEstimated,
+		GeneratedAt:         now.Format(time.RFC3339Nano),
+		TargetLastOutcome:   s.lastOutcomeSnapshot(accountID),
+		TargetCooldown:      s.cooldown.snapshot(accountID, now),
+		TargetHealth:        agg.TargetHealth,
+		VirtualModels:       agg.VirtualModels,
+		ClientKeys:          agg.ClientKeys,
+		RealModels:          agg.RealModels,
+		VirtualCache:        agg.VirtualCache,
+		ClientCache:         agg.ClientCache,
+		RealCache:           agg.RealCache,
+		ClientCost:          agg.ClientCost,
+		VirtualCost:         agg.VirtualCost,
+		RealCost:            agg.RealCost,
+		ClientTokens:        agg.ClientTokens,
+		VirtualTokens:       agg.VirtualTokens,
+		RealTokens:          agg.RealTokens,
+		ClientTokenSources:  agg.ClientTokenSources,
+		VirtualTokenSources: agg.VirtualTokenSources,
+		RealTokenSources:    agg.RealTokenSources,
+		ClientKeyNames:      agg.ClientKeyNames,
 		Modules: map[string]any{
 			"inflight_clients":       s.inflight.clientSnapshot(accountID),
 			"inflight_client_routes": s.inflight.clientRouteSnapshot(accountID),
@@ -217,25 +233,40 @@ func (s *Server) computeUsageAggregates(ctx context.Context, accountID string, n
 	if err != nil {
 		return usageAggregates{}, err
 	}
-	tokensEstimated, err := sc.EstimatedClients(ctx, cut7d)
+	clientTokenSources, err := sc.TokenSourcesByClient(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	virtualTokenSources, err := sc.TokenSourcesByVirtual(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	realTokenSources, err := sc.TokenSourcesByReal(ctx, cut1h, cut24h, cut7d)
+	if err != nil {
+		return usageAggregates{}, err
+	}
+	clientKeyNames, err := sc.ClientKeyNames(ctx)
 	if err != nil {
 		return usageAggregates{}, err
 	}
 	return usageAggregates{
-		TargetHealth:    targetHealth,
-		VirtualModels:   virtualModels,
-		ClientKeys:      clientKeys,
-		RealModels:      realModels,
-		VirtualCache:    virtualCache,
-		ClientCache:     clientCache,
-		RealCache:       realCache,
-		ClientCost:      clientCost,
-		VirtualCost:     virtualCost,
-		RealCost:        realCost,
-		ClientTokens:    clientTokens,
-		VirtualTokens:   virtualTokens,
-		RealTokens:      realTokens,
-		TokensEstimated: tokensEstimated,
+		TargetHealth:        targetHealth,
+		VirtualModels:       virtualModels,
+		ClientKeys:          clientKeys,
+		RealModels:          realModels,
+		VirtualCache:        virtualCache,
+		ClientCache:         clientCache,
+		RealCache:           realCache,
+		ClientCost:          clientCost,
+		VirtualCost:         virtualCost,
+		RealCost:            realCost,
+		ClientTokens:        clientTokens,
+		VirtualTokens:       virtualTokens,
+		RealTokens:          realTokens,
+		ClientTokenSources:  clientTokenSources,
+		VirtualTokenSources: virtualTokenSources,
+		RealTokenSources:    realTokenSources,
+		ClientKeyNames:      clientKeyNames,
 	}, nil
 }
 

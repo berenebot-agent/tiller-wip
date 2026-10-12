@@ -69,6 +69,50 @@ func TestRefreshIfDueCadence(t *testing.T) {
 	}
 }
 
+// TestFailureRetryCadence proves a provider whose last poll failed is retried
+// on the short FailureRetry cadence rather than waiting a full background
+// interval, so a transient blip does not leave the card unavailable for 30 min.
+func TestFailureRetryCadence(t *testing.T) {
+	var calls int64
+	adapters["test-flaky"] = func(_ context.Context, _ *http.Client, _ Credential) (Snapshot, error) {
+		n := atomic.AddInt64(&calls, 1)
+		if n == 1 {
+			// First poll fails: no windows → unavailable.
+			return Snapshot{}, nil
+		}
+		pct := 42.0
+		return Snapshot{Available: true, Windows: []Window{{Label: "5h", UsedPercent: &pct}}}, nil
+	}
+	defer delete(adapters, "test-flaky")
+
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	p.Register(ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "test-flaky"})
+
+	now := time.Now().UTC()
+	// First poll runs (and fails, as an empty snapshot).
+	snap, polled := p.RefreshIfDue(context.Background(), "acct", "prov", false, now)
+	if !polled || snap.Available {
+		t.Fatalf("first poll = %+v, polled=%v; want an unavailable result", snap, polled)
+	}
+	// A background refresh before FailureRetry is not due (would be a 30-min
+	// wait were the failure not tracked).
+	if _, polled := p.RefreshIfDue(context.Background(), "acct", "prov", false, now.Add(time.Second)); polled {
+		t.Fatal("failed provider should not poll again within FailureRetry")
+	}
+	// After FailureRetry it is retried, and now succeeds.
+	snap, polled = p.RefreshIfDue(context.Background(), "acct", "prov", false, now.Add(FailureRetry+time.Second))
+	if !polled || !snap.Available {
+		t.Fatalf("retry = %+v, polled=%v; want an available result", snap, polled)
+	}
+	// A healthy provider returns to the normal background cadence.
+	if _, polled := p.RefreshIfDue(context.Background(), "acct", "prov", false, now.Add(FailureRetry+2*time.Second)); polled {
+		t.Fatal("recovered provider should not poll on the failure cadence")
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("adapter calls = %d, want 2", got)
+	}
+}
+
 func TestRefreshIfDueUnknownProvider(t *testing.T) {
 	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "", nil })
 	if _, ok := p.RefreshIfDue(context.Background(), "acct", "missing", false, time.Now()); ok {
@@ -196,15 +240,22 @@ func TestParseClaudeWindow(t *testing.T) {
 	}
 }
 
-func TestFetchOllamaCloudNestedFractions(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// ollamaUsageOnlyServer answers /api/usage with body and 404s /api/balance, so
+// the adapter's balance-first probe falls through to the legacy/usage path.
+func ollamaUsageOnlyServer(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/usage" {
-			t.Errorf("path = %q, want /api/usage", r.URL.Path)
+			http.NotFound(w, r)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		// Verified shape: usage is a fraction (0-1).
-		w.Write([]byte(`{"limits":{"session":{"usage":0.42},"weekly":{"usage":0.55}}}`))
+		w.Write([]byte(body))
 	}))
+}
+
+func TestFetchOllamaCloudNestedFractions(t *testing.T) {
+	srv := ollamaUsageOnlyServer(t, `{"limits":{"session":{"usage":0.42},"weekly":{"usage":0.55}}}`)
 	defer srv.Close()
 	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL, Credential: "tok"})
 	if err != nil {
@@ -224,10 +275,74 @@ func TestFetchOllamaCloudNestedFractions(t *testing.T) {
 	}
 }
 
-func TestFetchOllamaCloudTopLevelFallback(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"session":0.1,"weekly":0.2}`))
+// TestFetchOllamaCloudBalance is the regression for the /api/balance generation:
+// remaining_percent (0-100) is inverted to used_percent, and resets_at is
+// carried through.
+func TestFetchOllamaCloudBalance(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/balance" {
+			t.Errorf("path = %q, want /api/balance", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+			t.Errorf("Authorization = %q, want Bearer tok", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"included":{"session":{"remaining_percent":72.34,"resets_at":"2026-10-10T11:00:00Z"},"weekly":{"remaining_percent":18.55,"resets_at":"2026-10-12T00:00:00Z"}},"purchased":{"balance_usd":0}}`))
 	}))
+	defer srv.Close()
+	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL, Credential: "tok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Windows) != 2 {
+		t.Fatalf("windows = %+v, want 2 (balance preferred, no credits when 0)", snap.Windows)
+	}
+	if snap.Windows[0].Label != "session" || snap.Windows[0].UsedPercent == nil {
+		t.Fatalf("session window = %+v", snap.Windows[0])
+	}
+	if got := *snap.Windows[0].UsedPercent; got < 27.65 || got > 27.67 {
+		t.Fatalf("session used pct = %v, want ~27.66", got)
+	}
+	if snap.Windows[0].ResetsAt == nil || snap.Windows[0].ResetsAt.UTC().Hour() != 11 {
+		t.Fatalf("session resets_at = %v, want 11:00Z", snap.Windows[0].ResetsAt)
+	}
+	if snap.Windows[1].Label != "weekly" || snap.Windows[1].UsedPercent == nil {
+		t.Fatalf("weekly window = %+v", snap.Windows[1])
+	}
+	if got := *snap.Windows[1].UsedPercent; got < 81.4 || got > 81.5 {
+		t.Fatalf("weekly used pct = %v, want ~81.45", got)
+	}
+}
+
+// TestFetchOllamaCloudBalancePurchasedCovered: a non-zero purchased balance is
+// surfaced as a "credits" window (remaining USD), not a percentage.
+func TestFetchOllamaCloudBalancePurchasedCovered(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/balance" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte(`{"included":{"session":{"remaining_percent":90}},"purchased":{"balance_usd":12.5}}`))
+	}))
+	defer srv.Close()
+	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Windows) != 2 {
+		t.Fatalf("windows = %+v, want session + credits", snap.Windows)
+	}
+	credits := snap.Windows[1]
+	if credits.Label != "credits" || credits.Remaining == nil || *credits.Remaining != 12.5 {
+		t.Fatalf("credits window = %+v, want remaining 12.5", credits)
+	}
+	if credits.UsedPercent != nil {
+		t.Fatalf("credits window should not carry a percentage, got %+v", credits)
+	}
+}
+
+func TestFetchOllamaCloudTopLevelFallback(t *testing.T) {
+	srv := ollamaUsageOnlyServer(t, `{"session":0.1,"weekly":0.2}`)
 	defer srv.Close()
 	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
 	if err != nil {
@@ -239,9 +354,7 @@ func TestFetchOllamaCloudTopLevelFallback(t *testing.T) {
 }
 
 func TestFetchOllamaCloudLegacyArrayFallback(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte(`{"limits":[{"label":"session","used_percent":30}]}`))
-	}))
+	srv := ollamaUsageOnlyServer(t, `{"limits":[{"label":"session","used_percent":30}]}`)
 	defer srv.Close()
 	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
 	if err != nil {
@@ -249,6 +362,30 @@ func TestFetchOllamaCloudLegacyArrayFallback(t *testing.T) {
 	}
 	if len(snap.Windows) != 1 || snap.Windows[0].Label != "session" || *snap.Windows[0].UsedPercent != 30 {
 		t.Fatalf("windows = %+v", snap.Windows)
+	}
+}
+
+// TestFetchOllamaCloudUsageShapeChangeNoLongerErrors: the modern /api/usage
+// returns a request-count time series with no windows. Since /api/balance is
+// probed first and succeeds with windows, that remains the source. When both
+// endpoints respond but yield nothing, the result is an empty (not error)
+// snapshot so the poller reports "format unavailable" rather than a hard error.
+func TestFetchOllamaCloudEmptyShapeIsNotAnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/balance" {
+			w.Write([]byte(`{"included":{},"purchased":{"balance_usd":0}}`))
+			return
+		}
+		w.Write([]byte(`{"range":"7d","scope":"self","totals":{"request_count":22395}}`))
+	}))
+	defer srv.Close()
+	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("empty shapes should not be an error: %v", err)
+	}
+	if len(snap.Windows) != 0 {
+		t.Fatalf("windows = %+v, want none", snap.Windows)
 	}
 }
 

@@ -52,6 +52,79 @@ Capability metadata is informational: `/v1/models` includes `context_length` and
 
 ---
 
+## Management API
+
+The web interface is a pure client of a JSON REST API under `/api/admin/*`. In local mode you can drive that same API from scripts and agents (for example a Hermes agent) with a **management API token**: create one under **Settings → Management API**, and authenticate with `Authorization: Bearer mt-tr-…`. No cookie or CSRF token is involved.
+
+Each token carries per-area access with three escalating levels — `read` ⊂ `write` ⊂ `delete`:
+
+| Area | read | write | delete |
+|---|---|---|---|
+| Providers | inspect providers, models, OAuth status | create/edit providers, swap credentials, refresh discovery, connect OAuth, add manual models | delete providers/models, disconnect OAuth |
+| Virtual models | inspect routes | create/edit groups and virtual models | delete groups and virtual models |
+| Client keys | list keys and permissions | create/edit/rotate keys, edit permissions | delete keys |
+| Settings | read settings | change logging, fallback, and notification settings, send a test notification | — |
+| Monitoring | usage, quota, activity (+CSV exports), cooldown status, health | — | clear activity, clear cooldown |
+
+Notes:
+
+- Tokens are shown **once** at creation; only a bcrypt hash is stored. Rotate or revoke at any time; expiry is optional (presets or a custom date).
+- Token management itself is browser-only: a token can never list, mint, or edit tokens. It can introspect itself (`GET /api/admin/api-tokens/self`).
+- Permanently out of reach for tokens: backup/account export, identity (password, passkeys, email, account deletion, sessions), onboarding, debug endpoints, and the live SSE stream.
+- Tokens survive admin credential changes; revoke compromised tokens explicitly in the Management API tab.
+- A built-in usage guide is served at `/api/admin` (and `/api`): open it in a browser for a rendered reference, or fetch it with `Accept: text/markdown` to hand an agent the entire guide as plain text.
+- A machine-readable discovery document is served at `/api.json` (or `/api` with `Accept: application/json`), so a host SDK can probe the instance — name, API base, auth scheme, key prefix, scopes, capabilities, and limits.
+
+### Embedding Tiller
+
+Because the control plane is a plain JSON API, Tiller can run headless inside
+another application as its LLM gateway and protocol translator, with the host
+owning the front end. Set `TILLER_ADMIN_API_KEY` (or `TILLER_ADMIN_API_KEY_FILE`)
+to a management token and the router seeds a single full-power token named
+`boot-admin` at boot — the host provisions providers, models, routes, and client
+keys entirely over the API, with no browser:
+
+```bash
+# 1. Create a management token in any Tiller's Settings → Management API,
+#    or generate a fresh instance's seed by copying it from there once.
+# 2. Boot the embedded instance with that token:
+TILLER_ADMIN_API_KEY=mt-tr-... docker compose up -d
+# 3. Point your host application's SDK at the instance:
+curl -H "Authorization: Bearer mt-tr-..." http://tiller:8080/api/admin/providers
+```
+
+Notes for embedders:
+
+- The seed is **full power** (every area at the delete ceiling) and never
+  logged. It is environment-managed and cannot be edited, rotated, or revoked
+  in the browser/token lifecycle API; bulk revocation excludes it. Rotate it
+  by changing the configured key and restarting — the fixed
+  identity replaces the old credential and invalidates it immediately.
+- Permanently revoke it by removing both `TILLER_ADMIN_API_KEY` and
+  `TILLER_ADMIN_API_KEY_FILE` and restarting; startup removes its stored row.
+  The key file takes precedence when configured.
+- A seed key counts as "configured": the instance does not report itself as
+  needing first-run browser setup.
+- Reach the management API over the bearer token; the token-lifecycle endpoints
+  themselves remain browser/cookie-only, so the seed is the one credential the
+  host manages out of band. Bind the instance to a private network/loopback and
+  let the host application own all external access.
+- Activity still records by default; turn it off per client key (`logging_enabled`)
+  or account-wide (`default_logging_enabled`) if the host wants no history.
+
+```bash
+# Create a token in Settings → Management API, then:
+curl -H "Authorization: Bearer mt-tr-..." \
+  https://your-router.example.com/api/admin/providers
+
+# Create a virtual model (the canonical id becomes <group>/<name>)
+curl -H "Authorization: Bearer mt-tr-..." -H "Content-Type: application/json" \
+  -d '{"group_name":"main","name":"coding","targets":[{"provider_model_id":"...","enabled":true}]}' \
+  https://your-router.example.com/api/admin/virtual-models
+```
+
+---
+
 ## Virtual models
 
 A virtual model gives a stable client-facing identity to one or more upstream targets. For example, `main/coding` might resolve to:

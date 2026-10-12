@@ -1002,6 +1002,70 @@ func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
 	}
 }
 
+// Codex returns two context fields with different meanings: `context_window`
+// is the client's session default (272000 for the GPT-6/5.6 family, aligned to
+// OpenAI's 272K billing tier) and `max_context_window` is the ceiling the
+// backend accepts (872000). Tiller must advertise the CEILING — clients size
+// their compaction from this number, so serving the session default makes them
+// compact ~3.2x earlier than the model requires.
+func TestDiscoverCodexPrefersMaxContextWindow(t *testing.T) {
+	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.156.1"})
+	}))
+	defer release.Close()
+	original := codex.ReleaseChannelURL
+	codex.ReleaseChannelURL = release.URL
+	defer func() { codex.ReleaseChannelURL = original }()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			http.Error(w, "wrong path", http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"models": []any{
+			// Steady state: a real ceiling well above the session default.
+			map[string]any{
+				"slug": "gpt-6-astra", "display_name": "GPT-6 Astra",
+				"supported_in_api": true, "visibility": "list",
+				"context_window": 272000, "max_context_window": 872000,
+			},
+			// Models where the two agree must keep that value, not gain one.
+			map[string]any{
+				"slug": "gpt-5.5", "display_name": "GPT-5.5",
+				"supported_in_api": true, "visibility": "list",
+				"context_window": 272000, "max_context_window": 272000,
+			},
+			// A backend that omits the max must fall back, never regress to 0:
+			// a zero limit would leave clients with nothing to compact against.
+			map[string]any{
+				"slug": "gpt-no-max", "display_name": "GPT no max",
+				"supported_in_api": true, "visibility": "list",
+				"context_window": 200000,
+			},
+		}})
+	}))
+	defer upstream.Close()
+
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: codexProviderType, BaseURL: upstream.URL, Credential: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]Model, len(models))
+	for _, model := range models {
+		byID[model.ID] = model
+	}
+
+	if got := byID["gpt-6-astra"].ContextLength; got != 872000 {
+		t.Errorf("gpt-6-astra ContextLength = %d, want 872000 (the max, not the session default)", got)
+	}
+	if got := byID["gpt-5.5"].ContextLength; got != 272000 {
+		t.Errorf("gpt-5.5 ContextLength = %d, want 272000 (both fields agree)", got)
+	}
+	if got := byID["gpt-no-max"].ContextLength; got != 200000 {
+		t.Errorf("gpt-no-max ContextLength = %d, want 200000 (fallback to context_window)", got)
+	}
+}
+
 func TestCodexClientEffortsHideWireMax(t *testing.T) {
 	cases := []struct {
 		name   string

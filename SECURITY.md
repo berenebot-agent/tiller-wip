@@ -101,6 +101,41 @@ no security effect, and the sliding cache exists to keep hash-verification cost
 proportional to the rate of distinct/expired keys rather than request volume.
 Both caches are periodically swept and capped so they cannot grow unbounded.
 
+**Management API tokens (local mode).** Local operators can mint management
+tokens (`mt-tr-<selector>.<secret>`, 256-bit secrets, bcrypt-hash-only, shown
+once) that authenticate the admin REST surface with `Authorization: Bearer`
+instead of the session cookie. The token and cookie paths are exclusive: a
+request carrying an `Authorization` header is decided by the token alone and
+can never fall back to cookie authentication; CSRF is skipped only for that
+path because a bearer credential is not browser-ambient. Tokens carry per-area
+ceilings (read/write/delete) enforced per route; token lifecycle management
+itself is cookie-only, so a compromised token cannot mint siblings or widen its
+own scopes. Backup export, account export, identity operations, setup, debug
+endpoints, and the live SSE stream are never token-reachable. Failed token
+authentication is rate-limited per selector and per address; rotate/delete/
+scope changes invalidate the verification cache synchronously. Tokens survive
+admin credential changes — revoke them explicitly on suspected compromise. In
+hosted mode the feature is disabled (routes 404, no bearer path exists).
+
+**Headless embedding seed.** Setting `TILLER_ADMIN_API_KEY` /
+`TILLER_ADMIN_API_KEY_FILE` (local mode only) seeds a single full-power
+management token named `boot-admin` at boot, so an embedding host can provision
+the instance over the API with no browser. The value is bcrypt-hash-only and
+never logged; a re-seed replaces and immediately invalidates the previous
+credential. This is a deliberately environment-provisioned super-user
+credential: the operator is expected to bind the instance to a private
+network/loopback and let the host application own external access. Hosted mode
+rejects the variable at config load.
+
+The environment key is authoritative, not a one-time seed. `boot-admin` is
+read-only in the browser and token lifecycle API, and bulk revocation excludes
+it. Change the configured key and restart to rotate it. Remove both
+`TILLER_ADMIN_API_KEY` and `TILLER_ADMIN_API_KEY_FILE` and restart to permanently
+revoke it; startup then removes its persisted token row. The file source takes
+precedence, so changing only the environment value while a key file is configured
+does not rotate the credential. Browser-managed tokens are unaffected by these
+configuration changes and remain explicitly revocable.
+
 **Hosted identity.** `TILLER_MODE=hosted` enables email/password accounts. Human
 passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
 single-use, short-lived, and hash-only at rest. Customer sessions and platform

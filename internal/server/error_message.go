@@ -23,6 +23,8 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "Upstream provider response exceeded Tiller's size limit"
 	case "context_limit_exceeded":
 		return "The request exceeds this target's context window. Shorten the conversation or use a target with a larger context window."
+	case "reasoning_roundtrip_required":
+		return "The upstream provider requires the reasoning_content from earlier assistant turns to be passed back when tools are used. Include each prior assistant message's reasoning_content in the conversation and retry."
 	case "model_not_found":
 		return "The requested model was not found or is not configured"
 	case "database_error":

@@ -51,9 +51,11 @@ type RequestLogInsert struct {
 	// ProviderCostMicros is a provider-reported exact cost (e.g. OpenRouter
 	// usage.cost). When present it supersedes the estimate for display.
 	ProviderCostMicros *int64
-	// InputTokensEstimated flags a row whose input count is a local heuristic
-	// estimate (the provider omitted usage), rendered with an "est." marker.
-	InputTokensEstimated bool
+	// InputTokensSource / OutputTokensSource record where each count came from:
+	// "provider" when the upstream reported it, "estimated" when it is a local
+	// heuristic. Nil when no count of that kind was recorded.
+	InputTokensSource    *string
+	OutputTokensSource   *string
 	ProviderRequestID    *string
 	ClientRequestID      string
 	ErrorText            *string
@@ -168,8 +170,8 @@ func insertRequestLogRow(ctx context.Context, q querier, accountID string, in *R
 			attempts++
 		}
 	}
-	if _, err := q.ExecContext(ctx, `INSERT INTO request_logs(id,account_id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,estimated_cost_micros,provider_cost_micros,input_tokens_estimated,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		in.ID, accountID, in.ClientKeyID, in.ClientName, in.RequestedModel, in.ExposedModel, in.RouteKind, in.RouteModelID, in.RouteModel, routeStatus, in.ResolvedProvider, in.ResolvedModel, in.Protocol, boolInt(in.Streaming), in.HTTPStatus, in.LatencyMs, in.InputTokens, in.OutputTokens, in.CacheReadInputTokens, in.CacheCreationInputTokens, in.EstimatedCostMicros, in.ProviderCostMicros, boolInt(in.InputTokensEstimated), in.ProviderRequestID, in.ClientRequestID, in.ErrorText, in.ErrorMessage, in.RequestBody, boolInt(in.RequestBodyTruncated), in.ErrorBody, boolInt(in.ErrorBodyTruncated), attempts, boolInt(in.FallbackUsed), in.FallbackReason, in.CreatedAt); err != nil {
+	if _, err := q.ExecContext(ctx, `INSERT INTO request_logs(id,account_id,client_key_id,client_name,requested_model,exposed_model,route_kind,route_model_id,route_model,route_status,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,cache_read_input_tokens,cache_creation_input_tokens,estimated_cost_micros,provider_cost_micros,input_tokens_source,output_tokens_source,provider_request_id,client_request_id,error_text,error_message,request_body,request_body_truncated,error_body,error_body_truncated,attempt_count,fallback_used,fallback_reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		in.ID, accountID, in.ClientKeyID, in.ClientName, in.RequestedModel, in.ExposedModel, in.RouteKind, in.RouteModelID, in.RouteModel, routeStatus, in.ResolvedProvider, in.ResolvedModel, in.Protocol, boolInt(in.Streaming), in.HTTPStatus, in.LatencyMs, in.InputTokens, in.OutputTokens, in.CacheReadInputTokens, in.CacheCreationInputTokens, in.EstimatedCostMicros, in.ProviderCostMicros, in.InputTokensSource, in.OutputTokensSource, in.ProviderRequestID, in.ClientRequestID, in.ErrorText, in.ErrorMessage, in.RequestBody, boolInt(in.RequestBodyTruncated), in.ErrorBody, boolInt(in.ErrorBodyTruncated), attempts, boolInt(in.FallbackUsed), in.FallbackReason, in.CreatedAt); err != nil {
 		return err
 	}
 	for i, attempt := range in.Attempts {

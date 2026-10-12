@@ -6,6 +6,90 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] - 2026-10-12
+
+Fifth public beta. Adds headless administration over the management API,
+Activity export improvements, and provider correctness fixes for Codex and
+DeepSeek.
+
+### Added
+
+- **Management API tokens (local mode).** Settings → Management API lets you
+  mint `mt-tr-` bearer tokens that drive the same JSON REST API the dashboard
+  uses, so scripts and agents (for example a Hermes agent) can manage providers,
+  models, virtual routes, client keys, settings, and monitoring without a
+  browser session. Each token carries per-area access with escalating levels —
+  read ⊂ write ⊂ delete — across Providers, Virtual models, Client keys,
+  Settings, and Monitoring. Tokens are bcrypt-hash-only and shown once; they
+  support optional expiry, rotation, revocation, and revoke-all. Token
+  management itself is browser-only (a token can only introspect itself), and
+  backup export, identity operations, setup, debug endpoints, and the live SSE
+  stream are never token-reachable. Local mode only; hosted instances have no
+  token routes. A built-in usage guide is served at `/api/admin` (and `/api`) —
+  rendered HTML for people, `text/markdown` for agents that request it — and the
+  one-time secret dialog links straight to it. A machine-readable discovery
+  document is served at `/api.json` (or `/api` with `Accept: application/json`).
+- **Headless embedding bootstrap.** Setting `TILLER_ADMIN_API_KEY` (or
+  `TILLER_ADMIN_API_KEY_FILE`) seeds a single full-power management token named
+  `boot-admin` at boot, so a host application can run Tiller as an embedded LLM
+  gateway and provision it entirely over the API with no browser. The seed is
+  never logged; rotating the env value and restarting replaces and immediately
+  invalidates the previous credential. Local mode only; a seed key counts as a
+  configured instance for first-run setup purposes.
+
+### Changed
+
+- **Codex models now advertise their real context ceiling.** Discovery reads
+  `max_context_window` and prefers it over the client session default
+  (`context_window`), falling back when the backend omits the max. Six of the
+  seven Codex models move from a 272000 advertised context to 872000, so Codex
+  clients (opencode, CodexUI, Hermes) compact later. Note that sessions crossing
+  272K input tokens fall into OpenAI's 2x input / 1.5x output billing tier.
+- **Activity export.** "Export CSV" is right-aligned next to "Clear activity",
+  the export dialog gains a custom from/to date range alongside the 24h/7d/30d/All
+  presets, and the Global activity card has its own account-wide export via
+  `GET /api/admin/activity/export`.
+- **Usage API.** `GET /api/admin/usage` (and the live SSE snapshot) now includes a
+  `client_key_names {id: name}` map so client-keyed aggregates can be labelled in
+  one request instead of cross-referencing `/api/admin/client-keys`.
+- **Activity export token provenance (breaking).** Token counts now carry their
+  source. The Activity CSV replaces the single `input_tokens_estimated` boolean
+  with `input_tokens_source` and `output_tokens_source`, each `provider` (the
+  upstream reported it) or `estimated` (a local heuristic used because the
+  provider omitted usage), or blank when the request recorded no count of that
+  kind. `/api/admin/usage` replaces `tokens_estimated` with `client_token_sources`,
+  `virtual_token_sources`, and `real_token_sources`, each splitting a group's
+  input total into `reported` and `estimated` windows (1h/24h/7d). **This is a
+  breaking change to the export and usage envelope** — the old
+  `input_tokens_estimated` column and `tokens_estimated` field are removed. Token
+  totals are unchanged: they still include estimated counts; the source fields
+  only make the mix transparent so an export can separate provider-reported
+  accounting from local estimates. The `estimated_cost_micros` /
+  `provider_cost_micros` cost provenance is unaffected, and its cost-side count
+  field is renamed internally (`CostWindows.EstimatedRows`) purely to stop the
+  name colliding with the new token-side term.
+
+### Fixed
+
+- **DeepSeek reasoning round-trip.** DeepSeek ignores OpenRouter's
+  `reasoning.enabled` object and, with tools present, requires `reasoning_content`
+  on every prior assistant turn. Requests carrying a foreign history failed with
+  HTTP 400. The router now maps the toggle onto DeepSeek's native `thinking.type`,
+  back-fills an empty `reasoning_content` where it is missing, and classifies any
+  remaining round-trip 400 as `reasoning_roundtrip_required` (request-shaped, so
+  it no longer cools a healthy target).
+- **Ollama Cloud quota.** The adapter probes `/api/balance` first (the current
+  subscription-window shape) and falls back to the legacy `/api/usage` shapes, so
+  the provider card works on either build. The quota poller also warms its cache
+  on boot and retries a failed provider on the short retry cadence.
+- **Bootstrap token lifecycle.** The env-seeded `boot-admin` token is explicitly
+  environment-managed: browser/API lifecycle mutations return
+  `409 environment_managed_token`, bulk revocation excludes it and reports the
+  exclusion, and the UI hides its lifecycle controls.
+- **Exclusive bearer authentication.** An `Authorization` header always selects
+  bearer authentication, even when its value is empty, and never falls back to
+  cookie auth.
+
 ## [0.1.0-beta.4] - 2026-10-09
 
 Fourth public beta. Re-publishes the 0.1.0-beta.3 feature set with a release-gate
