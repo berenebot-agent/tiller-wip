@@ -243,18 +243,26 @@ var activityDataUpgrades = []struct {
 		apply:   `UPDATE request_logs SET route_status='unresolved' WHERE route_status='legacy'`,
 	},
 	{
-		// 005_token_provenance_backfill carries the historical input-only
-		// boolean into the new per-direction source enum. A row flagged
-		// input_tokens_estimated=1 was a local heuristic, so its source is
-		// 'estimated'; every other row that actually carries an input count was
-		// provider-reported. Rows with no input count at all stay NULL.
+		// 005_token_provenance_backfill carries the historical counts into the
+		// new per-direction source enum. Before this change every stored count
+		// was either provider-reported or a local heuristic, and the heuristic
+		// applied to input only:
+		//   - input: flagged input_tokens_estimated=1 rows were local estimates;
+		//     any other row carrying an input count was provider-reported.
+		//   - output: every historical output count was provider-reported (the
+		//     router never estimated output), so any row with output_tokens set
+		//     gets 'provider'.
+		// Rows with no count of a kind stay NULL for that direction.
 		version: "005_token_provenance_backfill",
 		apply: `UPDATE request_logs
 			SET input_tokens_source = CASE
 				WHEN input_tokens_estimated = 1 THEN 'estimated'
 				WHEN input_tokens IS NOT NULL THEN 'provider'
+				ELSE NULL END,
+				output_tokens_source = CASE
+				WHEN output_tokens IS NOT NULL THEN 'provider'
 				ELSE NULL END
-			WHERE input_tokens_source IS NULL`,
+			WHERE input_tokens_source IS NULL OR output_tokens_source IS NULL`,
 	},
 }
 
@@ -337,21 +345,18 @@ func upgradeActivityData(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// dropActivityColumns applies the one-time column removals exactly once,
-// recording each in activity_schema_migrations. A fresh database never has the
-// column (so the probe skips it); an existing database that already ran the
-// step has the version row (so the rerun is a no-op). This runs after
-// upgradeActivityData so a backfill that reads the old column always precedes
-// its removal.
+// dropActivityColumns enforces the retired-column invariant on every boot: a
+// column listed here must not exist, so if it is present it is dropped. The
+// column probe — never the recorded version row — is the guard, deliberately.
+// An earlier design skipped the drop once its version was recorded, but the
+// additive 002_cost_and_estimate step is re-evaluated every startup and
+// recreates input_tokens_estimated whenever it is absent, so a version-row
+// guard would let the retired column return on the second boot and stay. Keying
+// the drop on the column itself keeps the invariant true no matter what any
+// other upgrade step does. This runs after upgradeActivityData so the backfill
+// that reads the old column always precedes its removal.
 func dropActivityColumns(ctx context.Context, db *sql.DB) error {
 	for _, drop := range activityColumnDrops {
-		var applied int
-		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM activity_schema_migrations WHERE version=?`, drop.version).Scan(&applied); err != nil {
-			return fmt.Errorf("activity column drop %s (check): %w", drop.version, err)
-		}
-		if applied != 0 {
-			continue
-		}
 		exists, err := activityColumnExists(ctx, db, drop.table, drop.column)
 		if err != nil {
 			return err
@@ -360,9 +365,12 @@ func dropActivityColumns(ctx context.Context, db *sql.DB) error {
 			if _, err := db.ExecContext(ctx, `ALTER TABLE `+drop.table+` DROP COLUMN `+drop.column); err != nil {
 				return fmt.Errorf("activity column drop %s (%s.%s): %w", drop.version, drop.table, drop.column, err)
 			}
-		}
-		if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO activity_schema_migrations(version,applied_at) VALUES(?,?)`, drop.version, Now()); err != nil {
-			return err
+			// Record the version only once the column has actually been removed,
+			// so the migration ledger reflects a real state change. It is
+			// bookkeeping, not the guard (see above).
+			if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO activity_schema_migrations(version,applied_at) VALUES(?,?)`, drop.version, Now()); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
