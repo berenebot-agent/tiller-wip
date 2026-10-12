@@ -1105,12 +1105,12 @@ func translateResponseObserved(w http.ResponseWriter, keepalive *sseKeepaliveWri
 	reader := bufio.NewReader(r)
 	prefix, err := reader.Peek(1)
 	if err != nil {
-		return err
+		return translatedStreamReadError(err)
 	}
 	if prefix[0] == '{' || prefix[0] == '[' {
 		body, err := io.ReadAll(io.LimitReader(reader, 64<<20))
 		if err != nil {
-			return err
+			return translatedStreamReadError(err)
 		}
 		extractUsage(body, usage)
 		translated, err := translateNonstreamResponse(body, incoming, target, route.RequestedModel)
@@ -1335,7 +1335,10 @@ func translateSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, 
 				deltas, done := canonicalDeltas(event.Name, payload, target, state)
 				for _, delta := range deltas {
 					if delta.Kind == "error" {
-						return errors.New("upstream stream reported failure")
+						if target == providers.ProtocolResponses && event.Name == "response.incomplete" {
+							return errUpstreamStreamIncomplete
+						}
+						return errUpstreamStreamError
 					}
 					if err := writeTranslatedEvent(keepalive, incoming, state, delta); err != nil {
 						return err
@@ -1359,9 +1362,9 @@ func translateSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, 
 				return nil
 			}
 			if err == io.EOF {
-				return errors.New("upstream stream ended before completion")
+				return errUpstreamStreamEOF
 			}
-			return err
+			return translatedStreamReadError(err)
 		}
 	}
 }
@@ -1381,6 +1384,35 @@ func writeStreamFailure(w io.Writer, protocol providers.Protocol, code, id, mode
 // errUpstreamStreamError marks an SSE stream that carried an explicit upstream
 // failure, so callers can classify it separately from a read error.
 var errUpstreamStreamError = errors.New("upstream stream reported failure")
+
+// These fixed markers retain only the failure category, never provider payloads.
+var (
+	errUpstreamStreamIncomplete = errors.New("upstream stream reported an incomplete response")
+	errUpstreamStreamEOF        = errors.New("upstream stream ended before completion")
+	errUpstreamStreamRead       = errors.New("could not read upstream stream")
+)
+
+func translatedStreamReadError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return errUpstreamStreamEOF
+	}
+	return fmt.Errorf("%w: %w", errUpstreamStreamRead, err)
+}
+
+func translatedStreamFailureClass(err error) string {
+	switch {
+	case errors.Is(err, errUpstreamStreamError):
+		return "upstream_stream_error"
+	case errors.Is(err, errUpstreamStreamIncomplete):
+		return "upstream_stream_incomplete"
+	case errors.Is(err, errUpstreamStreamEOF):
+		return "upstream_stream_eof"
+	case errors.Is(err, errUpstreamStreamRead):
+		return "upstream_read_error"
+	default:
+		return "translation_error"
+	}
+}
 
 // relayNonstreamFromSSE reads an upstream SSE stream and aggregates it into a
 // single non-streaming JSON response for the client. It exists because a target
