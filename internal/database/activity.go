@@ -56,7 +56,15 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	cache_creation_input_tokens INTEGER,
 	estimated_cost_micros INTEGER,
 	provider_cost_micros INTEGER,
-	input_tokens_estimated INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens_estimated IN (0,1)),
+	-- input_tokens_source / output_tokens_source record where each count came
+	-- from: 'provider' when the upstream reported it in its usage block, and
+	-- 'estimated' when it is a local heuristic (a chars-per-token estimate made
+	-- because the provider omitted usage). NULL means the request carried no
+	-- count of that kind at all (e.g. a failed request, or a response with no
+	-- usage and no captured body). The token totals in the usage aggregates sum
+	-- both sources; the source columns let an export separate them.
+	input_tokens_source TEXT CHECK (input_tokens_source IN ('provider','estimated')),
+	output_tokens_source TEXT CHECK (output_tokens_source IN ('provider','estimated')),
 	provider_request_id TEXT,
 	client_request_id TEXT NOT NULL,
 	error_text TEXT,
@@ -189,7 +197,26 @@ var activityUpgrades = []struct {
 		columns: []struct{ table, column, ddl string }{
 			{"request_logs", "estimated_cost_micros", `ALTER TABLE request_logs ADD COLUMN estimated_cost_micros INTEGER`},
 			{"request_logs", "provider_cost_micros", `ALTER TABLE request_logs ADD COLUMN provider_cost_micros INTEGER`},
+			// Retained so this already-shipped step stays immutable. On a fresh
+			// database it re-adds the column (the monolithic schema no longer
+			// defines it) and 006_drop_input_tokens_estimated removes it again;
+			// on a deployed database it is the historical column that the
+			// provenance backfill reads.
 			{"request_logs", "input_tokens_estimated", `ALTER TABLE request_logs ADD COLUMN input_tokens_estimated INTEGER NOT NULL DEFAULT 0`},
+		},
+	},
+	{
+		// 004_token_provenance replaces the single input-only boolean
+		// (input_tokens_estimated) with a per-direction source enum covering
+		// both input and output. The data rewrite in
+		// activityDataUpgrades/005_token_provenance_backfill carries the
+		// historical boolean into the new column before the old one is dropped,
+		// but the column order is deliberate: add first, backfill, then drop in
+		// a later step so a partial upgrade still reads.
+		version: "004_token_provenance_columns",
+		columns: []struct{ table, column, ddl string }{
+			{"request_logs", "input_tokens_source", `ALTER TABLE request_logs ADD COLUMN input_tokens_source TEXT CHECK (input_tokens_source IN ('provider','estimated'))`},
+			{"request_logs", "output_tokens_source", `ALTER TABLE request_logs ADD COLUMN output_tokens_source TEXT CHECK (output_tokens_source IN ('provider','estimated'))`},
 		},
 	},
 }
@@ -214,6 +241,37 @@ var activityDataUpgrades = []struct {
 		// longer write it) so this rewrite need not rebuild the table.
 		version: "003_legacy_route_unresolved",
 		apply:   `UPDATE request_logs SET route_status='unresolved' WHERE route_status='legacy'`,
+	},
+	{
+		// 005_token_provenance_backfill carries the historical input-only
+		// boolean into the new per-direction source enum. A row flagged
+		// input_tokens_estimated=1 was a local heuristic, so its source is
+		// 'estimated'; every other row that actually carries an input count was
+		// provider-reported. Rows with no input count at all stay NULL.
+		version: "005_token_provenance_backfill",
+		apply: `UPDATE request_logs
+			SET input_tokens_source = CASE
+				WHEN input_tokens_estimated = 1 THEN 'estimated'
+				WHEN input_tokens IS NOT NULL THEN 'provider'
+				ELSE NULL END
+			WHERE input_tokens_source IS NULL`,
+	},
+}
+
+// activityColumnDrops are one-time column removals applied to a pre-existing
+// Activity database, keyed on activity_schema_migrations. They are split out
+// from the additive upgrades so the backfill above (which reads the old column)
+// always runs before the drop. A fresh database never has the column, so the
+// step is a no-op.
+var activityColumnDrops = []struct {
+	version string
+	table   string
+	column  string
+}{
+	{
+		version: "006_drop_input_tokens_estimated",
+		table:   "request_logs",
+		column:  "input_tokens_estimated",
 	},
 }
 
@@ -240,6 +298,9 @@ func upgradeActivitySchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	if err := upgradeActivityData(ctx, db); err != nil {
+		return err
+	}
+	if err := dropActivityColumns(ctx, db); err != nil {
 		return err
 	}
 	return nil
@@ -271,6 +332,37 @@ func upgradeActivityData(ctx context.Context, db *sql.DB) error {
 		}
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("activity data upgrade %s (commit): %w", up.version, err)
+		}
+	}
+	return nil
+}
+
+// dropActivityColumns applies the one-time column removals exactly once,
+// recording each in activity_schema_migrations. A fresh database never has the
+// column (so the probe skips it); an existing database that already ran the
+// step has the version row (so the rerun is a no-op). This runs after
+// upgradeActivityData so a backfill that reads the old column always precedes
+// its removal.
+func dropActivityColumns(ctx context.Context, db *sql.DB) error {
+	for _, drop := range activityColumnDrops {
+		var applied int
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM activity_schema_migrations WHERE version=?`, drop.version).Scan(&applied); err != nil {
+			return fmt.Errorf("activity column drop %s (check): %w", drop.version, err)
+		}
+		if applied != 0 {
+			continue
+		}
+		exists, err := activityColumnExists(ctx, db, drop.table, drop.column)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if _, err := db.ExecContext(ctx, `ALTER TABLE `+drop.table+` DROP COLUMN `+drop.column); err != nil {
+				return fmt.Errorf("activity column drop %s (%s.%s): %w", drop.version, drop.table, drop.column, err)
+			}
+		}
+		if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO activity_schema_migrations(version,applied_at) VALUES(?,?)`, drop.version, Now()); err != nil {
+			return err
 		}
 	}
 	return nil

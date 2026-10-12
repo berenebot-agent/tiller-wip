@@ -41,7 +41,8 @@ type logRow struct {
 	// providerCostMicros is a provider-reported exact cost (OpenRouter
 	// usage.cost) when the upstream response carried one.
 	providerCostMicros   *int64
-	inputTokensEstimated bool
+	inputTokensSource    *string
+	outputTokensSource   *string
 	inputEstimate        int64
 	providerRequestID    *string
 	clientRequestID      string
@@ -69,7 +70,7 @@ func (row *logRow) copyUsage(usage *usageCapture) {
 	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
 	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 	row.providerCostMicros = usage.providerCostMicros
-	row.inputTokensEstimated = usage.inputTokensEstimated
+	row.inputTokensSource, row.outputTokensSource = usage.inputTokensSource, usage.outputTokensSource
 }
 
 type requestAttempt struct {
@@ -141,14 +142,25 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	// would otherwise leave input_tokens NULL and hide the request from token
 	// totals. When a successful row has no provider-reported input count but a
 	// body was captured, estimate it so the request still appears in the
-	// aggregate. The row is flagged estimated so the UI can mark it and so it is
-	// never confused with provider-reported accounting.
+	// aggregate, and mark the row's input source as 'estimated' so an export can
+	// separate it from provider-reported accounting. The estimated value is
+	// included in the token totals by design.
 	if row.inputTokens == nil && row.inputEstimate > 0 && row.httpStatus >= 200 && row.httpStatus < 300 {
 		if est := row.inputEstimate; est > 0 {
 			v := est
 			row.inputTokens = &v
-			row.inputTokensEstimated = true
+			row.inputTokensSource = strPtr(sourceEstimated)
 		}
+	}
+	// Provider-reported counts are labelled at the point the usage block is
+	// parsed (provider 'provider'), so any row that still carries a count with no
+	// source is a provider report that predates an explicit source. Label it here
+	// rather than in the query path.
+	if row.inputTokens != nil && row.inputTokensSource == nil {
+		row.inputTokensSource = strPtr(sourceProvider)
+	}
+	if row.outputTokens != nil && row.outputTokensSource == nil {
+		row.outputTokensSource = strPtr(sourceProvider)
 	}
 	// Estimated cost is computed only for a successfully resolved row that has
 	// token counts and a resolvable provider type. A provider-reported exact
@@ -215,7 +227,8 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		CacheCreationInputTokens: row.cacheCreationInputTokens,
 		EstimatedCostMicros:      estimatedCostMicros,
 		ProviderCostMicros:       row.providerCostMicros,
-		InputTokensEstimated:     row.inputTokensEstimated,
+		InputTokensSource:        row.inputTokensSource,
+		OutputTokensSource:       row.outputTokensSource,
 		ProviderRequestID:        row.providerRequestID,
 		ClientRequestID:          row.clientRequestID,
 		ErrorText:                row.errorText,
@@ -378,10 +391,20 @@ type usageCapture struct {
 	// (OpenRouter's usage.cost, a USD float). Nil when the provider did not
 	// report one. It is authoritative over any models.dev estimate.
 	providerCostMicros *int64
-	// inputTokensEstimated reports that inputTokens is a local heuristic
-	// estimate because the provider omitted usage. Set by the Slice 4 fallback.
-	inputTokensEstimated bool
+	// inputTokensSource / outputTokensSource record the provenance of the
+	// captured counts. They are set to "provider" when the usage block is parsed
+	// and overwritten to "estimated" by the missing-usage fallback, so an export
+	// can tell a real provider count from a local heuristic.
+	inputTokensSource  *string
+	outputTokensSource *string
 }
+
+// Token count provenance values, stored in request_logs.input_tokens_source /
+// output_tokens_source and surfaced in the Activity export.
+const (
+	sourceProvider  = "provider"
+	sourceEstimated = "estimated"
+)
 
 // extractUsage parses a non-streaming JSON response body for usage numbers.
 func extractUsage(body []byte, usage *usageCapture) {
@@ -457,10 +480,12 @@ func setUsage(usage *usageCapture, input, output any) {
 	if in, ok := input.(float64); ok && usage.inputTokens == nil {
 		v := int64(in)
 		usage.inputTokens = &v
+		usage.inputTokensSource = strPtr(sourceProvider)
 	}
 	if out, ok := output.(float64); ok && usage.outputTokens == nil {
 		v := int64(out)
 		usage.outputTokens = &v
+		usage.outputTokensSource = strPtr(sourceProvider)
 	}
 }
 

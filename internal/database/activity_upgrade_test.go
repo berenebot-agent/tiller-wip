@@ -46,7 +46,7 @@ INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,st
 	}
 	defer adb.Close()
 
-	for _, col := range []string{"estimated_cost_micros", "provider_cost_micros", "input_tokens_estimated"} {
+	for _, col := range []string{"estimated_cost_micros", "provider_cost_micros", "input_tokens_source", "output_tokens_source"} {
 		exists, err := activityColumnExists(ctx, adb, "request_logs", col)
 		if err != nil {
 			t.Fatal(err)
@@ -54,6 +54,12 @@ INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,st
 		if !exists {
 			t.Fatalf("column %s was not added by the upgrade", col)
 		}
+	}
+	// The retired input-only boolean is dropped by the provenance step.
+	if exists, err := activityColumnExists(ctx, adb, "request_logs", "input_tokens_estimated"); err != nil {
+		t.Fatal(err)
+	} else if exists {
+		t.Fatal("input_tokens_estimated should have been dropped by 006_drop_input_tokens_estimated")
 	}
 	// The pre-existing row survived.
 	var n int
@@ -63,13 +69,15 @@ INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,st
 	if n != 1 {
 		t.Fatalf("pre-existing row count = %d, want 1", n)
 	}
-	// The upgrade version is recorded.
-	var recorded int
-	if err := adb.QueryRowContext(ctx, `SELECT count(*) FROM activity_schema_migrations WHERE version='002_cost_and_estimate'`).Scan(&recorded); err != nil {
-		t.Fatal(err)
-	}
-	if recorded != 1 {
-		t.Fatalf("upgrade version rows = %d, want 1", recorded)
+	// The upgrade versions are recorded.
+	for _, version := range []string{"002_cost_and_estimate", "004_token_provenance_columns", "005_token_provenance_backfill", "006_drop_input_tokens_estimated"} {
+		var recorded int
+		if err := adb.QueryRowContext(ctx, `SELECT count(*) FROM activity_schema_migrations WHERE version=?`, version).Scan(&recorded); err != nil {
+			t.Fatal(err)
+		}
+		if recorded != 1 {
+			t.Fatalf("upgrade version %s rows = %d, want 1", version, recorded)
+		}
 	}
 	adb.Close()
 
