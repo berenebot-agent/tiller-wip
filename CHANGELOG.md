@@ -6,6 +6,12 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+## [0.1.0-beta.5] - 2026-10-12
+
+Fifth public beta. Adds headless administration over the management API,
+Activity export improvements, and provider correctness fixes for Codex and
+DeepSeek.
+
 ### Added
 
 - **Management API tokens (local mode).** Settings → Management API lets you
@@ -30,6 +36,43 @@ behavior may still change before a stable `1.0`.
   never logged; rotating the env value and restarting replaces and immediately
   invalidates the previous credential. Local mode only; a seed key counts as a
   configured instance for first-run setup purposes.
+
+### Changed
+
+- **Codex models now advertise their real context ceiling.** Discovery reads
+  `max_context_window` and prefers it over the client session default
+  (`context_window`), falling back when the backend omits the max. Six of the
+  seven Codex models move from a 272000 advertised context to 872000, so Codex
+  clients (opencode, CodexUI, Hermes) compact later. Note that sessions crossing
+  272K input tokens fall into OpenAI's 2x input / 1.5x output billing tier.
+- **Activity export.** "Export CSV" is right-aligned next to "Clear activity",
+  the export dialog gains a custom from/to date range alongside the 24h/7d/30d/All
+  presets, and the Global activity card has its own account-wide export via
+  `GET /api/admin/activity/export`.
+- **Usage API.** `GET /api/admin/usage` (and the live SSE snapshot) now includes a
+  `client_key_names {id: name}` map so client-keyed aggregates can be labelled in
+  one request instead of cross-referencing `/api/admin/client-keys`.
+
+### Fixed
+
+- **DeepSeek reasoning round-trip.** DeepSeek ignores OpenRouter's
+  `reasoning.enabled` object and, with tools present, requires `reasoning_content`
+  on every prior assistant turn. Requests carrying a foreign history failed with
+  HTTP 400. The router now maps the toggle onto DeepSeek's native `thinking.type`,
+  back-fills an empty `reasoning_content` where it is missing, and classifies any
+  remaining round-trip 400 as `reasoning_roundtrip_required` (request-shaped, so
+  it no longer cools a healthy target).
+- **Ollama Cloud quota.** The adapter probes `/api/balance` first (the current
+  subscription-window shape) and falls back to the legacy `/api/usage` shapes, so
+  the provider card works on either build. The quota poller also warms its cache
+  on boot and retries a failed provider on the short retry cadence.
+- **Bootstrap token lifecycle.** The env-seeded `boot-admin` token is explicitly
+  environment-managed: browser/API lifecycle mutations return
+  `409 environment_managed_token`, bulk revocation excludes it and reports the
+  exclusion, and the UI hides its lifecycle controls.
+- **Exclusive bearer authentication.** An `Authorization` header always selects
+  bearer authentication, even when its value is empty, and never falls back to
+  cookie auth.
 
 ## [0.1.0-beta.4] - 2026-10-09
 
