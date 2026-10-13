@@ -1,4 +1,4 @@
-/* Activity living pane: single shared force-layout graph.
+/* Activity living pane: single shared lane-aligned graph.
    Only active routes are shown; legs fade away 30s after going quiet.
    Edge states: req (carrying a request) / ok (served) / failed (no response)
    / cool (cooldown skip) / fading (melting away). */
@@ -14,7 +14,7 @@
   display: block;
   width: 100%;
   min-width: 760px;
-  height: 600px;
+  height: calc(600px + var(--graph-extra-height, 0px));
   background: radial-gradient(circle at 50% 40%, #fbfdfe, #eef3f6);
 }
 .graph-stage .empty-state {
@@ -143,6 +143,6 @@
 }
 @media (max-width: 760px) {
   .graph-stage svg {
-    height: 440px;
+    height: calc(440px + var(--graph-extra-height, 0px));
   }
 }
