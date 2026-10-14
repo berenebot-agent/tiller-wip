@@ -108,6 +108,10 @@ function edgeKey(a, b) {
 }
 
 const LABEL_WRAP = 24;
+// Keep text bounds in sync with activity-graph.css (17px labels, 14px subtext).
+const LABEL_LINE_HEIGHT = 21;
+const SUB_LINE_HEIGHT = 18;
+const LABEL_HALF_WIDTH = 135;
 function wrapLabel(label) {
   if (!label) return [''];
   const out = [];
@@ -321,11 +325,11 @@ function clampFansToLane() {
 
 // labelBox: the wrapped label/sub block *below* a node — not the disc. Legs
 // legally pass behind discs (paint order + halo handle that); text is what
-// must stay clear. Half-width 85 covers the 24-char mono wrap at 11px.
+// must stay clear. The half-width covers the 24-char mono wrap at 17px.
 function labelBox(n) {
   const lines = wrapLabel(n.label || '').length;
-  const h = 30 + lines * 13 + (n.sub ? 14 : 0);
-  return { x0: n.x - 85, x1: n.x + 85, y0: n.y + nodeRadius(n) + 2, y1: n.y + h + 6 };
+  const h = 30 + lines * LABEL_LINE_HEIGHT + (n.sub ? SUB_LINE_HEIGHT : 0);
+  return { x0: n.x - LABEL_HALF_WIDTH, x1: n.x + LABEL_HALF_WIDTH, y0: n.y + nodeRadius(n) + 2, y1: n.y + h + 6 };
 }
 
 function rectHit(pts, box) {
@@ -378,7 +382,7 @@ function barycenter(n, positions, incoming) {
 }
 
 function laneSpacing(list) {
-  return Math.max(90, ...list.map(n => 30 + wrapLabel(n.label || '').length * 13 + (n.sub ? 14 : 0) + 30));
+  return Math.max(90, ...list.map(n => 30 + wrapLabel(n.label || '').length * LABEL_LINE_HEIGHT + (n.sub ? SUB_LINE_HEIGHT : 0) + 30));
 }
 
 function lanePositions(lanes) {
@@ -410,7 +414,7 @@ function layoutScore(positions) {
       const p = positions.get(n);
       if (n === e.a || n === e.b || p.x <= a.x || p.x >= b.x) return;
       const y = a.y + (b.y - a.y) * (p.x - a.x) / (b.x - a.x);
-      const bottom = 30 + wrapLabel(n.label || '').length * 13 + (n.sub ? 14 : 0);
+      const bottom = 30 + wrapLabel(n.label || '').length * LABEL_LINE_HEIGHT + (n.sub ? SUB_LINE_HEIGHT : 0);
       if (y > p.y - nodeRadius(n) - 8 && y < p.y + bottom + 8) score += 1;
     });
   }
@@ -548,7 +552,7 @@ function syncSim() {
         .each(function (d) {
           renderNodeLabel(d3.select(this), d.label);
         });
-      g.append('text').attr('class', 'node-sub').attr('dy', d => 30 + wrapLabel(d.label || '').length * 13).attr('text-anchor', 'middle')
+      g.append('text').attr('class', 'node-sub').attr('dy', d => 30 + wrapLabel(d.label || '').length * LABEL_LINE_HEIGHT).attr('text-anchor', 'middle')
         .text(d => d.sub || '');
       return g;
     },
@@ -957,7 +961,7 @@ function relabelNode(n) {
   const g = nodeSel.filter(d => d.id === n.id);
   if (g.empty()) return;
   renderNodeLabel(g.select('.node-label'), n.label);
-  g.select('.node-sub').attr('dy', 30 + wrapLabel(n.label || '').length * 13).text(n.sub || '');
+  g.select('.node-sub').attr('dy', 30 + wrapLabel(n.label || '').length * LABEL_LINE_HEIGHT).text(n.sub || '');
   g.attr('aria-label', `Open activity for ${n.label}`);
 }
 
