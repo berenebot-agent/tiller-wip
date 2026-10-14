@@ -6,6 +6,19 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Live request rows on Activity.** A scrolling table beneath the graph shows
+  one row per logging-enabled request, filling in its target, outcome, latency,
+  and token metadata. Running requests stay above completed requests; completed
+  rows leave the live view after 30 seconds without deleting Activity history.
+  A clickable Fallback badge expands the ordered attempt chain, including skips,
+  and holds the row until collapsed. Mobile uses the same request-level cards.
+  The view starts fresh on navigation, reconciles missed updates after connection
+  loss, and caps unexpanded completed rows at 200 with an omission notice.
+  Live updates contain metadata only; detailed error bodies remain in the
+  existing authenticated Activity history, never in the live feed.
+
 ## [0.1.0-beta.5] - 2026-10-12
 
 Fifth public beta. Adds headless administration over the management API,

@@ -62,6 +62,10 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	}
 	insert(local, "row-local", "ck-local")
 	insert(other, "row-other", "ck-other")
+	tracked, err := local.LiveActivityByIDs(ctx, []string{"row-local", "row-other"})
+	if err != nil || len(tracked) != 1 || tracked[0].ID != "row-local" {
+		t.Fatalf("live recovery crossed account boundary: %v %v", ids(tracked), err)
+	}
 
 	globalLocal, err := local.ListGlobalActivity(ctx, "", 100, 0)
 	if err != nil {

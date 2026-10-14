@@ -670,6 +670,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
+	row.liveEnabled, _ = s.scope(r).ClientKeyLoggingEnabled(r.Context(), identity.ID)
+	s.publishLiveRequest(row, false)
 	logErrorBodies := false
 	if s.config.Mode != config.ModeHosted {
 		logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
@@ -718,6 +720,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		// request writes no Activity row and consumes no monthly slot.
 		if !quotaRejected {
 			s.writeLog(context.Background(), row)
+		}
+		if quotaRejected {
+			row.liveEnabled = false
+		}
+		if row.liveEnabled {
+			s.publishLiveRequest(row, true)
+		} else if s.liveHub != nil && row.liveRevision > 0 {
+			s.liveHub.withdrawRequest(row.accountID, row.clientRequestID)
 		}
 	}()
 	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
@@ -810,6 +820,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		for i := 0; i < len(candidates); i++ {
 			candidate := candidates[i]
+			row.liveFallback = row.liveFallback || (route.RoutingMode == "ordered_fallback" && (i > 0 || pass > 0))
+			row.liveAttempt = &requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID}
+			s.publishLiveRequest(row, false)
 			if ctxErr := r.Context().Err(); ctxErr != nil {
 				class := "client_cancelled"
 				if errors.Is(ctxErr, context.DeadlineExceeded) {
@@ -1560,6 +1573,7 @@ routeDone:
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
+			s.publishLiveRequest(row, false)
 			s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 			ensureStreamKeepalive()
 		}
@@ -1640,6 +1654,7 @@ routeDone:
 	if upstreamStreams {
 		streamed = true
 		row.streaming = true
+		s.publishLiveRequest(row, false)
 		s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 		ensureStreamKeepalive()
 		row.httpStatus = resp.StatusCode
@@ -2441,6 +2456,8 @@ func (s *Server) openCooldown(candidate resolvedRoute, class string, row *logRow
 }
 
 func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
+	row.liveAttempt = nil
+	s.publishLiveRequest(row, false)
 	if s.logger == nil {
 		return
 	}

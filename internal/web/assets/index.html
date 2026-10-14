@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/virtual-dialog.css">
   <link rel="stylesheet" href="/activity-graph.css">
+  <link rel="stylesheet" href="/live-requests.css">
   <link rel="stylesheet" href="/typography.css">
 </head>
 <body>
@@ -288,7 +289,8 @@
 
       <section class="view" id="view-activity" aria-label="Activity">
         <div class="graph-stage"><svg id="activity-pane" viewBox="0 0 1180 600" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Live request flow graph"></svg><div class="empty-state" id="graph-empty" hidden><span>∅</span><h2>No activity yet</h2><p>Send a request through the router and its client → model → provider chain will light up here.</p></div></div>
-        <div class="activity-mobile-shell" id="activity-mobile-shell"><div class="activity-mobile-head"><div><p class="eyebrow">LIVE REQUESTS</p><h1>Activity</h1></div><button class="btn btn-secondary" id="open-mobile-history">View history</button></div><div class="mobile-activity-list" id="mobile-activity-body"></div><div class="empty-state" id="mobile-activity-empty"><span>∅</span><h2>No live activity</h2><p>Requests in flight will appear here with their route and upstream target.</p></div></div>
+        <section class="live-requests-panel" aria-label="Live logged requests"><header class="live-requests-head"><div><h2>Live requests</h2><p>Logged requests only · completed rows stay for 30 seconds.</p></div><span class="meta-line" data-live-connection role="status">Connecting…</span></header><div class="live-requests-scroll"><table class="form-table activity-table" id="live-requests-body"><thead><tr><th>Status</th><th>When</th><th>Client</th><th>Requested model</th><th>Resolved</th><th>Protocol</th><th>Latency</th><th>Tokens</th><th>Request ID</th></tr></thead></table><div class="live-requests-empty" id="live-requests-empty"><h3>No live logged requests</h3><p>Logging-enabled requests will appear here as they arrive.</p></div></div><p class="meta-line live-requests-notice" data-live-request-notice role="status"></p></section>
+        <div class="activity-mobile-shell" id="activity-mobile-shell"><div class="activity-mobile-head"><div><p class="eyebrow">LIVE REQUESTS</p><h1>Activity</h1></div><button class="btn btn-secondary" id="open-mobile-history">View history</button></div><p class="meta-line" data-live-connection role="status">Connecting…</p><p class="meta-line">Logged requests only · completed rows stay for 30 seconds.</p><div class="mobile-activity-list" id="mobile-activity-body"></div><div class="empty-state" id="mobile-activity-empty"><span>∅</span><h2>No live logged requests</h2><p>Logging-enabled requests will appear here as they arrive.</p></div><p class="meta-line live-requests-notice" data-live-request-notice role="status"></p></div>
       </section>
 
       <section class="view" id="view-settings" aria-labelledby="settings-title">

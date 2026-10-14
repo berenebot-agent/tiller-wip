@@ -14,6 +14,8 @@
 #   TILLER_BROWSER_BASE_URL  base URL for playwright (default http://127.0.0.1:18080)
 #   TILLER_BROWSER_MOCK_BASE_URL  mock upstream /v1 base (default http://127.0.0.1:18081/v1)
 #   TILLER_BROWSER_REBUILD=1  force-rebuild the browser + fixturectl images
+#   TILLER_BROWSER_SPECS     space-separated specs for a targeted run (one shard,
+#                           no additional Activity or first-run suite)
 #                               (set after changing the browser Dockerfile, package
 #                               deps, copied JS, fixturectl code, or router code if
 #                               reusing a previously built router image).
@@ -23,6 +25,11 @@ set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 password=browser-test-password
 workers=${TILLER_BROWSER_WORKERS:-${PLAYWRIGHT_WORKERS:-3}}
+specs=(admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js)
+if [ -n "${TILLER_BROWSER_SPECS:-}" ]; then
+    read -r -a specs <<< "$TILLER_BROWSER_SPECS"
+    workers=1
+fi
 run_id=tiller-browser-$$
 ports_file=$(mktemp)
 run_start=$(date +%s)
@@ -274,10 +281,11 @@ while read -r i router_port mock_port; do
         -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
         -v "$run_dir/worker-$i-data:/fixture-data:rw" \
         -v "$run_dir/playwright-results:/tests/test-results" \
-        "$BROWSER_IMAGE" npx playwright test admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js --shard="$((i + 1))/$workers" &
+        "$BROWSER_IMAGE" npx playwright test "${specs[@]}" --shard="$((i + 1))/$workers" &
     echo "$i $!" >> "$pids_file"
 done < "$ports_file"
 
+if [ -z "${TILLER_BROWSER_SPECS:-}" ]; then
 docker run --rm --network host \
     -e TILLER_BROWSER_BASE_URL="http://127.0.0.1:$activity_router_port" \
     -e TILLER_BROWSER_MOCK_BASE_URL="http://127.0.0.1:$activity_mock_port/v1" \
@@ -289,8 +297,9 @@ docker run --rm --network host \
     -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
     -v "$run_dir/activity-data:/fixture-data:rw" \
     -v "$run_dir/playwright-results:/tests/test-results" \
-    "$BROWSER_IMAGE" npx playwright test activity.spec.js activity-graph.spec.js &
+    "$BROWSER_IMAGE" npx playwright test activity.spec.js activity-graph.spec.js live-requests.spec.js &
 activity_pid=$!
+fi
 
 # The first-run lane runs its spec against the credential-free router. The
 # spec performs the setup claim itself, so it starts from storageState: none
@@ -324,6 +333,7 @@ while read -r i pid; do
         failing_shards+=("$i")
     fi
 done < "$pids_file"
+if [ -n "${activity_pid:-}" ]; then
 if wait "$activity_pid"; then
     shard_rcs+=(0)
 else
@@ -331,13 +341,16 @@ else
     shard_rcs+=("$rc")
     failing_shards+=("activity")
 fi
+fi
 phase_timing "parallel shards done"
+if [ -z "${TILLER_BROWSER_SPECS:-}" ]; then
 if firstrun_lane; then
     shard_rcs+=(0)
 else
     rc=$?
     shard_rcs+=("$rc")
     failing_shards+=("firstrun")
+fi
 fi
 for rc in "${shard_rcs[@]}"; do
     [ "$rc" -gt "$playwright_status" ] && playwright_status=$rc

@@ -32,6 +32,18 @@ the right tool for a tight edit loop (Tier A: one package or one spec). Use the
 runner when you want a known set of tiers with a single summary and guaranteed
 detail on disk.
 
+For a targeted containerized browser run, name only the relevant specs:
+
+```bash
+TILLER_BROWSER_SPECS="live-requests.spec.js activity-graph.spec.js" ./tests/browser/run.sh
+```
+
+This uses one isolated test shard and skips the additional Activity and
+first-run suites. Without this override the normal lanes are unchanged;
+`live-requests.spec.js` is included in the Activity lane. Its coverage combines
+real routing/logging integration with deterministic request-row lifecycle,
+expiry, fallback expansion, recovery, and completed-row-cap checks.
+
 ## Tiers
 
 | Tier | What it runs | Typical |
