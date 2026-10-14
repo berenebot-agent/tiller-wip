@@ -41,6 +41,7 @@ type logRow struct {
 	// providerCostMicros is a provider-reported exact cost (OpenRouter
 	// usage.cost) when the upstream response carried one.
 	providerCostMicros   *int64
+	estimatedCostMicros  *int64
 	inputTokensSource    *string
 	outputTokensSource   *string
 	inputEstimate        int64
@@ -57,6 +58,10 @@ type logRow struct {
 	errorBody            *string
 	errorBodyTruncated   bool
 	createdAt            string
+	liveEnabled          bool
+	liveRevision         uint64
+	liveAttempt          *requestAttempt
+	liveFallback         bool
 }
 
 // copyUsage moves the captured token counts and any provider-reported cost from
@@ -127,6 +132,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	s.recordLastOutcome(row)
 	enabled, err := s.scopeFor(row.accountID).ClientKeyLoggingEnabled(ctx, row.clientKeyID)
 	if err != nil || !enabled {
+		row.liveEnabled = false
 		return
 	}
 	// Write-time invariant: a 2xx "success" row must always carry a resolved
@@ -187,6 +193,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		}
 	}
 	attempts := make([]store.RequestAttemptInsert, 0, len(row.attempts))
+	row.estimatedCostMicros = estimatedCostMicros
 	for _, attempt := range row.attempts {
 		attempts = append(attempts, store.RequestAttemptInsert{
 			Provider:           attempt.provider,

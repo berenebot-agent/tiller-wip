@@ -74,6 +74,7 @@ type liveHub struct {
 	activityCh chan activityEvent
 	cancel     context.CancelFunc
 	timings    liveTimings
+	requests   map[string]map[string]liveRequestView
 	// snapshot recomputes the full usage/health envelope for one account. It is
 	// bound to the owning Server so the dispatcher and the /api/admin/usage
 	// endpoint share one source of truth.

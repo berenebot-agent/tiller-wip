@@ -49,12 +49,14 @@ export class LiveStream {
     es.onmessage = (e) => { if (current()) this.dispatch('message', e.data); };
     es.addEventListener('outcome', (e) => { if (current()) this.dispatch('outcome', e.data); });
     es.addEventListener('activity', (e) => { if (current()) this.dispatch('activity', e.data); });
+    es.addEventListener('request', (e) => { if (current()) this.dispatch('request', e.data); });
     es.addEventListener('snapshot', (e) => { if (current()) this.dispatch('snapshot', e.data); });
     // On open (including after EventSource's built-in auto-reconnect),
     // clear any pending auth-failure timer. A transient blip that recovers
     // must not kick the admin back to login.
     es.onopen = () => {
       if (!current()) return;
+      this.dispatch('connection', JSON.stringify({ state: 'connected' }));
       if (this._authTimer) { clearTimeout(this._authTimer); this._authTimer = null; }
     };
     // On error, allow EventSource's built-in reconnect to recover from
@@ -64,6 +66,7 @@ export class LiveStream {
     // onAuthFailure(); a network failure or 200 leaves EventSource to keep
     // reconnecting.
     es.onerror = () => {
+      if (current()) this.dispatch('connection', JSON.stringify({ state: 'reconnecting' }));
       if (!current() || !this.enabled || this._authTimer) return;
       this._authTimer = setTimeout(async () => {
         this._authTimer = null;
@@ -86,6 +89,7 @@ export class LiveStream {
     }
     if (this._authTimer) { clearTimeout(this._authTimer); this._authTimer = null; }
     this.generation++;
+    this.dispatch('connection', JSON.stringify({ state: 'paused' }));
   }
 
   // start() enables the stream and opens the connection. Called after

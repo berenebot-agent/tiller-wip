@@ -125,6 +125,7 @@ func (s *Server) buildUsageSnapshot(ctx context.Context, accountID string) (live
 		RealTokenSources:    agg.RealTokenSources,
 		ClientKeyNames:      agg.ClientKeyNames,
 		Modules: map[string]any{
+			"request_rows":           s.liveHub.requestSnapshot(accountID, false),
 			"inflight_clients":       s.inflight.clientSnapshot(accountID),
 			"inflight_client_routes": s.inflight.clientRouteSnapshot(accountID),
 			"inflight_targets":       s.inflight.targetSnapshot(accountID),

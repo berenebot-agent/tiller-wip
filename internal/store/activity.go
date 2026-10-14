@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 )
 
 // This file owns all Activity attribution SQL (list, export, attempts). The
@@ -173,6 +174,36 @@ func (s *Scope) ListGlobalActivity(ctx context.Context, search string, limit, of
 	var out []ActivityRow
 	err := s.withActivity(ctx, func(q querier) error {
 		rows, err := q.QueryContext(ctx, `SELECT `+activityColumns+`,rl.client_key_id,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND `+searchClause+` ORDER BY rl.created_at DESC, rl.id DESC LIMIT ? OFFSET ?`, args...)
+		if err != nil {
+			return err
+		}
+		out, err = s.scanActivityRows(rows, true, true)
+		return err
+	})
+	return out, err
+}
+
+// LiveActivityByIDs recovers only requests already tracked by a live screen.
+// Bodies are not selected: detailed error logging does not belong in live SSE.
+func (s *Scope) LiveActivityByIDs(ctx context.Context, ids []string) ([]ActivityRow, error) {
+	out := []ActivityRow{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	if len(ids) > 1000 {
+		return nil, errors.New("too many tracked requests")
+	}
+	args := []any{s.accountID}
+	marks := make([]string, len(ids))
+	for i, id := range ids {
+		marks[i] = "?"
+		args = append(args, id)
+	}
+	columns := strings.ReplaceAll(activityColumns, "rl.request_body,", "NULL,")
+	columns = strings.ReplaceAll(columns, "rl.error_body,", "NULL,")
+	columns = strings.ReplaceAll(columns, "rl.error_message,", "NULL,")
+	err := s.withActivity(ctx, func(q querier) error {
+		rows, err := q.QueryContext(ctx, `SELECT `+columns+`,rl.client_key_id,rl.client_name FROM request_logs rl WHERE rl.account_id=? AND rl.id IN (`+strings.Join(marks, ",")+`)`, args...)
 		if err != nil {
 			return err
 		}

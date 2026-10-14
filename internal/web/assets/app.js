@@ -1,4 +1,5 @@
 import { LiveStream } from './live.js';
+import { LiveRequests } from './live-requests.js';
 const PROVIDER_LOGOS = {
   openai: '/media/providers/openai.svg', 'codex-subscription': '/media/providers/codex.svg',
   anthropic: '/media/providers/anthropic.svg', 'claude-subscription': '/media/providers/claude-code.svg',
@@ -3232,6 +3233,7 @@ async function ensureActivityGraph() {
   }
 }
 async function loadActivityView() {
+  liveRequests.start();
   const token = ++state.loadToken;
   const mod = await ensureActivityGraph();
   if (token !== state.loadToken) return;
@@ -3261,56 +3263,9 @@ async function loadActivityView() {
     // while the view was hidden (state keeps the client + leg lanes).
     if (activityGraphReady) noteActivityCatalogueMiss(mod.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs }));
     if (activityGraphReady) mod.onCooldowns(state.usage?.target_cooldown || {});
-    renderMobileActivity();
   } catch (error) {
     flash(errorMessage(error), 'error');
   }
-}
-function mobileActivityCatalogue() {
-  return activityGraphData || { clients: [], virtualModels: [], models: [] };
-}
-function mobileActivityTarget(routeID, targetID) {
-  const data = mobileActivityCatalogue();
-  const virtual = data.virtualModels.find(model => model.id === routeID);
-  if (virtual) {
-    const target = (virtual.targets || []).find(item => item.provider_model_id === targetID || `${item.provider_name}/${item.upstream_model_id}` === targetID);
-    return target ? `${target.provider_name}/${target.upstream_model_id}` : targetID;
-  }
-  const model = data.models.find(item => item.id === targetID || item.canonical_model_id === targetID);
-  return model ? model.canonical_model_id : targetID;
-}
-function renderMobileActivity() {
-  const data = mobileActivityCatalogue();
-  const byRoute = new Map();
-  Object.entries(state.liveRoutes || {}).filter(([, item]) => item && item.active > 0).forEach(([key, item]) => {
-    const separator = key.indexOf('\u0000');
-    const clientID = item.client_id || (separator >= 0 ? key.slice(0, separator) : '');
-    const client = data.clients.find(candidate => candidate.id === clientID);
-    const routeID = item.route_id || item.routeID;
-    const virtual = data.virtualModels.find(model => model.id === routeID);
-    const real = data.models.find(model => model.id === routeID || model.canonical_model_id === routeID);
-    const routeLabel = virtual?.canonical_model_id || real?.canonical_model_id || item.requested_model || routeID || 'Unknown route';
-    const targets = Object.entries(state.liveLegs || {}).filter(([targetKey, target]) => targetKey.startsWith(`${routeID}\u0000`) && target?.active > 0).map(([targetKey]) => mobileActivityTarget(routeID, targetKey.slice(targetKey.indexOf('\u0000') + 1)));
-    const targetLabel = item.resolved_model || targets[0] || 'Waiting for upstream target';
-    const entryKey = `${clientID}\u0000${routeID}`;
-    const existing = byRoute.get(entryKey);
-    if (existing) {
-      existing.streaming = existing.streaming || item.streaming > 0;
-      existing.targets = [...new Set([...existing.targets, ...targets])];
-      if (item.resolved_model) existing.target = item.resolved_model;
-      return;
-    }
-    byRoute.set(entryKey, { client: client?.name || clientID || 'Unknown client', route: routeLabel, target: targetLabel, requested: item.requested_model || routeLabel, streaming: item.streaming > 0, targets });
-  });
-  const entries = [...byRoute.values()];
-  const list = $('#mobile-activity-body');
-  if (!list) return;
-  $('#mobile-activity-empty').hidden = entries.length > 0;
-  list.innerHTML = entries.map(entry => { const sameRoute = entry.requested === entry.route; const chain = sameRoute ? `<span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span>` : `<span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.route)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span>`; return `<article class="live-activity-card"><div class="live-activity-top"><span class="live-pulse" aria-hidden="true"></span><strong>${h(entry.client)}</strong><span class="live-activity-state">${entry.streaming ? 'Streaming' : 'In flight'}</span></div><div class="live-activity-chain">${chain}</div>${entry.targets.length > 1 ? `<p class="live-activity-note">${entry.targets.length} upstream targets active</p>` : ''}<button class="btn btn-small btn-secondary" data-live-activity-client="${h(entry.client)}">View details</button></article>`; }).join('');
-  $$('[data-live-activity-client]', list).forEach(button => button.onclick = () => {
-    const client = data.clients.find(item => item.name === button.dataset.liveActivityClient);
-    if (client) openActivity(client);
-  });
 }
 function openGraphActivity(node, data) {
   const id = node.id.slice(2);
@@ -3327,6 +3282,7 @@ function openGraphActivity(node, data) {
   else openModelActivity(item, node.kind === 'route' ? 'virtual' : 'real');
 }
 function destroyActivityView() {
+  liveRequests.stop();
   if (activityGraphModule && activityGraphReady) {
     try { activityGraphModule.destroy(); } catch { /* teardown is best-effort */ }
   }
@@ -3344,6 +3300,9 @@ function destroyActivityView() {
 // cells; state is always kept current so a reconcile paint on close/nav is
 // instant.
 const live = new LiveStream('/api/admin/live', { onAuthFailure: () => showLogin() });
+const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, requestIdentity, rowCache, requestID: activityRequestID });
+live.on('request', row => liveRequests.onRequest(row));
+live.on('connection', payload => liveRequests.setConnection(payload.state));
 let livePendingReconcile = false;
 const liveDialogOpen = () => document.querySelector('dialog[open]') !== null;
 const liveViewActive = (...views) => views.includes(state.view);
@@ -3540,6 +3499,7 @@ live.on('outcome', payload => {
 });
 
 live.on('snapshot', payload => {
+  liveRequests.onSnapshot(payload.modules?.request_rows, payload.generated_at);
   if (!state.usage) state.usage = {};
   ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'client_token_sources', 'virtual_token_sources', 'real_token_sources'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
@@ -3553,7 +3513,6 @@ live.on('snapshot', payload => {
   if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
   if (payload.modules?.inflight_client_routes !== undefined) state.liveRoutes = payload.modules.inflight_client_routes || {};
   if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
-  if (liveViewActive('activity')) renderMobileActivity();
   // Activity living pane: seed currently-hot legs on every snapshot so a
   // missed delta self-heals without a refresh.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
@@ -3608,7 +3567,6 @@ live.on('activity', delta => {
         if (client) applyClientRoundel($('.status-roundel', card), client, state.liveRequests[delta.client_id]);
       }
     }
-    if (liveViewActive('activity')) renderMobileActivity();
   }
   if (delta.target_id) {
     const key = targetActivityKey(delta.id || '', delta.target_id);
@@ -3623,7 +3581,6 @@ live.on('activity', delta => {
       const target = model && (model.targets || []).find(item => (item.provider_model_id || `${item.provider_name}/${item.upstream_model_id}`) === delta.target_id);
       if (line && target) patchResolution(line, target);
     }
-    if (liveViewActive('activity')) renderMobileActivity();
   }
   // Activity living pane: client + target deltas drive the flow.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
@@ -3648,7 +3605,7 @@ navigate = function (view) {
 };
 
 function liveStart() { live.start(); }
-function liveStop() { live.stop(); }
+function liveStop() { live.stop(); liveRequests.stop(); }
 
 // Analytics consent is stored client-side only. The analytics script is never
 // requested until the visitor explicitly accepts; declining is remembered so

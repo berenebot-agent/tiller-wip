@@ -765,6 +765,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/usage", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.usage)))
 	mux.Handle("GET /api/admin/quota", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.quotaEndpoint)))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
+	mux.Handle("GET /api/admin/live/requests", s.requireAdmin(http.HandlerFunc(s.liveRequests)))
+	mux.Handle("POST /api/admin/live/requests/reconcile", s.requireAdmin(http.HandlerFunc(s.reconcileLiveRequests)))
 	mux.Handle("GET /api/admin/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportGlobalActivityCSV)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listRequestAttempts)))
