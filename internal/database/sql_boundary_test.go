@@ -18,6 +18,7 @@ import (
 // immediately following an SQL verb, which catches an unscoped query sneaking
 // back into a handler, provider or auth path.
 func TestTenantSQLStaysInStore(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("..", "..")
 	verbs := `(?:from|into|join|update)`
 	patterns := make([]*regexp.Regexp, 0, len(TenantTables()))

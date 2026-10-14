@@ -39,6 +39,7 @@ func writerRow(id string) logWrite {
 // TestLogWriterBatchesAndFlushes verifies queued Activity rows are written in
 // the background without the caller waiting.
 func TestLogWriterBatchesAndFlushes(t *testing.T) {
+	t.Parallel()
 	app, db := newLogWriterServer(t)
 	w := newLogWriter(app.scopeFor, app.logger)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -68,6 +69,7 @@ func TestLogWriterBatchesAndFlushes(t *testing.T) {
 // TestLogWriterFlushesOnShutdown verifies rows queued right before shutdown are
 // drained and committed.
 func TestLogWriterFlushesOnShutdown(t *testing.T) {
+	t.Parallel()
 	app, db := newLogWriterServer(t)
 	w := newLogWriter(app.scopeFor, app.logger)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -87,6 +89,7 @@ func TestLogWriterFlushesOnShutdown(t *testing.T) {
 // TestLogWriterDropsWhenQueueFull verifies a saturated queue drops rather than
 // blocks the caller.
 func TestLogWriterDropsWhenQueueFull(t *testing.T) {
+	t.Parallel()
 	w := newLogWriter(func(string) *store.Scope { return nil }, nil)
 	for i := 0; i < logWriteQueueSize; i++ {
 		w.enqueue(writerRow(fmt.Sprintf("q-%d", i)))
@@ -98,6 +101,7 @@ func TestLogWriterDropsWhenQueueFull(t *testing.T) {
 }
 
 func TestLogWriterStopRejectsEnqueueAndDrains(t *testing.T) {
+	t.Parallel()
 	app, db := newLogWriterServer(t)
 	w := newLogWriter(app.scopeFor, app.logger)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -123,6 +127,7 @@ func TestLogWriterStopRejectsEnqueueAndDrains(t *testing.T) {
 }
 
 func TestLogWriterDiscardBarrierFiltersDeletedKey(t *testing.T) {
+	t.Parallel()
 	app, db := newLogWriterServer(t)
 	w := newLogWriter(app.scopeFor, app.logger)
 	ctx, cancel := context.WithCancel(context.Background())

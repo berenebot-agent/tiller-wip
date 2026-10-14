@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// Every test in this file is serial (no t.Parallel): they all drive config
+// through t.Setenv, and Go forbids t.Setenv in a parallel test (it would race
+// the process environment against other tests).
 func TestLocalAdminCredentialsOptional(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_MODE", "")

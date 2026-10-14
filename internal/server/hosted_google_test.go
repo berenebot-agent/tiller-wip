@@ -83,6 +83,7 @@ func googleIdentityCount(t *testing.T, app *Server, accountID string) int {
 }
 
 func TestGoogleSignupCompletionRejectsThirdPartyLink(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 
@@ -104,6 +105,7 @@ func TestGoogleSignupCompletionRejectsThirdPartyLink(t *testing.T) {
 }
 
 func TestGoogleSignupCompletionAllowsAuthoritativeLink(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 
@@ -125,6 +127,7 @@ func TestGoogleSignupCompletionAllowsAuthoritativeLink(t *testing.T) {
 }
 
 func TestGoogleSignupCompletionRequiresTermsForNewAccount(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 	if err := app.storeHandle().SetHostedSignupEnabled(context.Background(), true); err != nil {
@@ -152,6 +155,7 @@ func TestGoogleSignupCompletionRequiresTermsForNewAccount(t *testing.T) {
 }
 
 func TestGoogleSignupCompletionCreatesAccountWithTerms(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 	if err := app.storeHandle().SetHostedSignupEnabled(context.Background(), true); err != nil {
@@ -179,6 +183,7 @@ func TestGoogleSignupCompletionCreatesAccountWithTerms(t *testing.T) {
 // contract: a refused attempt must leave the claim intact so the visitor can
 // retry without another Google round trip.
 func TestGoogleSignupCompletionKeepsClaimOnRefusal(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 
@@ -206,6 +211,7 @@ func TestGoogleSignupCompletionKeepsClaimOnRefusal(t *testing.T) {
 // defect: linking revokes the initiating session, so the callback must hand the
 // browser a NEW session whose row actually exists.
 func TestCompleteGoogleLinkIssuesLiveSession(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 	sessionToken := rawUserSessionTokenFromJar(t, api)
@@ -244,6 +250,7 @@ func TestCompleteGoogleLinkIssuesLiveSession(t *testing.T) {
 // claim returns the flag and a grant, and startGoogleLink accepts an empty
 // password.
 func TestPendingGoogleLinkGrantAllowsLinkWithoutPassword(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 
@@ -291,6 +298,7 @@ func TestPendingGoogleLinkGrantAllowsLinkWithoutPassword(t *testing.T) {
 // TestStartGoogleLinkRequiresPasswordWithoutGrant guards against the grant
 // accidentally removing the password requirement for ordinary sessions.
 func TestStartGoogleLinkRequiresPasswordWithoutGrant(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	seedGooglePlatformSettings(t, app)
 

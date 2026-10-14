@@ -15,6 +15,7 @@ import (
 // TestClientKeyGroup tests the organisational group on client keys: defaulting,
 // create/update, listing return, search, and filter.
 func TestClientKeyGroup(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

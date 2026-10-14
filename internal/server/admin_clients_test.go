@@ -3,6 +3,7 @@ package server
 import "testing"
 
 func TestCreateClientKeyDefaultsToCatalogue(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "catalogue default"})
@@ -32,6 +33,7 @@ func TestCreateClientKeyDefaultsToCatalogue(t *testing.T) {
 }
 
 func TestDeleteProviderWithStaleSingleRealBinding(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	var providerID, modelID string
@@ -79,6 +81,7 @@ func TestDeleteProviderWithStaleSingleRealBinding(t *testing.T) {
 // rejected provider delete (409 provider_in_use) does NOT wipe the OAuth token
 // row — credentials must survive a failed deletion.
 func TestDeleteProviderWithVirtualModelRefPreservesOAuthRow(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	var providerID, modelID string

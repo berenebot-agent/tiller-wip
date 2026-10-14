@@ -6,6 +6,7 @@ import (
 )
 
 func TestGenerateAndVerifyKey(t *testing.T) {
+	t.Parallel()
 	generated, err := GenerateKey()
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +38,7 @@ func TestGenerateAndVerifyKey(t *testing.T) {
 }
 
 func TestParseKeyRejectsMalformedValues(t *testing.T) {
+	t.Parallel()
 	for _, value := range []string{"", "sk-tr-a.b", "Bearer sk-tr-abc.def", "sk-ordinary"} {
 		if _, _, ok := ParseKey(value); ok {
 			t.Fatalf("accepted malformed key %q", value)

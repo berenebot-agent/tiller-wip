@@ -30,6 +30,7 @@ func newFastStore(t *testing.T, username, password string, ttl time.Duration) (*
 }
 
 func TestFastSessionCreateGetDelete(t *testing.T) {
+	t.Parallel()
 	store, _ := newFastStore(t, "admin", "pw", 30*24*time.Hour)
 	session, err := store.Create()
 	if err != nil {
@@ -58,6 +59,7 @@ func TestFastSessionCreateGetDelete(t *testing.T) {
 }
 
 func TestFastSessionSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
@@ -92,6 +94,7 @@ func TestFastSessionSurvivesRestart(t *testing.T) {
 }
 
 func TestFastSessionSlidingExpiry(t *testing.T) {
+	t.Parallel()
 	store, db := newFastStore(t, "admin", "pw", time.Hour)
 	session, err := store.Create()
 	if err != nil {
@@ -113,6 +116,7 @@ func TestFastSessionSlidingExpiry(t *testing.T) {
 }
 
 func TestFastSessionExpiredRejected(t *testing.T) {
+	t.Parallel()
 	store, db := newFastStore(t, "admin", "pw", time.Hour)
 	session, err := store.Create()
 	if err != nil {
@@ -129,6 +133,7 @@ func TestFastSessionExpiredRejected(t *testing.T) {
 }
 
 func TestFastCredentialChangeInvalidatesSessions(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
@@ -153,6 +158,7 @@ func TestFastCredentialChangeInvalidatesSessions(t *testing.T) {
 }
 
 func TestFastMultipleSessionsCoexist(t *testing.T) {
+	t.Parallel()
 	store, _ := newFastStore(t, "admin", "pw", 30*24*time.Hour)
 	s1, err := store.Create()
 	if err != nil {
@@ -178,6 +184,7 @@ func TestFastMultipleSessionsCoexist(t *testing.T) {
 }
 
 func TestFastSessionSecretNotStoredInPlaintext(t *testing.T) {
+	t.Parallel()
 	store, db := newFastStore(t, "admin", "pw", 30*24*time.Hour)
 	session, err := store.Create()
 	if err != nil {
@@ -199,6 +206,7 @@ func TestFastSessionSecretNotStoredInPlaintext(t *testing.T) {
 }
 
 func TestFastInvalidTokenRejected(t *testing.T) {
+	t.Parallel()
 	store, _ := newFastStore(t, "admin", "pw", 30*24*time.Hour)
 	if _, ok := store.Get(""); ok {
 		t.Fatal("empty token accepted")

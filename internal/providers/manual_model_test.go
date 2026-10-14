@@ -69,6 +69,7 @@ func manualModelRow(t *testing.T, db *database.DB, modelID string) (string, int,
 }
 
 func TestResolveManualModelPrefersLiveDiscovery(t *testing.T) {
+	t.Parallel()
 	upstream := discoveryServer(t, map[string]any{
 		"id":                   "live-model",
 		"context_length":       111,
@@ -103,6 +104,7 @@ func TestResolveManualModelPrefersLiveDiscovery(t *testing.T) {
 }
 
 func TestResolveManualModelFallsBackToModelsDev(t *testing.T) {
+	t.Parallel()
 	upstream := discoveryServer(t, map[string]any{"id": "other-model"})
 	db := manualModelTestDB(t)
 	insertTestProvider(t, db, "provider-md", "md", "deepseek", upstream.URL+"/v1")
@@ -143,6 +145,7 @@ func TestResolveManualModelFallsBackToModelsDev(t *testing.T) {
 }
 
 func TestResolveManualModelSurvivesProbeFailure(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unavailable", http.StatusInternalServerError)
 	}))
@@ -165,6 +168,7 @@ func TestResolveManualModelSurvivesProbeFailure(t *testing.T) {
 }
 
 func TestAddManualModelOverridesAndPersists(t *testing.T) {
+	t.Parallel()
 	upstream := discoveryServer(t, map[string]any{"id": "override-model", "context_length": 100})
 	db := manualModelTestDB(t)
 	insertTestProvider(t, db, "provider-add", "add", "deepseek", upstream.URL+"/v1")
@@ -213,6 +217,7 @@ func TestAddManualModelOverridesAndPersists(t *testing.T) {
 }
 
 func TestAddManualModelDuplicateReturnsConflict(t *testing.T) {
+	t.Parallel()
 	upstream := discoveryServer(t, map[string]any{"id": "dupe-model"})
 	db := manualModelTestDB(t)
 	insertTestProvider(t, db, "provider-dupe", "dupe", "deepseek", upstream.URL+"/v1")
@@ -227,6 +232,7 @@ func TestAddManualModelDuplicateReturnsConflict(t *testing.T) {
 }
 
 func TestAddManualModelUnknownProvider(t *testing.T) {
+	t.Parallel()
 	db := manualModelTestDB(t)
 	m := NewManager(store.New(db.SQL), NewRegistry())
 	if _, err := m.AddManualModel(context.Background(), database.LocalAccountID, "missing", ManualModelInput{UpstreamModelID: "x"}); !errors.Is(err, ErrProviderNotFound) {
@@ -235,6 +241,7 @@ func TestAddManualModelUnknownProvider(t *testing.T) {
 }
 
 func TestApplyCatalogueRetainsManualModels(t *testing.T) {
+	t.Parallel()
 	upstream := discoveryServer(t, map[string]any{"id": "discovered-model"})
 	db := manualModelTestDB(t)
 	insertTestProvider(t, db, "provider-retain", "retain", "deepseek", upstream.URL+"/v1")

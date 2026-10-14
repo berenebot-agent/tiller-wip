@@ -17,6 +17,7 @@ func snapshotClientRouteKey(id, routeID string) string { return id + "\x00" + ro
 // is the only request-presence signal, so these tests cover the client
 // lifecycle carrying the route ID.
 func TestInflightTrackerClientTransitions(t *testing.T) {
+	t.Parallel()
 	var deltas []inflightDelta
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(_ string, delta inflightDelta) { deltas = append(deltas, delta) }}
 
@@ -38,6 +39,7 @@ func TestInflightTrackerClientTransitions(t *testing.T) {
 }
 
 func TestInflightTrackerKeepsConcurrentClientRequests(t *testing.T) {
+	t.Parallel()
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(string, inflightDelta) {}}
 	tracker.clientStart(testAcct, "client-1", "route-1", "main")
 	tracker.clientStart(testAcct, "client-1", "route-1", "main")
@@ -58,6 +60,7 @@ func TestInflightTrackerKeepsConcurrentClientRequests(t *testing.T) {
 // identity; ending one must not tear down the other. It also checks the
 // per-client aggregate folds both tickets for the client status roundel.
 func TestInflightTrackerKeepsConcurrentRoutesForOneClient(t *testing.T) {
+	t.Parallel()
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(string, inflightDelta) {}}
 	tracker.clientStart(testAcct, "client-1", "main", "main")
 	tracker.clientStart(testAcct, "client-1", "coding", "coding")
@@ -99,6 +102,7 @@ func TestInflightTrackerKeepsConcurrentRoutesForOneClient(t *testing.T) {
 // provider-model ID on both sides (RouteModelID == ProviderModelID for a real
 // route). The full cycle must leave no residue in any snapshot.
 func TestInflightTrackerRealRouteBalance(t *testing.T) {
+	t.Parallel()
 	var deltas []inflightDelta
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}, emit: func(_ string, delta inflightDelta) { deltas = append(deltas, delta) }}
 
@@ -133,6 +137,7 @@ func TestInflightTrackerRealRouteBalance(t *testing.T) {
 // direct real-model request: clientStreaming increments are cleared by the
 // same deferred clientEnd(id, routeID, streamed=true) the proxy uses.
 func TestInflightTrackerRealRouteStreamingBalance(t *testing.T) {
+	t.Parallel()
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}, emit: func(string, inflightDelta) {}}
 
 	const pmID = "provider-model-1"
@@ -151,6 +156,7 @@ func TestInflightTrackerRealRouteStreamingBalance(t *testing.T) {
 // targetStart/targetEnd deltas (ID and TargetID both the provider-model ID)
 // and leaves no residue in any inflight snapshot.
 func TestDirectRealRouteEmitsBalancedTargetDeltas(t *testing.T) {
+	t.Parallel()
 	api, _, _, secret := loggingTestHarness(t, mockUpstream(t))
 
 	var mu sync.Mutex

@@ -148,6 +148,7 @@ func waitForNotification(t *testing.T, ch <-chan receivedNotification) receivedN
 }
 
 func TestNotificationSettingsRoundTrip(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	status, payload, _ := api.request("GET", "/api/admin/settings", nil)
 	if status != 200 {
@@ -251,6 +252,7 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 }
 
 func TestNotificationTestEndpoint(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -283,6 +285,7 @@ func TestNotificationTestEndpoint(t *testing.T) {
 }
 
 func TestNotificationTestEndpointSanitisesTransportErrors(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	const secret = "must-not-appear"
 	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{"notifications_webhook_url": "http://127.0.0.1:1/notify?token=" + secret})
@@ -300,6 +303,7 @@ func TestNotificationTestEndpointSanitisesTransportErrors(t *testing.T) {
 }
 
 func TestNotificationFallbackEvent(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer webhook-token" {
@@ -343,6 +347,7 @@ func TestNotificationFallbackEvent(t *testing.T) {
 }
 
 func TestNotificationAllTargetsFailedEvent(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -385,6 +390,7 @@ func TestNotificationAllTargetsFailedEvent(t *testing.T) {
 }
 
 func TestNotificationEventToggleRespected(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -416,6 +422,7 @@ func TestNotificationEventToggleRespected(t *testing.T) {
 }
 
 func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 2)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -454,6 +461,7 @@ func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
 }
 
 func TestAdminEventNotifications(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 4)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -516,6 +524,7 @@ func TestAdminEventNotifications(t *testing.T) {
 }
 
 func TestAdminEventToggleRespected(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -548,6 +557,7 @@ func TestAdminEventToggleRespected(t *testing.T) {
 // type to the real ntfy topic. It is opt-in (TILLER_NOTIFY_EXAMPLES=1) because
 // it hits the real network.
 func TestSendExampleNotificationsToNtfy(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("TILLER_NOTIFY_EXAMPLES") == "" {
 		t.Skip("set TILLER_NOTIFY_EXAMPLES=1 to send example notifications to the real ntfy topic")
 	}
@@ -589,6 +599,7 @@ func TestSendExampleNotificationsToNtfy(t *testing.T) {
 // semantics: targets skipped without an upstream attempt (unavailable or
 // protocol-mismatched) are not "attempted" and must not inflate the count.
 func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
+	t.Parallel()
 	attempts := []requestAttempt{
 		{providerModelID: "pm-a", provider: "a", model: "m", result: "skipped", failureClass: "unavailable"},
 		{providerModelID: "pm-b", provider: "b", model: "m", result: "failed", failureClass: "http_500"},
@@ -608,6 +619,7 @@ func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
 }
 
 func TestNotificationFailureDoesNotFailInference(t *testing.T) {
+	t.Parallel()
 	// Webhook that blocks until released, to prove delivery never blocks the
 	// response. The handler closes `started` when it begins handling, then
 	// waits for `release` before returning 200.
@@ -678,6 +690,7 @@ func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *
 }
 
 func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
+	t.Parallel()
 	var status atomic.Int32
 	var requests atomic.Int32
 	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -705,6 +718,7 @@ func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
 }
 
 func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
+	t.Parallel()
 	var status atomic.Int32
 	var requests atomic.Int32
 	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -740,6 +754,7 @@ func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
 }
 
 func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	var requests atomic.Int32
@@ -778,6 +793,7 @@ func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
 }
 
 func TestNotificationTimeoutClearsReservation(t *testing.T) {
+	t.Parallel()
 	var phase atomic.Int32
 	var requests atomic.Int32
 	release := make(chan struct{})
@@ -816,6 +832,7 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 // admitted, so key churn against a slow endpoint cannot accumulate unbounded
 // concurrent work.
 func TestNotificationAdmissionBoundsConcurrency(t *testing.T) {
+	t.Parallel()
 	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
 
 	// Track every successful admission so the release count is exact.
@@ -867,6 +884,7 @@ func TestNotificationAdmissionBoundsConcurrency(t *testing.T) {
 // TestNotificationProcessWideBound proves the global cap applies across
 // tenants.
 func TestNotificationProcessWideBound(t *testing.T) {
+	t.Parallel()
 	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
 
 	admitted := 0
@@ -889,6 +907,7 @@ func TestNotificationProcessWideBound(t *testing.T) {
 // TestNotificationCooldownPruning proves the cooldown map does not grow without
 // bound: entries older than the retention window are dropped.
 func TestNotificationCooldownPruning(t *testing.T) {
+	t.Parallel()
 	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
 
 	now := time.Now()
@@ -911,6 +930,7 @@ func TestNotificationCooldownPruning(t *testing.T) {
 // pre-SaaS review TR-004 fix: the first delivery for an account (whose budget
 // entry does not yet exist) must be admitted, not panic on a nil entry.
 func TestNotificationBudgetFirstDeliveryAdmitted(t *testing.T) {
+	t.Parallel()
 	b := newNotificationBudget(30, time.Hour)
 	if !b.admit("account-a", time.Now()) {
 		t.Fatal("first delivery for a new account was not admitted")
@@ -921,6 +941,7 @@ func TestNotificationBudgetFirstDeliveryAdmitted(t *testing.T) {
 // an account is admitted exactly `budget` times within the window, rejected
 // after, and admitted again once the window has passed.
 func TestNotificationBudgetExhaustsAndExpires(t *testing.T) {
+	t.Parallel()
 	const budget = 3
 	b := newNotificationBudget(budget, time.Hour)
 	now := time.Now()
@@ -941,6 +962,7 @@ func TestNotificationBudgetExhaustsAndExpires(t *testing.T) {
 // TestNotificationBudgetIsPerAccount confirms one account's exhausted budget
 // does not throttle another account.
 func TestNotificationBudgetIsPerAccount(t *testing.T) {
+	t.Parallel()
 	b := newNotificationBudget(1, time.Hour)
 	now := time.Now()
 	if !b.admit("account-a", now) {

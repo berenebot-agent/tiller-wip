@@ -18,6 +18,7 @@ func mustCipher(t *testing.T, keys ...[]byte) *Cipher {
 }
 
 func TestRoundTrip(t *testing.T) {
+	t.Parallel()
 	c := mustCipher(t, testKey(1))
 	aad := AAD("acct", "provider", "p1", "credential_secret")
 	stored, err := c.Encrypt(aad, "sk-secret")
@@ -40,6 +41,7 @@ func TestRoundTrip(t *testing.T) {
 }
 
 func TestUniqueNonce(t *testing.T) {
+	t.Parallel()
 	c := mustCipher(t, testKey(1))
 	aad := AAD("acct")
 	a, _ := c.Encrypt(aad, "same")
@@ -50,6 +52,7 @@ func TestUniqueNonce(t *testing.T) {
 }
 
 func TestWrongKeyIsLocked(t *testing.T) {
+	t.Parallel()
 	aad := AAD("acct")
 	stored, _ := mustCipher(t, testKey(1)).Encrypt(aad, "secret")
 	if _, err := mustCipher(t, testKey(2)).Decrypt(aad, stored); !errors.Is(err, ErrLocked) {
@@ -58,6 +61,7 @@ func TestWrongKeyIsLocked(t *testing.T) {
 }
 
 func TestTamperedCiphertextIsLocked(t *testing.T) {
+	t.Parallel()
 	c := mustCipher(t, testKey(1))
 	aad := AAD("acct")
 	stored, _ := c.Encrypt(aad, "secret")
@@ -74,6 +78,7 @@ func TestTamperedCiphertextIsLocked(t *testing.T) {
 }
 
 func TestAADMismatchIsLocked(t *testing.T) {
+	t.Parallel()
 	c := mustCipher(t, testKey(1))
 	stored, _ := c.Encrypt(AAD("acct-a", "provider", "p1", "credential_secret"), "secret")
 	if _, err := c.Decrypt(AAD("acct-b", "provider", "p1", "credential_secret"), stored); !errors.Is(err, ErrLocked) {
@@ -85,6 +90,7 @@ func TestAADMismatchIsLocked(t *testing.T) {
 }
 
 func TestPlaintextPassesThrough(t *testing.T) {
+	t.Parallel()
 	c := mustCipher(t, testKey(1))
 	got, err := c.Decrypt(AAD("acct"), "legacy-plaintext")
 	if err != nil {
@@ -96,6 +102,7 @@ func TestPlaintextPassesThrough(t *testing.T) {
 }
 
 func TestMalformedIsRejected(t *testing.T) {
+	t.Parallel()
 	c := mustCipher(t, testKey(1))
 	for _, bad := range []string{"enc:v1:notbase64", "enc:v1:AAAA", "enc:v1::", "enc:v1:AAAA:notbase64"} {
 		if _, err := c.Decrypt(AAD("acct"), bad); !errors.Is(err, ErrMalformed) && !errors.Is(err, ErrLocked) {
@@ -105,6 +112,7 @@ func TestMalformedIsRejected(t *testing.T) {
 }
 
 func TestMultiKeyRotation(t *testing.T) {
+	t.Parallel()
 	old := mustCipher(t, testKey(1))
 	aad := AAD("acct")
 	stored, _ := old.Encrypt(aad, "secret")
@@ -125,6 +133,7 @@ func TestMultiKeyRotation(t *testing.T) {
 }
 
 func TestLockedCipher(t *testing.T) {
+	t.Parallel()
 	c := Locked()
 	if c.Enabled() {
 		t.Fatal("locked cipher reports Enabled")

@@ -25,6 +25,7 @@ func openLegalStore(t *testing.T) (*database.DB, *store.Store) {
 // placeholder (updated_by NULL) is refreshed with the generated placeholder,
 // while a row an operator has published is preserved.
 func TestSeedLegalDocRefreshesPlaceholderButNotOperatorEdit(t *testing.T) {
+	t.Parallel()
 	_, st := openLegalStore(t)
 	ctx := context.Background()
 
@@ -71,6 +72,7 @@ func TestSeedLegalDocRefreshesPlaceholderButNotOperatorEdit(t *testing.T) {
 // replaces whatever was stored and stamps updated_by, with no conditional on the
 // previous row.
 func TestUpsertLegalDocAlwaysReplaces(t *testing.T) {
+	t.Parallel()
 	_, st := openLegalStore(t)
 	ctx := context.Background()
 
@@ -98,6 +100,7 @@ func TestUpsertLegalDocAlwaysReplaces(t *testing.T) {
 }
 
 func TestGetLegalDocUnknownSlug(t *testing.T) {
+	t.Parallel()
 	_, st := openLegalStore(t)
 	_, err := st.GetLegalDoc(context.Background(), "does-not-exist")
 	if !errors.Is(err, store.ErrLegalDocNotFound) {
@@ -106,6 +109,7 @@ func TestGetLegalDocUnknownSlug(t *testing.T) {
 }
 
 func TestListLegalDocsOrdersBySlug(t *testing.T) {
+	t.Parallel()
 	db, st := openLegalStore(t)
 	ctx := context.Background()
 	if _, err := db.SQL.Exec(`INSERT INTO legal_documents(slug,title,body,updated_at,updated_by) VALUES('extra-doc','Extra','s','2026-09-21T00:00:00Z','platform')`); err != nil {
@@ -128,6 +132,7 @@ func TestListLegalDocsOrdersBySlug(t *testing.T) {
 // TestLegalAcceptanceRoundTrips proves an acceptance record written through the
 // account-scoped handle is readable back with its timestamps intact.
 func TestLegalAcceptanceRoundTrips(t *testing.T) {
+	t.Parallel()
 	_, st := openLegalStore(t)
 	ctx := context.Background()
 	const userID = "user-legal-test"

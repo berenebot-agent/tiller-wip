@@ -25,6 +25,7 @@ func (t *routingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // TestRefreshInvalidGrantReturnsReconnectRequired verifies that an invalid_grant
 // error from the Claude token endpoint is classified as reconnect_required.
 func TestRefreshInvalidGrantReturnsReconnectRequired(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
@@ -42,6 +43,7 @@ func TestRefreshInvalidGrantReturnsReconnectRequired(t *testing.T) {
 // TestRefresh401ReturnsReconnectRequired verifies that a 401 from the Claude
 // token endpoint is classified as reconnect_required.
 func TestRefresh401ReturnsReconnectRequired(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -57,6 +59,7 @@ func TestRefresh401ReturnsReconnectRequired(t *testing.T) {
 // TestRefresh500StaysTransient verifies that a 500 from the Claude token endpoint
 // stays as a transient error (not reconnect_required).
 func TestRefresh500StaysTransient(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))

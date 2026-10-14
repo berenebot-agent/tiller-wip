@@ -29,6 +29,7 @@ func boolPtrEqual(a, b *bool) bool {
 }
 
 func TestExtractChatReasoning(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		body map[string]any
@@ -95,6 +96,7 @@ func TestExtractChatReasoning(t *testing.T) {
 }
 
 func TestExtractResponsesReasoning(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		body map[string]any
@@ -130,6 +132,7 @@ func TestExtractResponsesReasoning(t *testing.T) {
 }
 
 func TestExtractMessagesReasoning(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		body map[string]any
@@ -181,6 +184,7 @@ func TestExtractMessagesReasoning(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_ChatToResponses(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		selector   reasoningSelector
@@ -241,6 +245,7 @@ func TestApplyReasoningSelector_ChatToResponses(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_ChatToMessages(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name      string
 		selector  reasoningSelector
@@ -282,6 +287,7 @@ func TestApplyReasoningSelector_ChatToMessages(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_MessagesToChat(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium", "high"}}}}
 	body := []byte(`{"model":"x","output_config":{"effort":"high"}}`)
 	selector := extractMessagesReasoning(map[string]any{
@@ -294,6 +300,7 @@ func TestApplyReasoningSelector_MessagesToChat(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_ToggleEnabledSemantics(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		selector   reasoningSelector
@@ -337,6 +344,7 @@ func TestApplyReasoningSelector_ToggleEnabledSemantics(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_SilentlyOmitsUnsupportedEffort(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "medium"}}}}
 	selector := reasoningSelector{Present: true, Effort: "ultra"}
 	body := []byte(`{"model":"x","reasoning_effort":"ultra"}`)
@@ -347,6 +355,7 @@ func TestApplyReasoningSelector_SilentlyOmitsUnsupportedEffort(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_BudgetApplication(t *testing.T) {
+	t.Parallel()
 	min, max := int64(1024), int64(8192)
 	cases := []struct {
 		name, body, field string
@@ -382,6 +391,7 @@ func TestApplyReasoningSelector_BudgetApplication(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_NoSelectorPreservesBytes(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{ "model": "x", "messages": [{"role":"user","content":"hi"}] }`)
 	result := applyReasoningSelector(body, reasoningSelector{}, providers.ProtocolChat, &providers.ReasoningCapabilities{})
 	if string(result) != string(body) {
@@ -395,6 +405,7 @@ func TestApplyReasoningSelector_NoSelectorPreservesBytes(t *testing.T) {
 // unsupported_feature) and must not gain an invented reasoning selector; the
 // target's provider default applies.
 func TestTranslatePlainRequestNeverRejectsOrInventsReasoning(t *testing.T) {
+	t.Parallel()
 	bodies := map[providers.Protocol][]byte{
 		providers.ProtocolChat:      []byte(`{"model":"client-x","messages":[{"role":"user","content":"hi"}]}`),
 		providers.ProtocolResponses: []byte(`{"model":"client-x","input":"hi"}`),
@@ -440,6 +451,7 @@ func TestTranslatePlainRequestNeverRejectsOrInventsReasoning(t *testing.T) {
 // genuinely unrepresentable Responses state, never to a missing reasoning
 // selector.
 func TestTranslateResponsesPlainStatefulFieldStillRejects(t *testing.T) {
+	t.Parallel()
 	for _, field := range []string{"conversation", "previous_response_id", "store", "background"} {
 		body := []byte(`{"model":"client-x","input":"hi","` + field + `":"value"}`)
 		_, err := translateRequest(body, providers.ProtocolResponses, providers.ProtocolChat, "upstream-model")
@@ -451,6 +463,7 @@ func TestTranslateResponsesPlainStatefulFieldStillRejects(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_T7AcrossProtocols(t *testing.T) {
+	t.Parallel()
 	type protocolCase struct {
 		name     string
 		target   providers.Protocol
@@ -500,6 +513,7 @@ func TestApplyReasoningSelector_T7AcrossProtocols(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_ToggleOnlyTarget(t *testing.T) {
+	t.Parallel()
 	// A model whose only capability is Toggle (no effort, no budget) must NOT
 	// be treated as explicitly non-reasoning.
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}}
@@ -513,6 +527,7 @@ func TestApplyReasoningSelector_ToggleOnlyTarget(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_AdaptivePreserved(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
 	selector := reasoningSelector{Present: true, Mode: "adaptive"}
 	body := []byte(`{"model":"x","thinking":{"type":"adaptive"}}`)
@@ -523,6 +538,7 @@ func TestApplyReasoningSelector_AdaptivePreserved(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_ChatPreservesNonSelectorFields(t *testing.T) {
+	t.Parallel()
 	// stripReasoningSelector for Chat must preserve reasoning.exclude.
 	caps := &providers.ReasoningCapabilities{} // explicitly unsupported
 	selector := reasoningSelector{Present: true, Effort: "high"}
@@ -537,6 +553,7 @@ func TestApplyReasoningSelector_ChatPreservesNonSelectorFields(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_OpenRouterMandatoryNone(t *testing.T) {
+	t.Parallel()
 	// OpenRouter: mandatory=true + default_effort=none means reasoning is
 	// required; don't use "none" to force-enable when user explicitly enables.
 	caps := &providers.ReasoningCapabilities{
@@ -554,6 +571,7 @@ func TestApplyReasoningSelector_OpenRouterMandatoryNone(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_TranslateRequestThenMap(t *testing.T) {
+	t.Parallel()
 	// Full path: Chat→Messages via translateRequest then applyReasoningSelector.
 	chatBody := []byte(`{"model":"client-x","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
 	translated, err := translateRequest(chatBody, providers.ProtocolChat, providers.ProtocolMessages, "claude-opus-5")
@@ -568,6 +586,7 @@ func TestApplyReasoningSelector_TranslateRequestThenMap(t *testing.T) {
 }
 
 func TestApplyReasoningSelector_TranslateEnabledToAdaptiveMessages(t *testing.T) {
+	t.Parallel()
 	chatBody := []byte(`{"model":"client-x","messages":[{"role":"user","content":"hi"}],"reasoning":{"enabled":true}}`)
 	translated, err := translateRequest(chatBody, providers.ProtocolChat, providers.ProtocolMessages, "claude-opus-5")
 	if err != nil {
@@ -581,6 +600,7 @@ func TestApplyReasoningSelector_TranslateEnabledToAdaptiveMessages(t *testing.T)
 }
 
 func TestApplyReasoningSelector_MaterializesTranslatedControls(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		selector   reasoningSelector
@@ -634,6 +654,7 @@ func TestApplyReasoningSelector_MaterializesTranslatedControls(t *testing.T) {
 }
 
 func TestApplyReasoningSelectorRejectsIncompatibleMechanism(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}}
 	result := applyReasoningSelector([]byte(`{"model":"x","reasoning_effort":"high"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolChat, caps)
 	if containsString(result, "reasoning_effort") {
@@ -642,6 +663,7 @@ func TestApplyReasoningSelectorRejectsIncompatibleMechanism(t *testing.T) {
 }
 
 func TestStripReasoningSelectorMessagesRemovesEmptyObjects(t *testing.T) {
+	t.Parallel()
 	result := stripReasoningSelector([]byte(`{"model":"x","output_config":{"effort":"high"},"thinking":{"type":"enabled"}}`), providers.ProtocolMessages)
 	if containsString(result, "output_config") || containsString(result, "thinking") {
 		t.Fatalf("empty selector objects survived: %s", result)
@@ -649,6 +671,7 @@ func TestStripReasoningSelectorMessagesRemovesEmptyObjects(t *testing.T) {
 }
 
 func TestMergeReasoningCapabilitiesPreservesModesAndUnrestrictedEffort(t *testing.T) {
+	t.Parallel()
 	merged := mergeReasoningCapabilities(
 		&providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low"}}}, ThinkingModes: []string{"enabled"}},
 		&providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort}}, ThinkingModes: []string{"adaptive"}},
@@ -662,6 +685,7 @@ func TestMergeReasoningCapabilitiesPreservesModesAndUnrestrictedEffort(t *testin
 }
 
 func TestTranslateNonstreamReasoning_MessagesUpstream_ClientChat(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{
 		"id": "msg_123",
 		"type": "message",
@@ -687,6 +711,7 @@ func TestTranslateNonstreamReasoning_MessagesUpstream_ClientChat(t *testing.T) {
 }
 
 func TestTranslateNonstreamReasoning_MessagesUpstream_ClientResponses(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{
 		"id": "msg_123",
 		"type": "message",
@@ -715,6 +740,7 @@ func TestTranslateNonstreamReasoning_MessagesUpstream_ClientResponses(t *testing
 }
 
 func TestTranslateNonstreamReasoning_ResponsesUpstream_ClientChat(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{
 		"id": "resp_123",
 		"object": "response",
@@ -752,6 +778,7 @@ func TestTranslateNonstreamReasoning_ResponsesUpstream_ClientChat(t *testing.T) 
 }
 
 func TestTranslateNonstreamReasoning_ResponsesUpstream_ClientMessages(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{
 		"id": "resp_123",
 		"object": "response",
@@ -792,6 +819,7 @@ func TestTranslateNonstreamReasoning_ResponsesUpstream_ClientMessages(t *testing
 }
 
 func TestTranslateNonstreamReasoning_ChatReasoningUpstream_ClientResponses(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{
 		"id": "chat_123",
 		"object": "chat.completion",
@@ -824,6 +852,7 @@ func TestTranslateNonstreamReasoning_ChatReasoningUpstream_ClientResponses(t *te
 }
 
 func TestTranslateNonstreamReasoning_ChatReasoningUpstream_ClientMessages(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{
 		"id": "chat_123",
 		"object": "chat.completion",
@@ -856,6 +885,7 @@ func TestTranslateNonstreamReasoning_ChatReasoningUpstream_ClientMessages(t *tes
 }
 
 func TestTranslateNonstreamReasoning_NoReasoningPreservesText(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{
 		"id": "chat_123",
 		"object": "chat.completion",

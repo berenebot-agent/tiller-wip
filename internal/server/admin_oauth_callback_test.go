@@ -76,6 +76,7 @@ func beginCallbackFlow(t *testing.T, app *Server, providerID string) (string, in
 }
 
 func TestHostedOAuthRedirectCallbackCompletesCodexFlow(t *testing.T) {
+	t.Parallel()
 	app, db, providerID := newHostedCallbackHarness(t)
 	var grants atomic.Int32
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +129,7 @@ func TestHostedOAuthRedirectCallbackCompletesCodexFlow(t *testing.T) {
 }
 
 func TestHostedOAuthRedirectCallbackRejectsBadState(t *testing.T) {
+	t.Parallel()
 	app, _, _ := newHostedCallbackHarness(t)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
@@ -144,6 +146,7 @@ func TestHostedOAuthRedirectCallbackRejectsBadState(t *testing.T) {
 }
 
 func TestHostedOAuthRedirectCallbackWithoutStateGivesPasteHelp(t *testing.T) {
+	t.Parallel()
 	app, _, _ := newHostedCallbackHarness(t)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
@@ -160,6 +163,7 @@ func TestHostedOAuthRedirectCallbackWithoutStateGivesPasteHelp(t *testing.T) {
 }
 
 func TestHostedOAuthRedirectCallbackProviderError(t *testing.T) {
+	t.Parallel()
 	app, _, providerID := newHostedCallbackHarness(t)
 	state, _ := beginCallbackFlow(t, app, providerID)
 	router := httptest.NewServer(app.Handler())
@@ -177,6 +181,7 @@ func TestHostedOAuthRedirectCallbackProviderError(t *testing.T) {
 }
 
 func TestHostedOAuthRedirectCallbackDisconnectRace(t *testing.T) {
+	t.Parallel()
 	app, _, providerID := newHostedCallbackHarness(t)
 	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

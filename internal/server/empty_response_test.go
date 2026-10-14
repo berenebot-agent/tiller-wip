@@ -121,6 +121,7 @@ func reachedOrder(mu *sync.Mutex, reached *[]string) []string {
 }
 
 func TestOrderedFallbackEmptyStreamFallsThrough(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	api, secret, canonical, _ := cooldownTestHarness(t,
@@ -137,6 +138,7 @@ func TestOrderedFallbackEmptyStreamFallsThrough(t *testing.T) {
 }
 
 func TestOrderedFallbackStreamErrorFallsThrough(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	api, secret, canonical, _ := cooldownTestHarness(t,
@@ -153,6 +155,7 @@ func TestOrderedFallbackStreamErrorFallsThrough(t *testing.T) {
 }
 
 func TestOrderedFallbackReasoningOnlyDoesNotFallBack(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	api, secret, canonical, _ := cooldownTestHarness(t,
@@ -169,6 +172,7 @@ func TestOrderedFallbackReasoningOnlyDoesNotFallBack(t *testing.T) {
 }
 
 func TestEmptyResponseCooldownSkipsTargetOnNextRequest(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	api, secret, canonical, _ := cooldownTestHarness(t,
@@ -197,6 +201,7 @@ func TestEmptyResponseCooldownSkipsTargetOnNextRequest(t *testing.T) {
 // cut by a reverse proxy read timeout. The silent target must still serve, and
 // the client stream must carry keepalive frames during the probe window.
 func TestOrderedFallbackProbeKeepaliveDuringSilence(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	api, secret, canonical, _ := cooldownTestHarness(t,
@@ -221,6 +226,7 @@ func TestOrderedFallbackProbeKeepaliveDuringSilence(t *testing.T) {
 // chain is surfaced as an SSE failure frame rather than a JSON body on a
 // committed 200 stream.
 func TestOrderedFallbackProbeKeepaliveThenExhausted(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	api, secret, canonical, _ := cooldownTestHarness(t,
@@ -251,6 +257,7 @@ func sseUpstreamWithHeaders(modelID, mode string, reached *[]string, mu *sync.Mu
 // provider-specific headers from a failed ordered-fallback target are not
 // carried into the client response when the stream is committed early.
 func TestOrderedFallbackEarlyCommitDoesNotLeakProviderHeaders(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	// Target A returns SSE with provider-specific headers but no usable output.

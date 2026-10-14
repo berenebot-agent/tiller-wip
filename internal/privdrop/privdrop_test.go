@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+// Every test in this file is serial (no t.Parallel): several drive environment
+// variables via t.Setenv, which Go forbids in a parallel test (it would race
+// the process environment against other tests). They are also fast, so
+// parallelism would buy nothing.
 func TestDropToRuntimeUserNoopWhenNonRoot(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("test asserts no-op behaviour, which only holds for a non-root process")

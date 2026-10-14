@@ -70,6 +70,7 @@ func hostedBootstrapConfig(adminUsername, adminPassword string) config.Config {
 }
 
 func TestHostedStartupRequiresTrustedProxy(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -84,6 +85,7 @@ func TestHostedStartupRequiresTrustedProxy(t *testing.T) {
 }
 
 func TestHostedStartupRequiresBootstrapCredentialsForExistingLocalDatabase(t *testing.T) {
+	t.Parallel()
 	db := openExistingLocalDatabase(t)
 	_, err := New(hostedBootstrapConfig("", ""), db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if !errors.Is(err, identity.ErrBootstrapRequired) {
@@ -93,6 +95,7 @@ func TestHostedStartupRequiresBootstrapCredentialsForExistingLocalDatabase(t *te
 }
 
 func TestHostedStartupRejectsNonEmailBootstrapUsername(t *testing.T) {
+	t.Parallel()
 	db := openExistingLocalDatabase(t)
 	_, err := New(hostedBootstrapConfig("admin", "correct horse battery staple"), db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if !errors.Is(err, identity.ErrBootstrapInvalid) {
@@ -102,6 +105,7 @@ func TestHostedStartupRejectsNonEmailBootstrapUsername(t *testing.T) {
 }
 
 func TestHostedStartupMigratesExistingLocalDatabase(t *testing.T) {
+	t.Parallel()
 	db := openExistingLocalDatabase(t)
 	app, err := New(hostedBootstrapConfig("owner@example.com", "correct horse battery staple"), db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if err != nil {
@@ -144,6 +148,7 @@ func TestHostedStartupMigratesExistingLocalDatabase(t *testing.T) {
 // ownerless account and failed with ErrBootstrapCollision on the local
 // operator's owner_user_id.
 func TestLocalToHostedConversionPreservesOperatorAndPasskeys(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")

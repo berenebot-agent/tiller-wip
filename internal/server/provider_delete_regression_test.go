@@ -36,6 +36,7 @@ func deleteMatrixHarness(t *testing.T) (*testAPI, string, string, string, string
 }
 
 func TestProviderDeleteAvailabilityMatrix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		aAvailable bool

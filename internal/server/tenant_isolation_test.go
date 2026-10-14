@@ -54,6 +54,7 @@ func loginTestAPI(t *testing.T, app *Server) *testAPI {
 // enumerate account A's admin resources, and that a client key bound to A
 // cannot resolve B's models.
 func TestCrossAccountHTTPIsolation(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

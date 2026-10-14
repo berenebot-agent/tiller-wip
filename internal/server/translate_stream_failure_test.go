@@ -20,6 +20,7 @@ func (r failedTranslationStreamReader) Read([]byte) (int, error) {
 }
 
 func TestTranslatedStreamFailureClassification(t *testing.T) {
+	t.Parallel()
 	readErr := errors.New("synthetic transport failure")
 	cases := []struct {
 		name   string
@@ -97,6 +98,7 @@ func TestTranslatedStreamFailureClassification(t *testing.T) {
 }
 
 func TestTranslatedStreamCompletionUnchanged(t *testing.T) {
+	t.Parallel()
 	for _, terminal := range []string{
 		"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
 		"data: [DONE]\n\n",

@@ -17,6 +17,7 @@ func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func TestValidateMailConfigs(t *testing.T) {
+	t.Parallel()
 	valid := []Config{
 		{Provider: "resend", From: "Tiller <no-reply@example.com>", ResendAPIKey: "re_test"},
 		{Provider: "brevo", From: "no-reply@example.com", BrevoAPIKey: "xkeysib-test"},
@@ -41,6 +42,7 @@ func TestValidateMailConfigs(t *testing.T) {
 }
 
 func TestManagerStartsUnconfiguredAndHotSwaps(t *testing.T) {
+	t.Parallel()
 	m, err := NewManager(Config{})
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +64,7 @@ func TestManagerStartsUnconfiguredAndHotSwaps(t *testing.T) {
 }
 
 func TestBrevoSendReturnsProviderMessageID(t *testing.T) {
+	t.Parallel()
 	const wantMessageID = "<20260927.12345@example.brevo.com>"
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() != "https://api.brevo.com/v3/smtp/email" {
@@ -88,6 +91,7 @@ func TestBrevoSendReturnsProviderMessageID(t *testing.T) {
 }
 
 func TestResendPayloadIncludesHTMLOnlyWhenPresent(t *testing.T) {
+	t.Parallel()
 	plain := resendPayload("no-reply@example.com", Message{To: "u@example.com", Subject: "s", Text: "t"})
 	if _, ok := plain["html"]; ok {
 		t.Fatal("plain message carried an html field")
@@ -102,6 +106,7 @@ func TestResendPayloadIncludesHTMLOnlyWhenPresent(t *testing.T) {
 }
 
 func TestBrevoPayloadIncludesHTMLContentOnlyWhenPresent(t *testing.T) {
+	t.Parallel()
 	plain := brevoPayload("no-reply@example.com", Message{To: "u@example.com", Subject: "s", Text: "t"})
 	if _, ok := plain["htmlContent"]; ok {
 		t.Fatal("plain message carried an htmlContent field")
@@ -116,6 +121,7 @@ func TestBrevoPayloadIncludesHTMLContentOnlyWhenPresent(t *testing.T) {
 }
 
 func TestBrevoSendIncludesHTMLContentInRequest(t *testing.T) {
+	t.Parallel()
 	var body map[string]any
 	mailer := &brevoMailer{
 		from:   "no-reply@example.com",
@@ -141,6 +147,7 @@ func TestBrevoSendIncludesHTMLContentInRequest(t *testing.T) {
 }
 
 func TestBuildSMTPBodyPlainAndMultipart(t *testing.T) {
+	t.Parallel()
 	plain := buildSMTPBody("no-reply@example.com", "u@example.com", Message{Subject: "s", Text: "hello"})
 	if !strings.Contains(plain, "Content-Type: text/plain; charset=UTF-8") {
 		t.Fatalf("plain body missing text/plain header:\n%s", plain)
@@ -168,6 +175,7 @@ func TestBuildSMTPBodyPlainAndMultipart(t *testing.T) {
 }
 
 func TestBrevoSendAcceptsMissingOrMalformedMessageID(t *testing.T) {
+	t.Parallel()
 	for _, body := range []string{"", "not-json", `{"messageId":42}`} {
 		t.Run(body, func(t *testing.T) {
 			mailer := &brevoMailer{

@@ -69,6 +69,7 @@ func insertLogRow(t *testing.T, db *database.DB, id, clientKeyID, requestedModel
 }
 
 func TestGlobalActivityRequiresAdmin(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	// A request without an admin session cookie must be rejected.
 	req, _ := http.NewRequest("GET", api.base+"/api/admin/activity", nil)
@@ -83,6 +84,7 @@ func TestGlobalActivityRequiresAdmin(t *testing.T) {
 }
 
 func TestGlobalActivityMultipleClientsNewestFirst(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	client2ID, _ := createClientWithModel(t, api, "second client")
 	// Insert rows with distinct created_at so ordering is deterministic.
@@ -105,6 +107,7 @@ func TestGlobalActivityMultipleClientsNewestFirst(t *testing.T) {
 }
 
 func TestGlobalActivityIncludesClientIdentity(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	client2ID, _ := createClientWithModel(t, api, "second client")
 	insertLogRow(t, db, "row-a", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
@@ -129,6 +132,7 @@ func TestGlobalActivityIncludesClientIdentity(t *testing.T) {
 }
 
 func TestGlobalActivitySearchFields(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	client2ID, _ := createClientWithModel(t, api, "second client")
 	// Row A: client1 direct success.
@@ -208,6 +212,7 @@ func TestGlobalActivitySearchFields(t *testing.T) {
 // resolved_provider/resolved_model columns. Searching by the canonical
 // "provider/model" id must still find the row via the concatenated resolved pair.
 func TestGlobalActivitySearchResolvedPair(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Row A: real-model request addressed by an alias, resolved to provider-a/model-a.
 	insertLogRow(t, db, "row-a", clientID, "main/hermes-daily", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
@@ -234,6 +239,7 @@ func TestGlobalActivitySearchResolvedPair(t *testing.T) {
 }
 
 func TestGlobalActivityPagination(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Insert 5 rows with increasing created_at.
 	for i := 1; i <= 5; i++ {
@@ -273,6 +279,7 @@ func TestGlobalActivityPagination(t *testing.T) {
 }
 
 func TestGlobalActivityNoSensitiveMaterial(t *testing.T) {
+	t.Parallel()
 	api, _, _, secret := loggingTestHarness(t, mockUpstream(t))
 	_, secret2 := createClientWithModel(t, api, "second client")
 	// Make real requests through both clients with distinctive prompt content.

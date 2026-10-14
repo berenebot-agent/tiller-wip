@@ -12,6 +12,7 @@ import (
 // (they are served to every hosted page), so they must be stored in plaintext
 // and never treated as recoverable secrets.
 func TestPlatformAnalyticsSettingsRoundTrip(t *testing.T) {
+	t.Parallel()
 	db, st := openStore(t)
 	ctx := context.Background()
 

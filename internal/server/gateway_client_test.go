@@ -183,6 +183,7 @@ func gatewayClientEqualJSON(t *testing.T, got, want any) {
 }
 
 func TestGatewayClientCatalog(t *testing.T) {
+	t.Parallel()
 	for _, known := range []bool{true, false} {
 		t.Run(fmt.Sprintf("capabilities-known-%t", known), func(t *testing.T) {
 			f := newGatewayClientFixture(t, known)
@@ -234,6 +235,7 @@ func TestGatewayClientCatalog(t *testing.T) {
 }
 
 func TestGatewayClientChatToolRoundTrip(t *testing.T) {
+	t.Parallel()
 	f := newGatewayClientFixture(t, true)
 	strict := true
 	schema := map[string]any{"type": "object", "properties": map[string]any{"city": map[string]any{"type": "string"}}, "required": []string{"city"}, "additionalProperties": false}
@@ -280,6 +282,7 @@ func TestGatewayClientChatToolRoundTrip(t *testing.T) {
 }
 
 func TestGatewayClientStream(t *testing.T) {
+	t.Parallel()
 	f := newGatewayClientFixture(t, true)
 	stream, err := f.client.Stream(context.Background(), gateway.Request{Model: "virtual/free", Messages: []gateway.Message{{"role": "user", "content": "stream-fixture"}}, Tools: []gateway.Tool{{Type: "function", Function: gateway.ToolFunction{Name: "lookup", Parameters: map[string]any{"type": "object"}}}}})
 	if err != nil {
@@ -341,6 +344,7 @@ func TestGatewayClientStream(t *testing.T) {
 }
 
 func TestGatewayClientStreamCancellation(t *testing.T) {
+	t.Parallel()
 	f := newGatewayClientFixture(t, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

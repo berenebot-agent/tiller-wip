@@ -11,6 +11,7 @@ import (
 func boolPtr(v bool) *bool { return &v }
 
 func TestTriStateANDBoolTruthTableAndEmptySet(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		in   []*bool
@@ -39,6 +40,7 @@ func TestTriStateANDBoolTruthTableAndEmptySet(t *testing.T) {
 }
 
 func TestAggregateVirtualNumericRequiresKnownPositiveEligibleValues(t *testing.T) {
+	t.Parallel()
 	known := []virtualTargetView{
 		{Enabled: true, Available: true, ContextLength: int64Ptr(128000), MaxOutputTokens: int64Ptr(8192)},
 		{Enabled: true, Available: true, ContextLength: int64Ptr(64000), MaxOutputTokens: int64Ptr(4096)},
@@ -62,6 +64,7 @@ func TestAggregateVirtualNumericRequiresKnownPositiveEligibleValues(t *testing.T
 }
 
 func TestVirtualAdminUsesAllEligibleTargetsForAvailabilityCapabilitiesAndDeletion(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	var providerA, modelA string
 	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerA); err != nil {
@@ -222,6 +225,7 @@ func seedSecondProvider(t *testing.T, db *database.DB) (providerID, modelID stri
 // columns before the provider/model rows are deleted, so the ON DELETE RESTRICT
 // foreign keys do not block the delete and the virtual model stays routable.
 func TestProviderDeletePromotesRemainingTargetToCompatibilityPrimary(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 	var providerA, modelA string
 	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerA); err != nil {
@@ -287,6 +291,7 @@ func TestProviderDeletePromotesRemainingTargetToCompatibilityPrimary(t *testing.
 // provider is the first of a three-target chain: the second target becomes the
 // new compatibility primary and the third is untouched.
 func TestProviderDeleteWithThreeTargets(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 	var providerA, modelA string
 	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerA); err != nil {
@@ -349,6 +354,7 @@ func TestProviderDeleteWithThreeTargets(t *testing.T) {
 // remaining target (from another provider) is promoted to the compatibility
 // primary.
 func TestProviderDeleteWithMultipleModelOccurrences(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 	var providerA, modelA string
 	if err := db.SQL.QueryRow(`SELECT id FROM providers WHERE name='provider-a'`).Scan(&providerA); err != nil {

@@ -58,6 +58,7 @@ func localPasskeyServer(t *testing.T) (*Server, *testAPI) {
 // the local operator users row (unified credential storage) and can read the
 // local account profile.
 func TestLocalOperatorLoginResolvesIdentity(t *testing.T) {
+	t.Parallel()
 	app, api := localPasskeyServer(t)
 	u, err := app.identity.LocalOperatorUser(context.Background())
 	if err != nil {
@@ -79,6 +80,7 @@ func TestLocalOperatorLoginResolvesIdentity(t *testing.T) {
 // register a passkey on the operator via the admin session, then log out and
 // sign in with it, ending with a usable admin session.
 func TestLocalPasskeyRegisterAndLogin(t *testing.T) {
+	t.Parallel()
 	app, api := localPasskeyServer(t)
 	auth := newHTTPTestAuthenticator(t)
 	operator, err := app.identity.LocalOperatorUser(context.Background())
@@ -128,6 +130,7 @@ func TestLocalPasskeyRegisterAndLogin(t *testing.T) {
 // TestLocalPasskeyUnavailableWithoutPublicURL proves a plain local install (no
 // PublicURL) reports passkeys disabled and 501s the endpoints.
 func TestLocalPasskeyUnavailableWithoutPublicURL(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

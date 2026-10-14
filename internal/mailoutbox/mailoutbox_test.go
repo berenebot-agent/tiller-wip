@@ -69,6 +69,7 @@ func enqueueOnce(t *testing.T, o *Outbox, msg QueuedMessage) string {
 }
 
 func TestEnqueueEncryptsTokenAtRest(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	id := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "raw-secret-token"})
 	var stored string
@@ -88,6 +89,7 @@ func TestEnqueueEncryptsTokenAtRest(t *testing.T) {
 // locked cipher reported Enabled()==false and open() handed the stored enc:v1:
 // value back as if it were plaintext.
 func TestLockedCipherNeverReturnsCiphertextAsPlaintext(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	id := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "raw-secret-token"})
 	var stored string
@@ -104,6 +106,7 @@ func TestLockedCipherNeverReturnsCiphertextAsPlaintext(t *testing.T) {
 }
 
 func TestNotConfiguredDefersWithoutConsumingAttempt(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
 	o.processDue(context.Background())
@@ -140,6 +143,7 @@ func (m successfulMailer) Send(context.Context, mailer.Message) (mailer.SendResu
 }
 
 func TestProcessDueRecordsSuccessfulSendMetadata(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	const messageID = "<accepted-message@example.brevo.com>"
 	o.mailer = successfulMailer{result: mailer.SendResult{MessageID: messageID}}
@@ -170,6 +174,7 @@ func TestProcessDueRecordsSuccessfulSendMetadata(t *testing.T) {
 }
 
 func TestRetryBackoffAndDeadLetter(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	o.mailer = nil // force processDue to use our injected sender below
 	enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
@@ -219,6 +224,7 @@ func TestRetryBackoffAndDeadLetter(t *testing.T) {
 }
 
 func TestDueWorkIndexOnlyCoversLiveRows(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
 	var name string
@@ -228,6 +234,7 @@ func TestDueWorkIndexOnlyCoversLiveRows(t *testing.T) {
 }
 
 func TestCleanupRemovesSentRows(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	id := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
 	if _, err := o.db.Exec(`UPDATE mail_outbox SET sent_at=?,token_ciphertext=NULL WHERE id=?`, formatTime(time.Now().Add(-48*time.Hour)), id); err != nil {
@@ -240,6 +247,7 @@ func TestCleanupRemovesSentRows(t *testing.T) {
 }
 
 func TestDueCounts(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
 	queued, dead, err := o.DueCounts(context.Background(), 24*time.Hour)
@@ -249,6 +257,7 @@ func TestDueCounts(t *testing.T) {
 }
 
 func TestSentCountAndRecent(t *testing.T) {
+	t.Parallel()
 	o, _ := newTestOutbox(t)
 	sentID := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "sent@example.com", Token: "tok"})
 	enqueueOnce(t, o, QueuedMessage{Type: TypePasswordReset, Recipient: "queued@example.com", Token: "tok"})

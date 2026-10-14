@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +13,7 @@ import (
 )
 
 func TestRunClientCreatesCatalogueFixture(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 	db, err := database.Open(context.Background(), dbPath)
@@ -23,12 +25,9 @@ func TestRunClientCreatesCatalogueFixture(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	old := outputDest
-	outputDest = &buf
-	defer func() { outputDest = old }()
 
 	args := []string{"--db", dbPath, "--name", "browser-catalogue-fixture", "--type", "catalogue"}
-	if err := runClient(args); err != nil {
+	if err := runClient(args, &buf); err != nil {
 		t.Fatal(err)
 	}
 
@@ -54,7 +53,7 @@ func TestRunClientCreatesCatalogueFixture(t *testing.T) {
 
 	// Re-running with the same name must be idempotent (no unique-constraint error).
 	buf.Reset()
-	if err := runClient(args); err != nil {
+	if err := runClient(args, &buf); err != nil {
 		t.Fatalf("re-run failed: %v", err)
 	}
 	var out2 fixtureOutput
@@ -67,6 +66,7 @@ func TestRunClientCreatesCatalogueFixture(t *testing.T) {
 }
 
 func TestRunClientCreatesSingleFixture(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 	db, err := database.Open(context.Background(), dbPath)
@@ -89,12 +89,9 @@ func TestRunClientCreatesSingleFixture(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	old := outputDest
-	outputDest = &buf
-	defer func() { outputDest = old }()
 
 	args := []string{"--db", dbPath, "--name", "browser-single-fixture", "--type", "single", "--target-kind", "real", "--target-id", "fm"}
-	if err := runClient(args); err != nil {
+	if err := runClient(args, &buf); err != nil {
 		t.Fatal(err)
 	}
 	var out fixtureOutput
@@ -121,6 +118,7 @@ func TestRunClientCreatesSingleFixture(t *testing.T) {
 }
 
 func TestRunClientValidatesArgs(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 	if _, err := database.Open(context.Background(), dbPath); err != nil {
@@ -128,20 +126,21 @@ func TestRunClientValidatesArgs(t *testing.T) {
 	}
 
 	// Missing --name.
-	if err := runClient([]string{"--db", dbPath}); err == nil {
+	if err := runClient([]string{"--db", dbPath}, io.Discard); err == nil {
 		t.Fatal("expected error for missing --name")
 	}
 	// Invalid --type.
-	if err := runClient([]string{"--db", dbPath, "--name", "x", "--type", "bogus"}); err == nil {
+	if err := runClient([]string{"--db", dbPath, "--name", "x", "--type", "bogus"}, io.Discard); err == nil {
 		t.Fatal("expected error for invalid --type")
 	}
 	// Single without --target-id.
-	if err := runClient([]string{"--db", dbPath, "--name", "x", "--type", "single"}); err == nil {
+	if err := runClient([]string{"--db", dbPath, "--name", "x", "--type", "single"}, io.Discard); err == nil {
 		t.Fatal("expected error for single without --target-id")
 	}
 }
 
 func TestRunClientPinnedHashIsProductionArgon2id(t *testing.T) {
+	t.Parallel()
 	// The pinned hash must be a genuine Argon2id PHC string with production
 	// parameters, so the real router authenticates it through its normal
 	// verifier. If this ever drifts, the fixture silently breaks.

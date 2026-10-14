@@ -12,6 +12,7 @@ import (
 // an existing v1 Activity database (created before the cost columns) gains the
 // new columns on open, without losing rows, and the upgrade is idempotent.
 func TestActivitySchemaUpgradeAddsCostColumns(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ActivityFileName)
 	ctx := context.Background()
 
@@ -131,6 +132,7 @@ INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,st
 //     stored CREATE TABLE text for request_logs), which fails if any schema
 //     mutation runs on a steady-state boot.
 func TestActivityRetiredColumnStaysDropped(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ActivityFileName)
 	ctx := context.Background()
 
@@ -232,6 +234,7 @@ INSERT INTO activity_schema_migrations(version,applied_at) VALUES('001','2026-01
 // upgrade rewrites historical route_status='legacy' rows to 'unresolved', keeps
 // already-routed rows untouched, records its version, and is idempotent.
 func TestActivityDataUpgradeReclassifiesLegacyRouteStatus(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), ActivityFileName)
 	ctx := context.Background()
 

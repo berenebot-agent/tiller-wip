@@ -86,6 +86,7 @@ func cooldownTestHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc) (*
 }
 
 func TestCooldown500SkipsTargetOnNextRequest(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +136,7 @@ func TestCooldown500SkipsTargetOnNextRequest(t *testing.T) {
 }
 
 func TestCooldownExpiryRetriesTarget(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -200,6 +202,7 @@ func TestCooldownExpiryRetriesTarget(t *testing.T) {
 }
 
 func TestCooldownSharedAcrossVirtualModels(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -300,6 +303,7 @@ func TestCooldownSharedAcrossVirtualModels(t *testing.T) {
 }
 
 func TestCooldownDisabledRetriesEveryTime(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -349,6 +353,7 @@ func TestCooldownDisabledRetriesEveryTime(t *testing.T) {
 }
 
 func TestCooldownUpstream400SkipsTargetOnNextRequest(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +403,7 @@ func TestCooldownUpstream400SkipsTargetOnNextRequest(t *testing.T) {
 }
 
 func TestCooldownExhaustionBypass(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var aCalls atomic.Int32
 	var bCalls atomic.Int32
@@ -445,6 +451,7 @@ func TestCooldownExhaustionBypass(t *testing.T) {
 }
 
 func TestCooldownDirectRouteUnaffected(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -514,6 +521,7 @@ func TestCooldownDirectRouteUnaffected(t *testing.T) {
 }
 
 func TestCooldownTimeoutOpensCooldown(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	// A hangs (never sends a response header) so the router's per-attempt
@@ -575,6 +583,7 @@ func TestCooldownTimeoutOpensCooldown(t *testing.T) {
 }
 
 func TestCooldownResponseTooLargeDoesNotOpen(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	tooLargeA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +633,7 @@ func TestCooldownResponseTooLargeDoesNotOpen(t *testing.T) {
 }
 
 func TestCooldownRestartClearsState(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -692,6 +702,7 @@ func TestCooldownRestartClearsState(t *testing.T) {
 // target, so a subsequent ordered-fallback route over the same target is not
 // skipped.
 func TestCooldownDoesNotApplyToFixedVirtualRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -755,6 +766,7 @@ func TestCooldownDoesNotApplyToFixedVirtualRoute(t *testing.T) {
 // route never populates cooldown, so the same target used by an ordered-fallback
 // route is not skipped.
 func TestCooldownDoesNotApplyToDirectRealRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {

@@ -33,7 +33,13 @@ func newSSEKeepaliveWriter(w http.ResponseWriter, interval time.Duration) *sseKe
 		k.flusher = f
 	}
 	if interval > 0 {
+		// Start the timer under mu: the timer goroutine acquires mu before it
+		// reads k.timer, and the mutex gives it a happens-before edge with the
+		// field write. Without this the goroutine can fire and read k.timer
+		// while the constructor is still assigning it (a real data race).
+		k.mu.Lock()
 		k.timer = time.AfterFunc(interval, k.keepalive)
+		k.mu.Unlock()
 	}
 	return k
 }

@@ -23,6 +23,7 @@ func (r repeatingByteReader) Read(p []byte) (int, error) {
 }
 
 func TestOversizedNonStreamResponseFallsBackBeforeOutput(t *testing.T) {
+	t.Parallel()
 	oversized := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
@@ -46,6 +47,7 @@ func TestOversizedNonStreamResponseFallsBackBeforeOutput(t *testing.T) {
 }
 
 func TestOrderedFallbackCoversUpstreamHTTPFailures(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +99,7 @@ func TestOrderedFallbackCoversUpstreamHTTPFailures(t *testing.T) {
 }
 
 func TestOrderedFallbackDoesNotWaitForStalledErrorBody(t *testing.T) {
+	t.Parallel()
 	first := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
@@ -132,6 +135,7 @@ func TestOrderedFallbackDoesNotWaitForStalledErrorBody(t *testing.T) {
 }
 
 func TestOrderedFallbackCoversNetworkAndTLSFailures(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		baseURL func(*testing.T) string
@@ -169,6 +173,7 @@ func TestOrderedFallbackCoversNetworkAndTLSFailures(t *testing.T) {
 }
 
 func TestOrderedFallbackStopsAfterFirstSuccess(t *testing.T) {
+	t.Parallel()
 	var secondCalls atomic.Int32
 	first := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -193,6 +198,7 @@ func TestOrderedFallbackStopsAfterFirstSuccess(t *testing.T) {
 }
 
 func TestDirectRealRequestDoesNotInheritVirtualFallback(t *testing.T) {
+	t.Parallel()
 	var fallbackCalls atomic.Int32
 	failing := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -250,6 +256,7 @@ func TestDirectRealRequestDoesNotInheritVirtualFallback(t *testing.T) {
 }
 
 func TestClientCancellationDoesNotAttemptNextTarget(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var secondCalls atomic.Int32
@@ -306,6 +313,7 @@ func TestClientCancellationDoesNotAttemptNextTarget(t *testing.T) {
 }
 
 func TestStreamFailureAfterOutputDoesNotSpliceFallback(t *testing.T) {
+	t.Parallel()
 	var secondCalls atomic.Int32
 	first := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -342,6 +350,7 @@ func TestStreamFailureAfterOutputDoesNotSpliceFallback(t *testing.T) {
 }
 
 func TestInFlightRouteKeepsResolvedTargetWhileNewRequestsUseUpdate(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{})
 	release := make(chan struct{})
 	first := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -43,6 +43,7 @@ func insertStoreManagementToken(t *testing.T, scope *Scope, id, name, selector, 
 }
 
 func TestManagementTokensAreAccountScoped(t *testing.T) {
+	t.Parallel()
 	store, _ := newAPITokenStore(t)
 	ctx := context.Background()
 	scopeA := store.For("account-a")
@@ -112,6 +113,7 @@ func TestManagementTokensAreAccountScoped(t *testing.T) {
 }
 
 func TestRevokeAllManagementTokensCounts(t *testing.T) {
+	t.Parallel()
 	store, _ := newAPITokenStore(t)
 	ctx := context.Background()
 	scope := store.For("account-a")
@@ -135,6 +137,7 @@ func TestRevokeAllManagementTokensCounts(t *testing.T) {
 }
 
 func TestClientKeyNames(t *testing.T) {
+	t.Parallel()
 	store, db := newAPITokenStore(t)
 	ctx := context.Background()
 	scopeA := store.For("account-a")

@@ -13,6 +13,7 @@ import (
 )
 
 func TestLiveRequestsLifecycleIsolationAndSanitization(t *testing.T) {
+	t.Parallel()
 	h := &liveHub{subs: map[string]map[chan []byte]struct{}{}}
 	a, b := make(chan []byte, 20), make(chan []byte, 20)
 	h.subs["a"] = map[chan []byte]struct{}{a: {}}
@@ -56,6 +57,7 @@ func TestLiveRequestsLifecycleIsolationAndSanitization(t *testing.T) {
 }
 
 func TestLiveRequestsRetentionAndCompletedCap(t *testing.T) {
+	t.Parallel()
 	h := &liveHub{}
 	now := time.Now().Truncate(time.Second)
 	for i := 0; i < 205; i++ {
@@ -79,6 +81,7 @@ func TestLiveRequestsRetentionAndCompletedCap(t *testing.T) {
 }
 
 func TestLiveRequestsHTTPStartCompleteAndRecovery(t *testing.T) {
+	t.Parallel()
 	started, release := make(chan struct{}), make(chan struct{})
 	upstream := mockUpstream(t)
 	api, _, _, secret := loggingTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
@@ -146,6 +149,7 @@ func TestLiveRequestsHTTPStartCompleteAndRecovery(t *testing.T) {
 }
 
 func TestLiveRequestsLoggingDisabled(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	ch := make(chan []byte, 20)
 	api.server.liveHub.mu.Lock()

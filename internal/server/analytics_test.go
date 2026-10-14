@@ -13,6 +13,7 @@ import (
 )
 
 func TestPlatformAnalyticsSettingsValidationAndOptions(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 
@@ -86,6 +87,7 @@ func TestPlatformAnalyticsSettingsValidationAndOptions(t *testing.T) {
 // operator's script origin while analytics is enabled, and that it is added to
 // the directives a browser needs for script load and event beacons.
 func TestAnalyticsOriginWidensHostedCSP(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 
@@ -121,6 +123,7 @@ func TestAnalyticsOriginWidensHostedCSP(t *testing.T) {
 // TestAnalyticsOptionsHostedOnly proves the public analytics endpoint is not
 // registered outside hosted mode.
 func TestAnalyticsOptionsHostedOnly(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

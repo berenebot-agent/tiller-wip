@@ -9,6 +9,7 @@ import (
 )
 
 func TestRunActivitySeedsDeterministicRows(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 	db, err := database.Open(context.Background(), dbPath)
@@ -110,6 +111,7 @@ type status struct {
 }
 
 func TestRunActivityValidatesClient(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 	if _, err := database.Open(context.Background(), dbPath); err != nil {

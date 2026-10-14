@@ -28,6 +28,7 @@ func newTestStore(t *testing.T, username, password string, ttl time.Duration) (*
 // high-entropy session tokens are bcrypt-hashed, while the low-entropy admin
 // credential fingerprint keeps the memory-hard Argon2id KDF (64MiB/3/4).
 func TestSessionStoreProductionHasher(t *testing.T) {
+	t.Parallel()
 	store, _ := newTestStore(t, "admin", "pw", 30*24*time.Hour)
 	session, err := store.Create()
 	if err != nil {

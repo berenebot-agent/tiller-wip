@@ -12,6 +12,7 @@ import (
 // database gets exactly one verified rollback snapshot before migration 028
 // mutates it, written to the configured backup directory.
 func TestPreTenancySnapshotCreatedForExistingInstall(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "router.db")
 	// Checkpoint 27 applies migrations 001..027, i.e. everything before 028.
@@ -54,6 +55,7 @@ func TestPreTenancySnapshotCreatedForExistingInstall(t *testing.T) {
 // TestPreTenancySnapshotIsIdempotent proves a second Open reuses the existing
 // snapshot rather than piling up new ones.
 func TestPreTenancySnapshotIsIdempotent(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "router.db")
 	backupDir := filepath.Join(dir, "backups")
@@ -92,6 +94,7 @@ func TestPreTenancySnapshotIsIdempotent(t *testing.T) {
 // treated as another database's rollback point even when they share a backup
 // directory.
 func TestPreTenancySnapshotNotReusedAcrossInstallations(t *testing.T) {
+	t.Parallel()
 	backupDir := t.TempDir()
 
 	// First installation: migrate and record its snapshot name.
@@ -143,6 +146,7 @@ func snapshotNames(t *testing.T, dir string) []string {
 // TestInstallationIDStableAcrossReopen proves the install id used to bind
 // snapshot reuse is durable: reopening the same database yields the same id.
 func TestInstallationIDStableAcrossReopen(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "router.db")
 	openMigrationFixture(t, path, 27)
@@ -177,6 +181,7 @@ func TestInstallationIDStableAcrossReopen(t *testing.T) {
 // TestPreTenancySnapshotSkippedForFreshInstall proves a fresh install (no
 // schema_migrations table) takes no snapshot.
 func TestPreTenancySnapshotSkippedForFreshInstall(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "router.db")
 	backupDir := filepath.Join(dir, "backups")
@@ -204,6 +209,7 @@ func TestPreTenancySnapshotSkippedForFreshInstall(t *testing.T) {
 // activity.db does not prevent startup: the core database opens and the
 // Activity handle is left nil.
 func TestOpenSucceedsWhenActivityUnavailable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "router.db")
 	// Create a directory named activity.db so OpenActivity cannot open it as a

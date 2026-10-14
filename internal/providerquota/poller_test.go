@@ -10,7 +10,16 @@ import (
 	"time"
 )
 
+// Test parallelism note: the package-level `adapters` registry (provider-quota
+// adapter functions keyed by provider type) is read at runtime by RefreshIfDue
+// and is mutated by several tests in this file to inject test adapters. Tests
+// that register/delete entries are deliberately serial (no t.Parallel) so no
+// parallel test can observe a half-installed registry. Making the registry
+// per-Poller would let them run in parallel, but that is a runtime change and is
+// out of scope for the test-speed work.
+
 func TestSupports(t *testing.T) {
+	t.Parallel()
 	for _, ty := range []string{"codex-subscription", "claude-subscription", "github-copilot", "zai", "ollama-cloud", "commandcode"} {
 		if !Supports(ty) {
 			t.Errorf("Supports(%q) = false, want true", ty)
@@ -21,6 +30,8 @@ func TestSupports(t *testing.T) {
 	}
 }
 
+// Serial (no t.Parallel): mutates the package-level adapters registry below, and
+// other tests in this file read it. See the adapters note near the top of the file.
 func TestRefreshIfDueCadence(t *testing.T) {
 	var calls int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -72,6 +83,7 @@ func TestRefreshIfDueCadence(t *testing.T) {
 // TestFailureRetryCadence proves a provider whose last poll failed is retried
 // on the short FailureRetry cadence rather than waiting a full background
 // interval, so a transient blip does not leave the card unavailable for 30 min.
+// Serial (no t.Parallel): mutates the package-level adapters registry.
 func TestFailureRetryCadence(t *testing.T) {
 	var calls int64
 	adapters["test-flaky"] = func(_ context.Context, _ *http.Client, _ Credential) (Snapshot, error) {
@@ -114,6 +126,7 @@ func TestFailureRetryCadence(t *testing.T) {
 }
 
 func TestRefreshIfDueUnknownProvider(t *testing.T) {
+	t.Parallel()
 	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "", nil })
 	if _, ok := p.RefreshIfDue(context.Background(), "acct", "missing", false, time.Now()); ok {
 		t.Fatal("unknown provider should not poll")
@@ -123,6 +136,7 @@ func TestRefreshIfDueUnknownProvider(t *testing.T) {
 // TestReconcileUnregistersAbsentProviders is the regression for quota cards
 // persisting after a provider was deleted or disabled: registration was
 // add-only and Unregister had no callers.
+// Serial (no t.Parallel): mutates the package-level adapters registry.
 func TestReconcileUnregistersAbsentProviders(t *testing.T) {
 	adapters["test-reconcile"] = func(context.Context, *http.Client, Credential) (Snapshot, error) {
 		pct := 10.0
@@ -158,6 +172,7 @@ func TestReconcileUnregistersAbsentProviders(t *testing.T) {
 // only moves when a registration actually changes, so a steady-state reconcile
 // on every tick cannot discard in-flight poll results.
 func TestReconcileDoesNotInvalidateUnchangedRegistration(t *testing.T) {
+	t.Parallel()
 	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
 	ref := ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "codex-subscription"}
 	p.Register(ref)
@@ -177,6 +192,7 @@ func TestReconcileDoesNotInvalidateUnchangedRegistration(t *testing.T) {
 
 // TestUnregisterDiscardsInFlightPoll proves a poll that finishes after the
 // provider was removed cannot republish its snapshot.
+// Serial (no t.Parallel): mutates the package-level adapters registry.
 func TestUnregisterDiscardsInFlightPoll(t *testing.T) {
 	release := make(chan struct{})
 	adapters["test-late"] = func(ctx context.Context, _ *http.Client, _ Credential) (Snapshot, error) {
@@ -213,6 +229,7 @@ func TestUnregisterDiscardsInFlightPoll(t *testing.T) {
 	}
 }
 
+// Serial (no t.Parallel): mutates the package-level adapters registry.
 func TestPollHydrateFailureIsUnavailable(t *testing.T) {
 	adapters["test-quota2"] = func(context.Context, *http.Client, Credential) (Snapshot, error) {
 		t.Fatal("adapter should not run when hydration fails")
@@ -230,6 +247,7 @@ func TestPollHydrateFailureIsUnavailable(t *testing.T) {
 }
 
 func TestParseClaudeWindow(t *testing.T) {
+	t.Parallel()
 	util := 85.0
 	w := claudeWindowView("5h", &claudeWindow{Utilization: &util, ResetsAt: "2026-09-30T12:00:00Z"})
 	if w == nil || w.UsedPercent == nil || *w.UsedPercent != 85 {
@@ -255,6 +273,7 @@ func ollamaUsageOnlyServer(t *testing.T, body string) *httptest.Server {
 }
 
 func TestFetchOllamaCloudNestedFractions(t *testing.T) {
+	t.Parallel()
 	srv := ollamaUsageOnlyServer(t, `{"limits":{"session":{"usage":0.42},"weekly":{"usage":0.55}}}`)
 	defer srv.Close()
 	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL, Credential: "tok"})
@@ -279,6 +298,7 @@ func TestFetchOllamaCloudNestedFractions(t *testing.T) {
 // remaining_percent (0-100) is inverted to used_percent, and resets_at is
 // carried through.
 func TestFetchOllamaCloudBalance(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/balance" {
 			t.Errorf("path = %q, want /api/balance", r.URL.Path)
@@ -317,6 +337,7 @@ func TestFetchOllamaCloudBalance(t *testing.T) {
 // TestFetchOllamaCloudBalancePurchasedCovered: a non-zero purchased balance is
 // surfaced as a "credits" window (remaining USD), not a percentage.
 func TestFetchOllamaCloudBalancePurchasedCovered(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/balance" {
 			http.NotFound(w, r)
@@ -342,6 +363,7 @@ func TestFetchOllamaCloudBalancePurchasedCovered(t *testing.T) {
 }
 
 func TestFetchOllamaCloudTopLevelFallback(t *testing.T) {
+	t.Parallel()
 	srv := ollamaUsageOnlyServer(t, `{"session":0.1,"weekly":0.2}`)
 	defer srv.Close()
 	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
@@ -354,6 +376,7 @@ func TestFetchOllamaCloudTopLevelFallback(t *testing.T) {
 }
 
 func TestFetchOllamaCloudLegacyArrayFallback(t *testing.T) {
+	t.Parallel()
 	srv := ollamaUsageOnlyServer(t, `{"limits":[{"label":"session","used_percent":30}]}`)
 	defer srv.Close()
 	snap, err := fetchOllamaCloud(context.Background(), srv.Client(), Credential{BaseURL: srv.URL})
@@ -371,6 +394,7 @@ func TestFetchOllamaCloudLegacyArrayFallback(t *testing.T) {
 // endpoints respond but yield nothing, the result is an empty (not error)
 // snapshot so the poller reports "format unavailable" rather than a hard error.
 func TestFetchOllamaCloudEmptyShapeIsNotAnError(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/balance" {
@@ -402,6 +426,7 @@ func requireCommandCodeHeaders(t *testing.T, r *http.Request) {
 }
 
 func TestFetchCommandCode(t *testing.T) {
+	t.Parallel()
 	resetAt := time.Now().Add(90 * time.Minute).UnixMilli()
 	periodEnd := time.Now().Add(20 * 24 * time.Hour).UTC().Truncate(time.Second)
 	mux := http.NewServeMux()
@@ -475,6 +500,7 @@ func TestFetchCommandCode(t *testing.T) {
 }
 
 func TestFetchCommandCodePlanFailureStillReportsWindows(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"credits":{"monthlyCredits":10},` +
@@ -503,6 +529,7 @@ func TestFetchCommandCodePlanFailureStillReportsWindows(t *testing.T) {
 // TestFetchCommandCodePayGoNoSubscriptionDetail verifies pay-as-you-go (no
 // subscription detail in the response) surfaces windows but no monthly window.
 func TestFetchCommandCodePayGoNoSubscriptionDetail(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"credits":{"belowThreshold":false,"creditThreshold":0},` +
@@ -529,6 +556,7 @@ func TestFetchCommandCodePayGoNoSubscriptionDetail(t *testing.T) {
 // TestFetchCommandCodeMonthlyNoPeriodEnd verifies a subscriptions response
 // without currentPeriodEnd yields a monthly window with no reset time.
 func TestFetchCommandCodeMonthlyNoPeriodEnd(t *testing.T) {
+	t.Parallel()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/alpha/billing/credits", func(w http.ResponseWriter, _ *http.Request) {
 		w.Write([]byte(`{"credits":{"monthlyCredits":5},` +
@@ -562,6 +590,7 @@ func TestFetchCommandCodeMonthlyNoPeriodEnd(t *testing.T) {
 }
 
 func TestFetchZAI(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// unit 3 = minutes-per-unit multiplier 60, number 5 => 300 min = 5h.

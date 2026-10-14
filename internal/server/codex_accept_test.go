@@ -26,6 +26,7 @@ import (
 // Response-side classification, rather than this request header, decides
 // whether the upstream body is relayed as SSE.
 func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var gotAccept, gotSessionID, gotClientRequestID, gotRoutingHint, gotContentType string
 	var gotRequest map[string]any
