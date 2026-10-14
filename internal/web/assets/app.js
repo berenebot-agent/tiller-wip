@@ -3871,6 +3871,7 @@ async function loadPlatformSettings() {
   const settings = await api('/api/platform/settings');
   const form = $('#platform-settings-form');
   form.elements.hosted_signup_enabled.checked = !!settings.hosted_signup_enabled;
+  form.elements.prevent_search_indexing.checked = !!settings.prevent_search_indexing;
   form.elements.audit_retention_days.value = settings.audit_retention_days;
   form.elements.google_signin_enabled.checked = !!settings.google?.enabled;
   form.elements.google_client_id.value = settings.google?.client_id || '';
@@ -4067,6 +4068,7 @@ document.querySelector('#platform-settings-form').addEventListener('submit', asy
   const form = new FormData(event.currentTarget);
   const payload = {
     hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on',
+    prevent_search_indexing: form.get('prevent_search_indexing') === 'on',
     audit_retention_days: Number(form.get('audit_retention_days')),
     google_signin_enabled: form.get('google_signin_enabled') === 'on',
     google_client_id: form.get('google_client_id'),

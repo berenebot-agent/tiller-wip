@@ -176,40 +176,47 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
 		return
 	}
+	preventSearchIndexing, err := s.storeHandle().GetPlatformPreventSearchIndexing(r.Context())
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"hosted_signup_enabled": signup, "audit_retention_days": retention,
-		"mail":      map[string]any{"provider": mail.Provider, "from": mail.From, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
-		"google":    map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
-		"turnstile": map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
-		"analytics": map[string]any{"enabled": analytics.Enabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
+		"prevent_search_indexing": preventSearchIndexing,
+		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
+		"google":                  map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
+		"turnstile":               map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
+		"analytics":               map[string]any{"enabled": analytics.Enabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
 	})
 }
 
 func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		HostedSignupEnabled  *bool   `json:"hosted_signup_enabled"`
-		AuditRetentionDays   *int    `json:"audit_retention_days"`
-		MailProvider         *string `json:"mail_provider"`
-		MailFrom             *string `json:"mail_from"`
-		MailResendAPIKey     *string `json:"mail_resend_api_key"`
-		MailBrevoAPIKey      *string `json:"mail_brevo_api_key"`
-		MailSMTPHost         *string `json:"mail_smtp_host"`
-		MailSMTPPort         *int    `json:"mail_smtp_port"`
-		MailSMTPUsername     *string `json:"mail_smtp_username"`
-		MailSMTPPassword     *string `json:"mail_smtp_password"`
-		MailSMTPMode         *string `json:"mail_smtp_mode"`
-		GoogleEnabled        *bool   `json:"google_signin_enabled"`
-		GoogleClientID       *string `json:"google_client_id"`
-		GoogleClientSecret   *string `json:"google_client_secret"`
-		ClearGoogleSecret    bool    `json:"clear_google_client_secret"`
-		TurnstileEnabled     *bool   `json:"turnstile_enabled"`
-		TurnstileSiteKey     *string `json:"turnstile_site_key"`
-		TurnstileSecret      *string `json:"turnstile_secret"`
-		ClearTurnstileSecret bool    `json:"clear_turnstile_secret"`
-		AnalyticsEnabled     *bool   `json:"analytics_enabled"`
-		AnalyticsProvider    *string `json:"analytics_provider"`
-		AnalyticsScriptURL   *string `json:"analytics_script_url"`
-		AnalyticsSiteID      *string `json:"analytics_site_id"`
+		HostedSignupEnabled   *bool   `json:"hosted_signup_enabled"`
+		AuditRetentionDays    *int    `json:"audit_retention_days"`
+		MailProvider          *string `json:"mail_provider"`
+		MailFrom              *string `json:"mail_from"`
+		MailResendAPIKey      *string `json:"mail_resend_api_key"`
+		MailBrevoAPIKey       *string `json:"mail_brevo_api_key"`
+		MailSMTPHost          *string `json:"mail_smtp_host"`
+		MailSMTPPort          *int    `json:"mail_smtp_port"`
+		MailSMTPUsername      *string `json:"mail_smtp_username"`
+		MailSMTPPassword      *string `json:"mail_smtp_password"`
+		MailSMTPMode          *string `json:"mail_smtp_mode"`
+		GoogleEnabled         *bool   `json:"google_signin_enabled"`
+		GoogleClientID        *string `json:"google_client_id"`
+		GoogleClientSecret    *string `json:"google_client_secret"`
+		ClearGoogleSecret     bool    `json:"clear_google_client_secret"`
+		TurnstileEnabled      *bool   `json:"turnstile_enabled"`
+		TurnstileSiteKey      *string `json:"turnstile_site_key"`
+		TurnstileSecret       *string `json:"turnstile_secret"`
+		ClearTurnstileSecret  bool    `json:"clear_turnstile_secret"`
+		AnalyticsEnabled      *bool   `json:"analytics_enabled"`
+		AnalyticsProvider     *string `json:"analytics_provider"`
+		AnalyticsScriptURL    *string `json:"analytics_script_url"`
+		AnalyticsSiteID       *string `json:"analytics_site_id"`
+		PreventSearchIndexing *bool   `json:"prevent_search_indexing"`
 	}
 	var fields map[string]json.RawMessage
 	if err := decodeJSONLimit(w, r, &fields, 64<<10); err != nil {
@@ -223,6 +230,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		"google_signin_enabled": true, "google_client_id": true, "google_client_secret": true, "clear_google_client_secret": true,
 		"turnstile_enabled": true, "turnstile_site_key": true, "turnstile_secret": true, "clear_turnstile_secret": true,
 		"analytics_enabled": true, "analytics_provider": true, "analytics_script_url": true, "analytics_site_id": true,
+		"prevent_search_indexing": true,
 	}
 	for key := range fields {
 		if !allowed[key] {
@@ -256,6 +264,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	_, hasAnalyticsProvider := fields["analytics_provider"]
 	_, hasAnalyticsScriptURL := fields["analytics_script_url"]
 	_, hasAnalyticsSiteID := fields["analytics_site_id"]
+	_, hasPreventSearchIndexing := fields["prevent_search_indexing"]
 	if input.GoogleClientID != nil && len(*input.GoogleClientID) > 2048 || input.GoogleClientSecret != nil && len(*input.GoogleClientSecret) > 8192 || input.TurnstileSiteKey != nil && len(*input.TurnstileSiteKey) > 2048 || input.TurnstileSecret != nil && len(*input.TurnstileSecret) > 8192 {
 		adminError(w, http.StatusBadRequest, "invalid_auth_settings", "Authentication settings are too long.")
 		return
@@ -393,13 +402,21 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasSignup && input.HostedSignupEnabled != nil {
 		signup = *input.HostedSignupEnabled
 	}
+	preventSearchIndexing, err := st.GetPlatformPreventSearchIndexing(r.Context())
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform settings.")
+		return
+	}
+	if hasPreventSearchIndexing && input.PreventSearchIndexing != nil {
+		preventSearchIndexing = *input.PreventSearchIndexing
+	}
 	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
 	if err := mailer.Validate(cfg); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
 		return
 	}
-	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, Mail: currentMail, Auth: authSettings, Analytics: analytics}
-	if !hasSignup && input.AuditRetentionDays == nil && !hasAnyMailField && !hasGoogleEnabled && !hasGoogleClientID && !hasGoogleSecret && !hasClearGoogleSecret && !hasTurnstileEnabled && !hasTurnstileSiteKey && !hasTurnstileSecret && !hasClearTurnstileSecret && !hasAnalyticsEnabled && !hasAnalyticsProvider && !hasAnalyticsScriptURL && !hasAnalyticsSiteID {
+	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, PreventSearchIndexing: preventSearchIndexing, Mail: currentMail, Auth: authSettings, Analytics: analytics}
+	if !hasSignup && input.AuditRetentionDays == nil && !hasAnyMailField && !hasGoogleEnabled && !hasGoogleClientID && !hasGoogleSecret && !hasClearGoogleSecret && !hasTurnstileEnabled && !hasTurnstileSiteKey && !hasTurnstileSecret && !hasClearTurnstileSecret && !hasAnalyticsEnabled && !hasAnalyticsProvider && !hasAnalyticsScriptURL && !hasAnalyticsSiteID && !hasPreventSearchIndexing {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -408,6 +425,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.setPlatformAnalytics(analytics)
+	s.setPlatformPreventSearchIndexing(preventSearchIndexing)
 	if cfg.Provider == "" {
 		s.mailer.Clear()
 	} else if err := s.mailer.Update(cfg); err != nil {
@@ -429,33 +447,37 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasAnalyticsEnabled || hasAnalyticsProvider || hasAnalyticsScriptURL || hasAnalyticsSiteID {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.analytics_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(analytics.Enabled)}})
 	}
+	if hasPreventSearchIndexing {
+		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.search_indexing_setting_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(preventSearchIndexing)}})
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func hasMailUpdate(input struct {
-	HostedSignupEnabled  *bool   `json:"hosted_signup_enabled"`
-	AuditRetentionDays   *int    `json:"audit_retention_days"`
-	MailProvider         *string `json:"mail_provider"`
-	MailFrom             *string `json:"mail_from"`
-	MailResendAPIKey     *string `json:"mail_resend_api_key"`
-	MailBrevoAPIKey      *string `json:"mail_brevo_api_key"`
-	MailSMTPHost         *string `json:"mail_smtp_host"`
-	MailSMTPPort         *int    `json:"mail_smtp_port"`
-	MailSMTPUsername     *string `json:"mail_smtp_username"`
-	MailSMTPPassword     *string `json:"mail_smtp_password"`
-	MailSMTPMode         *string `json:"mail_smtp_mode"`
-	GoogleEnabled        *bool   `json:"google_signin_enabled"`
-	GoogleClientID       *string `json:"google_client_id"`
-	GoogleClientSecret   *string `json:"google_client_secret"`
-	ClearGoogleSecret    bool    `json:"clear_google_client_secret"`
-	TurnstileEnabled     *bool   `json:"turnstile_enabled"`
-	TurnstileSiteKey     *string `json:"turnstile_site_key"`
-	TurnstileSecret      *string `json:"turnstile_secret"`
-	ClearTurnstileSecret bool    `json:"clear_turnstile_secret"`
-	AnalyticsEnabled     *bool   `json:"analytics_enabled"`
-	AnalyticsProvider    *string `json:"analytics_provider"`
-	AnalyticsScriptURL   *string `json:"analytics_script_url"`
-	AnalyticsSiteID      *string `json:"analytics_site_id"`
+	HostedSignupEnabled   *bool   `json:"hosted_signup_enabled"`
+	AuditRetentionDays    *int    `json:"audit_retention_days"`
+	MailProvider          *string `json:"mail_provider"`
+	MailFrom              *string `json:"mail_from"`
+	MailResendAPIKey      *string `json:"mail_resend_api_key"`
+	MailBrevoAPIKey       *string `json:"mail_brevo_api_key"`
+	MailSMTPHost          *string `json:"mail_smtp_host"`
+	MailSMTPPort          *int    `json:"mail_smtp_port"`
+	MailSMTPUsername      *string `json:"mail_smtp_username"`
+	MailSMTPPassword      *string `json:"mail_smtp_password"`
+	MailSMTPMode          *string `json:"mail_smtp_mode"`
+	GoogleEnabled         *bool   `json:"google_signin_enabled"`
+	GoogleClientID        *string `json:"google_client_id"`
+	GoogleClientSecret    *string `json:"google_client_secret"`
+	ClearGoogleSecret     bool    `json:"clear_google_client_secret"`
+	TurnstileEnabled      *bool   `json:"turnstile_enabled"`
+	TurnstileSiteKey      *string `json:"turnstile_site_key"`
+	TurnstileSecret       *string `json:"turnstile_secret"`
+	ClearTurnstileSecret  bool    `json:"clear_turnstile_secret"`
+	AnalyticsEnabled      *bool   `json:"analytics_enabled"`
+	AnalyticsProvider     *string `json:"analytics_provider"`
+	AnalyticsScriptURL    *string `json:"analytics_script_url"`
+	AnalyticsSiteID       *string `json:"analytics_site_id"`
+	PreventSearchIndexing *bool   `json:"prevent_search_indexing"`
 }) bool {
 	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
 }
