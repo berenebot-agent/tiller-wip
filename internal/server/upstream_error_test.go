@@ -93,6 +93,131 @@ func TestParseUpstreamErrorDetailTolerantForms(t *testing.T) {
 	}
 }
 
+// wrapNestedError builds a relay-style body whose error.message is the JSON
+// text of inner — the double-encoded shape Command Code produces.
+func wrapNestedError(t *testing.T, inner map[string]any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(inner)
+	if err != nil {
+		t.Fatalf("marshal inner: %v", err)
+	}
+	outer, err := json.Marshal(map[string]any{"error": map[string]any{
+		"message": string(encoded),
+		"type":    "invalid_request_error",
+	}})
+	if err != nil {
+		t.Fatalf("marshal outer: %v", err)
+	}
+	return outer
+}
+
+func TestParseUpstreamErrorDetailUnwrapsNestedRelayError(t *testing.T) {
+	t.Parallel()
+	body := []byte(`{"error":{"message":"{\"type\":\"invalid_request_error\",\"code\":\"\",\"message\":\"invalid request error trace_id: dc06d04f3faca50f715815dffe1a6ac5\"}\n","type":"invalid_request_error"}}`)
+	got := parseUpstreamErrorDetail(body, "application/json")
+	if want := "invalid request error trace_id: dc06d04f3faca50f715815dffe1a6ac5"; got.Message != want {
+		t.Fatalf("message = %q, want %q", got.Message, want)
+	}
+	if got.Type != "invalid_request_error" {
+		t.Fatalf("type = %q, want invalid_request_error", got.Type)
+	}
+	if strings.Contains(got.clientMessage(), `"code"`) {
+		t.Fatalf("nested blob leaked to the client: %q", got.clientMessage())
+	}
+}
+
+func TestParseUpstreamErrorDetailUnwrapEnablesContextLimit(t *testing.T) {
+	t.Parallel()
+	body := wrapNestedError(t, map[string]any{"error": map[string]any{
+		"message": "This model's maximum context length is 131072 tokens.",
+		"type":    "invalid_request_error",
+		"code":    "context_length_exceeded",
+	}})
+	got := parseUpstreamErrorDetail(body, "application/json")
+	if got.Code != "context_length_exceeded" {
+		t.Fatalf("code = %q, want context_length_exceeded", got.Code)
+	}
+	if !isContextLimitError(got) {
+		t.Fatalf("context-limit must be classified through a wrap: %+v", got)
+	}
+}
+
+func TestParseUpstreamErrorDetailUnwrapEnablesReasoningRoundtrip(t *testing.T) {
+	t.Parallel()
+	body := wrapNestedError(t, map[string]any{"error": map[string]any{
+		"message": "The reasoning_content in the thinking mode must be passed back to the API",
+		"type":    "invalid_request_error",
+	}})
+	got := parseUpstreamErrorDetail(body, "application/json")
+	if !isReasoningRoundtripError(got) {
+		t.Fatalf("reasoning round-trip must be classified through a wrap: %+v", got)
+	}
+}
+
+func TestParseUpstreamErrorDetailUnwrapDepthCap(t *testing.T) {
+	t.Parallel()
+	message := "deepest"
+	for i := 0; i < 5; i++ {
+		encoded, err := json.Marshal(map[string]any{"error": map[string]any{"message": message}})
+		if err != nil {
+			t.Fatalf("marshal level %d: %v", i, err)
+		}
+		message = string(encoded)
+	}
+	got := parseUpstreamErrorDetail([]byte(message), "application/json")
+	if !strings.HasPrefix(got.Message, "{") {
+		t.Fatalf("depth cap must stop before the innermost level, got %q", got.Message)
+	}
+}
+
+func TestParseUpstreamErrorDetailUnwrapIgnoresOpaqueJSON(t *testing.T) {
+	t.Parallel()
+	inner, err := json.Marshal(map[string]any{"foo": "bar"})
+	if err != nil {
+		t.Fatalf("marshal inner: %v", err)
+	}
+	body, err := json.Marshal(map[string]any{"error": map[string]any{
+		"message": string(inner),
+		"code":    "invalid_value",
+	}})
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	got := parseUpstreamErrorDetail(body, "application/json")
+	if got.Message != `{"foo":"bar"}` {
+		t.Fatalf("opaque JSON must be left intact, got %q", got.Message)
+	}
+	if got.Code != "invalid_value" {
+		t.Fatalf("code = %q, want invalid_value", got.Code)
+	}
+}
+
+func TestParseUpstreamErrorDetailUnwrapKeepsOuterCode(t *testing.T) {
+	t.Parallel()
+	body := wrapNestedError(t, map[string]any{"message": "rate limited"})
+	got := parseUpstreamErrorDetail(body, "application/json")
+	if got.Message != "rate limited" {
+		t.Fatalf("message = %q, want rate limited", got.Message)
+	}
+}
+
+func TestNestedUpstreamErrorIsRedacted(t *testing.T) {
+	t.Parallel()
+	const secret = "provider-secret"
+	body := wrapNestedError(t, map[string]any{"error": map[string]any{
+		"message": "rejected; auth=" + secret,
+		"type":    "invalid_request_error",
+	}})
+	detail := parseUpstreamErrorDetail(body, "application/json")
+	got := redactProviderSecrets(detail.clientMessage(), providers.Instance{Credential: secret})
+	if strings.Contains(got, secret) {
+		t.Fatalf("nested credential not redacted: %q", got)
+	}
+	if !strings.Contains(got, "rejected") {
+		t.Fatalf("nested message lost: %q", got)
+	}
+}
+
 func TestIsContextLimitError(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
