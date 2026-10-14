@@ -25,6 +25,7 @@ func (t *routingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 }
 
 func TestRequestDeviceCodeSuccess(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/accounts/deviceauth/usercode" {
 			http.Error(w, "unexpected path", http.StatusBadRequest)
@@ -64,6 +65,7 @@ func TestRequestDeviceCodeSuccess(t *testing.T) {
 }
 
 func TestRequestDeviceCodeAcceptedAliasAndDefaultInterval(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"device_auth_id":"deviceauth_abc","usercode":"ABCD-EFGHI"}`))
@@ -84,6 +86,7 @@ func TestRequestDeviceCodeAcceptedAliasAndDefaultInterval(t *testing.T) {
 }
 
 func TestRequestDeviceCodeUnsupported(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -97,6 +100,7 @@ func TestRequestDeviceCodeUnsupported(t *testing.T) {
 }
 
 func TestPollDeviceTokenPendingThenExchanges(t *testing.T) {
+	t.Parallel()
 	polls := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -144,6 +148,7 @@ func TestPollDeviceTokenPendingThenExchanges(t *testing.T) {
 }
 
 func TestPollDeviceTokenExchangeFailure(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/accounts/deviceauth/token":

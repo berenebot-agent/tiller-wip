@@ -5,6 +5,7 @@ import "testing"
 func floatPtr(v float64) *float64 { return &v }
 
 func TestEstimatedCostMicrosBasic(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"anthropic": {Models: map[string]modelsDevModel{
@@ -30,6 +31,7 @@ func TestEstimatedCostMicrosBasic(t *testing.T) {
 }
 
 func TestEstimatedCostMicrosCacheFallsBackToInputRate(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"openai": {Models: map[string]modelsDevModel{
@@ -47,6 +49,7 @@ func TestEstimatedCostMicrosCacheFallsBackToInputRate(t *testing.T) {
 }
 
 func TestEstimatedCostMicrosUnknownModel(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{"openai": {Models: map[string]modelsDevModel{}}}
 	if _, ok := r.EstimatedCostMicros("openai", "missing", 100, 100, 0, 0); ok {
@@ -55,6 +58,7 @@ func TestEstimatedCostMicrosUnknownModel(t *testing.T) {
 }
 
 func TestEstimatedCostMicrosDisabled(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDevEnabled = false
 	r.modelsDev = modelsDevDataset{"openai": {Models: map[string]modelsDevModel{
@@ -66,6 +70,7 @@ func TestEstimatedCostMicrosDisabled(t *testing.T) {
 }
 
 func TestEstimatedCostMicrosSuppressesSubscriptionProviders(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"openai": {Models: map[string]modelsDevModel{
@@ -92,6 +97,7 @@ func TestEstimatedCostMicrosSuppressesSubscriptionProviders(t *testing.T) {
 }
 
 func TestParseModelsDevCost(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"openai":{"models":{"gpt-x":{"cost":{"input":1.5,"output":6,"cache_read":0.15}}}}}`)
 	data, err := parseModelsDev(body)
 	if err != nil {

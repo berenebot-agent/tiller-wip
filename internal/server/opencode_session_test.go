@@ -19,6 +19,7 @@ import (
 )
 
 func TestOpenCodeSessionIDNamespacing(t *testing.T) {
+	t.Parallel()
 	first := openCodeSessionID("conv-1", "req-1", "client-key-a")
 	again := openCodeSessionID("conv-1", "req-1", "client-key-a")
 	if first != again {
@@ -34,6 +35,7 @@ func TestOpenCodeSessionIDNamespacing(t *testing.T) {
 }
 
 func TestOpenCodeSessionIDSynthesizedStable(t *testing.T) {
+	t.Parallel()
 	first := openCodeSessionID("", "req-abc", "client-key-a")
 	again := openCodeSessionID("", "req-abc", "client-key-a")
 	if first != again {
@@ -48,6 +50,7 @@ func TestOpenCodeSessionIDSynthesizedStable(t *testing.T) {
 }
 
 func TestCodexSessionIDUsesOpenCodeConversation(t *testing.T) {
+	t.Parallel()
 	first, firstSource := codexSessionID("journey-board", "req-1", "client-key-a")
 	again, againSource := codexSessionID("journey-board", "req-2", "client-key-a")
 	if first != again {
@@ -70,6 +73,7 @@ func TestCodexSessionIDUsesOpenCodeConversation(t *testing.T) {
 }
 
 func TestClientSessionHeaderPrecedence(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		headers map[string]string
@@ -102,6 +106,7 @@ func TestClientSessionHeaderPrecedence(t *testing.T) {
 // stable upstream Codex session-id across turns while an absent header keeps
 // requests isolated.
 func TestCodexSessionAffinityHeaderStable(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	sessions := []string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -303,6 +308,7 @@ func opencodeSessionClientCall(t *testing.T, base, secret, opencodeSession strin
 }
 
 func TestOpenCodeSessionHeaderStableAcrossFallback(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	sessions := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -340,6 +346,7 @@ func TestOpenCodeSessionHeaderStableAcrossFallback(t *testing.T) {
 }
 
 func TestOpenCodeSuppliedSessionHeaderStableAcrossFallback(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	sessions := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

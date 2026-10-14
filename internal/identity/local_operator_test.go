@@ -10,6 +10,7 @@ import (
 )
 
 func TestEnsureLocalOperatorCreatesAndAttachesUser(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
 
@@ -42,6 +43,7 @@ func TestEnsureLocalOperatorCreatesAndAttachesUser(t *testing.T) {
 }
 
 func TestEnsureLocalOperatorIsIdempotent(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 
@@ -60,6 +62,7 @@ func TestEnsureLocalOperatorIsIdempotent(t *testing.T) {
 }
 
 func TestEnsureLocalOperatorRejectsEmptyUsername(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	if _, err := st.EnsureLocalOperator(context.Background(), "  ", "correct horse battery staple", ""); !errors.Is(err, ErrBootstrapInvalid) {
 		t.Fatalf("empty username err = %v, want ErrBootstrapInvalid", err)
@@ -67,6 +70,7 @@ func TestEnsureLocalOperatorRejectsEmptyUsername(t *testing.T) {
 }
 
 func TestEnsureLocalOperatorUsesProvidedHash(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
 
@@ -85,6 +89,7 @@ func TestEnsureLocalOperatorUsesProvidedHash(t *testing.T) {
 }
 
 func TestAuthenticateLocalOperator(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 
@@ -109,6 +114,7 @@ func TestAuthenticateLocalOperator(t *testing.T) {
 }
 
 func TestAuthenticateLocalOperatorWithoutRow(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	if _, err := st.AuthenticateLocalOperator(context.Background(), "operator", "correct horse battery staple"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("err = %v, want ErrNotFound", err)
@@ -116,6 +122,7 @@ func TestAuthenticateLocalOperatorWithoutRow(t *testing.T) {
 }
 
 func TestSyncLocalOperatorCredentialsUpdatesUsernameAndPassword(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 
@@ -162,6 +169,7 @@ func TestSyncLocalOperatorCredentialsUpdatesUsernameAndPassword(t *testing.T) {
 }
 
 func TestSyncLocalOperatorCredentialsNoRowIsNoop(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	// No operator row exists yet; the boot sync must not error (the row is
 	// materialised later by EnsureLocalOperator).
@@ -171,6 +179,7 @@ func TestSyncLocalOperatorCredentialsNoRowIsNoop(t *testing.T) {
 }
 
 func TestLocalOperatorEmailNormalizesUsername(t *testing.T) {
+	t.Parallel()
 	if got := LocalOperatorEmail("  Operator  "); !strings.HasSuffix(got, "@local.invalid") || got != "operator@local.invalid" {
 		t.Fatalf("LocalOperatorEmail = %q", got)
 	}

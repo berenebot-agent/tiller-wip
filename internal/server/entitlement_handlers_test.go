@@ -44,6 +44,7 @@ func requestWithIdentity(accountID, clientID string) *http.Request {
 }
 
 func TestPlatformStatsAggregateAccountsAndUsage(t *testing.T) {
+	t.Parallel()
 	app, _, accountID := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 	second, err := app.identity.CreateSignup(context.Background(), "second-platform-stats@example.com", "correct horse battery staple")
@@ -84,6 +85,7 @@ func TestPlatformStatsAggregateAccountsAndUsage(t *testing.T) {
 }
 
 func TestPlatformStatsRepresentUnavailableActivity(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, true)
 	papi := hostedPlatformAPI(t, app)
 	status, payload, _ := papi.request(http.MethodGet, "/api/platform/stats", nil)
@@ -96,6 +98,7 @@ func TestPlatformStatsRepresentUnavailableActivity(t *testing.T) {
 }
 
 func TestPlatformPlansListUpdateAndValidation(t *testing.T) {
+	t.Parallel()
 	app, _, accountID := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 
@@ -152,6 +155,7 @@ func TestPlatformPlansListUpdateAndValidation(t *testing.T) {
 }
 
 func TestAccountPlanEndpointShowsCapsAndUsage(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedServerHarness(t, false)
 
 	sc := app.storeHandle().For(accountID)
@@ -188,6 +192,7 @@ func TestAccountPlanEndpointShowsCapsAndUsage(t *testing.T) {
 }
 
 func TestAccountPlanAssignAndErrors(t *testing.T) {
+	t.Parallel()
 	app, _, accountID := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 	ctx := context.Background()
@@ -225,6 +230,7 @@ func TestAccountPlanAssignAndErrors(t *testing.T) {
 }
 
 func TestMonthlyLimitEnforcementReturns429(t *testing.T) {
+	t.Parallel()
 	app, _, accountID := hostedServerHarness(t, false)
 	ctx := context.Background()
 	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: -1, MaxVirtualModels: -1, MaxConcurrentStreams: -1, ActivityRetentionDays: 7, MonthlyRequests: 1}); err != nil {
@@ -266,6 +272,7 @@ func TestMonthlyLimitEnforcementReturns429(t *testing.T) {
 // so the monthly quota never advanced. The reservation lives on the request path
 // now, so logging settings are irrelevant to enforcement.
 func TestMonthlyLimitIndependentOfActivityLogging(t *testing.T) {
+	t.Parallel()
 	app, _, accountID := hostedServerHarness(t, false)
 	ctx := context.Background()
 	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: -1, MaxVirtualModels: -1, MaxConcurrentStreams: -1, ActivityRetentionDays: 7, MonthlyRequests: 1}); err != nil {
@@ -299,6 +306,7 @@ func TestMonthlyLimitIndependentOfActivityLogging(t *testing.T) {
 }
 
 func TestConcurrencyLimitEnforcementReturns429(t *testing.T) {
+	t.Parallel()
 	app, _, accountID := hostedServerHarness(t, false)
 	ctx := context.Background()
 	if err := app.storeHandle().UpdatePlan(ctx, store.Plan{Name: "free", MaxProviders: -1, MaxClientKeys: -1, MaxVirtualModels: -1, MaxConcurrentStreams: 1, ActivityRetentionDays: 7, MonthlyRequests: -1}); err != nil {
@@ -337,6 +345,7 @@ func TestConcurrencyLimitEnforcementReturns429(t *testing.T) {
 // five parallel requests from one client key to one route shared a single map
 // entry (Active=5) but were counted as one.
 func TestConcurrencyCountsConcurrentSameRouteRequests(t *testing.T) {
+	t.Parallel()
 	tracker := &inflightTracker{clientStates: map[string]inflightState{}, emit: func(string, inflightDelta) {}}
 	for i := 0; i < 5; i++ {
 		if !tracker.tryAcquire(testAcct, 5, "client-1", "route-1", "main") {
@@ -359,6 +368,7 @@ func TestConcurrencyCountsConcurrentSameRouteRequests(t *testing.T) {
 }
 
 func TestConcurrencyLimitIsAccountScoped(t *testing.T) {
+	t.Parallel()
 	app, _, accountA := hostedServerHarness(t, false)
 	// A second account with its own client key.
 	const accountB = "acct-plan-b-server"
@@ -380,6 +390,7 @@ func TestConcurrencyLimitIsAccountScoped(t *testing.T) {
 }
 
 func TestLocalModeSkipsQuotaEnforcement(t *testing.T) {
+	t.Parallel()
 	app, _ := newLogWriterServer(t)
 	if app.config.Mode == config.ModeHosted {
 		t.Fatal("test server unexpectedly hosted")
@@ -399,6 +410,7 @@ func TestLocalModeSkipsQuotaEnforcement(t *testing.T) {
 }
 
 func TestCreateLimitReturns409LimitExceeded(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedServerHarness(t, false)
 	ctx := context.Background()
 	// One client key allowed; unlimited everywhere else.
@@ -434,6 +446,7 @@ func TestCreateLimitReturns409LimitExceeded(t *testing.T) {
 }
 
 func TestPlatformUsersIncludeScopedResourceAndUsageStats(t *testing.T) {
+	t.Parallel()
 	app, _, firstAccount := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 	ctx := context.Background()
@@ -504,6 +517,7 @@ func TestPlatformUsersIncludeScopedResourceAndUsageStats(t *testing.T) {
 }
 
 func TestPlatformUsersReportUsageUnavailable(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, true)
 	papi := hostedPlatformAPI(t, app)
 	status, payload, _ := papi.request(http.MethodGet, "/api/platform/users", nil)

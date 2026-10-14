@@ -17,6 +17,7 @@ import (
 // racing with Google linking. Linking disables password auth, so a password
 // authentication that observed the pre-link state must not be able to complete.
 func TestLinkRejectsPasswordLoginSnapshotTakenBeforeLink(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, _ := signupAndVerify(t, st, "link-race@example.com", "correct horse battery staple")
@@ -47,6 +48,7 @@ func TestLinkRejectsPasswordLoginSnapshotTakenBeforeLink(t *testing.T) {
 // this is the case where a revoked sign-in method would otherwise still mint a
 // session after the user revoked it.
 func TestUnlinkRejectsGoogleLoginSnapshotTakenBeforeUnlink(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, _ := signupAndVerify(t, st, "unlink-race@example.com", "correct horse battery staple")
@@ -74,6 +76,7 @@ func TestUnlinkRejectsGoogleLoginSnapshotTakenBeforeUnlink(t *testing.T) {
 // TestGoogleLinkBumpsGeneration proves the generation actually changes on link
 // and unlink, which is the mechanism the two race tests above depend on.
 func TestGoogleLinkBumpsGeneration(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, _ := signupAndVerify(t, st, "generation@example.com", "correct horse battery staple")
@@ -109,6 +112,7 @@ func TestGoogleLinkBumpsGeneration(t *testing.T) {
 // re-linking an identity that is already attached still disables password auth,
 // so it still counts as a credential change and revokes existing sessions.
 func TestRelinkSameSubjectBumpsGeneration(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, first := signupAndVerify(t, st, "relink@example.com", "correct horse battery staple")

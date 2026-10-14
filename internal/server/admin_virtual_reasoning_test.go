@@ -10,6 +10,7 @@ import (
 )
 
 func TestDecodeReasoningCapabilitiesHandlesStoredJSON(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		raw  string
@@ -31,6 +32,7 @@ func TestDecodeReasoningCapabilitiesHandlesStoredJSON(t *testing.T) {
 }
 
 func TestAddReasoningToCataloguePreservesTillerMetadata(t *testing.T) {
+	t.Parallel()
 	entry := map[string]any{}
 	caps := &providers.ReasoningCapabilities{
 		Options:        []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"high"}}, {Type: providers.ReasoningOptionToggle}, {Type: providers.ReasoningOptionBudgetTokens}},
@@ -68,6 +70,7 @@ func nullableReasoningTestString(raw string) (v sql.NullString) {
 }
 
 func TestMergeReasoningCapabilitiesBuildsStableSuperset(t *testing.T) {
+	t.Parallel()
 	minA, maxA := int64(128), int64(4096)
 	minB, maxB := int64(64), int64(8192)
 	merged := mergeReasoningCapabilities(
@@ -115,6 +118,7 @@ func TestMergeReasoningCapabilitiesBuildsStableSuperset(t *testing.T) {
 }
 
 func TestMergeReasoningCapabilitiesMandatoryRequiresEveryTarget(t *testing.T) {
+	t.Parallel()
 	mandatory := boolPtr(true)
 	notMandatory := boolPtr(false)
 	mixed := mergeReasoningCapabilities(&providers.ReasoningCapabilities{Mandatory: mandatory}, &providers.ReasoningCapabilities{Mandatory: notMandatory})
@@ -132,6 +136,7 @@ func TestMergeReasoningCapabilitiesMandatoryRequiresEveryTarget(t *testing.T) {
 }
 
 func TestMergeReasoningCapabilitiesHandlesNilAndFiniteEffortUnion(t *testing.T) {
+	t.Parallel()
 	if mergeReasoningCapabilities(nil, nil) != nil {
 		t.Fatal("nil inputs should produce nil capabilities")
 	}
@@ -149,6 +154,7 @@ func TestMergeReasoningCapabilitiesHandlesNilAndFiniteEffortUnion(t *testing.T) 
 }
 
 func TestMergeReasoningCapabilitiesMergesClientEffortsSeparately(t *testing.T) {
+	t.Parallel()
 	codexEfforts := []string{"low", "high", "ultra"}
 	merged := mergeReasoningCapabilities(
 		&providers.ReasoningCapabilities{
@@ -183,6 +189,7 @@ func TestMergeReasoningCapabilitiesMergesClientEffortsSeparately(t *testing.T) {
 }
 
 func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 	var modelA string
 	if err := db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
@@ -301,6 +308,7 @@ func TestVirtualAdminExposesTargetAndEligibleAggregateReasoningCapabilities(t *t
 }
 
 func TestMergeReasoningCapabilitiesMergesEffortAliases(t *testing.T) {
+	t.Parallel()
 	merged := mergeReasoningCapabilities(
 		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "max"}},
 		&providers.ReasoningCapabilities{EffortAliases: map[string]string{"ultra": "high", "persistent": "none"}},

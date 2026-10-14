@@ -56,6 +56,7 @@ func hostedAccountServer(t *testing.T) (*Server, *testAPI, string) {
 }
 
 func TestHostedAccountPageProfileAndPassword(t *testing.T) {
+	t.Parallel()
 	_, api, accountID := hostedAccountServer(t)
 
 	status, profile, _ := api.request("GET", "/api/auth/account", nil)
@@ -79,6 +80,7 @@ func TestHostedAccountPageProfileAndPassword(t *testing.T) {
 }
 
 func TestHostedEmailChangeFlow(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedAccountServer(t)
 
 	status, payload, _ := api.request("POST", "/api/auth/account/email", map[string]any{"new_email": "New@Example.com", "password": "correct horse battery staple"})
@@ -117,6 +119,7 @@ func TestHostedEmailChangeFlow(t *testing.T) {
 }
 
 func TestHostedSelfDeletePurgesAccountAndRevokesSession(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedAccountServer(t)
 
 	// Wrong confirmation value is rejected.
@@ -158,6 +161,7 @@ func TestHostedSelfDeletePurgesAccountAndRevokesSession(t *testing.T) {
 }
 
 func TestHostedSelfDeleteConsumesGoogleReauthOnlyAfterEmailConfirmation(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedAccountServer(t)
 	var userID string
 	if err := app.db.SQL.QueryRow(`SELECT owner_user_id FROM accounts WHERE id=?`, accountID).Scan(&userID); err != nil {
@@ -194,6 +198,7 @@ func TestHostedSelfDeleteConsumesGoogleReauthOnlyAfterEmailConfirmation(t *testi
 }
 
 func TestHostedGoogleUnlinkRequiresGoogleReauthAndRestoresPassword(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedAccountServer(t)
 	var userID string
 	if err := app.db.SQL.QueryRow(`SELECT owner_user_id FROM accounts WHERE id=?`, accountID).Scan(&userID); err != nil {
@@ -231,6 +236,7 @@ func TestHostedGoogleUnlinkRequiresGoogleReauthAndRestoresPassword(t *testing.T)
 }
 
 func TestHostedGoogleOnlyUserCannotUnlinkLastSignInMethod(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedAccountServer(t)
 	var userID string
 	if err := app.db.SQL.QueryRow(`SELECT owner_user_id FROM accounts WHERE id=?`, accountID).Scan(&userID); err != nil {
@@ -260,6 +266,7 @@ func TestHostedGoogleOnlyUserCannotUnlinkLastSignInMethod(t *testing.T) {
 }
 
 func TestHostedRevokeAllSessions(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedAccountServer(t)
 	status, _, _ := api.request("POST", "/api/auth/account/sessions/revoke-all", map[string]any{})
 	if status != http.StatusNoContent {
@@ -272,6 +279,7 @@ func TestHostedRevokeAllSessions(t *testing.T) {
 }
 
 func TestHostedAccountEndpointsRequireAuth(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedAccountServer(t)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
@@ -300,6 +308,7 @@ func TestHostedAccountEndpointsRequireAuth(t *testing.T) {
 }
 
 func TestPlatformMailQueueEndpoint(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedAccountServer(t)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)

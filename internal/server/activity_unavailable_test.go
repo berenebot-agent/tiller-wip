@@ -84,6 +84,7 @@ func activityUnavailableHarness(t *testing.T, upstream http.HandlerFunc) (*testA
 // when activity.db cannot be opened: an inference request still succeeds and
 // the best-effort Activity write does not fail the request.
 func TestInferenceSucceedsWhenActivityUnavailable(t *testing.T) {
+	t.Parallel()
 	api, _, _, secret := activityUnavailableHarness(t, mockUpstream(t))
 	resp, payload := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
 	if resp.StatusCode != 200 {
@@ -95,6 +96,7 @@ func TestInferenceSucceedsWhenActivityUnavailable(t *testing.T) {
 // explicit 503 activity_unavailable rather than an empty list or a generic
 // database 500 when the Activity store is down.
 func TestActivityReadsReportUnavailable(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, _ := activityUnavailableHarness(t, mockUpstream(t))
 
 	status, payload, _ := api.request("GET", "/api/admin/activity?limit=50&offset=0", nil)
@@ -118,6 +120,7 @@ func TestActivityReadsReportUnavailable(t *testing.T) {
 // reports Activity unavailability as a degraded state rather than a total
 // service failure.
 func TestAdminHealthReportsActivityDegraded(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := activityUnavailableHarness(t, mockUpstream(t))
 	status, payload, _ := api.request("GET", "/api/admin/health", nil)
 	if status != 200 {
@@ -137,6 +140,7 @@ func TestAdminHealthReportsActivityDegraded(t *testing.T) {
 // fails closed to an empty account. Local mode keeps its single implicit
 // account fallback.
 func TestHostedScopeNeverFallsBackToLocalAccount(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

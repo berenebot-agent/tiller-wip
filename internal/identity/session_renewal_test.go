@@ -8,6 +8,7 @@ import (
 )
 
 func TestUserSessionRenewalCASConflictReloadsWinner(t *testing.T) {
+	t.Parallel()
 	first, db := newTestStore(t)
 	ctx := context.Background()
 	signup, err := first.CreateSignup(ctx, "renew@example.com", "correct horse battery staple")
@@ -61,6 +62,7 @@ func TestUserSessionRenewalCASConflictReloadsWinner(t *testing.T) {
 }
 
 func TestPlatformSessionRenewalCASConflictReloadsWinner(t *testing.T) {
+	t.Parallel()
 	first, db := newTestStore(t)
 	ctx := context.Background()
 	session, err := first.CreatePlatformSession(ctx)

@@ -16,6 +16,7 @@ import (
 //   - a declared table is missing from the live schema (stale inventory); or
 //   - a tenant-owned table does not have an account_id column.
 func TestTenantTableClassification(t *testing.T) {
+	t.Parallel()
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +87,7 @@ func TestTenantTableClassification(t *testing.T) {
 // account's audit events (there is deliberately no FK from
 // account_audit_events to accounts).
 func TestAuditSurvivesAccountDeletion(t *testing.T) {
+	t.Parallel()
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

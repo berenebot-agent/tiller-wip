@@ -18,6 +18,7 @@ import (
 )
 
 func TestSafeRefreshErrorDoesNotExposeRequestDetails(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		err  error
@@ -45,6 +46,7 @@ func TestSafeRefreshErrorDoesNotExposeRequestDetails(t *testing.T) {
 // model (e.g. a new OpenCode free-tier model) is therefore picked up without
 // a manual admin refresh.
 func TestRefreshDueRefreshesOverdueProviders(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			http.Error(w, "wrong path", http.StatusNotFound)

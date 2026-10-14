@@ -11,6 +11,7 @@ import (
 )
 
 func TestPruneAuditEventsUsesCutoffForBothTables(t *testing.T) {
+	t.Parallel()
 	db, st := openAuditStore(t)
 	ctx := context.Background()
 	current := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
@@ -41,6 +42,7 @@ func TestPruneAuditEventsUsesCutoffForBothTables(t *testing.T) {
 }
 
 func TestPruneAuditEventsRetentionSettingChanges(t *testing.T) {
+	t.Parallel()
 	db, st := openAuditStore(t)
 	ctx := context.Background()
 	current := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
@@ -67,6 +69,7 @@ func TestPruneAuditEventsRetentionSettingChanges(t *testing.T) {
 }
 
 func TestPruneAuditEventsDoesNotRequireActivity(t *testing.T) {
+	t.Parallel()
 	db, st := openAuditStore(t)
 	ctx := context.Background()
 	current := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)

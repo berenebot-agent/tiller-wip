@@ -131,6 +131,7 @@ func lookup(t *testing.T, resolver *net.Resolver, want string) {
 }
 
 func TestSuppliedDNSRemainsAuthoritative(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name  string
 		rcode byte
@@ -161,6 +162,7 @@ func TestSuppliedDNSRemainsAuthoritative(t *testing.T) {
 }
 
 func TestAllSuppliedServersBeforeFallback(t *testing.T) {
+	t.Parallel()
 	first := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 2, "") })
 	second := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 0, "10.1.2.3") })
 	public := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 0, "93.184.216.34") })
@@ -171,6 +173,7 @@ func TestAllSuppliedServersBeforeFallback(t *testing.T) {
 }
 
 func TestCloudflareThenGoogleAfterSuppliedFailure(t *testing.T) {
+	t.Parallel()
 	for _, failure := range []string{"SERVFAIL", "REFUSED", "timeout"} {
 		t.Run(failure, func(t *testing.T) {
 			var mu sync.Mutex
@@ -206,6 +209,7 @@ func TestCloudflareThenGoogleAfterSuppliedFailure(t *testing.T) {
 }
 
 func TestFallbackNegativeReplyStopsChain(t *testing.T) {
+	t.Parallel()
 	primary := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 2, "") })
 	cloudflare := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 3, "") })
 	google := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 0, "93.184.216.34") })
@@ -217,6 +221,7 @@ func TestFallbackNegativeReplyStopsChain(t *testing.T) {
 }
 
 func TestRecoveredSuppliedDNSIsUsedAgain(t *testing.T) {
+	t.Parallel()
 	var recovered atomic.Bool
 	primary := startDNS(t, func(q []byte, _ string) []byte {
 		if recovered.Load() {
@@ -235,6 +240,7 @@ func TestRecoveredSuppliedDNSIsUsedAgain(t *testing.T) {
 }
 
 func TestTruncatedUDPUsesTCP(t *testing.T) {
+	t.Parallel()
 	primary := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 2, "") })
 	fallback := startDNS(t, func(q []byte, network string) []byte {
 		reply := answer(q, 0, "93.184.216.34")
@@ -250,6 +256,7 @@ func TestTruncatedUDPUsesTCP(t *testing.T) {
 }
 
 func TestCancellationStopsFailover(t *testing.T) {
+	t.Parallel()
 	queried := make(chan struct{}, 1)
 	primary := startDNS(t, func([]byte, string) []byte {
 		select {
@@ -287,6 +294,7 @@ func TestCancellationStopsFailover(t *testing.T) {
 }
 
 func TestHostsFileBypassesDNS(t *testing.T) {
+	t.Parallel()
 	primary := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 2, "") })
 	fallback := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 0, "93.184.216.34") })
 	resolver := mockResolver([]*mockDNS{primary}, []*mockDNS{fallback}, 100*time.Millisecond)
@@ -299,6 +307,7 @@ func TestHostsFileBypassesDNS(t *testing.T) {
 }
 
 func TestNativeDialerUsesFallback(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	defer upstream.Close()
 	_, port, _ := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
@@ -318,6 +327,10 @@ func TestNativeDialerUsesFallback(t *testing.T) {
 	}
 }
 
+// TestHostedPolicyRejectsPrivateFallbackAnswer is deliberately NOT parallel: it
+// swaps the process-wide net.DefaultResolver, which every other test in the
+// package (and the stdlib's own dialer) reads. Serial execution guarantees no
+// parallel test observes the swapped resolver.
 func TestHostedPolicyRejectsPrivateFallbackAnswer(t *testing.T) {
 	primary := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 2, "") })
 	fallback := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 0, "127.0.0.1") })
@@ -339,6 +352,7 @@ func TestHostedPolicyRejectsPrivateFallbackAnswer(t *testing.T) {
 }
 
 func TestParseServers(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		raw  string
 		want []string
@@ -365,6 +379,7 @@ func TestParseServers(t *testing.T) {
 }
 
 func TestAllServersFail(t *testing.T) {
+	t.Parallel()
 	primary := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 2, "") })
 	fallback := startDNS(t, func(q []byte, _ string) []byte { return answer(q, 2, "") })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -377,6 +392,7 @@ func TestAllServersFail(t *testing.T) {
 }
 
 func TestExchangeTransportFailureAndMalformedPacket(t *testing.T) {
+	t.Parallel()
 	// An unreachable supplied DNS socket must not prevent the next resolver.
 	closed, err := net.ListenPacket("udp4", "127.0.0.1:0")
 	if err != nil {
@@ -392,6 +408,7 @@ func TestExchangeTransportFailureAndMalformedPacket(t *testing.T) {
 }
 
 func TestDeadlineLeavesBudgetForLaterResolvers(t *testing.T) {
+	t.Parallel()
 	var servers []*mockDNS
 	for i := 0; i < 5; i++ {
 		servers = append(servers, startDNS(t, func([]byte, string) []byte { return nil }))

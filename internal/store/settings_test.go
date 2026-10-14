@@ -27,6 +27,7 @@ func openStore(t *testing.T) (*database.DB, *store.Store) {
 // TestSettingsAreAccountScoped proves a settings write under one account is
 // invisible to another account.
 func TestSettingsAreAccountScoped(t *testing.T) {
+	t.Parallel()
 	_, st := openStore(t)
 	ctx := context.Background()
 	local := st.For(database.LocalAccountID)
@@ -58,6 +59,7 @@ func TestSettingsAreAccountScoped(t *testing.T) {
 // TestSettingsDefaultsArePerAccount proves defaults are computed per account
 // and unaffected by another account's explicit values.
 func TestSettingsDefaultsArePerAccount(t *testing.T) {
+	t.Parallel()
 	_, st := openStore(t)
 	ctx := context.Background()
 	local := st.For(database.LocalAccountID)
@@ -78,6 +80,7 @@ func TestSettingsDefaultsArePerAccount(t *testing.T) {
 // TestRunTxCommitsAndRollsBack proves a transaction-bound scope writes for the
 // scope's own account and that an error rolls the whole transaction back.
 func TestRunTxCommitsAndRollsBack(t *testing.T) {
+	t.Parallel()
 	_, st := openStore(t)
 	ctx := context.Background()
 	local := st.For(database.LocalAccountID)
@@ -112,6 +115,7 @@ func TestRunTxCommitsAndRollsBack(t *testing.T) {
 // TestNotificationSettingsAreAccountScoped proves notification config does not
 // leak across accounts.
 func TestNotificationSettingsAreAccountScoped(t *testing.T) {
+	t.Parallel()
 	_, st := openStore(t)
 	ctx := context.Background()
 	local := st.For(database.LocalAccountID)

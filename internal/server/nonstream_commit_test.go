@@ -14,6 +14,7 @@ import (
 // malformed body so the caller can answer with an error instead of committing
 // the upstream 2xx and then failing silently.
 func TestTranslateNonstreamBodyRejectsMalformedBeforeCommit(t *testing.T) {
+	t.Parallel()
 	usage := &usageCapture{}
 	_, isJSON, err := translateNonstreamBody(
 		bufio.NewReader(strings.NewReader(`{"choices":[`)),
@@ -31,6 +32,7 @@ func TestTranslateNonstreamBodyRejectsMalformedBeforeCommit(t *testing.T) {
 // translated to completion before any write, so the caller can commit the
 // status and the body together.
 func TestTranslateNonstreamBodyReturnsTranslatedBytes(t *testing.T) {
+	t.Parallel()
 	usage := &usageCapture{}
 	body := `{"id":"m1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":4}}`
 	translated, isJSON, err := translateNonstreamBody(
@@ -52,6 +54,7 @@ func TestTranslateNonstreamBodyReturnsTranslatedBytes(t *testing.T) {
 // consumed: the caller must be able to fall through to the streaming
 // translator with every byte intact.
 func TestTranslateNonstreamBodyPassesThroughSSE(t *testing.T) {
+	t.Parallel()
 	usage := &usageCapture{}
 	body := "data: {\"choices\":[]}\n\n"
 	reader := bufio.NewReader(strings.NewReader(body))

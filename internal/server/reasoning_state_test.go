@@ -8,6 +8,7 @@ import (
 )
 
 func TestReasoningDetailsAnthropicRoundTrip(t *testing.T) {
+	t.Parallel()
 	details := []any{map[string]any{"type": "reasoning.text", "text": "", "signature": "sig", "format": "anthropic-claude-v1", "index": 2}, map[string]any{"type": "reasoning.encrypted", "data": "opaque", "format": "anthropic-claude-v1"}}
 	blocks, err := chatReasoningDetailsToAnthropic(details)
 	if err != nil {
@@ -31,6 +32,7 @@ func TestReasoningDetailsAnthropicRoundTrip(t *testing.T) {
 }
 
 func TestResponsesReasoningDetailsRoundTrip(t *testing.T) {
+	t.Parallel()
 	item := map[string]any{"type": "reasoning", "id": "rs_1", "encrypted_content": "opaque", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}}
 	details := responsesReasoningToChatDetails(item)
 	if len(details) != 2 {
@@ -47,6 +49,7 @@ func TestResponsesReasoningDetailsRoundTrip(t *testing.T) {
 }
 
 func TestPlaintextResponsesSummaryIsRepresentable(t *testing.T) {
+	t.Parallel()
 	item := map[string]any{"type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": "plan"}}}
 	if got := responsesReasoningToChatDetails(item); len(got) != 1 {
 		t.Fatalf("details = %#v", got)
@@ -57,6 +60,7 @@ func TestPlaintextResponsesSummaryIsRepresentable(t *testing.T) {
 }
 
 func TestResponsesReasoningRejectedForMessages(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"model":"x","input":[{"type":"reasoning","encrypted_content":"opaque"}]}`)
 	if _, err := translateRequest(body, providers.ProtocolResponses, providers.ProtocolMessages, "claude-x"); err == nil {
 		t.Fatal("expected unsupported reasoning state")

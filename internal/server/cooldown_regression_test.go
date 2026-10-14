@@ -14,6 +14,7 @@ import (
 )
 
 func TestCooldownSlowFailureStillCools(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	slowA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,6 +77,7 @@ func TestCooldownSlowFailureStillCools(t *testing.T) {
 }
 
 func TestCooldownStatusEligibilityMatrix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		status   int
 		wantCool bool
@@ -143,6 +145,7 @@ func TestCooldownStatusEligibilityMatrix(t *testing.T) {
 }
 
 func TestCooldownEligibleStatusDoesNotApplyToFixedVirtualRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls int
 	var mu sync.Mutex
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +204,7 @@ func TestCooldownEligibleStatusDoesNotApplyToFixedVirtualRoute(t *testing.T) {
 }
 
 func TestCooldownExcludedStatusDoesNotApplyToDirectRealRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls int
 	var mu sync.Mutex
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +255,7 @@ func TestCooldownExcludedStatusDoesNotApplyToDirectRealRoute(t *testing.T) {
 }
 
 func TestCooldownClientCancelDoesNotCool(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	releaseA := make(chan struct{})
@@ -296,7 +301,24 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 		resp, reqErr = http.DefaultClient.Do(req)
 		close(done)
 	}()
-	time.Sleep(18 * time.Millisecond)
+	// Wait until A has actually been attempted, then cancel the client request.
+	// A fixed sleep is not safe here: under load the router may not have
+	// dispatched to A within the window, in which case the cancel lands before A
+	// is ever tried and the "A is still attempted" assertion below sees only the
+	// follow-up hit. Polling makes the precondition deterministic.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		attemptedA := len(reached) > 0
+		mu.Unlock()
+		if attemptedA {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("router never dispatched to target A")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 	select {
 	case <-done:
@@ -341,6 +363,7 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 // reading the response body. That read error is self-inflicted and must not
 // cool an otherwise healthy target (regression: gpt-5.6-luna cooled for 5m).
 func TestCooldownClientCancelDuringBodyReadDoesNotCool(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	bodyStarted := make(chan struct{}, 1)

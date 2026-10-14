@@ -42,6 +42,7 @@ func request() gateway.Request {
 }
 
 func TestCatalogFixturesAndCacheIsolation(t *testing.T) {
+	t.Parallel()
 	tiller := fixture(t, "tiller-models.json")
 	openrouter := fixture(t, "openrouter-models.json")
 	var calls atomic.Int32
@@ -107,6 +108,7 @@ func TestCatalogFixturesAndCacheIsolation(t *testing.T) {
 }
 
 func TestChatReplayExtensionsAndSafety(t *testing.T) {
+	t.Parallel()
 	result := fixture(t, "chat-result.json")
 	var received map[string]any
 	var calls int
@@ -159,6 +161,7 @@ func TestChatReplayExtensionsAndSafety(t *testing.T) {
 }
 
 func TestErrorsRedirectsAndPagination(t *testing.T) {
+	t.Parallel()
 	var leaked atomic.Int32
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { leaked.Add(1) }))
 	defer target.Close()
@@ -205,6 +208,7 @@ func TestErrorsRedirectsAndPagination(t *testing.T) {
 }
 
 func TestStreamFixturesAndFailure(t *testing.T) {
+	t.Parallel()
 	good := fixture(t, "chat-stream.sse")
 	bad := fixture(t, "stream-error.sse")
 	cases := []struct {
@@ -280,6 +284,7 @@ func TestStreamFixturesAndFailure(t *testing.T) {
 }
 
 func TestReviewErrorMetadataAndMappings(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		status         int
 		code, category string
@@ -311,6 +316,7 @@ func TestReviewErrorMetadataAndMappings(t *testing.T) {
 }
 
 func TestReviewNormalizationAndBudgets(t *testing.T) {
+	t.Parallel()
 	body := `{"data":[{"id":"explicit","supports_tools":null,"supports_vision":"bad","supports_structured_output":null,"architecture":{"input_modalities":["image"]},"supported_parameters":["tools","structured_outputs","response_format"]},{"id":"derived","max_output_tokens":200,"supported_parameters":["response_format"],"reasoning":{"budget_min":10,"budget_max":20,"supports_max_tokens":true,"supports_toggle":false}},{"id":"budget","reasoning_options":[{"type":"budget_tokens","min":1,"max":3},{"type":"toggle"}]}]}`
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, body) }))
 	defer s.Close()
@@ -334,6 +340,7 @@ func TestReviewNormalizationAndBudgets(t *testing.T) {
 }
 
 func TestReviewRequestCatalogAndArgumentBounds(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -374,6 +381,7 @@ func TestReviewRequestCatalogAndArgumentBounds(t *testing.T) {
 }
 
 func TestReviewAssistantValidation(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct{ message, finish, category string }{
 		{`{"role":"user","content":"bad"}`, "stop", "malformed_response"},
 		{`{"role":"assistant","content":42}`, "stop", "malformed_response"},
@@ -394,6 +402,7 @@ func TestReviewAssistantValidation(t *testing.T) {
 }
 
 func TestFinalCommonNormalizationTable(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		fields                string
 		tools, schema, object gateway.Support
@@ -417,6 +426,7 @@ func TestFinalCommonNormalizationTable(t *testing.T) {
 }
 
 func TestFinalUsageNormalization(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		payload     string
 		read, write *int
@@ -446,6 +456,7 @@ func intPointer(n int) *int    { return &n }
 func sameCount(a, b *int) bool { return a == nil && b == nil || a != nil && b != nil && *a == *b }
 
 func TestFinalConfigAndWirePreservation(t *testing.T) {
+	t.Parallel()
 	cfg := gateway.Config{Profile: gateway.Tiller, BaseURL: "http://localhost/v1", APIKey: "private-secret"}
 	serialized, err := json.Marshal(cfg)
 	if err != nil || strings.Contains(string(serialized), cfg.APIKey) {
@@ -497,6 +508,7 @@ func TestFinalConfigAndWirePreservation(t *testing.T) {
 }
 
 func TestFinalCloseAndDoneDoesNotMaskFailure(t *testing.T) {
+	t.Parallel()
 	for _, frame := range []string{`not-json`, `{"choices":[{"delta":{},"finish_reason":"error"}]}`} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Header.Get("Accept") != "text/event-stream" {
@@ -553,6 +565,7 @@ func TestFinalCloseAndDoneDoesNotMaskFailure(t *testing.T) {
 }
 
 func TestStreamCancellationClosesUpstream(t *testing.T) {
+	t.Parallel()
 	closed := make(chan struct{})
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

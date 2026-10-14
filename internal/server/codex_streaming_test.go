@@ -24,6 +24,7 @@ import (
 )
 
 func TestHeaderlessSSEIsInspectedByOutputProbe(t *testing.T) {
+	t.Parallel()
 	const body = "event: response.failed\ndata: {\"type\":\"response.failed\"}\n\n"
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
@@ -54,6 +55,7 @@ func TestHeaderlessSSEIsInspectedByOutputProbe(t *testing.T) {
 }
 
 func TestHeaderlessSSEUsesExistingLineLimit(t *testing.T) {
+	t.Parallel()
 	body := "event: response.created\ndata: {}\n\n" + "data: " + strings.Repeat("x", maxSSELineBytes) + "\n\n"
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
@@ -76,6 +78,7 @@ func TestHeaderlessSSEUsesExistingLineLimit(t *testing.T) {
 }
 
 func TestCodexHeaderlessSSEStreamsIncrementally(t *testing.T) {
+	t.Parallel()
 	allowComplete := make(chan struct{})
 	firstFrameSent := make(chan struct{})
 	upstreamDone := make(chan struct{})

@@ -17,6 +17,7 @@ import (
 // API base paths in local mode, in HTML for humans and markdown for agents,
 // without any credential.
 func TestManagementGuideServedLocally(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +77,7 @@ func TestManagementGuideServedLocally(t *testing.T) {
 // TestManagementGuideAbsentInHosted proves the local-only feature leaves no
 // guide (or token surface) in hosted mode.
 func TestManagementGuideAbsentInHosted(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	for _, path := range []string{"/api", "/api/admin"} {
 		status, _, _ := api.request("GET", path, nil)
@@ -86,6 +88,7 @@ func TestManagementGuideAbsentInHosted(t *testing.T) {
 }
 
 func TestManagementDiscoveryDocument(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +148,7 @@ func TestManagementDiscoveryDocument(t *testing.T) {
 }
 
 func TestManagementDiscoveryAbsentInHosted(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	if status, _, _ := api.request("GET", "/api.json", nil); status != 404 {
 		t.Fatalf("hosted GET /api.json = %d, want 404", status)

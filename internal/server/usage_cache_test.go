@@ -13,6 +13,7 @@ import (
 // are reused inside the TTL and that invalidateUsageAggregates forces a
 // recompute, while live in-memory state is never cached.
 func TestUsageAggregatesReusedWithinTTL(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	s := api.server
 	s.usageCacheTTL = time.Minute
@@ -61,6 +62,7 @@ func TestUsageAggregatesReusedWithinTTL(t *testing.T) {
 // and cooldowns are read fresh on every snapshot even when the DB aggregates
 // are served from cache.
 func TestUsageSnapshotLiveStateNotCached(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	s := api.server
 	s.usageCacheTTL = time.Minute
@@ -86,6 +88,7 @@ func TestUsageSnapshotLiveStateNotCached(t *testing.T) {
 // snapshot builds. The mutex must serialize the compute so there is no data
 // race, and every caller must observe a consistent aggregate.
 func TestUsageAggregatesConcurrentCoalesce(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	s := api.server
 	s.usageCacheTTL = time.Minute
@@ -122,6 +125,7 @@ func TestUsageAggregatesConcurrentCoalesce(t *testing.T) {
 // production enables the TTL, tests must not, so a write-then-read sequence is
 // never served stale.
 func TestUsageCacheDisabledByDefaultInTests(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	if api.server.usageCacheTTL != 0 {
 		t.Fatalf("test server usageCacheTTL = %v, want 0", api.server.usageCacheTTL)

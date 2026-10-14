@@ -10,6 +10,7 @@ import (
 )
 
 func TestParseUpstreamErrorDetailOpenAI(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"error":{"message":"Invalid value: 'ultra'","type":"invalid_request_error","param":"reasoning.effort","code":"invalid_value"}}`)
 	got := parseUpstreamErrorDetail(body, "application/json")
 	if got.Message != "Invalid value: 'ultra'" || got.Code != "invalid_value" || got.Param != "reasoning.effort" {
@@ -18,6 +19,7 @@ func TestParseUpstreamErrorDetailOpenAI(t *testing.T) {
 }
 
 func TestParseUpstreamErrorDetailAnthropic(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"type":"error","error":{"type":"invalid_request_error","message":"credit balance too low"}}`)
 	if got := parseUpstreamErrorDetail(body, "application/json"); got.Message != "credit balance too low" {
 		t.Fatalf("unexpected detail: %+v", got)
@@ -25,6 +27,7 @@ func TestParseUpstreamErrorDetailAnthropic(t *testing.T) {
 }
 
 func TestParseUpstreamErrorDetailKeepsInnerType(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"type":"error","error":{"type":"FreeTierError","message":"Error from provider (Console): OpenCode's free tier can only be used from within OpenCode"}}`)
 	got := parseUpstreamErrorDetail(body, "application/json")
 	if got.Type != "FreeTierError" {
@@ -36,6 +39,7 @@ func TestParseUpstreamErrorDetailKeepsInnerType(t *testing.T) {
 }
 
 func TestIsOpenCodeFreeTierRejection(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		body string
@@ -59,6 +63,7 @@ func TestIsOpenCodeFreeTierRejection(t *testing.T) {
 }
 
 func TestFreeShadowSessionOpaqueAndStable(t *testing.T) {
+	t.Parallel()
 	a := freeShadowSession("tiller-req-123")
 	b := freeShadowSession("tiller-req-123")
 	if a != b || a == "" {
@@ -76,6 +81,7 @@ func TestFreeShadowSessionOpaqueAndStable(t *testing.T) {
 }
 
 func TestParseUpstreamErrorDetailTolerantForms(t *testing.T) {
+	t.Parallel()
 	if got := parseUpstreamErrorDetail([]byte(`{"error":{"code":429,"message":"rate limited"}}`), "application/json"); got.Code != "429" || got.Message != "rate limited" {
 		t.Fatalf("numeric code: %+v", got)
 	}
@@ -88,6 +94,7 @@ func TestParseUpstreamErrorDetailTolerantForms(t *testing.T) {
 }
 
 func TestIsContextLimitError(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name   string
 		detail upstreamErrorDetail
@@ -107,12 +114,14 @@ func TestIsContextLimitError(t *testing.T) {
 }
 
 func TestContextLimitDoesNotTriggerCooldown(t *testing.T) {
+	t.Parallel()
 	if cooldownTrigger("context_limit_exceeded", http.StatusBadRequest) {
 		t.Fatal("context-limit rejection must not cool a target")
 	}
 }
 
 func TestParseUpstreamErrorDetailGarbageAndPlain(t *testing.T) {
+	t.Parallel()
 	if got := parseUpstreamErrorDetail([]byte("<html>502</html>"), "application/json"); got.clientMessage() != "" {
 		t.Fatalf("html should not parse: %+v", got)
 	}
@@ -122,6 +131,7 @@ func TestParseUpstreamErrorDetailGarbageAndPlain(t *testing.T) {
 }
 
 func TestRedactProviderSecrets(t *testing.T) {
+	t.Parallel()
 	p := providers.Instance{
 		Credential:        "sk-secret",
 		OAuthAccountID:    "acct-123",
@@ -140,6 +150,7 @@ func TestRedactProviderSecrets(t *testing.T) {
 }
 
 func TestVirtualExhaustedRouteListsTargetErrors(t *testing.T) {
+	t.Parallel()
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
@@ -172,6 +183,7 @@ func TestVirtualExhaustedRouteListsTargetErrors(t *testing.T) {
 }
 
 func TestVirtualFallbackSuccessHidesProviderError(t *testing.T) {
+	t.Parallel()
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})

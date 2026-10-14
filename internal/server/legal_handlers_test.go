@@ -63,6 +63,7 @@ func legalTestServer(t *testing.T) (*Server, *testAPI, *http.Client, string) {
 // serves the generated placeholder rather than a 404 or anything that reads like
 // approved legal text.
 func TestLegalDocPublicGetReturnsSeededPlaceholder(t *testing.T) {
+	t.Parallel()
 	_, _, client, base := legalTestServer(t)
 
 	for _, slug := range []string{"terms", "privacy"} {
@@ -95,6 +96,7 @@ func TestLegalDocPublicGetReturnsSeededPlaceholder(t *testing.T) {
 }
 
 func TestLegalDocUnknownSlugReturns404(t *testing.T) {
+	t.Parallel()
 	_, _, client, base := legalTestServer(t)
 	resp, err := client.Get(base + "/api/legal/does-not-exist")
 	if err != nil {
@@ -111,6 +113,7 @@ func TestLegalDocUnknownSlugReturns404(t *testing.T) {
 }
 
 func TestPlatformLegalListAndPublish(t *testing.T) {
+	t.Parallel()
 	app, api, _, _ := legalTestServer(t)
 
 	status, list, _ := api.request("GET", "/api/platform/legal", nil)
@@ -163,6 +166,7 @@ func TestPlatformLegalListAndPublish(t *testing.T) {
 // lets the router re-seed its placeholder on every boot: once an operator
 // publishes, a deploy must never replace that text.
 func TestSeedLegalDocumentsDoesNotOverwriteOperatorPublish(t *testing.T) {
+	t.Parallel()
 	app, api, client, base := legalTestServer(t)
 
 	status, _, _ := api.request("PUT", "/api/platform/legal/privacy", map[string]any{"title": "Privacy Policy", "body": "Operator-published privacy."})

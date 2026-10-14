@@ -53,6 +53,7 @@ func assertLimitKind(t *testing.T, err error, kind string, limit, used int) {
 }
 
 func TestProviderCreationLimitRejectsAtCapAndAllowsUnder(t *testing.T) {
+	t.Parallel()
 	db, st := openPlanStore(t)
 	ctx := context.Background()
 	sc := st.For(planTestAccount)
@@ -83,6 +84,7 @@ func TestProviderCreationLimitRejectsAtCapAndAllowsUnder(t *testing.T) {
 }
 
 func TestClientKeyAndVirtualModelCreationLimits(t *testing.T) {
+	t.Parallel()
 	db, st := openPlanStore(t)
 	ctx := context.Background()
 	sc := st.For(planTestAccount)
@@ -122,6 +124,7 @@ func TestClientKeyAndVirtualModelCreationLimits(t *testing.T) {
 }
 
 func TestUnlimitedPlanAllowsCreation(t *testing.T) {
+	t.Parallel()
 	_, st := openPlanStore(t)
 	ctx := context.Background()
 	sc := st.For(planTestAccount)
@@ -137,6 +140,7 @@ func TestUnlimitedPlanAllowsCreation(t *testing.T) {
 }
 
 func TestLocalModeStoreHasNoEnforcement(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -158,6 +162,7 @@ func TestLocalModeStoreHasNoEnforcement(t *testing.T) {
 }
 
 func TestUsageCounterIncrementsAndPeriodRollover(t *testing.T) {
+	t.Parallel()
 	_, st := openPlanStore(t)
 	ctx := context.Background()
 	sc := st.For(planTestAccount)
@@ -191,6 +196,7 @@ func TestUsageCounterIncrementsAndPeriodRollover(t *testing.T) {
 }
 
 func TestEffectiveRetentionDaysClamps(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name       string
 		configured int
@@ -216,6 +222,7 @@ func TestEffectiveRetentionDaysClamps(t *testing.T) {
 // exactly `limit` concurrent requests: no request sees a stale count, and a
 // rejected reservation performs no increment.
 func TestReserveUsageCounterIsAtomicAtTheCap(t *testing.T) {
+	t.Parallel()
 	_, st := openPlanStore(t)
 	ctx := context.Background()
 	sc := st.For(planTestAccount)
@@ -254,6 +261,7 @@ func TestReserveUsageCounterIsAtomicAtTheCap(t *testing.T) {
 // TestPlanEnforcementIsAccountScoped proves one account's resources never count
 // against another's plan, and one account's usage never leaks into another.
 func TestPlanEnforcementIsAccountScoped(t *testing.T) {
+	t.Parallel()
 	_, st := openPlanStore(t)
 	ctx := context.Background()
 	a := st.For(planTestAccount)
@@ -285,6 +293,7 @@ func TestPlanEnforcementIsAccountScoped(t *testing.T) {
 // when enforcement is on, and at its configured 90 days when enforcement is
 // off. Rows are never rewritten.
 func TestPruneRequestLogsClampsRetentionToPlan(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

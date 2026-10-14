@@ -3,6 +3,7 @@ package server
 import "testing"
 
 func TestFallbackTimeoutSetting(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	// Default from migration 012.
@@ -39,6 +40,7 @@ func TestFallbackTimeoutSetting(t *testing.T) {
 }
 
 func TestFallbackCooldownSetting(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	// Default from migration 025.

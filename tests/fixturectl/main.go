@@ -44,7 +44,7 @@ func main() {
 			os.Exit(1)
 		}
 	case "client":
-		if err := runClient(os.Args[2:]); err != nil {
+		if err := runClient(os.Args[2:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "fixturectl: "+err.Error())
 			os.Exit(1)
 		}

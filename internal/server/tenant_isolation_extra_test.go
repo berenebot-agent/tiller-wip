@@ -12,6 +12,7 @@ import (
 // TestLiveAccountIsolation proves a live delta emitted for one account reaches
 // only that account's subscribers, even though all accounts share one hub.
 func TestLiveAccountIsolation(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	h := api.server.liveHub
 	// Keep the idle/debounce paths from pushing snapshots during the test so a
@@ -51,6 +52,7 @@ func TestLiveAccountIsolation(t *testing.T) {
 // account: one account's snapshot never includes another's traffic, and
 // invalidating one account's cache leaves the other's intact.
 func TestUsageCacheAccountIsolation(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 	s := api.server
 	s.usageCacheTTL = time.Minute

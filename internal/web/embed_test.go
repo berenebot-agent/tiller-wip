@@ -13,6 +13,7 @@ import (
 )
 
 func TestHandlerServesSPAEntryWithoutRedirect(t *testing.T) {
+	t.Parallel()
 	tests := []string{"/", "/index.html", "/platform", "/login", "/verify-email?token=x", "/reset-password?token=x"}
 	handler := Handler()
 
@@ -43,6 +44,7 @@ func TestHandlerServesSPAEntryWithoutRedirect(t *testing.T) {
 }
 
 func TestHandlerWithSiteUsesExternalLandingAndAssets(t *testing.T) {
+	t.Parallel()
 	siteDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(siteDir, "index.html"), []byte("<!doctype html><title>Custom</title>"), 0o600); err != nil {
 		t.Fatal(err)
@@ -91,6 +93,7 @@ func TestHandlerWithSiteUsesExternalLandingAndAssets(t *testing.T) {
 }
 
 func TestHandlerWithSiteWarnsOnceForShadowedAsset(t *testing.T) {
+	t.Parallel()
 	siteDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(siteDir, "index.html"), []byte("<!doctype html>"), 0o600); err != nil {
 		t.Fatal(err)
@@ -118,6 +121,7 @@ func TestHandlerWithSiteWarnsOnceForShadowedAsset(t *testing.T) {
 }
 
 func TestShadowedCustomAssetsReportsCollisions(t *testing.T) {
+	t.Parallel()
 	siteDir := t.TempDir()
 	files := map[string]string{
 		"index.html":      "<!doctype html>",
@@ -147,12 +151,14 @@ func TestShadowedCustomAssetsReportsCollisions(t *testing.T) {
 }
 
 func TestHandlerWithSiteRequiresIndex(t *testing.T) {
+	t.Parallel()
 	if _, err := HandlerWithSite(t.TempDir(), nil); err == nil {
 		t.Fatal("custom site without index.html should fail")
 	}
 }
 
 func TestHandlerWithSiteConfinesFilesAndCanonicalizesRoutes(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	siteDir := filepath.Join(parent, "site")
 	if err := os.Mkdir(siteDir, 0o700); err != nil {
@@ -235,6 +241,7 @@ func TestHandlerWithSiteConfinesFilesAndCanonicalizesRoutes(t *testing.T) {
 // paths, and a symlink whose target is the parent directory. None may return
 // content from outside siteDir.
 func TestHandlerWithSiteRejectsTraversalVariants(t *testing.T) {
+	t.Parallel()
 	parent := t.TempDir()
 	siteDir := filepath.Join(parent, "site")
 	if err := os.Mkdir(siteDir, 0o700); err != nil {
@@ -326,6 +333,7 @@ func TestHandlerWithSiteRejectsTraversalVariants(t *testing.T) {
 }
 
 func TestHandlerWithSiteSupportsRangeAndHead(t *testing.T) {
+	t.Parallel()
 	siteDir := t.TempDir()
 	for _, name := range []string{"index.html", "landing.txt"} {
 		if err := os.WriteFile(filepath.Join(siteDir, name), []byte("abcdef"), 0o600); err != nil {
@@ -351,6 +359,7 @@ func TestHandlerWithSiteSupportsRangeAndHead(t *testing.T) {
 }
 
 func TestHandlerServesStaticAssetsAndDoesNotRouteAPIOrHealthToSPA(t *testing.T) {
+	t.Parallel()
 	handler := Handler()
 
 	tests := []struct {

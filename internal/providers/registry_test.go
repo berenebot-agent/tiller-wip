@@ -17,6 +17,7 @@ import (
 )
 
 func TestRegistryIncludesApprovedProviders(t *testing.T) {
+	t.Parallel()
 	for _, providerType := range []string{"openai", "codex-subscription", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "commandcode", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
 		if _, ok := Lookup(providerType); !ok {
 			t.Errorf("missing provider type %s", providerType)
@@ -25,6 +26,7 @@ func TestRegistryIncludesApprovedProviders(t *testing.T) {
 }
 
 func TestDiscoverCommandCodeUsesSupportedEndpoints(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/provider/v1/models" {
 			t.Errorf("discovery path = %q, want /provider/v1/models", r.URL.Path)
@@ -59,6 +61,7 @@ func TestDiscoverCommandCodeUsesSupportedEndpoints(t *testing.T) {
 }
 
 func TestDescriptorsDefaultToAPIKeyAuth(t *testing.T) {
+	t.Parallel()
 	for _, descriptor := range Descriptors() {
 		if descriptor.Type == "codex-subscription" || descriptor.Type == "claude-subscription" || descriptor.Type == "github-copilot" {
 			if descriptor.AuthMode != AuthModeOAuth {
@@ -73,6 +76,7 @@ func TestDescriptorsDefaultToAPIKeyAuth(t *testing.T) {
 }
 
 func TestSetResponseHeaderTimeout(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	transport, ok := r.HTTPClient().Transport.(*http.Transport)
 	if !ok {
@@ -94,6 +98,7 @@ func TestSetResponseHeaderTimeout(t *testing.T) {
 }
 
 func TestHostedRegistryDoesNotFollowRedirects(t *testing.T) {
+	t.Parallel()
 	client := NewHostedRegistry().HTTPClient()
 	request, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if err != nil {
@@ -105,6 +110,7 @@ func TestHostedRegistryDoesNotFollowRedirects(t *testing.T) {
 }
 
 func TestOpenCodeNativeProtocols(t *testing.T) {
+	t.Parallel()
 	zen := map[string]Protocol{
 		"gpt-5.5":            ProtocolResponses,
 		"claude-opus-4.6":    ProtocolMessages,
@@ -153,6 +159,7 @@ func TestOpenCodeNativeProtocols(t *testing.T) {
 }
 
 func TestOpenCodeDescriptors(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		providerType string
 		url          string
@@ -174,6 +181,7 @@ func TestOpenCodeDescriptors(t *testing.T) {
 }
 
 func TestOpenCodeDiscoveryAssignsNativeProtocols(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			t.Errorf("discovery path = %q, want /v1/models", r.URL.Path)
@@ -211,6 +219,7 @@ func TestOpenCodeDiscoveryAssignsNativeProtocols(t *testing.T) {
 }
 
 func TestOpenCodeFreeDiscoveryFiltersToFreeModels(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			t.Errorf("discovery path = %q, want /v1/models", r.URL.Path)
@@ -259,6 +268,7 @@ func TestOpenCodeFreeDiscoveryFiltersToFreeModels(t *testing.T) {
 }
 
 func TestIsOpenCodeFreeModel(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		id   string
 		free bool
@@ -282,6 +292,7 @@ func TestIsOpenCodeFreeModel(t *testing.T) {
 }
 
 func TestProviderProtocolEndpointsAndAuthentication(t *testing.T) {
+	t.Parallel()
 	for _, descriptor := range Descriptors() {
 		baseURL := descriptor.DefaultBaseURL
 		if baseURL == "" {
@@ -320,6 +331,7 @@ func TestProviderProtocolEndpointsAndAuthentication(t *testing.T) {
 }
 
 func TestAppendEndpointMergesQueries(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name, base, endpoint string
 		want                 url.Values
@@ -349,6 +361,7 @@ func TestAppendEndpointMergesQueries(t *testing.T) {
 }
 
 func TestEndpointPreservesBaseQuery(t *testing.T) {
+	t.Parallel()
 	endpoint, err := Endpoint(Instance{Type: "generic-openai", BaseURL: "https://example.com/v1?api-version=2026-01-01&tenant=one"}, ProtocolChat)
 	if err != nil {
 		t.Fatal(err)
@@ -364,6 +377,7 @@ func TestEndpointPreservesBaseQuery(t *testing.T) {
 }
 
 func TestPagedDiscovery(t *testing.T) {
+	t.Parallel()
 	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -393,6 +407,7 @@ func TestPagedDiscovery(t *testing.T) {
 }
 
 func TestPagedDiscoveryCapturesCapabilities(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
 			map[string]any{
@@ -439,6 +454,7 @@ func TestPagedDiscoveryCapturesCapabilities(t *testing.T) {
 // be parsed and merged with the nested `reasoning` object so mandatory,
 // defaults, toggle, and budget survive the hop.
 func TestPagedDiscoveryRoundTripsTillerReasoningMetadata(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{
 			"id":                "model-a",
@@ -476,6 +492,7 @@ func TestPagedDiscoveryRoundTripsTillerReasoningMetadata(t *testing.T) {
 }
 
 func TestOpenRouterDiscoveryCapturesTopProviderOutputLimit(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
 			map[string]any{"id": "model-a", "top_provider": map[string]any{"max_completion_tokens": 8192}},
@@ -493,6 +510,7 @@ func TestOpenRouterDiscoveryCapturesTopProviderOutputLimit(t *testing.T) {
 }
 
 func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/tags":
@@ -586,6 +604,7 @@ func TestOllamaDiscoveryCapturesContextLength(t *testing.T) {
 }
 
 func TestOllamaThinkingDescriptorNormalization(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name        string
 		values      []any
@@ -643,6 +662,7 @@ func TestOllamaThinkingDescriptorNormalization(t *testing.T) {
 }
 
 func TestParseReasoningCapabilitiesOpenRouter(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		raw  map[string]any
@@ -735,6 +755,7 @@ func TestParseReasoningCapabilitiesOpenRouter(t *testing.T) {
 }
 
 func TestParseReasoningCapabilitiesAnthropic(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		raw  map[string]any
@@ -816,6 +837,7 @@ func TestParseReasoningCapabilitiesAnthropic(t *testing.T) {
 }
 
 func TestPagedDiscoveryCapturesOpenRouterReasoning(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
 			map[string]any{
@@ -863,6 +885,7 @@ func TestPagedDiscoveryCapturesOpenRouterReasoning(t *testing.T) {
 }
 
 func TestPagedDiscoveryCapturesAnthropicReasoning(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{
 			map[string]any{
@@ -915,6 +938,7 @@ func boolPtrEqual(a, b *bool) bool {
 }
 
 func TestValidateBaseURL(t *testing.T) {
+	t.Parallel()
 	for _, invalid := range []string{"file:///etc/passwd", "https://user:secret@example.com", "javascript:alert(1)", "https:///missing"} {
 		if ValidateBaseURL(invalid) == nil {
 			t.Errorf("accepted %q", invalid)
@@ -925,6 +949,9 @@ func TestValidateBaseURL(t *testing.T) {
 	}
 }
 
+// Serial (no t.Parallel): swaps the package-level codex.ReleaseChannelURL test
+// seam, which the Codex discovery/version tests below also read. These tests
+// must not run concurrently with each other.
 func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
 	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.156.1"})
@@ -1008,6 +1035,7 @@ func TestDiscoverCodexResolvesEffortAliases(t *testing.T) {
 // backend accepts (872000). Tiller must advertise the CEILING — clients size
 // their compaction from this number, so serving the session default makes them
 // compact ~3.2x earlier than the model requires.
+// Serial (no t.Parallel): shares the codex.ReleaseChannelURL test seam.
 func TestDiscoverCodexPrefersMaxContextWindow(t *testing.T) {
 	release := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"tag_name": "rust-v0.156.1"})
@@ -1067,6 +1095,7 @@ func TestDiscoverCodexPrefersMaxContextWindow(t *testing.T) {
 }
 
 func TestCodexClientEffortsHideWireMax(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name   string
 		levels []string
@@ -1086,6 +1115,7 @@ func TestCodexClientEffortsHideWireMax(t *testing.T) {
 }
 
 func TestCodexEffortAliases(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		levels     []string
@@ -1117,6 +1147,7 @@ func TestCodexEffortAliases(t *testing.T) {
 	}
 }
 
+// Serial (no t.Parallel): shares the codex.ReleaseChannelURL test seam.
 func TestResolveLatestVersionParsesTag(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Accept"); got != "application/json" {
@@ -1138,6 +1169,7 @@ func TestResolveLatestVersionParsesTag(t *testing.T) {
 	}
 }
 
+// Serial (no t.Parallel): shares the codex.ReleaseChannelURL test seam.
 func TestResolveLatestVersionRejectsBadPayloads(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -1171,6 +1203,7 @@ func TestResolveLatestVersionRejectsBadPayloads(t *testing.T) {
 
 // TestCodexClientVersionFallsBackToFloor verifies discovery degrades to the
 // pinned floor when the release channel is unreachable, rather than failing.
+// Serial (no t.Parallel): shares the codex.ReleaseChannelURL test seam.
 func TestCodexClientVersionFallsBackToFloor(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "down", http.StatusServiceUnavailable)
@@ -1188,6 +1221,7 @@ func TestCodexClientVersionFallsBackToFloor(t *testing.T) {
 
 // TestCodexClientVersionCachesResolution verifies a successful resolution is
 // reused without contacting the release channel again within the TTL.
+// Serial (no t.Parallel): shares the codex.ReleaseChannelURL test seam.
 func TestCodexClientVersionCachesResolution(t *testing.T) {
 	var hits int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

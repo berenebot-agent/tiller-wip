@@ -8,6 +8,7 @@ import (
 // TestRegistryHasExactlyTermsAndPrivacy pins the published document set and the
 // canonical order the platform editor and public endpoint rely on.
 func TestRegistryHasExactlyTermsAndPrivacy(t *testing.T) {
+	t.Parallel()
 	slugs := Slugs()
 	if len(slugs) == 0 {
 		t.Fatal("no registered legal documents")
@@ -40,6 +41,7 @@ func TestRegistryHasExactlyTermsAndPrivacy(t *testing.T) {
 // the exported slice relies on: a caller mutating the result must not corrupt the
 // registry.
 func TestPlatformSlugsReturnsAnIndependentCopy(t *testing.T) {
+	t.Parallel()
 	got := PlatformSlugs()
 	if len(got) != 2 {
 		t.Fatalf("PlatformSlugs len = %d, want 2", len(got))
@@ -55,6 +57,7 @@ func TestPlatformSlugsReturnsAnIndependentCopy(t *testing.T) {
 // unpublished, name the publish path, and carry bracketed fill-in tokens — but it
 // must not contain drafted clause text.
 func TestSeedDocumentsAreActionablePlaceholders(t *testing.T) {
+	t.Parallel()
 	docs := SeedDocuments()
 	if len(docs) != len(Slugs()) {
 		t.Fatalf("SeedDocuments returned %d docs, want %d", len(docs), len(Slugs()))
@@ -87,6 +90,7 @@ func TestSeedDocumentsAreActionablePlaceholders(t *testing.T) {
 // operator details plus its own, and that the tokens the surviving drafts use are
 // the ones the placeholder asks for.
 func TestSharedAndSpecificFillInFields(t *testing.T) {
+	t.Parallel()
 	bodies := map[string]string{}
 	for _, doc := range SeedDocuments() {
 		bodies[doc.Slug] = doc.Body
@@ -129,6 +133,7 @@ func TestSharedAndSpecificFillInFields(t *testing.T) {
 // TestPlaceholderBodyAlignsTokens guards the presentation: a longer label added
 // later must not leave the fill-in list ragged.
 func TestPlaceholderBodyAlignsTokens(t *testing.T) {
+	t.Parallel()
 	width := fieldLabelWidth()
 	for _, meta := range documentFiles {
 		body := placeholderBody(meta)
@@ -145,6 +150,7 @@ func TestPlaceholderBodyAlignsTokens(t *testing.T) {
 }
 
 func TestKnownSlugAndPlatformEditable(t *testing.T) {
+	t.Parallel()
 	if !KnownSlug("terms") {
 		t.Fatal("terms should be a known slug")
 	}

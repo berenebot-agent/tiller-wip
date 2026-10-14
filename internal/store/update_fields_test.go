@@ -46,6 +46,7 @@ func clientEditable(t *testing.T, sc *store.Scope, id string) store.ClientKeyEdi
 // the partial-update overwrite: a metadata-only PATCH must not rewrite fields it
 // did not supply, so a concurrent change to those fields survives.
 func TestUpdateClientKeyMetadataOnlyPreservesConcurrentFields(t *testing.T) {
+	t.Parallel()
 	sc, _ := patchScope(t)
 	ctx := context.Background()
 	seedPatchClient(t, sc, "ck-1", "original")
@@ -111,6 +112,7 @@ func seedPatchVirtual(t *testing.T, db *sql.DB, sc *store.Scope, modelID, name s
 // TestUpdateVirtualModelMetadataOnlyPreservesModeAndTargets is the virtual-model
 // counterpart: a rename must not restore a stale routing mode or target list.
 func TestUpdateVirtualModelMetadataOnlyPreservesModeAndTargets(t *testing.T) {
+	t.Parallel()
 	sc, db := patchScope(t)
 	ctx := context.Background()
 	seedPatchVirtual(t, db, sc, "vm-1", "original")

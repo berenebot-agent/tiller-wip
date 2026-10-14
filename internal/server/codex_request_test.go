@@ -8,6 +8,7 @@ import (
 )
 
 func TestNormalizeCodexRequestResolvesEffortAliases(t *testing.T) {
+	t.Parallel()
 	aliasCaps := &providers.ReasoningCapabilities{
 		Options:       []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high", "max", "ultra"}}},
 		EffortAliases: map[string]string{"ultra": "max"},
@@ -60,6 +61,7 @@ func TestNormalizeCodexRequestResolvesEffortAliases(t *testing.T) {
 // reasoning content, mirroring codex_cli_rs / 9router. An explicit client
 // summary is preserved, and a disabled/absent reasoning object is left alone.
 func TestNormalizeCodexRequestRequestsReasoningSummary(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{
 		Options:       []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high", "max"}}},
 		EffortAliases: map[string]string{},
@@ -114,6 +116,7 @@ func TestNormalizeCodexRequestRequestsReasoningSummary(t *testing.T) {
 // TestEnsureReasoningEncryptedContentDedupes checks the include-list helper
 // does not append a duplicate and tolerates a non-list value.
 func TestEnsureReasoningEncryptedContentDedupes(t *testing.T) {
+	t.Parallel()
 	got := ensureReasoningEncryptedContent([]any{"reasoning.encrypted_content"})
 	if len(got) != 1 {
 		t.Fatalf("duplicate appended: %v", got)

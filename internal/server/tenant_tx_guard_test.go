@@ -36,6 +36,11 @@ func (w *txCheckWriter) Flush() {
 // tenant-transaction-lifetime guard: a streaming inference request must not
 // have any tenant transaction open while the provider is called or while bytes
 // are written to the client.
+//
+// Deliberately NOT parallel: the guard reads store.ActiveTenantTransactions(),
+// a process-wide gauge. A parallel test elsewhere that has a tenant
+// transaction open would be observed by this test's assertions as a false
+// violation. Serial execution means the gauge reflects only this test.
 func TestNoTenantTxAcrossProviderIOOrClientStreaming(t *testing.T) {
 	var upstreamViolations atomic.Int64
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ import (
 )
 
 func TestExtractReasoningOptions(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		caps *ReasoningCapabilities
@@ -122,6 +123,7 @@ func TestExtractReasoningOptions(t *testing.T) {
 }
 
 func TestNullableReasoningCapabilitiesRoundTrip(t *testing.T) {
+	t.Parallel()
 	caps := &ReasoningCapabilities{
 		Options: []ReasoningOption{
 			{Type: ReasoningOptionEffort, Values: []string{"none", "low", "high"}},
@@ -157,6 +159,7 @@ func TestNullableReasoningCapabilitiesRoundTrip(t *testing.T) {
 }
 
 func TestNullableReasoningCapabilitiesNilIsSQLNull(t *testing.T) {
+	t.Parallel()
 	if got := nullableReasoningCapabilities(nil); got != nil {
 		t.Fatalf("nullableReasoningCapabilities(nil) = %#v, want nil for SQL NULL", got)
 	}

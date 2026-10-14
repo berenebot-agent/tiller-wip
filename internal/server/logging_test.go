@@ -140,6 +140,7 @@ func clientCall(t *testing.T, base, secret, path string, body any) (*http.Respon
 }
 
 func TestRequestLoggingMetadataAndClientRequestID(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
 	if resp.StatusCode != 200 {
@@ -200,6 +201,7 @@ func TestRequestLoggingMetadataAndClientRequestID(t *testing.T) {
 }
 
 func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	// Streaming request captures usage from the final chunk.
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "stream": true, "messages": []any{map[string]any{"role": "user", "content": "stream"}}})
@@ -248,6 +250,7 @@ func TestRequestLoggingStreamingUsageAndFailure(t *testing.T) {
 }
 
 func TestRequestLoggingStreamRequestWithJSONResponseIsNotStreaming(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockJSONUpstream(t))
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{
 		"model": "provider-a/model-a", "stream": true, "messages": []any{},
@@ -269,6 +272,7 @@ func TestRequestLoggingStreamRequestWithJSONResponseIsNotStreaming(t *testing.T)
 }
 
 func TestRequestLogPrimaryKeyIsClientRequestID(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	const n = 3
 	headers := make([]string, 0, n)
@@ -311,6 +315,7 @@ func TestRequestLogPrimaryKeyIsClientRequestID(t *testing.T) {
 }
 
 func TestLoggingDisabledClientProducesNoRows(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	// Disable logging for this client.
 	status, _, _ := api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"logging_enabled": false})
@@ -338,6 +343,7 @@ func TestLoggingDisabledClientProducesNoRows(t *testing.T) {
 // require weakening production code, so we assert the contract is preserved
 // instead: writeLog returns nothing and the request path is unaffected.
 func TestWriteLogBestEffort(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -359,6 +365,7 @@ func TestWriteLogBestEffort(t *testing.T) {
 // Activity write: one routed request produces exactly one request_logs row and
 // one request_attempts row for its single attempt.
 func TestWriteLogTransactionPersistsLogAndAttempt(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
 	if resp.StatusCode != 200 {
@@ -387,6 +394,7 @@ func TestWriteLogTransactionPersistsLogAndAttempt(t *testing.T) {
 // fallback request persists every recorded attempt (the failed first target and
 // the succeeding second one) alongside its single request log row.
 func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
+	t.Parallel()
 	api, secret, canonical := notificationTestHarness(t, failUpstream(t), okUpstream(t))
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
 	if resp.StatusCode != 200 {
@@ -412,6 +420,7 @@ func TestWriteLogTransactionPersistsAllFallbackAttempts(t *testing.T) {
 }
 
 func TestRecordSkippedAttemptPersistsReasonAndFallback(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	row := &logRow{
 		clientKeyID:      clientID,
@@ -458,6 +467,7 @@ func TestRecordSkippedAttemptPersistsReasonAndFallback(t *testing.T) {
 }
 
 func TestUpstreamErrorDetailIsRedactedButSurfacedToClient(t *testing.T) {
+	t.Parallel()
 	// Direct (non-virtual) routes surface a sanitized provider error so the
 	// client can act on it, but any credential the provider echoes back must be
 	// redacted. The raw body is never persisted to Activity (privacy guardrail).
@@ -523,6 +533,7 @@ func TestUpstreamErrorDetailIsRedactedButSurfacedToClient(t *testing.T) {
 }
 
 func TestContextLimitErrorIsClassifiedAndExplained(t *testing.T) {
+	t.Parallel()
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
@@ -560,6 +571,7 @@ func TestContextLimitErrorIsClassifiedAndExplained(t *testing.T) {
 }
 
 func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
+	t.Parallel()
 	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
 	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -592,6 +604,7 @@ func TestRequestLoggingDoesNotCaptureBodies(t *testing.T) {
 // request and upstream error bodies are persisted (bounded), and over-bound
 // bodies are truncated with the truncated flag set.
 func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
+	t.Parallel()
 	const requestMarker = "CLIENT-REQUEST-SECRET-MARKER"
 	const errorMarker = "PROVIDER-ERROR-SECRET-MARKER"
 	bigBody := strings.Repeat("x", int(maxUpstreamErrorBytes)+100)
@@ -668,6 +681,7 @@ func TestRequestLoggingCapturesBodiesWhenEnabled(t *testing.T) {
 // source columns only explain them). It also pins that the retired
 // input_tokens_estimated boolean is gone from the Activity payload.
 func TestTokenSourceProvenanceExported(t *testing.T) {
+	t.Parallel()
 	// First response reports usage; the second omits it entirely so the
 	// missing-usage fallback estimates the input from the request body.
 	var served int
@@ -768,6 +782,7 @@ func mustJSON(t *testing.T, value any) []byte {
 // (here a primary-key collision), the transaction rolls back and no
 // request_attempts row leaks for that request.
 func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
+	t.Parallel()
 	_, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := database.Now()
 	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('dup-req',?,'provider-a/model-a','chat',0,200,1,'dup-req',?)`, clientID, now); err != nil {
@@ -789,6 +804,7 @@ func TestWriteLogTransactionFailureLeavesNoPartialRow(t *testing.T) {
 // deferred writeLog INSERT fail, but the inference request still returns 200
 // with a request id. writeLog never fails the request.
 func TestInferenceUnaffectedWhenActivityPersistenceFails(t *testing.T) {
+	t.Parallel()
 	api, db, _, secret := loggingTestHarness(t, mockUpstream(t))
 	// Warm the store's Activity handle with a first request so it is cached;
 	// otherwise dropping the tables would be undone by the lazy open path
@@ -812,6 +828,7 @@ func TestInferenceUnaffectedWhenActivityPersistenceFails(t *testing.T) {
 }
 
 func TestActivitySearchAndClear(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	for i := 0; i < 3; i++ {
 		resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "hello"}}})
@@ -837,6 +854,7 @@ func TestActivitySearchAndClear(t *testing.T) {
 }
 
 func TestClientKeyCreationCopiesLoggingDefaults(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	// Change the defaults, then create a key and confirm it copies them.
 	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{"default_logging_enabled": false, "default_retention_days": 7})
@@ -865,6 +883,7 @@ func TestClientKeyCreationCopiesLoggingDefaults(t *testing.T) {
 }
 
 func TestSetCacheFromUsageDeepSeekNativeField(t *testing.T) {
+	t.Parallel()
 	// DeepSeek reports its prompt cache breakdown as prompt_cache_hit_tokens;
 	// ensure it maps to the router's cacheReadInputTokens (hit) field.
 	u := map[string]any{
@@ -891,6 +910,7 @@ func TestSetCacheFromUsageDeepSeekNativeField(t *testing.T) {
 }
 
 func TestPrunerDeletesByRetention(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Insert a log row with an old timestamp directly.
 	old := time.Now().UTC().Add(-40 * 24 * time.Hour).Format(time.RFC3339Nano)
@@ -914,6 +934,7 @@ func TestPrunerDeletesByRetention(t *testing.T) {
 // records exactly one measurement (the first visible frame), and stores it on
 // the most recent attempt.
 func TestOutputObserverRecordsFirstOutputOnce(t *testing.T) {
+	t.Parallel()
 	row := &logRow{clientRequestID: "req-1", attempts: []requestAttempt{{result: "success"}}}
 	var got []int64
 	obs := &outputObserver{
@@ -936,6 +957,7 @@ func TestOutputObserverRecordsFirstOutputOnce(t *testing.T) {
 // TestOutputObserverNilSafe confirms a nil observer is a no-op, so streaming
 // call sites can pass nil without guards.
 func TestOutputObserverNilSafe(t *testing.T) {
+	t.Parallel()
 	var obs *outputObserver
 	obs.observe()
 }
@@ -944,6 +966,7 @@ func TestOutputObserverNilSafe(t *testing.T) {
 // client-visible frame. Reasoning-summary deltas count, so a Codex prefill
 // driven by summary:auto is not mistaken for silence.
 func TestResponsesEventHasOutput(t *testing.T) {
+	t.Parallel()
 	yes := []string{
 		"response.output_text.delta",
 		"response.reasoning_summary_text.delta",

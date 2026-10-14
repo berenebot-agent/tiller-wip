@@ -20,6 +20,7 @@ import (
 // reasoning_details with a signature, and the client must receive a thinking
 // block carrying that signature.
 func TestStreamedChatReasoningDetailsReachAnthropicClient(t *testing.T) {
+	t.Parallel()
 	s := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"plan\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"plan\",\"signature\":\"sig-abc\",\"format\":\"anthropic-claude-v1\"}]}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
@@ -41,6 +42,7 @@ func TestStreamedChatReasoningDetailsReachAnthropicClient(t *testing.T) {
 // shape for a Responses client, where the state must appear as
 // encrypted_content on the reasoning item.
 func TestStreamedChatReasoningDetailsReachResponsesClient(t *testing.T) {
+	t.Parallel()
 	s := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"plan\",\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"opaque-blob\",\"format\":\"openai-responses-v1\"}]}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
@@ -57,6 +59,7 @@ func TestStreamedChatReasoningDetailsReachResponsesClient(t *testing.T) {
 // TestStreamedChatReasoningDetailsReachChatClient verifies the same-protocol
 // shape is passed through rather than converted.
 func TestStreamedChatReasoningDetailsReachChatClient(t *testing.T) {
+	t.Parallel()
 	s := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"plan\",\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"blob\",\"format\":\"openai-responses-v1\"}]}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
@@ -71,6 +74,7 @@ func TestStreamedChatReasoningDetailsReachChatClient(t *testing.T) {
 // feeding a Chat client: the thinking signature arrives as its own
 // signature_delta and must become reasoning_details the request path can replay.
 func TestStreamedMessagesSignatureReachesChatClient(t *testing.T) {
+	t.Parallel()
 	s := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\n" +
 		"event: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
 		"event: content_block_delta\ndata: {\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"plan\"}}\n\n" +
@@ -88,6 +92,7 @@ func TestStreamedMessagesSignatureReachesChatClient(t *testing.T) {
 // upstream feeding a Chat client: the encrypted reasoning item must become
 // reasoning_details so it can be replayed.
 func TestStreamedResponsesEncryptedReasoningReachesChatClient(t *testing.T) {
+	t.Parallel()
 	s := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\n" +
 		"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"encrypted_content\":\"enc-123\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}]}}\n\n" +
 		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\"}}\n\n"
@@ -105,6 +110,7 @@ func TestStreamedResponsesEncryptedReasoningReachesChatClient(t *testing.T) {
 // aggregation path (used when a target forces stream:true upstream, e.g.
 // Codex): the accumulated opaque state must appear in the single JSON response.
 func TestAggregatedStreamPreservesReasoningDetails(t *testing.T) {
+	t.Parallel()
 	s := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"plan\",\"reasoning_details\":[{\"type\":\"reasoning.encrypted\",\"data\":\"agg-blob\",\"format\":\"openai-responses-v1\"}]}}]}\n\n" +
 		"data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\n" +
 		"data: [DONE]\n\n"
@@ -150,6 +156,7 @@ func TestAggregatedStreamPreservesReasoningDetails(t *testing.T) {
 // Claude signature cannot be represented to a Responses client, matching the
 // non-streaming gate.
 func TestStreamedIncompatibleReasoningStateFailsLoudly(t *testing.T) {
+	t.Parallel()
 	s := "data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning\":\"plan\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"plan\",\"signature\":\"sig\",\"format\":\"anthropic-claude-v1\"}]}}]}\n\n" +
 		"data: [DONE]\n\n"
 	rec := httptest.NewRecorder()

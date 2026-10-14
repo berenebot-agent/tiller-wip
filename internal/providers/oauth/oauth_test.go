@@ -31,6 +31,7 @@ func testToken(t *testing.T, st *store.Scope, id string) TokenRecord {
 }
 
 func TestNewPKCEAndParseCallback(t *testing.T) {
+	t.Parallel()
 	pkce, err := NewPKCE()
 	if err != nil {
 		t.Fatal(err)
@@ -55,6 +56,7 @@ func TestNewPKCEAndParseCallback(t *testing.T) {
 }
 
 func TestFlowStoreOneActiveAndSingleUse(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	store := NewFlowStore(func() time.Time { return now })
 	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
@@ -81,6 +83,7 @@ func TestFlowStoreOneActiveAndSingleUse(t *testing.T) {
 }
 
 func TestFlowStorePreservesRedirectURI(t *testing.T) {
+	t.Parallel()
 	store := NewFlowStore(nil)
 	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
 	if err != nil {
@@ -96,6 +99,7 @@ func TestFlowStorePreservesRedirectURI(t *testing.T) {
 }
 
 func TestFlowStoreTakeByStateSingleUseAndBinding(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	store := NewFlowStore(func() time.Time { return now })
 	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
@@ -123,6 +127,7 @@ func TestFlowStoreTakeByStateSingleUseAndBinding(t *testing.T) {
 }
 
 func TestFlowStoreTakeByStateExpiryAndCancel(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	store := NewFlowStore(func() time.Time { return now })
 	expired, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
@@ -145,6 +150,7 @@ func TestFlowStoreTakeByStateExpiryAndCancel(t *testing.T) {
 }
 
 func TestFlowStoreReplacementClearsSupersededState(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	store := NewFlowStore(func() time.Time { return now })
 	first, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
@@ -165,6 +171,7 @@ func TestFlowStoreReplacementClearsSupersededState(t *testing.T) {
 }
 
 func TestPersistentFlowStoreRebuildsStateIndex(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "flows.json")
 	store := NewPersistentFlowStore(nil, path)
 	flow, err := store.Begin("acct-1", "provider-1", "https://tiller.example.com/auth/callback")
@@ -182,6 +189,7 @@ func TestPersistentFlowStoreRebuildsStateIndex(t *testing.T) {
 }
 
 func TestMergeTokenPreservesOmittedRefreshToken(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, time.September, 4, 12, 0, 0, 0, time.UTC)
 	old := TokenRecord{ProviderID: "provider-1", AccessToken: "old-access", RefreshToken: "durable-refresh", TokenType: "Bearer", AuthState: AuthReconnectRequired, CreatedAt: now.Add(-time.Hour)}
 	merged, err := MergeToken(old, TokenResponse{AccessToken: "new-access", ExpiresIn: 3600, AccountEmail: "user@example.test"}, now)
@@ -197,6 +205,7 @@ func TestMergeTokenPreservesOmittedRefreshToken(t *testing.T) {
 }
 
 func TestPollDeviceCode(t *testing.T) {
+	t.Parallel()
 	var polls atomic.Int32
 	token, err := PollDeviceCode(context.Background(), time.Now().Add(time.Second), time.Millisecond, func(context.Context) DevicePollResult {
 		if polls.Add(1) == 1 {
@@ -216,6 +225,7 @@ func TestPollDeviceCode(t *testing.T) {
 }
 
 func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -287,6 +297,20 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	}
 }
 
+// TestRefreshManagerDeduplicatesConcurrentRefresh asserts the refresh
+// single-flight guard collapses concurrent callers into one refresh.
+//
+// Deliberately NOT parallel, and it is a load-sensitive assertion even so.
+// Manager.refresh() is best-effort single-flight: Current() reads the token,
+// then calls refresh(), which joins-or-creates the in-flight call. A caller
+// descheduled between that read and the join can observe the flight already
+// completed (and delete itself) and start a second one. That is a
+// check-then-act window in the runtime guard, not a test artefact; running the
+// 20 callers while 400+ sibling tests compete for the CPU makes it observable.
+// Running this test serial removes the sibling contention that triggers it.
+// Airtight dedup needs a freshness re-check under the flight in Manager.refresh
+// (which would also change the token-refresh path), so it is left for a
+// deliberate change rather than folded into the test-speed work.
 func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
@@ -346,6 +370,7 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 // cancellation during refresh does NOT transition auth_state — the failure
 // must stay retryable.
 func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -383,6 +408,7 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 }
 
 func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -448,6 +474,7 @@ func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
 // even though the refresh reports an error, because the old pair may already be
 // invalidated.
 func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -492,6 +519,7 @@ func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
 // cannot resurrect a connection that was deliberately disconnected while the
 // refresh was in flight.
 func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

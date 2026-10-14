@@ -7,6 +7,7 @@ import (
 )
 
 func TestParseKey(t *testing.T) {
+	t.Parallel()
 	key := testKey(7)
 	encoded := EncodeKey(key)
 	got, err := ParseKey(encoded)
@@ -29,6 +30,7 @@ func TestParseKey(t *testing.T) {
 }
 
 func TestResolveGeneratesAndReloads(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	key, source, err := Resolve(dir, "", "", false)
 	if err != nil {
@@ -57,6 +59,7 @@ func TestResolveGeneratesAndReloads(t *testing.T) {
 }
 
 func TestResolvePrecedenceAndLocked(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	envKey := testKey(3)
 	fileKey := testKey(4)

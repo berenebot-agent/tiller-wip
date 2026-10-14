@@ -8,6 +8,7 @@ import (
 )
 
 func TestReasoningRequestFixes_UnknownDisableUsesStandardSelectors(t *testing.T) {
+	t.Parallel()
 	selector := reasoningSelector{Present: true, Enabled: boolPtr(false)}
 	chat := applyReasoningSelector([]byte(`{"model":"x"}`), selector, providers.ProtocolChat, nil)
 	if string(chat) != `{"model":"x","reasoning_effort":"none"}` {
@@ -23,6 +24,7 @@ func TestReasoningRequestFixes_UnknownDisableUsesStandardSelectors(t *testing.T)
 }
 
 func TestReasoningRequestFixes_UnknownPositiveEffortEnablesMessagesWithBudget(t *testing.T) {
+	t.Parallel()
 	selector := reasoningSelector{Present: true, Effort: "high"}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), selector, providers.ProtocolMessages, nil)
 	if !strings.Contains(string(result), `"type":"enabled"`) || !strings.Contains(string(result), `"budget_tokens":1024`) {
@@ -31,6 +33,7 @@ func TestReasoningRequestFixes_UnknownPositiveEffortEnablesMessagesWithBudget(t 
 }
 
 func TestReasoningRequestFixes_AdaptiveNeverCarriesBudget(t *testing.T) {
+	t.Parallel()
 	min := int64(1024)
 	caps := &providers.ReasoningCapabilities{
 		ThinkingModes: []string{"adaptive"},
@@ -43,6 +46,7 @@ func TestReasoningRequestFixes_AdaptiveNeverCarriesBudget(t *testing.T) {
 }
 
 func TestReasoningRequestFixes_DoesNotRaiseExplicitOutputCap(t *testing.T) {
+	t.Parallel()
 	min := int64(1024)
 	caps := &providers.ReasoningCapabilities{
 		ThinkingModes: []string{"enabled"},
@@ -56,6 +60,7 @@ func TestReasoningRequestFixes_DoesNotRaiseExplicitOutputCap(t *testing.T) {
 }
 
 func TestReasoningRequestFixes_EnabledWithoutBudgetMetadataUsesDefault(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolMessages, caps)
 	// Unadvertised efforts are never emitted (e5deab9): the target gets a
@@ -70,6 +75,7 @@ func TestReasoningRequestFixes_EnabledWithoutBudgetMetadataUsesDefault(t *testin
 }
 
 func TestReasoningRequestFixes_BudgetOnlyGetsEnabledType(t *testing.T) {
+	t.Parallel()
 	min := int64(512)
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionBudgetTokens, Min: &min}}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, BudgetTokens: int64Ptr(1024)}, providers.ProtocolMessages, caps)
@@ -79,6 +85,7 @@ func TestReasoningRequestFixes_BudgetOnlyGetsEnabledType(t *testing.T) {
 }
 
 func TestReasoningRequestFixes_OutputCapUsesMessagesMaxTokensStrictly(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"enabled"}}
 	body := []byte(`{"model":"x","max_tokens":1024}`)
 	result := applyReasoningSelector(body, reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolMessages, caps)
@@ -88,6 +95,7 @@ func TestReasoningRequestFixes_OutputCapUsesMessagesMaxTokensStrictly(t *testing
 }
 
 func TestReasoningRequestFixes_UnknownChatEnableDoesNotInventNestedToggle(t *testing.T) {
+	t.Parallel()
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Enabled: boolPtr(true)}, providers.ProtocolChat, nil)
 	if strings.Contains(string(result), `"enabled"`) || strings.Contains(string(result), `"mode"`) {
 		t.Fatalf("unknown Chat capability invented selector: %s", result)
@@ -95,6 +103,7 @@ func TestReasoningRequestFixes_UnknownChatEnableDoesNotInventNestedToggle(t *tes
 }
 
 func TestReasoningRequestFixes_TranslatedEffortRetainedWithEnabledMessages(t *testing.T) {
+	t.Parallel()
 	request := []byte(`{"model":"client","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`)
 	translated, err := translateRequest(request, providers.ProtocolChat, providers.ProtocolMessages, "claude")
 	if err != nil {
@@ -113,6 +122,7 @@ func TestReasoningRequestFixes_TranslatedEffortRetainedWithEnabledMessages(t *te
 }
 
 func TestReasoningRequestFixes_EnabledTrueAdaptiveOnlyPreservesEffort(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{ThinkingModes: []string{"adaptive"}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Enabled: boolPtr(true), Effort: "high"}, providers.ProtocolMessages, caps)
 	// Adaptive mode is preserved, but the unadvertised "high" effort is
@@ -129,6 +139,7 @@ func TestReasoningRequestFixes_EnabledTrueAdaptiveOnlyPreservesEffort(t *testing
 }
 
 func TestReasoningRequestFixes_LegacyToggleOnlyEnablesMessagesWithBudget(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Enabled: boolPtr(true)}, providers.ProtocolMessages, caps)
 	if !strings.Contains(string(result), `"type":"enabled"`) || !strings.Contains(string(result), `"budget_tokens":1024`) {
@@ -137,6 +148,7 @@ func TestReasoningRequestFixes_LegacyToggleOnlyEnablesMessagesWithBudget(t *test
 }
 
 func TestReasoningRequestFixes_EffortOnlyKnownMessagesPreservesEffort(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"low", "high"}}}}
 	result := applyReasoningSelector([]byte(`{"model":"x"}`), reasoningSelector{Present: true, Effort: "high"}, providers.ProtocolMessages, caps)
 	if !strings.Contains(string(result), `"effort":"high"`) {
@@ -148,6 +160,7 @@ func TestReasoningRequestFixes_EffortOnlyKnownMessagesPreservesEffort(t *testing
 }
 
 func TestReasoningRequestFixes_NativeSignedRequestIsBytePreserving(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"model":"x","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high","signature":"opaque-signed-state"}`)
 	result, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolChat, "ignored")
 	if err != nil {
@@ -159,6 +172,7 @@ func TestReasoningRequestFixes_NativeSignedRequestIsBytePreserving(t *testing.T)
 }
 
 func TestReasoningRequestFixes_NativeBodyIsBytePreserving(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{ "model": "x", "reasoning_effort": "high" }`)
 	result, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolChat, "ignored")
 	if err != nil || string(result) != string(body) {
@@ -170,6 +184,7 @@ func TestReasoningRequestFixes_NativeBodyIsBytePreserving(t *testing.T) {
 // advertising effort "none" gets an explicit reasoning_effort:none for a
 // plain-chat request body.
 func TestPlainChatDefaultDisableInjectsNoneWhenSupported(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{
 		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionEffort, Values: []string{"none", "low", "high"}}},
 	}
@@ -185,6 +200,7 @@ func TestPlainChatDefaultDisableInjectsNoneWhenSupported(t *testing.T) {
 // TestPlainChatDefaultDisableFallsBackToToggle verifies B2 toggle-only
 // targets get reasoning.enabled:false instead of effort:none.
 func TestPlainChatDefaultDisableFallsBackToToggle(t *testing.T) {
+	t.Parallel()
 	caps := &providers.ReasoningCapabilities{
 		Options: []providers.ReasoningOption{{Type: providers.ReasoningOptionToggle}},
 	}
@@ -198,6 +214,7 @@ func TestPlainChatDefaultDisableFallsBackToToggle(t *testing.T) {
 }
 
 func TestPlainChatDefaultDisableLeavesUnknownAndMandatoryAlone(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"model":"m"}`)
 	// Unknown capabilities: preserve provider default, never invent a selector.
 	if out, ok := injectChatDisable(body, nil); ok || string(out) != string(body) {

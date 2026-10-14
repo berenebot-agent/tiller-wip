@@ -38,6 +38,7 @@ func firstRunHarness(t *testing.T) (*Server, *testAPI) {
 }
 
 func TestRuntimeFirstRunSignals(t *testing.T) {
+	t.Parallel()
 	_, api := firstRunHarness(t)
 	status, payload, _ := api.request("GET", "/api/runtime", nil)
 	if status != 200 {
@@ -54,6 +55,7 @@ func TestRuntimeFirstRunSignals(t *testing.T) {
 // TestSetupClaimsInstanceAndMintsSession is the happy path: the first visitor
 // sets credentials, gets an authenticated session, and the endpoint disappears.
 func TestSetupClaimsInstanceAndMintsSession(t *testing.T) {
+	t.Parallel()
 	app, api := firstRunHarness(t)
 	status, payload, header := api.request("POST", "/api/admin/setup", map[string]any{"username": "owner", "password": "wizard-password"})
 	if status != 200 {
@@ -106,6 +108,7 @@ func TestSetupClaimsInstanceAndMintsSession(t *testing.T) {
 // claim after the first gets 409 (or 404 once the route disappears) and can
 // never replace the administrator.
 func TestSetupSecondClaimConflicts(t *testing.T) {
+	t.Parallel()
 	app, api := firstRunHarness(t)
 	// Pre-set the credential behind the route to simulate a winning concurrent
 	// claim, then the loser's request must conflict rather than overwrite.
@@ -127,6 +130,7 @@ func TestSetupSecondClaimConflicts(t *testing.T) {
 // TestSetupRejectsWrongOriginAndBadInput covers the pre-login endpoint's
 // validation layers.
 func TestSetupRejectsWrongOriginAndBadInput(t *testing.T) {
+	t.Parallel()
 	app, api := firstRunHarness(t)
 
 	// Cross-site Origin is rejected before any credential work.
@@ -161,6 +165,7 @@ func TestSetupRejectsWrongOriginAndBadInput(t *testing.T) {
 // TestSetupRateLimited proves the per-IP attempt budget bounds unauthenticated
 // argon2id work.
 func TestSetupRateLimited(t *testing.T) {
+	t.Parallel()
 	_, api := firstRunHarness(t)
 	for i := 0; i < 20; i++ {
 		status, payload, _ := api.request("POST", "/api/admin/setup", map[string]any{"username": "owner", "password": "bad"})
@@ -177,6 +182,7 @@ func TestSetupRateLimited(t *testing.T) {
 // TestSetupAbsentWithEnvAdmin proves env-admin installs never offer setup and
 // hide the onboarding wizard.
 func TestSetupAbsentWithEnvAdmin(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -205,6 +211,7 @@ func TestSetupAbsentWithEnvAdmin(t *testing.T) {
 // credential authenticates through the login endpoint after a database reopen
 // with no env credentials, and that the UI identity reflects it.
 func TestLoginUsesStoredCredentialAfterRestart(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 	db, err := database.Open(context.Background(), dbPath)
@@ -256,6 +263,7 @@ func TestLoginUsesStoredCredentialAfterRestart(t *testing.T) {
 // TestLocalOnboardingRoutes proves the wizard state API works against the
 // implicit local account and is auth-gated.
 func TestLocalOnboardingRoutes(t *testing.T) {
+	t.Parallel()
 	app, api := firstRunHarness(t)
 	// Unauthenticated state read is rejected.
 	status, _, _ := api.request("GET", "/api/auth/onboarding", nil)
@@ -285,6 +293,7 @@ func TestLocalOnboardingRoutes(t *testing.T) {
 // TestHostedRuntimePayloadUnchanged keeps hosted mode's public payload as-is:
 // setup fields are a local-mode addition only.
 func TestHostedRuntimePayloadUnchanged(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
