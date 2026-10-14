@@ -30,7 +30,7 @@
   pointer-events: none;
 }
 .col-title {
-  font: 700 11px var(--mono);
+  font: 700 17px var(--mono);
   fill: var(--muted);
   letter-spacing: 0.12em;
 }
@@ -110,7 +110,7 @@
 }
 .node-label {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: 17px;
   fill: var(--navy);
   paint-order: stroke;
   stroke: #fff;
@@ -118,7 +118,7 @@
   stroke-linejoin: round;
 }
 .node-sub {
-  font-size: 10px;
+  font-size: 14px;
   fill: var(--muted);
   paint-order: stroke;
   stroke: #fff;

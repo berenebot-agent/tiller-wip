@@ -21,6 +21,10 @@ behavior may still change before a stable `1.0`.
 
 ### Changed
 
+- **Activity graph readability.** Increase lane headings and node labels to
+  17px, secondary labels to 14px, and adjust text bounds and row spacing to
+  keep graph lines clear of the larger labels. Inline Fallback buttons match
+  the height and corner radius of their adjacent resolved-model boxes.
 - **Activity widescreen layout.** At viewport widths of 1900px and above,
   Activity uses the available page width to show the graph beside the live
   request table, including on 1920×1080 displays. Smaller desktop layouts stay
