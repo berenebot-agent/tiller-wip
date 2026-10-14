@@ -1,11 +1,16 @@
 // Request-level live view. No completed-history seed or browser persistence.
 // The graph retains its separate aggregate feed.
 export class LiveRequests {
-  constructor(root, { api, h, date, requestIdentity, rowCache, requestID }) {
-    Object.assign(this, { root, api, h, date, requestIdentity, rowCache, requestID });
+  constructor(root, { api, h, date, when, requestIdentity, rowCache }) {
+    Object.assign(this, { root, api, h, date, when, requestIdentity, rowCache });
     this.rows = new Map();
     this.expanded = new Set();
     this.omitted = new Map();
+    // IDs already painted at least once this session. render() re-inserts
+    // existing nodes on every pass, so an enter animation must be driven off
+    // this set rather than the act of insertion or the whole list would replay
+    // it on each tick.
+    this.seen = new Set();
     this.generation = 0;
     this.active = false;
     this.connection = 'connecting';
@@ -50,6 +55,7 @@ export class LiveRequests {
     this.rows.clear();
     this.expanded.clear();
     this.omitted.clear();
+    this.seen.clear();
     this.reconciling = false;
     for (const node of [...this.root.querySelector('#live-requests-body').tBodies]) node.remove();
     this.root.querySelector('#mobile-activity-body').replaceChildren();
@@ -159,11 +165,6 @@ export class LiveRequests {
     });
   }
 
-  statusHTML(row) {
-    const labels = { running: 'Running', streaming: 'Streaming', success: 'Served', failed: 'Failed', cancelled: 'Cancelled' };
-    return `<span class="live-request-state live-request-${this.h(row.state)}">${this.h(labels[row.state] || row.state)}</span>`;
-  }
-
   fallbackHTML(row) {
     if (!row.fallback_used) return '';
     const expanded = this.expanded.has(row.id);
@@ -193,6 +194,12 @@ export class LiveRequests {
     return `<span class="meta-line" data-live-elapsed="${this.h(row.id)}">${this.elapsed(row)} ms</span>`;
   }
 
+  // Relative age, refreshed every tick alongside the latency cell. Completed
+  // rows freeze at their completion time so the value stops moving once served.
+  ageHTML(row) {
+    return `<span class="meta-line" data-live-when="${this.h(row.id)}">${this.h(this.when(this.elapsed(row)))}</span>`;
+  }
+
   elapsed(row) {
     return row.completed_at ? row.latency_ms : Math.max(0, this.now() - Date.parse(row.created_at));
   }
@@ -214,20 +221,29 @@ export class LiveRequests {
     let cardCursor = cards.firstElementChild;
     for (const row of rows) {
       const key = JSON.stringify([row, this.expanded.has(row.id)]);
+      // Only genuinely new rows animate. A row already painted this session is
+      // re-inserted silently, and a row that was already old by the time it
+      // first reached the pane (e.g. a burst after a reconnect) does not replay
+      // the settle animation for every entry in the backlog.
+      const fresh = !this.seen.has(row.id);
+      if (fresh) this.seen.add(row.id);
+      const entering = fresh && this.now() - Date.parse(row.created_at) < 1000;
       let group = groupsByID.get(row.id);
       if (!group) { group = document.createElement('tbody'); group.dataset.liveRequest = row.id; }
       if (group.dataset.renderKey !== key) {
         group.dataset.renderKey = key;
-        group.innerHTML = `<tr><td>${this.statusHTML(row)}</td><td><span class="meta-line">${this.date(row.created_at)}</span></td><td><strong class="client-name">${this.h(row.client_name)}</strong></td><td>${this.requestIdentity(row)}</td><td>${this.targetHTML(row)}</td><td><span class="protocol">${this.h(row.protocol)}</span>${row.streaming ? '<span class="protocol">stream</span>' : ''}</td><td>${this.elapsedHTML(row)}</td><td>${this.rowCache(row)}</td><td>${this.requestID(row)}</td></tr>${this.expanded.has(row.id) ? `<tr class="live-chain-row"><td colspan="9">${this.chainHTML(row)}</td></tr>` : ''}`;
+        group.innerHTML = `<tr><td>${this.ageHTML(row)}</td><td><strong class="client-name">${this.h(row.client_name)}</strong></td><td>${this.requestIdentity(row)}</td><td>${this.targetHTML(row)}</td><td>${this.elapsedHTML(row)}</td><td>${this.rowCache(row)}</td></tr>${this.expanded.has(row.id) ? `<tr class="live-chain-row"><td colspan="6">${this.chainHTML(row)}</td></tr>` : ''}`;
       }
+      group.classList.toggle('live-row-enter', entering);
       if (group !== tableCursor) table.insertBefore(group, tableCursor);
       else tableCursor = tableCursor.nextElementSibling;
       let card = cardsByID.get(row.id);
       if (!card) { card = document.createElement('article'); card.className = 'live-activity-card'; card.dataset.liveRequest = row.id; }
       if (card.dataset.renderKey !== key) {
         card.dataset.renderKey = key;
-        card.innerHTML = `<div class="live-activity-top"><strong>${this.h(row.client_name)}</strong><div class="live-activity-state">${this.statusHTML(row)}</div></div><div class="live-request-mobile-route">${this.requestIdentity(row)}<span aria-hidden="true"> → </span>${this.targetHTML(row)}</div><div class="history-meta"><span>${this.date(row.created_at)}</span><span class="protocol">${this.h(row.protocol)}${row.streaming ? ' · stream' : ''}</span>${this.elapsedHTML(row)}${this.rowCache(row)}${this.requestID(row)}</div>${this.chainHTML(row)}`;
+        card.innerHTML = `<div class="live-activity-top"><strong>${this.h(row.client_name)}</strong><div class="live-request-mobile-route">${this.requestIdentity(row)}<span aria-hidden="true"> → </span>${this.targetHTML(row)}</div></div>${this.chainHTML(row)}`;
       }
+      card.classList.toggle('live-row-enter', entering);
       if (card !== cardCursor) cards.insertBefore(card, cardCursor);
       else cardCursor = cardCursor.nextElementSibling;
     }
@@ -245,6 +261,10 @@ export class LiveRequests {
   }
 
   tickElapsed() {
+    for (const node of this.root.querySelectorAll('[data-live-when]')) {
+      const row = this.rows.get(node.dataset.liveWhen);
+      if (row) node.textContent = this.when(this.elapsed(row));
+    }
     for (const node of this.root.querySelectorAll('[data-live-elapsed]')) {
       const row = this.rows.get(node.dataset.liveElapsed);
       if (row && !row.completed_at) node.textContent = `${this.elapsed(row)} ms`;

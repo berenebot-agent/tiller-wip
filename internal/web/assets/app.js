@@ -104,6 +104,19 @@ const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
+// Coarse relative age for the live requests table's Age column. Deliberately
+// rounded to a single unit: the cell refreshes every second, so seconds-only
+// precision past a minute would just add flicker. `ms` is the elapsed time the
+// live panel already computed against the server clock offset.
+const relativeAge = ms => {
+  const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  if (s < 60) return `${s} sec ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+};
 // tokLoadingInner is the placeholder shown in a token cell before the usage /
 // health envelope has arrived. It is deliberately distinct from the "—" empty
 // state: "—" means "no traffic recorded" and only appears once usage is known,
@@ -3300,7 +3313,7 @@ function destroyActivityView() {
 // cells; state is always kept current so a reconcile paint on close/nav is
 // instant.
 const live = new LiveStream('/api/admin/live', { onAuthFailure: () => showLogin() });
-const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, requestIdentity, rowCache, requestID: activityRequestID });
+const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, when: relativeAge, requestIdentity, rowCache });
 live.on('request', row => liveRequests.onRequest(row));
 live.on('connection', payload => liveRequests.setConnection(payload.state));
 let livePendingReconcile = false;
