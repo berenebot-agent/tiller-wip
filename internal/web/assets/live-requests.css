@@ -13,10 +13,16 @@
 .live-request-success{color:var(--green,#27845c)}
 .live-request-failed{color:var(--red,#b93c3c)}
 .live-request-cancelled{color:var(--muted)}
-.live-fallback{margin-top:6px;white-space:nowrap}
+.live-model-target{display:flex;align-items:center;gap:6px;min-width:220px}
+.live-model-box.activity-attempt{flex:1;min-width:0;grid-template-columns:minmax(0,1fr) auto}
+.live-model-target .live-fallback{flex:none;width:auto;margin:0;white-space:nowrap}
+.live-model-error{display:block;margin-top:4px}
 .live-chain-row td{background:var(--surface,#f7fafb);padding:12px 20px}
 .live-request-attempts{max-width:900px}
 .live-request-attempts .attempt-status{white-space:normal}
 .live-request-mobile-route{margin:14px 0;overflow-wrap:anywhere;color:var(--navy)}
-.live-activity-state .live-fallback{width:auto}
+.live-request-mobile-route .live-model-target{min-width:0;margin-top:8px}
+/* Only Activity uses the full viewport. At 1920px the graph retains its
+   760px drawing width and the table gets approximately 1100px beside it. */
+@media(min-width:1900px){main:has(#view-activity.active){max-width:none;padding-left:10px;padding-right:10px}#view-activity.active{display:grid;grid-template-columns:minmax(762px,2fr) minmax(0,3fr);gap:16px;align-items:start}#view-activity>.graph-stage,#view-activity>.live-requests-panel{min-width:0}#view-activity>.live-requests-panel{margin-top:0}.live-requests-scroll{max-height:520px}}
 @media(max-width:720px){.live-requests-panel{display:none}.live-request-attempts .activity-attempt{flex-wrap:wrap}.live-request-attempts .attempt-status{overflow-wrap:anywhere}.live-request-mobile-route code{white-space:normal;overflow-wrap:anywhere}.live-activity-card .history-meta{flex-wrap:wrap}}

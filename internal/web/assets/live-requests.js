@@ -160,16 +160,24 @@ export class LiveRequests {
   }
 
   statusHTML(row) {
-    const expanded = this.expanded.has(row.id);
     const labels = { running: 'Running', streaming: 'Streaming', success: 'Served', failed: 'Failed', cancelled: 'Cancelled' };
-    return `<span class="live-request-state live-request-${this.h(row.state)}">${this.h(labels[row.state] || row.state)}</span>${row.fallback_used ? `<button type="button" class="btn btn-small btn-secondary live-fallback" data-live-fallback="${this.h(row.id)}" aria-expanded="${expanded}">Fallback ${expanded ? '▴' : '▾'}</button>` : ''}`;
+    return `<span class="live-request-state live-request-${this.h(row.state)}">${this.h(labels[row.state] || row.state)}</span>`;
+  }
+
+  fallbackHTML(row) {
+    if (!row.fallback_used) return '';
+    const expanded = this.expanded.has(row.id);
+    return `<button type="button" class="btn btn-small btn-secondary live-fallback" data-live-fallback="${this.h(row.id)}" aria-expanded="${expanded}">Fallback ${expanded ? '▴' : '▾'}</button>`;
   }
 
   targetHTML(row) {
     const last = row.attempts?.at(-1);
     const provider = row.resolved_provider || last?.provider;
     const model = row.resolved_model || last?.model;
-    return `${provider ? `<code class="model-id" title="${this.h(`${provider}/${model || ''}`)}">${this.h(`${provider}/${model || ''}`)}</code>` : '<span class="meta-line">Resolving…</span>'}${row.error_text ? `<span class="error-text">${this.h(row.error_text)}</span>` : ''}`;
+    const route = provider ? `${provider}/${model || ''}` : row.completed_at ? 'Unresolved' : 'Resolving…';
+    const cls = row.state === 'success' ? 'attempt-success' : row.state === 'failed' ? 'attempt-failed' : 'attempt-neutral';
+    const status = row.completed_at ? (row.http_status ? `HTTP ${row.http_status}` : row.state) : row.state === 'streaming' ? 'Streaming' : 'Running';
+    return `<div class="live-model-target"><div class="activity-attempt live-model-box ${cls}"><span class="attempt-route"><code class="model-id" title="${this.h(route)}">${this.h(route)}</code></span><span class="attempt-status">${this.h(status)}</span></div>${this.fallbackHTML(row)}</div>${row.error_text ? `<span class="error-text live-model-error">${this.h(row.error_text)}</span>` : ''}`;
   }
 
   chainHTML(row) {

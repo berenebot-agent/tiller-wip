@@ -19,6 +19,15 @@ behavior may still change before a stable `1.0`.
   Live updates contain metadata only; detailed error bodies remain in the
   existing authenticated Activity history, never in the live feed.
 
+### Changed
+
+- **Activity widescreen layout.** At viewport widths of 1900px and above,
+  Activity uses the available page width to show the graph beside the live
+  request table, including on 1920×1080 displays. Smaller desktop layouts stay
+  stacked and mobile keeps its cards. Resolved models use the same green/red
+  outcome boxes as Activity history, with the Fallback button inline on the
+  right of the model box.
+
 ## [0.1.0-beta.5] - 2026-10-12
 
 Fifth public beta. Adds headless administration over the management API,
