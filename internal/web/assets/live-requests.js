@@ -211,6 +211,11 @@ export class LiveRequests {
     const rows = this.visibleRows();
     const table = this.root.querySelector('#live-requests-body');
     const cards = this.root.querySelector('#mobile-activity-body');
+    // FLIP step 1: finish any in-flight motion first, so the positions measured
+    // below are true layout positions and not an animation's midpoint.
+    const mounted = [...table.tBodies, ...cards.children].filter(node => node.dataset.liveRequest);
+    for (const node of mounted) for (const el of this.rowElements(node)) el.getAnimations().forEach(animation => animation.cancel());
+    const before = new Map(mounted.map(node => [node, node.getBoundingClientRect().top]));
     const keep = new Set(rows.map(row => row.id));
     for (const container of [table, cards]) {
       for (const node of [...container.children]) if (node.dataset.liveRequest && !keep.has(node.dataset.liveRequest)) node.remove();
@@ -219,6 +224,8 @@ export class LiveRequests {
     const cardsByID = new Map([...cards.children].map(node => [node.dataset.liveRequest, node]));
     let tableCursor = table.tBodies[0] || null;
     let cardCursor = cards.firstElementChild;
+    const entered = [];
+    let newRows = 0;
     for (const row of rows) {
       const key = JSON.stringify([row, this.expanded.has(row.id)]);
       // Only genuinely new rows animate. A row already painted this session is
@@ -229,7 +236,8 @@ export class LiveRequests {
       if (fresh) this.seen.add(row.id);
       const entering = fresh && this.now() - Date.parse(row.created_at) < 1000;
       let group = groupsByID.get(row.id);
-      if (!group) { group = document.createElement('tbody'); group.dataset.liveRequest = row.id; }
+      const groupNew = !group;
+      if (groupNew) { group = document.createElement('tbody'); group.dataset.liveRequest = row.id; }
       if (group.dataset.renderKey !== key) {
         group.dataset.renderKey = key;
         group.innerHTML = `<tr><td>${this.ageHTML(row)}</td><td><strong class="client-name">${this.h(row.client_name)}</strong></td><td>${this.requestIdentity(row)}</td><td>${this.targetHTML(row)}</td><td>${this.elapsedHTML(row)}</td><td>${this.rowCache(row)}</td></tr>${this.expanded.has(row.id) ? `<tr class="live-chain-row"><td colspan="6">${this.chainHTML(row)}</td></tr>` : ''}`;
@@ -238,7 +246,8 @@ export class LiveRequests {
       if (group !== tableCursor) table.insertBefore(group, tableCursor);
       else tableCursor = tableCursor.nextElementSibling;
       let card = cardsByID.get(row.id);
-      if (!card) { card = document.createElement('article'); card.className = 'live-activity-card'; card.dataset.liveRequest = row.id; }
+      const cardNew = !card;
+      if (cardNew) { card = document.createElement('article'); card.className = 'live-activity-card'; card.dataset.liveRequest = row.id; }
       if (card.dataset.renderKey !== key) {
         card.dataset.renderKey = key;
         card.innerHTML = `<div class="live-activity-top"><strong>${this.h(row.client_name)}</strong><div class="live-request-mobile-route">${this.requestIdentity(row)}<span aria-hidden="true"> → </span>${this.targetHTML(row)}</div></div>${this.chainHTML(row)}`;
@@ -246,12 +255,45 @@ export class LiveRequests {
       card.classList.toggle('live-row-enter', entering);
       if (card !== cardCursor) cards.insertBefore(card, cardCursor);
       else cardCursor = cardCursor.nextElementSibling;
+      if (groupNew) { entered.push(group); newRows++; }
+      if (cardNew) entered.push(card);
     }
+    this.settle(before, entered, newRows);
     this.root.querySelector('#live-requests-empty').hidden = rows.length > 0;
     this.root.querySelector('#mobile-activity-empty').hidden = rows.length > 0;
     this.paintStatus();
     this.tickElapsed();
     if (focused) (focusedMobile ? cards : table).querySelector(`[data-live-fallback="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
+  }
+
+  // The elements that carry a row's motion. For the table that is the <tr>
+  // inside its per-row <tbody>, because transforms do not apply to a
+  // row-group box; for a mobile card it is the <article> itself.
+  rowElements(node) {
+    return node.tagName === 'TBODY' ? [...node.children] : [node];
+  }
+
+  // FLIP step 2. render() re-inserts every row in order on each paint, so an
+  // arrival at the top displaces the rows below it. Animating only the new row
+  // leaves that displacement instantaneous — the rows simply jump — so every
+  // row that moved is animated from where it used to be, and the arrival slides
+  // in from directly above (its own height) so the two motions meet seam-free.
+  settle(before, entered, newRows) {
+    if (typeof Element.prototype.animate !== 'function') return;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    const duration = 500;
+    for (const [node, top] of before) {
+      const delta = top - node.getBoundingClientRect().top;
+      if (Math.abs(delta) < 1) continue;
+      for (const el of this.rowElements(node)) el.animate({ transform: [`translateY(${delta}px)`, 'none'] }, { duration, easing: 'ease-out' });
+    }
+    // A burst — a reconnect backlog or the first populated paint — is admitted
+    // without motion rather than making the whole list animate at once.
+    if (newRows > 3) return;
+    for (const node of entered) {
+      const el = this.rowElements(node)[0];
+      if (el?.getClientRects().length) el.animate({ transform: ['translateY(-100%)', 'none'], opacity: [0, 1] }, { duration, easing: 'ease-out' });
+    }
   }
 
   paintStatus() {
