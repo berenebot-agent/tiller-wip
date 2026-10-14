@@ -20,6 +20,19 @@ test('live requests integrate with fallback, logging switches, mobile, and fresh
   expect(permissions.status()).toBe(204);
   await page.locator('#nav-links a[data-view="activity"]').click();
   await expect(page.locator('#live-requests-empty')).toBeVisible();
+  // Reflow depends only on viewport width, not the client or request lifecycle.
+  for (const width of [1900, 1920]) {
+    await page.setViewportSize({ width, height: 1080 });
+    const graph = await page.locator('.graph-stage').boundingBox();
+    const table = await page.locator('.live-requests-panel').boundingBox();
+    expect(table.x).toBeGreaterThanOrEqual(graph.x + graph.width);
+    expect(Math.abs(table.y - graph.y)).toBeLessThan(1);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBeTruthy();
+  }
+  await page.setViewportSize({ width: 1899, height: 1080 });
+  const graph = await page.locator('.graph-stage').boundingBox();
+  const table = await page.locator('.live-requests-panel').boundingBox();
+  expect(table.y).toBeGreaterThanOrEqual(graph.y + graph.height);
   await expect(page.locator('[data-live-connection]').first()).toHaveText('Live');
   const call = () => page.request.post('/v1/chat/completions', { headers: { Authorization: `Bearer ${client.secret}` }, data: { model: 'live-table-group/route', messages: [{ role: 'user', content: 'fixture' }] } });
   const response = await call();
@@ -28,17 +41,22 @@ test('live requests integrate with fallback, logging switches, mobile, and fresh
   const row = page.locator(`#live-requests-body tbody[data-live-request="${id}"]`);
   await expect(row).toContainText('Served');
   await expect(row).toContainText('live-table-provider/live-healthy');
-  await expect(row.locator('.activity-attempt')).toHaveCount(0);
+  await expect(row.locator('.live-model-box')).toHaveClass(/attempt-success/);
+  await expect(row.locator('.live-model-target > .live-fallback')).toHaveCount(1);
+  await expect(row.locator('tr').first().locator('td').first().locator('.live-fallback')).toHaveCount(0);
+  await expect(row.locator('.live-request-attempts .activity-attempt')).toHaveCount(0);
   await row.getByRole('button', { name: /Fallback/ }).click();
-  await expect(row.locator('.activity-attempt')).toHaveCount(2);
-  await expect(row.locator('.activity-attempt').first()).toContainText('failed');
-  await expect(row.locator('.activity-attempt').last()).toContainText('success');
+  await expect(row.locator('.live-request-attempts .activity-attempt')).toHaveCount(2);
+  await expect(row.locator('.live-request-attempts .activity-attempt').first()).toContainText('failed');
+  await expect(row.locator('.live-request-attempts .activity-attempt').last()).toContainText('success');
 
   await page.setViewportSize({ width: 390, height: 844 });
   const card = page.locator(`#mobile-activity-body [data-live-request="${id}"]`);
   await expect(card).toBeVisible();
   await expect(page.locator('.live-requests-panel')).toBeHidden();
-  await expect(card.locator('.activity-attempt')).toHaveCount(2);
+  await expect(card.locator('.live-request-attempts .activity-attempt')).toHaveCount(2);
+  await expect(card.locator('.live-model-box')).toHaveClass(/attempt-success/);
+  await expect(card.locator('.live-model-target > .live-fallback')).toBeVisible();
   await expect(page.locator('#open-mobile-history')).toBeVisible();
   const switched = await page.request.patch(`/api/admin/client-keys/${client.id}`, { headers: { 'X-CSRF-Token': csrf }, data: { logging_enabled: false } });
   expect(switched.ok()).toBeTruthy();
@@ -75,6 +93,7 @@ async function harness(page) {
 test('rows update in place, sort running first, expire, and hold expanded fallback chains', async ({ page }) => {
   await harness(page);
   await page.evaluate(() => panel.onRequest(makeRow('older')));
+  await expect(page.locator('#live-requests-body .live-model-box').first()).toHaveClass(/attempt-neutral/);
   await page.clock.fastForward(1000);
   await page.evaluate(() => panel.onRequest(makeRow('newer')));
   await expect(page.locator('#live-requests-body tbody').first()).toHaveAttribute('data-live-request', 'newer');
@@ -84,12 +103,13 @@ test('rows update in place, sort running first, expire, and hold expanded fallba
   const finished = page.locator('#live-requests-body tbody[data-live-request="newer"]');
   await expect(finished).toContainText('8 / 2');
   await finished.getByRole('button', { name: /Fallback/ }).click();
-  await expect(finished.locator('.activity-attempt').first()).toContainText('cooldown');
+  await expect(finished.locator('.live-request-attempts .activity-attempt').first()).toContainText('cooldown');
   await page.clock.fastForward(31000);
   await expect(finished).toHaveCount(1);
   await finished.getByRole('button', { name: /Fallback/ }).click();
   await expect(finished).toHaveCount(0);
   await page.evaluate(() => panel.onRequest({ ...panel.rows.get('older'), revision: 2, state: 'failed', completed_at: new Date(Date.now()).toISOString(), latency_ms: 32000 }));
+  await expect(page.locator('#live-requests-body .live-model-box')).toHaveClass(/attempt-failed/);
   await page.clock.fastForward(31000);
   await expect(page.locator('#live-requests-body tbody')).toHaveCount(0);
 });
