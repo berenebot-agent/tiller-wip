@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
@@ -210,6 +211,7 @@ type Server struct {
 	// platformAnalyticsMu and refreshed at boot and whenever settings are saved.
 	platformAnalyticsMu sync.RWMutex
 	platformAnalytics   store.PlatformAnalyticsSettings
+	platformNoIndex     atomic.Bool
 }
 
 // secretsLocked reports whether the recoverable-secret cipher is in the locked
@@ -492,6 +494,11 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			s.setPlatformAnalytics(analytics)
 		} else if logger != nil {
 			logger.Warn("analytics settings load failed", "error_class", fmt.Sprintf("%T", loadErr))
+		}
+		if preventSearchIndexing, loadErr := st.GetPlatformPreventSearchIndexing(context.Background()); loadErr == nil {
+			s.setPlatformPreventSearchIndexing(preventSearchIndexing)
+		} else if logger != nil {
+			logger.Warn("search indexing setting load failed", "error_class", fmt.Sprintf("%T", loadErr))
 		}
 	} else if cfg.AdminAPIKey != "" {
 		if err := s.seedManagementToken(cfg.AdminAPIKey); err != nil {
@@ -1282,6 +1289,9 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			// sibling subdomains and this app cannot vouch for them.
 			// (docs/pre_saas_release_review.md TR-008.)
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+			if s.platformPreventSearchIndexing() {
+				w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+			}
 			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://challenges.cloudflare.com https://accounts.google.com; frame-src https://challenges.cloudflare.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 			// The analytics origin is operator-configured and only extends the
 			// hosted policy. Its presence in the header does not load a script;
