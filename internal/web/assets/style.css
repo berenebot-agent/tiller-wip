@@ -276,12 +276,12 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .mobile-actionbar-split .btn{min-width:0}
 .live-activity-card{padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)}
 .live-activity-card+.live-activity-card{margin-top:10px}
-.live-activity-top{display:flex;align-items:center;gap:8px;color:var(--navy)}
-.live-activity-top strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.live-activity-top{display:flex;align-items:baseline;gap:8px;color:var(--navy)}
+.live-activity-top strong{flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:44%}
+.live-activity-top .live-request-mobile-route{margin:0}
 .live-pulse{display:inline-block;width:18px;height:18px;flex:none;border-radius:50%;position:relative;background:transparent;box-shadow:none}
 .live-pulse:before{content:"";position:absolute;inset:1px;border-radius:50%;border:2px solid transparent;border-top-color:var(--blue);border-right-color:var(--blue);animation:status-roundel-spin 1.05s linear infinite}
 .live-pulse:after{content:"";position:absolute;inset:4px;border-radius:50%;background:var(--blue)}
-.live-activity-state{margin-left:auto;color:var(--blue);font:700 9px var(--mono);letter-spacing:.06em;text-transform:uppercase}
 .live-activity-chain{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:6px;margin:14px 0;color:var(--navy);font:11px var(--mono)}
 .live-activity-chain span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .live-activity-chain b{color:var(--blue);font:18px Georgia,serif}

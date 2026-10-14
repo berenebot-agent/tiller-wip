@@ -39,11 +39,11 @@ test('live requests integrate with fallback, logging switches, mobile, and fresh
   expect(response.status()).toBe(200);
   const id = response.headers()['x-tiller-request-id'];
   const row = page.locator(`#live-requests-body tbody[data-live-request="${id}"]`);
-  await expect(row).toContainText('Served');
+  await expect(row.locator('.live-model-box .attempt-status')).toContainText('HTTP 200');
   await expect(row).toContainText('live-table-provider/live-healthy');
   await expect(row.locator('.live-model-box')).toHaveClass(/attempt-success/);
   await expect(row.locator('.live-model-target > .live-fallback')).toHaveCount(1);
-  await expect(row.locator('tr').first().locator('td').first().locator('.live-fallback')).toHaveCount(0);
+  await expect(row.locator('.live-fallback')).toHaveCount(1);
   await expect(row.locator('.live-request-attempts .activity-attempt')).toHaveCount(0);
   await row.getByRole('button', { name: /Fallback/ }).click();
   await expect(row.locator('.live-request-attempts .activity-attempt')).toHaveCount(2);
@@ -74,7 +74,7 @@ test('live requests integrate with fallback, logging switches, mobile, and fresh
 // Exercise the actual module with deterministic clocks and metadata-only fake
 // transport; no test hooks or timing knobs enter the production application.
 async function harness(page) {
-  await page.route('**/__live-request-test', route => route.fulfill({ contentType: 'text/html', body: '<link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/live-requests.css"><main id="fixture"><span data-live-connection></span><p data-live-request-notice></p><table id="live-requests-body"><thead><tr><th>Status</th></tr></thead></table><div id="live-requests-empty"></div><div id="mobile-activity-body"></div><div id="mobile-activity-empty"></div></main>' }));
+  await page.route('**/__live-request-test', route => route.fulfill({ contentType: 'text/html', body: '<link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/live-requests.css"><main id="fixture"><span data-live-connection></span><p data-live-request-notice></p><table id="live-requests-body"><thead><tr><th>Age</th></tr></thead></table><div id="live-requests-empty"></div><div id="mobile-activity-body"></div><div id="mobile-activity-empty"></div></main>' }));
   await page.goto('/__live-request-test');
   const time = new Date('2026-10-14T12:00:00Z');
   await page.clock.install({ time });
@@ -84,7 +84,7 @@ async function harness(page) {
     const h = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
     window.recovery = { data: [], missing: [] };
     window.calls = [];
-    window.panel = new LiveRequests(document.querySelector('#fixture'), { api: async (path, options) => { window.calls.push({ path, options }); return options ? window.recovery : { data: [] }; }, h, date: h, requestIdentity: row => h(row.requested_model), rowCache: row => `${row.input_tokens ?? '—'} / ${row.output_tokens ?? '—'}`, requestID: row => h(row.id) });
+    window.panel = new LiveRequests(document.querySelector('#fixture'), { api: async (path, options) => { window.calls.push({ path, options }); return options ? window.recovery : { data: [] }; }, h, date: h, when: ms => `${Math.floor(ms / 1000)} sec ago`, requestIdentity: row => h(row.requested_model), rowCache: row => `${row.input_tokens ?? '—'} / ${row.output_tokens ?? '—'}` });
     await window.panel.start();
     window.makeRow = (id, extra = {}) => ({ id, client_name: 'Client', requested_model: 'route/model', created_at: new Date(Date.now()).toISOString(), state: 'running', revision: 1, attempts: [], ...extra });
   });
@@ -122,7 +122,7 @@ test('reconciliation recovers a missed completion without undoing newer state or
     window.recovery = { data: [makeRow('tracked', { state: 'success', revision: 3, completed_at: new Date(Date.now()).toISOString(), latency_ms: 4 })], missing: [] };
     panel.onSnapshot([]);
   });
-  await expect(page.locator('#live-requests-body')).toContainText('Served');
+  await expect(page.locator('#live-requests-body .live-model-box .attempt-status')).toContainText('success');
   await expect(page.locator('[data-live-connection]')).toHaveText('Reconnecting…');
   await page.evaluate(() => {
     panel.onRequest(makeRow('tracked', { revision: 2 }));
@@ -130,7 +130,7 @@ test('reconciliation recovers a missed completion without undoing newer state or
     panel.setConnection('connected');
   });
   await expect(page.locator('#live-requests-body tbody')).toHaveCount(1);
-  await expect(page.locator('#live-requests-body')).toContainText('Served');
+  await expect(page.locator('#live-requests-body .live-model-box .attempt-status')).toContainText('success');
   await expect(page.locator('[data-live-connection]')).toHaveText('Live');
   expect(await page.evaluate(() => JSON.parse(calls.find(call => call.options)?.options.body).ids)).toEqual(['tracked']);
 });
@@ -158,7 +158,7 @@ test('server clock skew does not hide completions or break expiry', async ({ pag
   await page.clock.fastForward(1000);
   await expect(page.locator('[data-live-elapsed="skewed"]').first()).toContainText('1000 ms');
   await page.evaluate(() => panel.onRequest({ ...panel.rows.get('skewed'), state: 'success', revision: 2, completed_at: new Date(panel.now()).toISOString(), latency_ms: 1000 }));
-  await expect(page.locator('#live-requests-body')).toContainText('Served');
+  await expect(page.locator('#live-requests-body .live-model-box .attempt-status')).toContainText('success');
   await page.clock.fastForward(31000);
   await expect(page.locator('#live-requests-body tbody')).toHaveCount(0);
 });
