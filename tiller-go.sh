@@ -75,9 +75,16 @@ if [ -t 1 ]; then TTY_FLAG="-it"; fi
 
 # Pass through the opt-in example-notifications flag so the test can reach the
 # real ntfy topic. Other env vars are intentionally not forwarded.
-ENV_FLAGS="-e GOFLAGS=-p=$PARALLEL"
+#
+# -trimpath is in GOFLAGS (not a command line) so it applies to every
+# invocation this pass-through wrapper makes — test, vet, build alike. Without
+# it an object's cache key includes its absolute build path, so the same source
+# built from a different mount point or workdir stores a SEPARATE copy: two
+# lineages of identical objects. See the same note in mailmoose-go.sh; measured
+# there as +1,322 entries for the second lineage.
+ENV_FLAGS=(-e "GOFLAGS=-p=$PARALLEL -trimpath")
 if [ -n "${TILLER_NOTIFY_EXAMPLES:-}" ]; then
-    ENV_FLAGS="$ENV_FLAGS -e TILLER_NOTIFY_EXAMPLES=$TILLER_NOTIFY_EXAMPLES"
+    ENV_FLAGS+=(-e "TILLER_NOTIFY_EXAMPLES=$TILLER_NOTIFY_EXAMPLES")
 fi
 
 # Log capture: always write full output to a repo-local log file under
@@ -104,7 +111,7 @@ docker run $TTY_FLAG --rm \
     --memory="$MEM_LIMIT" \
     --memory-swap="$MEM_LIMIT" \
     $TMPFS_FLAG \
-    $ENV_FLAGS \
+    "${ENV_FLAGS[@]}" \
     -v "$MOD_CACHE:/go/pkg/mod" \
     -v "$BUILD_CACHE:/root/.cache/go-build" \
     -v "$REPO_ROOT:/src" \
