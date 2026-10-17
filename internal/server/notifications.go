@@ -358,8 +358,15 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 		s.pruneNotificationCooldownsLocked(now)
 		if cfg.CooldownSeconds > 0 {
 			if until, ok := s.notifyLastSent[key]; ok && now.Before(until) {
-				s.notifyCooldownMu.Unlock()
-				return
+				// Shorten an already-open window if the cooldown was lowered
+				// since it was recorded, so a config change takes effect at the
+				// next send rather than after the window the old value bought.
+				if capped := now.Add(time.Duration(cfg.CooldownSeconds) * time.Second); capped.Before(until) {
+					s.notifyLastSent[key] = capped
+				} else {
+					s.notifyCooldownMu.Unlock()
+					return
+				}
 			}
 		}
 		if s.notifyInFlight[key] {

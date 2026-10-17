@@ -31,10 +31,15 @@ func newCooldownStore() *cooldownStore {
 	return &cooldownStore{until: map[string]cooldownEntry{}}
 }
 
+// cooled reports whether the given target is still cooling. The read path does
+// not prune: it treats an expired entry as not-cooled anyway, and cooling is
+// checked once per candidate on every ordered-fallback request, so a full map
+// scan here would put O(candidates x map size) work on the latency-sensitive
+// routing path. Expired entries are dropped by set() and snapshot() instead,
+// and their memory is bounded by cooldown churn.
 func (c *cooldownStore) cooled(accountID, id string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pruneExpiredLocked(now)
 	e, ok := c.until[tenantKey(accountID, id)]
 	if !ok {
 		return false

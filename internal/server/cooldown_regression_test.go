@@ -76,6 +76,46 @@ func TestCooldownSlowFailureStillCools(t *testing.T) {
 	}
 }
 
+func TestCooldownCooledDoesNotPrune(t *testing.T) {
+	t.Parallel()
+	store := newCooldownStore()
+	now := time.Now()
+	store.set("acct", "pm-live", now, now.Add(time.Minute), "provider-a", "model-a", "req-1", "upstream_5xx", "boom")
+	// Insert the expired entry directly: set() prunes as it writes, so a set
+	// call cannot produce a stale entry to observe.
+	store.mu.Lock()
+	store.until[tenantKey("acct", "pm-expired")] = cooldownEntry{
+		providerModelID: "pm-expired", startedAt: now.Add(-2 * time.Hour), until: now.Add(-time.Hour),
+		provider: "provider-a", model: "model-b",
+	}
+	store.mu.Unlock()
+	if !store.cooled("acct", "pm-live", now) {
+		t.Fatal("live cooldown reported not cooling")
+	}
+	if store.cooled("acct", "pm-expired", now) {
+		t.Fatal("expired cooldown reported cooling")
+	}
+	// cooled() deliberately leaves pruning to set()/snapshot(): it runs once per
+	// candidate on every ordered-fallback request, so a full map scan there
+	// would be O(candidates x map size) on the routing path.
+	store.mu.Lock()
+	_, kept := store.until[tenantKey("acct", "pm-expired")]
+	store.mu.Unlock()
+	if !kept {
+		t.Fatal("cooled() pruned the map; the check must stay a single lookup")
+	}
+	// The off-hot-path readers still sweep, so the map stays bounded.
+	if _, ok := store.snapshot("acct", now)["pm-live"]; !ok {
+		t.Fatal("snapshot dropped the live entry")
+	}
+	store.mu.Lock()
+	_, stillKept := store.until[tenantKey("acct", "pm-expired")]
+	store.mu.Unlock()
+	if stillKept {
+		t.Fatal("snapshot did not prune the expired entry")
+	}
+}
+
 func TestCooldownStatusEligibilityMatrix(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

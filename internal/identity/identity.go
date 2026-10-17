@@ -269,6 +269,9 @@ func (s *Store) PlatformCounts(ctx context.Context) (PlatformCounts, error) {
 
 // PlatformAccountIDs returns hosted account identifiers for operator-level
 // aggregate jobs. Callers must use each ID only to obtain account-scoped data.
+// The eligibility predicate is deliberately the same one store's platform
+// aggregates apply, so the totals and the per-account breakdown cannot cover
+// different accounts.
 func (s *Store) PlatformAccountIDs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM accounts WHERE owner_user_id IS NOT NULL AND status <> 'deleting' ORDER BY id`)
 	if err != nil {

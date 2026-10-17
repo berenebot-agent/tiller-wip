@@ -492,6 +492,43 @@ func TestNotificationCooldownHonoursLongWindow(t *testing.T) {
 	}
 }
 
+// TestNotificationCooldownLoweredAppliesToOpenWindow guards the config-change
+// path: a window recorded under a long cooldown must be capped to the newly
+// configured one instead of suppressing for the originally calculated hour.
+func TestNotificationCooldownLoweredAppliesToOpenWindow(t *testing.T) {
+	t.Parallel()
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	scope := app.store.For(database.LocalAccountID)
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "3600"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	app.notifyCooldownMu.Lock()
+	hourDeadline := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if hourDeadline.IsZero() {
+		t.Fatal("successful delivery recorded no cooldown")
+	}
+
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "1"); err != nil {
+		t.Fatal(err)
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	app.notifyCooldownMu.Lock()
+	minuteDeadline := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if !minuteDeadline.Before(hourDeadline) {
+		t.Fatalf("lowered cooldown did not shorten the open window: hour=%v after=%v", hourDeadline, minuteDeadline)
+	}
+	if minuteDeadline.After(time.Now().Add(2 * time.Second)) {
+		t.Fatalf("open window deadline %v ignores the new 1s cooldown", minuteDeadline)
+	}
+}
+
 func TestAdminEventNotifications(t *testing.T) {
 	t.Parallel()
 	received := make(chan receivedNotification, 4)

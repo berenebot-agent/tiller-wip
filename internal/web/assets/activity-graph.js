@@ -929,6 +929,14 @@ function missingIds(delta) {
   return out;
 }
 
+// isCooling reports whether a provider_model_id is in fallback cooldown. The
+// live snapshot keys target_cooldown by provider_model_id, so the id is the
+// primary key; the provider/upstream form is the legacy key shape and is only a
+// fallback when the catalogue entry (and so the names) is known.
+function isCooling(pmID, idx) {
+  return coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+}
+
 // relabelNode rewrites a live node's label/sub after updateCatalogue fills in
 // an id that was unknown when the node first materialized. Nodes are keyed by
 // id and never re-enter, so the raw-id fallback would otherwise stick forever.
@@ -946,7 +954,7 @@ function relabelNode(n) {
     const idx = modelIndex.get(pmID);
     if (idx) {
       n.label = idx.provider + '/' + idx.upstream;
-      n.cooling = coolingSet.has(pmID) || coolingSet.has(idx.provider + '/' + idx.upstream);
+      n.cooling = isCooling(pmID, idx);
       applyNodeState(n);
     }
   } else if (n.kind === 'client') {
@@ -998,7 +1006,7 @@ function ensureTargetNode(pmID) {
   const idx = modelIndex.get(pmID);
   const label = idx ? idx.provider + '/' + idx.upstream : pmID;
   const node = ensureNode('target', 't:' + pmID, label, '');
-  node.cooling = coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+  node.cooling = isCooling(pmID, idx);
   applyNodeState(node);
   return node;
 }
@@ -1306,7 +1314,7 @@ function onCooldowns(map) {
     if (n.kind !== 'target') return;
     const pmID = n.id.slice(2);
     const idx = modelIndex.get(pmID);
-    const cooling = coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+    const cooling = isCooling(pmID, idx);
     if (n.cooling !== cooling) {
       n.cooling = cooling;
       applyNodeState(n);
