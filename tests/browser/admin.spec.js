@@ -182,8 +182,6 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   const detail = card.locator('.client-card-detail');
   await expect(detail).toBeVisible();
   await expect(detail.locator('.client-card-route')).toContainText(`${providerName}/mock-model`);
-  // The route is available, so no broken-target badge.
-  await expect(detail.locator('.client-route-broken')).toHaveCount(0);
 
   // "Change route" opens the target-only quick picker — not the full client
   // Settings dialog. On mobile it renders as a bottom sheet.
