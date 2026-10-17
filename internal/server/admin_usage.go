@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -133,27 +134,64 @@ func (s *Server) buildUsageSnapshot(ctx context.Context, accountID string) (live
 	}, nil
 }
 
+// usageAggEntry holds one account's cached aggregates. Its own mutex coalesces
+// concurrent callers for that account, so one account's cold scan does not
+// block another account's dashboard.
+type usageAggEntry struct {
+	mu  sync.Mutex
+	agg *usageAggregates
+	at  time.Time
+}
+
 // usageAggregates returns the DB-derived usage aggregates, reusing a recently
-// computed set within usageCacheTTL. A zero TTL disables reuse. The mutex is
-// held across the computation so concurrent callers coalesce onto one set of
-// scans rather than stampeding the database.
+// computed set within usageCacheTTL. A zero TTL disables reuse. Callers for the
+// same account coalesce onto one set of scans rather than stampeding the
+// database.
 func (s *Server) usageAggregates(ctx context.Context, accountID string, now time.Time) (usageAggregates, error) {
-	s.usageAggMu.Lock()
-	defer s.usageAggMu.Unlock()
-	if s.usageCacheTTL > 0 {
-		if cached := s.usageAgg[accountID]; cached != nil && now.Sub(s.usageAggAt[accountID]) < s.usageCacheTTL {
-			return *cached, nil
+	entry := s.usageAggEntryFor(accountID)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if s.usageCacheTTL > 0 && entry.agg != nil {
+		if now.Sub(entry.at) < s.usageCacheTTL {
+			return *entry.agg, nil
 		}
+		// Drop the stale set: otherwise every account that ever opened a
+		// dashboard leaves its aggregates resident for the process life.
+		entry.agg = nil
 	}
 	agg, err := s.computeUsageAggregates(ctx, accountID, now)
 	if err != nil {
 		return usageAggregates{}, err
 	}
 	if s.usageCacheTTL > 0 {
-		s.usageAgg[accountID] = &agg
-		s.usageAggAt[accountID] = now
+		entry.agg, entry.at = &agg, now
 	}
 	return agg, nil
+}
+
+// maxUsageAggAccounts bounds the per-account aggregate cache so a hosted
+// instance with many historical accounts cannot grow it without limit. A
+// dropped entry is simply recomputed on the next dashboard read.
+const maxUsageAggAccounts = 256
+
+// usageAggEntryFor returns the account's cache entry, creating it if needed and
+// evicting an arbitrary entry when the cache is at its cap. Eviction is always
+// safe because every entry is recomputed on demand.
+func (s *Server) usageAggEntryFor(accountID string) *usageAggEntry {
+	s.usageAggMu.Lock()
+	defer s.usageAggMu.Unlock()
+	if entry := s.usageAgg[accountID]; entry != nil {
+		return entry
+	}
+	if len(s.usageAgg) >= maxUsageAggAccounts {
+		for key := range s.usageAgg {
+			delete(s.usageAgg, key)
+			break
+		}
+	}
+	entry := &usageAggEntry{}
+	s.usageAgg[accountID] = entry
+	return entry
 }
 
 // invalidateUsageAggregates drops any cached aggregates so the next snapshot
@@ -161,17 +199,21 @@ func (s *Server) usageAggregates(ctx context.Context, accountID string, now time
 // needed for ordinary request logging, which the short TTL covers.
 func (s *Server) invalidateUsageAggregates(accountID string) {
 	s.usageAggMu.Lock()
-	delete(s.usageAgg, accountID)
-	delete(s.usageAggAt, accountID)
+	entry := s.usageAgg[accountID]
 	s.usageAggMu.Unlock()
+	if entry == nil {
+		return
+	}
+	entry.mu.Lock()
+	entry.agg, entry.at = nil, time.Time{}
+	entry.mu.Unlock()
 }
 
 // invalidateAllUsageAggregates drops every account's cached aggregates. Used by
 // the platform-wide retention pruner, which spans accounts.
 func (s *Server) invalidateAllUsageAggregates() {
 	s.usageAggMu.Lock()
-	s.usageAgg = map[string]*usageAggregates{}
-	s.usageAggAt = map[string]time.Time{}
+	s.usageAgg = map[string]*usageAggEntry{}
 	s.usageAggMu.Unlock()
 }
 

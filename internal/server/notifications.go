@@ -310,23 +310,15 @@ func (s *Server) releaseNotification(accountID string) {
 	s.notifyCooldownMu.Unlock()
 }
 
-// pruneNotificationCooldownsLocked drops cooldown entries that can no longer
-// suppress anything (their window has elapsed for every configured cooldown).
-// The map is keyed by account+event+model and would otherwise grow for the
-// process lifetime as accounts and models churn. Caller holds notifyCooldownMu.
+// pruneNotificationCooldownsLocked drops cooldown entries whose suppression
+// window has closed. The map is keyed by account+event+model and would
+// otherwise grow for the process lifetime as accounts and models churn. Each
+// entry stores the instant it stops suppressing, so the window follows the
+// cooldown configured when it was recorded (any value up to the operator's
+// choice in local mode; 60s in hosted). Caller holds notifyCooldownMu.
 func (s *Server) pruneNotificationCooldownsLocked(now time.Time) {
-	if len(s.notifyLastSent) == 0 {
-		return
-	}
-	// The longest cooldown a tenant can configure is not known here, so use the
-	// hosted floor as the retention window: any entry older than that can no
-	// longer be within a sane cooldown.
-	retention := time.Duration(hostedNotificationCooldownSeconds) * time.Second
-	if retention < time.Minute {
-		retention = time.Minute
-	}
-	for key, last := range s.notifyLastSent {
-		if now.Sub(last) > retention {
+	for key, until := range s.notifyLastSent {
+		if !now.Before(until) {
 			delete(s.notifyLastSent, key)
 		}
 	}
@@ -365,7 +357,7 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 		now := time.Now()
 		s.pruneNotificationCooldownsLocked(now)
 		if cfg.CooldownSeconds > 0 {
-			if last, ok := s.notifyLastSent[key]; ok && now.Sub(last) < time.Duration(cfg.CooldownSeconds)*time.Second {
+			if until, ok := s.notifyLastSent[key]; ok && now.Before(until) {
 				s.notifyCooldownMu.Unlock()
 				return
 			}
@@ -416,7 +408,9 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 	}
 	if reserved {
 		s.notifyCooldownMu.Lock()
-		s.notifyLastSent[key] = time.Now()
+		// Store the instant this key stops suppressing, so the window follows
+		// the cooldown configured at record time rather than a fixed floor.
+		s.notifyLastSent[key] = time.Now().Add(time.Duration(cfg.CooldownSeconds) * time.Second)
 		s.notifyCooldownMu.Unlock()
 	}
 }

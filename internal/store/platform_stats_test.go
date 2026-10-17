@@ -53,19 +53,24 @@ func TestPlatformUsageAggregatesOnlyAccountScope(t *testing.T) {
 		t.Fatalf("PlatformAccountIDs = %v, want only hosted account", accountIDs)
 	}
 	st := store.New(db.SQL, store.WithActivityDB(db.Activity))
-	usage, err := st.For(database.LocalAccountID).PlatformUsage(context.Background(), now)
+	usages, err := st.PlatformUsageForAccounts(context.Background(), []string{database.LocalAccountID, "other-account"}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.Requests1h != 1 || usage.Tokens1h != 30 || usage.Requests24h != 1 || usage.Tokens24h != 30 || usage.Requests7d != 2 || usage.Tokens7d != 42 {
-		t.Fatalf("local account usage = %+v", usage)
+	local := usages[database.LocalAccountID]
+	if local.Requests1h != 1 || local.Tokens1h != 30 || local.Requests24h != 1 || local.Tokens24h != 30 || local.Requests7d != 2 || local.Tokens7d != 42 {
+		t.Fatalf("local account usage = %+v", local)
 	}
-	other, err := st.For("other-account").PlatformUsage(context.Background(), now)
-	if err != nil {
-		t.Fatal(err)
-	}
+	other := usages["other-account"]
 	if other.Requests1h != 1 || other.Tokens1h != 300 || other.Requests24h != 1 || other.Tokens24h != 300 || other.Requests7d != 1 || other.Tokens7d != 300 {
 		t.Fatalf("other account usage = %+v", other)
+	}
+	totals, err := st.PlatformUsageTotals(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if totals.Requests7d != 3 || totals.Tokens7d != 342 || totals.Requests24h != 2 || totals.Tokens24h != 330 {
+		t.Fatalf("platform totals = %+v", totals)
 	}
 }
 
@@ -76,8 +81,12 @@ func TestPlatformUsageReportsUnavailableActivityStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if _, err := store.New(db.SQL).For(database.LocalAccountID).PlatformUsage(context.Background(), time.Now()); !errors.Is(err, store.ErrActivityUnavailable) {
-		t.Fatalf("PlatformUsage error = %v, want ErrActivityUnavailable", err)
+	st := store.New(db.SQL)
+	if _, err := st.PlatformUsageTotals(context.Background(), time.Now()); !errors.Is(err, store.ErrActivityUnavailable) {
+		t.Fatalf("PlatformUsageTotals error = %v, want ErrActivityUnavailable", err)
+	}
+	if _, err := st.PlatformUsageForAccounts(context.Background(), []string{database.LocalAccountID}, time.Now()); !errors.Is(err, store.ErrActivityUnavailable) {
+		t.Fatalf("PlatformUsageForAccounts error = %v, want ErrActivityUnavailable", err)
 	}
 }
 
@@ -91,7 +100,11 @@ func TestPlatformUsagePropagatesActivityQueryError(t *testing.T) {
 	if _, err := db.Activity.Exec(`DROP TABLE request_logs`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.New(db.SQL, store.WithActivityDB(db.Activity)).For(database.LocalAccountID).PlatformUsage(context.Background(), time.Now()); err == nil {
-		t.Fatal("PlatformUsage succeeded after request_logs was dropped")
+	st := store.New(db.SQL, store.WithActivityDB(db.Activity))
+	if _, err := st.PlatformUsageTotals(context.Background(), time.Now()); err == nil {
+		t.Fatal("PlatformUsageTotals succeeded after request_logs was dropped")
+	}
+	if _, err := st.PlatformUsageForAccounts(context.Background(), []string{database.LocalAccountID}, time.Now()); err == nil {
+		t.Fatal("PlatformUsageForAccounts succeeded after request_logs was dropped")
 	}
 }

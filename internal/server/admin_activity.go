@@ -196,6 +196,10 @@ func (s *Server) clearActivity(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 404, "not_found", "Client key not found.")
 		return
 	}
+	// Flush the async Activity writer first: a request that completed moments
+	// ago may still be queued, and its insert would land after the delete and
+	// resurrect a cleared row.
+	_ = s.flushActivity(r.Context())
 	if err := sc.ClearClientActivity(r.Context(), clientID); err != nil {
 		activityReadError(w, err, "Could not clear activity.")
 		return

@@ -460,6 +460,38 @@ func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
 	}
 }
 
+// TestNotificationCooldownHonoursLongWindow is the regression guard for the
+// truncation fix: a cooldown longer than the hosted 60s floor must still
+// suppress, and its entry must survive a prune that runs past that floor.
+func TestNotificationCooldownHonoursLongWindow(t *testing.T) {
+	t.Parallel()
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	if err := app.store.For(database.LocalAccountID).SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "3600"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+
+	app.notifyCooldownMu.Lock()
+	deadline := app.notifyLastSent[key]
+	// Prune as if 61 seconds had passed: the entry must survive.
+	app.pruneNotificationCooldownsLocked(time.Now().Add(61 * time.Second))
+	_, survives := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if deadline.IsZero() {
+		t.Fatal("successful delivery recorded no cooldown")
+	}
+	if !survives {
+		t.Fatalf("prune dropped an unexpired cooldown entry (deadline %v)", deadline)
+	}
+	if deadline.Before(time.Now().Add(30 * time.Minute)) {
+		t.Fatalf("cooldown deadline %v does not honour the configured hour", deadline)
+	}
+}
+
 func TestAdminEventNotifications(t *testing.T) {
 	t.Parallel()
 	received := make(chan receivedNotification, 4)
@@ -905,24 +937,25 @@ func TestNotificationProcessWideBound(t *testing.T) {
 }
 
 // TestNotificationCooldownPruning proves the cooldown map does not grow without
-// bound: entries older than the retention window are dropped.
+// bound: entries whose suppression window has closed are dropped.
 func TestNotificationCooldownPruning(t *testing.T) {
 	t.Parallel()
 	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
 
 	now := time.Now()
 	app.notifyCooldownMu.Lock()
-	app.notifyLastSent["fresh|fallback|vm"] = now
+	// The stored value is the instant the entry stops suppressing.
+	app.notifyLastSent["fresh|fallback|vm"] = now.Add(time.Hour)
 	app.notifyLastSent["stale|fallback|vm"] = now.Add(-2 * time.Hour)
 	app.pruneNotificationCooldownsLocked(now)
 	_, freshOK := app.notifyLastSent["fresh|fallback|vm"]
 	_, staleGone := app.notifyLastSent["stale|fallback|vm"]
 	app.notifyCooldownMu.Unlock()
 	if !freshOK {
-		t.Fatal("pruning removed a recent cooldown entry")
+		t.Fatal("pruning removed an unexpired cooldown entry")
 	}
 	if staleGone {
-		t.Fatal("pruning kept a stale cooldown entry")
+		t.Fatal("pruning kept an expired cooldown entry")
 	}
 }
 

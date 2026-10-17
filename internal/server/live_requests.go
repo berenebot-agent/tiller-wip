@@ -71,21 +71,26 @@ func (s *Server) publishLiveRequest(row *logRow, completed bool) {
 func (h *liveHub) putRequest(accountID string, v liveRequestView) {
 	// Store and enqueue under the same lock so concurrent request publications
 	// cannot reorder revisions. A dropped delta is repaired by snapshots.
-	data, err := json.Marshal(v)
-	if err != nil {
-		return
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.requests == nil {
 		h.requests = map[string]map[string]liveRequestView{}
 	}
-	h.pruneRequestsLocked(time.Now())
 	if h.requests[accountID] == nil {
 		h.requests[accountID] = map[string]liveRequestView{}
 	}
 	h.requests[accountID][v.ID] = v
+	// Prune once per publication. The stored row is needed even with nobody
+	// watching: a pane opened mid-request is filled from the snapshot. Only the
+	// fan-out copy is skipped when the account has no subscriber.
 	h.pruneRequestsLocked(time.Now())
+	if len(h.subs[accountID]) == 0 {
+		return
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
 	msg := []byte("event: request\ndata: " + string(data) + "\n\n")
 	for ch := range h.subs[accountID] {
 		select {

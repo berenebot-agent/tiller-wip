@@ -205,6 +205,10 @@ Tiller includes adapters for a broad set of native and OpenAI-compatible provide
 
 Provider support varies because upstream APIs vary. The beta should be treated as **verified for the providers explicitly tested** and compatibility/best-effort for the wider OpenAI-compatible surface.
 
+Notes:
+
+- **Hugging Face Inference:** model discovery always calls `https://huggingface.co/api/models`. A custom base URL changes where inference requests go, not where discovery does, so a mirror configured for inference still sends the token to `huggingface.co` during discovery.
+
 ---
 
 ## Install

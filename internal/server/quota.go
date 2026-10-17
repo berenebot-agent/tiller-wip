@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/providerquota"
@@ -94,10 +95,10 @@ func (s *Server) startQuotaPoller(ctx context.Context) {
 // /api/admin/quota cannot keep showing a card for a provider that is gone. A
 // store error returns early and leaves the existing registry untouched — an
 // unavailable database must never be read as "no providers configured".
-func (s *Server) registerQuotaProviders(ctx context.Context) {
+func (s *Server) registerQuotaProviders(ctx context.Context) []providerquota.ProviderRef {
 	refs, err := s.storeHandle().QuotaProviders(ctx, quotaProviderTypes())
 	if err != nil {
-		return
+		return nil
 	}
 	out := make([]providerquota.ProviderRef, 0, len(refs))
 	for _, ref := range refs {
@@ -110,16 +111,13 @@ func (s *Server) registerQuotaProviders(ctx context.Context) {
 		})
 	}
 	s.quota.Reconcile(out)
+	return out
 }
 
 // refreshQuotaProviders polls every registered provider that is due under the
 // cadence.
 func (s *Server) refreshQuotaProviders(ctx context.Context) {
-	s.registerQuotaProviders(ctx)
-	refs, err := s.storeHandle().QuotaProviders(ctx, quotaProviderTypes())
-	if err != nil {
-		return
-	}
+	refs := s.registerQuotaProviders(ctx)
 	now := time.Now().UTC()
 	for _, ref := range refs {
 		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -141,17 +139,25 @@ func (s *Server) quotaEndpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	// Register/poll on view so a fresh provider appears even before the next
 	// background tick, respecting the MinInterval floor the poller enforces.
-	s.registerQuotaProviders(r.Context())
-	refs, _ := s.storeHandle().QuotaProviders(r.Context(), quotaProviderTypes())
+	// The on-view refreshes run concurrently: the poller coalesces duplicates
+	// through its own inflight map, so a serially-polled account with several
+	// slow providers would otherwise hold the response open for N x 10s.
+	refs := s.registerQuotaProviders(r.Context())
 	now := time.Now().UTC()
+	var wg sync.WaitGroup
 	for _, ref := range refs {
 		if ref.AccountID != accountID {
 			continue
 		}
-		pollCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		s.quota.RefreshIfDue(pollCtx, ref.AccountID, ref.ProviderID, true, now)
-		cancel()
+		wg.Add(1)
+		go func(account, provider string) {
+			defer wg.Done()
+			pollCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			s.quota.RefreshIfDue(pollCtx, account, provider, true, now)
+		}(ref.AccountID, ref.ProviderID)
 	}
+	wg.Wait()
 	out := s.quota.SnapshotForAccount(accountID)
 	if out == nil {
 		out = map[string]providerquota.Snapshot{}

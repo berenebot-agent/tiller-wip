@@ -434,6 +434,36 @@ func (s *Scope) DeleteAccountResources(ctx context.Context) error {
 	})
 }
 
+// AdminHealthForAccounts returns the same catalogue health counts for several
+// accounts in one statement, so a platform page does not run four queries per
+// account. Accounts with no row are absent from the map.
+func (s *Store) AdminHealthForAccounts(ctx context.Context, accountIDs []string) (map[string]AdminHealthCounts, error) {
+	out := make(map[string]AdminHealthCounts, len(accountIDs))
+	if len(accountIDs) == 0 {
+		return out, nil
+	}
+	placeholders, args := inPlaceholders(accountIDs)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,
+		(SELECT count(*) FROM providers WHERE account_id=a.id),
+		(SELECT count(*) FROM provider_models WHERE available=1 AND account_id=a.id),
+		(SELECT count(*) FROM provider_models WHERE available=0 AND account_id=a.id),
+		(SELECT count(*) FROM virtual_models v WHERE v.account_id=a.id AND NOT EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1 AND t.account_id=a.id AND m.account_id=a.id AND p.account_id=a.id))
+		FROM accounts a WHERE a.id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var accountID string
+		var c AdminHealthCounts
+		if err := rows.Scan(&accountID, &c.Providers, &c.AvailableModels, &c.RetiredModels, &c.BrokenVirtualModels); err != nil {
+			return nil, err
+		}
+		out[accountID] = c
+	}
+	return out, rows.Err()
+}
+
 // AdminHealthCounts summarizes catalogue health for the account.
 type AdminHealthCounts struct {
 	Providers           int
