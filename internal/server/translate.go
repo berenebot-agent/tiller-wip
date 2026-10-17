@@ -2535,6 +2535,20 @@ func number(value any) float64 {
 	}
 	return 0
 }
+
+// anthropicTotalTokens produces the OpenAI-style total for an Anthropic usage
+// map. Anthropic's input_tokens excludes cached input (cache_read), so the
+// bare input+output sum undercounts cache-assisted traffic; the canonical
+// total is input + cache_read + output. A total_tokens already present in the
+// upstream map is trusted as authored when positive.
+func anthropicTotalTokens(u map[string]any) float64 {
+	if t, present := u["total_tokens"]; present {
+		if n := number(t); n > 0 {
+			return n
+		}
+	}
+	return number(u["input_tokens"]) + number(u["cache_read_input_tokens"]) + number(u["output_tokens"])
+}
 func first(values ...any) any {
 	for _, v := range values {
 		if v != nil {
