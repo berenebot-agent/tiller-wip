@@ -92,11 +92,6 @@ type RequestAttemptRow struct {
 
 const activityColumns = `rl.id,rl.requested_model,rl.exposed_model,rl.route_kind,rl.route_model_id,rl.route_model,rl.resolved_provider,rl.resolved_model,rl.protocol,rl.streaming,rl.http_status,rl.latency_ms,rl.input_tokens,rl.output_tokens,rl.cache_read_input_tokens,rl.cache_creation_input_tokens,rl.provider_request_id,rl.client_request_id,rl.error_text,rl.error_message,rl.request_body,rl.request_body_truncated,rl.error_body,rl.error_body_truncated,rl.attempt_count,(SELECT COUNT(*) FROM request_attempts ra WHERE ra.request_log_id=rl.id AND ra.account_id=rl.account_id),rl.fallback_used,rl.fallback_reason,rl.created_at,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_source,rl.output_tokens_source`
 
-// activityCostColumns appends numeric accounting metadata to each SELECT.
-func activityCostColumns(columns string) string {
-	return columns + `,rl.estimated_cost_micros,rl.provider_cost_micros,rl.input_tokens_source,rl.output_tokens_source`
-}
-
 func (s *Scope) scanActivityRows(rows *sql.Rows, withClientKey, withClientName bool) ([]ActivityRow, error) {
 	defer rows.Close()
 	out := []ActivityRow{}

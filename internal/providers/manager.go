@@ -85,13 +85,16 @@ func (m *Manager) oauthRefreshFunc(providerType string) oauth.RefreshFunc {
 }
 
 func (m *Manager) Refresh(ctx context.Context, accountID, providerID string) error {
-	lock := m.providerLock(accountID, providerID)
-	lock.Lock()
-	defer lock.Unlock()
+	// Load first: the per-provider lock is only dropped on a successful delete,
+	// so taking it for a provider that does not exist (a refresh of a bogus id)
+	// would leave a permanent entry in the map.
 	provider, err := m.loadProvider(ctx, accountID, providerID)
 	if err != nil {
 		return err
 	}
+	lock := m.providerLock(accountID, providerID)
+	lock.Lock()
+	defer lock.Unlock()
 	models, discoverErr := m.registry.Discover(ctx, provider)
 	if discoverErr != nil {
 		_ = m.store.For(accountID).SetProviderRefreshError(ctx, providerID, safeRefreshError(discoverErr))

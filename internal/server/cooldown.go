@@ -34,11 +34,23 @@ func newCooldownStore() *cooldownStore {
 func (c *cooldownStore) cooled(accountID, id string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.pruneExpiredLocked(now)
 	e, ok := c.until[tenantKey(accountID, id)]
 	if !ok {
 		return false
 	}
 	return now.Before(e.until)
+}
+
+// pruneExpiredLocked drops entries whose window has closed. Without it the map
+// only ever grows: an entry was otherwise removed only when a later request to
+// the same target succeeded or an admin released it. Caller holds c.mu.
+func (c *cooldownStore) pruneExpiredLocked(now time.Time) {
+	for key, e := range c.until {
+		if !now.Before(e.until) {
+			delete(c.until, key)
+		}
+	}
 }
 
 // set records a cooldown window for the given provider_model_id. startedAt is
@@ -47,6 +59,7 @@ func (c *cooldownStore) cooled(accountID, id string, now time.Time) bool {
 func (c *cooldownStore) set(accountID, id string, startedAt, until time.Time, provider, model, originRequestLogID, originErrorClass, originErrorMessage string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.pruneExpiredLocked(startedAt)
 	key := tenantKey(accountID, id)
 	// A cooldown only ever extends: a failure that would schedule a shorter
 	// window than the one already open must not release the target early. The
@@ -150,6 +163,7 @@ type cooldownView struct {
 func (c *cooldownStore) snapshot(accountID string, now time.Time) map[string]cooldownView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.pruneExpiredLocked(now)
 	out := make(map[string]cooldownView, len(c.until))
 	prefix := accountID + "\x00"
 	for key, e := range c.until {

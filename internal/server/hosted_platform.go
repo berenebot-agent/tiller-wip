@@ -104,31 +104,14 @@ func (s *Server) platformStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts, "usage": usage, "usage_available": true})
 }
 
-// platformUsageTotals queries the global account-id list, then obtains one
-// account-scoped aggregate at a time through store.Scope. The response is
-// totals only; it never returns tenant identifiers or request metadata.
+// platformUsageTotals returns the platform-wide usage windows in one query. The
+// response is totals only; it never returns tenant identifiers or request
+// metadata.
 func (s *Server) platformUsageTotals(ctx context.Context, current time.Time) (store.PlatformUsageWindows, error) {
 	if s.db.Activity == nil {
 		return store.PlatformUsageWindows{}, store.ErrActivityUnavailable
 	}
-	accountIDs, err := s.identity.PlatformAccountIDs(ctx)
-	if err != nil {
-		return store.PlatformUsageWindows{}, err
-	}
-	activityStore := store.New(s.db.SQL, store.WithActivityDB(s.db.Activity))
-
-	var totals store.PlatformUsageWindows
-	for _, accountID := range accountIDs {
-		usage, err := activityStore.For(accountID).PlatformUsage(ctx, current)
-		if err != nil {
-			return store.PlatformUsageWindows{}, err
-		}
-		totals.Requests24h += usage.Requests24h
-		totals.Tokens24h += usage.Tokens24h
-		totals.Requests7d += usage.Requests7d
-		totals.Tokens7d += usage.Tokens7d
-	}
-	return totals, nil
+	return s.storeHandle().PlatformUsageTotals(ctx, current)
 }
 
 func (s *Server) platformLogout(w http.ResponseWriter, r *http.Request) {
@@ -504,33 +487,43 @@ func (s *Server) platformUsers(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	st := s.storeHandle()
 	usageAvailable := s.db.Activity != nil
+	accountIDs := make([]string, 0, len(rows))
+	for i := range rows {
+		accountIDs = append(accountIDs, rows[i].AccountID)
+	}
+	// One grouped query per concern for the whole page, not one per account.
+	counts, err := st.ResourceCountsForAccounts(r.Context(), accountIDs)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
+		return
+	}
+	health, err := st.AdminHealthForAccounts(r.Context(), accountIDs)
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
+		return
+	}
+	var usage map[string]store.PlatformUsageWindows
+	if usageAvailable {
+		usage, err = st.PlatformUsageForAccounts(r.Context(), accountIDs, now)
+		if err != nil {
+			adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
+			return
+		}
+	}
 	stats := make([]accountUserStats, len(rows))
 	for i, row := range rows {
-		sc := st.For(row.AccountID)
-		counts, err := sc.ResourceCounts(r.Context())
-		if err != nil {
-			adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
-			return
-		}
-		health, err := sc.AdminHealth(r.Context())
-		if err != nil {
-			adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
-			return
-		}
+		c := counts[row.AccountID]
+		h := health[row.AccountID]
 		stats[i] = accountUserStats{
-			Providers:      counts.Providers,
-			ClientKeys:     counts.ClientKeys,
-			VirtualModels:  counts.VirtualModels,
-			Models:         health.AvailableModels + health.RetiredModels,
+			Providers:      c.Providers,
+			ClientKeys:     c.ClientKeys,
+			VirtualModels:  c.VirtualModels,
+			Models:         h.AvailableModels + h.RetiredModels,
 			UsageAvailable: usageAvailable,
 		}
 		if usageAvailable {
-			usage, err := sc.PlatformUsage(r.Context(), now)
-			if err != nil {
-				adminError(w, http.StatusInternalServerError, "database_error", "Could not load account usage.")
-				return
-			}
-			stats[i].Usage = &usage
+			u := usage[row.AccountID]
+			stats[i].Usage = &u
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": rows, "stats": stats, "limit": limit, "offset": offset, "has_more": len(rows) == limit})

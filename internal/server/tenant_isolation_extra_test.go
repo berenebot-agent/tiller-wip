@@ -97,15 +97,21 @@ func TestUsageCacheAccountIsolation(t *testing.T) {
 		t.Fatalf("expected per-account caches, got A=%v B=%v", hasA, hasB)
 	}
 
-	s.invalidateUsageAggregates(database.LocalAccountID)
 	s.usageAggMu.Lock()
-	_, hasA = s.usageAgg[database.LocalAccountID]
-	_, hasB = s.usageAgg[otherAccountID]
+	entryA := s.usageAgg[database.LocalAccountID]
+	entryB := s.usageAgg[otherAccountID]
 	s.usageAggMu.Unlock()
-	if hasA {
+	if entryA == nil || entryA.agg == nil || entryB == nil || entryB.agg == nil {
+		t.Fatalf("expected per-account caches, got A=%+v B=%+v", entryA, entryB)
+	}
+
+	// Invalidation clears the cached aggregates; the entry itself stays as the
+	// account's coalescing lock. Account B must be untouched.
+	s.invalidateUsageAggregates(database.LocalAccountID)
+	if entryA.agg != nil {
 		t.Fatal("account A cache was not invalidated")
 	}
-	if !hasB {
+	if entryB.agg == nil {
 		t.Fatal("invalidating account A wrongly dropped account B's cache")
 	}
 }

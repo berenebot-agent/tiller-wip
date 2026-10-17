@@ -15,6 +15,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -86,11 +87,6 @@ func New(db *sql.DB, opts ...Option) *Store {
 	}
 	return s
 }
-
-// DB exposes the underlying pool for platform-global tables only
-// (schema_migrations, accounts, admin_sessions, platform_settings). Tenant
-// tables must not be queried through it.
-func (s *Store) DB() *sql.DB { return s.db }
 
 // DeleteAccountActivity records an account cleanup before attempting the
 // best-effort Activity delete. The record survives an unavailable Activity
@@ -287,6 +283,19 @@ func (s *Scope) withActivity(ctx context.Context, fn func(q querier) error) erro
 		return ErrActivityUnavailable
 	}
 	return fn(s.activity)
+}
+
+// inPlaceholders builds the "?,?,?" marker list and argument slice for an IN
+// clause over strings. Callers pass the arguments in the order their SQL text
+// places the markers.
+func inPlaceholders(values []string) (string, []any) {
+	marks := make([]string, len(values))
+	args := make([]any, len(values))
+	for i, v := range values {
+		marks[i] = "?"
+		args[i] = v
+	}
+	return strings.Join(marks, ","), args
 }
 
 // runActivityTx runs fn inside a transaction on the Activity database.
