@@ -95,6 +95,14 @@ func (m *Manager) Refresh(ctx context.Context, accountID, providerID string) err
 	lock := m.providerLock(accountID, providerID)
 	lock.Lock()
 	defer lock.Unlock()
+	// Reload under the lock: the existence check above only bounds the lock map,
+	// and a concurrent refresh or admin edit may have changed the endpoint or
+	// credential since it ran. Discovering with a stale instance would apply a
+	// catalogue fetched from the old base URL.
+	provider, err = m.loadProvider(ctx, accountID, providerID)
+	if err != nil {
+		return err
+	}
 	models, discoverErr := m.registry.Discover(ctx, provider)
 	if discoverErr != nil {
 		_ = m.store.For(accountID).SetProviderRefreshError(ctx, providerID, safeRefreshError(discoverErr))

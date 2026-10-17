@@ -131,3 +131,55 @@ func TestRefreshDueRefreshesOverdueProviders(t *testing.T) {
 		t.Fatalf("provider with future next_refresh_at must be untouched, got last_refresh_at valid=%v models=%d", freshLast.Valid, freshModels)
 	}
 }
+
+// TestRefreshReloadsProviderUnderLock is the regression guard for the stale-load
+// race: the existence check that runs before the per-provider lock must not be
+// the instance the discovery uses, or a concurrent refresh that changes the
+// endpoint would be applied from the previous base URL.
+func TestRefreshReloadsProviderUnderLock(t *testing.T) {
+	t.Parallel()
+	discovered := make(chan string, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		discovered <- r.URL.Path
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "model-a"}}})
+	}))
+	defer upstream.Close()
+
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('reload','real','provider-reload')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		"provider-reload", "reload", "generic-openai", upstream.URL+"/stale/v1", nil, 1, EncodeProtocols([]Protocol{ProtocolChat}), now, now); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(store.New(db.SQL), NewRegistry())
+
+	// Hold the per-provider lock so the refresh is parked after its pre-lock
+	// existence check, then change the endpoint underneath it.
+	lock := m.providerLock(database.LocalAccountID, "provider-reload")
+	lock.Lock()
+	done := make(chan error, 1)
+	go func() { done <- m.Refresh(context.Background(), database.LocalAccountID, "provider-reload") }()
+	if _, err := db.SQL.Exec(`UPDATE providers SET base_url=? WHERE id='provider-reload'`, upstream.URL+"/fresh/v1"); err != nil {
+		lock.Unlock()
+		t.Fatal(err)
+	}
+	lock.Unlock()
+	if err := <-done; err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	select {
+	case path := <-discovered:
+		if path != "/fresh/v1/models" {
+			t.Fatalf("discovery used %q, want the reloaded base URL", path)
+		}
+	default:
+		t.Fatal("provider was never discovered")
+	}
+}

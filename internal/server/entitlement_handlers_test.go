@@ -52,6 +52,11 @@ func TestPlatformStatsAggregateAccountsAndUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherAccount := second.User.AccountID
+	// The totals are platform-admin only and exclude non-active accounts, so
+	// activate the new signup before its rows are expected to count.
+	if err := app.identity.SetAccountStatus(context.Background(), otherAccount, "active"); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now().UTC()
 	for _, row := range []struct {
 		id, accountID, created string
