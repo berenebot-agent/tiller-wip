@@ -48,6 +48,34 @@ query against the normalised shape.
   argon2id by design (`Argon2Hasher`).
 - `internal/auth/keys.go` `NeedsRehash` call sites — lazy upgrade of legacy
   client-key hashes on successful use. Stays while §3's argon2id branch stays.
+- `internal/auth/keys.go` `argon2idVerify` bounded-drift acceptance — the
+  verifier accepts an encoded Argon2id row whose parameters are *weaker than or
+  equal to* the current package constants (and rejects anything above or any
+  malformed encoding). This is what makes the argon2id parameters adoptable:
+  old rows keep verifying after a parameter change and are re-hashed to the
+  current format on their next successful use. Deletion precondition: none —
+  this is forward-compat policy, not debt; it exists so the constants are
+  changeable at all.
+- **Argon2id parameter freeze (deletion precondition).** Changing
+  `argonMemory`/`argonIterations`/`argonParallelism` requires the analysis
+  below. The bounded verifier accepts rows whose recorded parameters are *≤*
+  the current constants, so:
+  1. **Raising** a constant is the safe direction: every previously-written
+     row now records weaker-or-equal parameters, keeps verifying, and converges
+     — legacy argon2id *client keys* upgrade to bcrypt on next successful use
+     (plaintext is available during the verify), and human admin fingerprints
+     re-hash via the lazy paths in (2).
+  2. **Lowering** a constant is forbidden without a migration decision: rows
+     recorded at the old (higher) parameters then exceed the new constants and
+     fail closed; legacy argon2id client keys are hash-only (plaintext gone),
+     so they could never be re-hashed — those rows become permanently
+     unverifiable.
+  3. Human admin fingerprints (`Argon2Hasher`) verify via the same bounded
+     acceptance and lazily converge: `SessionStore.VerifyCredential` and
+     `internal/identity` `SyncPlatformCredential` re-hash the stored fingerprint
+     (best-effort CAS) after the first successful verify under drifted
+     parameters, via `Argon2Hasher.NeedsRehash`.
+  Any future change to these parameters must re-read this block first.
 - Sessions are **not** argon2id anymore: the legacy ones are revoked at boot
   (see §4), so `keys.go` session rehash paths are dead-compat for sessions.
 

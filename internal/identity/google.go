@@ -82,11 +82,18 @@ func (s *Store) LinkGoogleIdentity(ctx context.Context, userID, subject, email s
 	if subject == "" || len(subject) > 255 || !ValidateEmail(email) {
 		return ErrNotFound
 	}
+	// Serialized with the other sign-in-method mutators via authMethodsMu (see
+	// Store): linking turns password auth off, which must not land inside
+	// DeletePasskey's or SetPasswordSignInEnabled's guard window. The held
+	// lock reaches into disablePasswordAuthLocked, which is why that variant
+	// (not the public wrapper) is called here.
+	s.authMethodsMu.Lock()
+	defer s.authMethodsMu.Unlock()
 	var existingUser string
 	err := s.db.QueryRowContext(ctx, `SELECT user_id FROM user_identities WHERE provider='google' AND subject=?`, subject).Scan(&existingUser)
 	if err == nil {
 		if existingUser == userID {
-			return s.disablePasswordAuth(ctx, userID)
+			return s.disablePasswordAuthLocked(ctx, userID)
 		}
 		return ErrGoogleIdentityTaken
 	}
@@ -132,7 +139,16 @@ func (s *Store) LinkGoogleIdentity(ctx context.Context, userID, subject, email s
 	return nil
 }
 
+// disablePasswordAuth disables password sign-in because a Google identity
+// owns the account's recovery. It is the locking wrapper; LinkGoogleIdentity
+// calls the internal variant while already holding authMethodsMu.
 func (s *Store) disablePasswordAuth(ctx context.Context, userID string) error {
+	s.authMethodsMu.Lock()
+	defer s.authMethodsMu.Unlock()
+	return s.disablePasswordAuthLocked(ctx, userID)
+}
+
+func (s *Store) disablePasswordAuthLocked(ctx context.Context, userID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -160,6 +176,12 @@ func (s *Store) disablePasswordAuth(ctx context.Context, userID string) error {
 // identity. Google can only be linked from an account with password sign-in,
 // so the existing password hash is available to restore.
 func (s *Store) UnlinkGoogleIdentity(ctx context.Context, userID string) error {
+	// Serialized with the other sign-in-method mutators via authMethodsMu (see
+	// Store): unlinking removes the Google identity and conditionally restores
+	// password auth, which must not interleave with DeletePasskey's
+	// last-method guard or a concurrent password toggle.
+	s.authMethodsMu.Lock()
+	defer s.authMethodsMu.Unlock()
 	var hasPassword bool
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash<>'' FROM users WHERE id=?`, userID).Scan(&hasPassword); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
