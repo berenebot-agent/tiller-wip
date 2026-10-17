@@ -34,6 +34,12 @@ type Manager struct {
 	locks    map[string]*sync.Mutex
 }
 
+// refreshConcurrency bounds how many provider discoveries the scheduler runs at
+// once. Discovery is outbound network work against a provider-supplied endpoint,
+// so a tick that finds many providers due at the same moment is throttled to
+// this many in flight; the rest queue behind a slot.
+const refreshConcurrency = 4
+
 func NewManager(st *store.Store, registry *Registry) *Manager {
 	return &Manager{store: st, registry: registry, oauth: oauth.NewManager(st, 5*time.Minute), locks: make(map[string]*sync.Mutex)}
 }
@@ -281,13 +287,27 @@ func (m *Manager) StartScheduler(ctx context.Context) {
 	}()
 }
 
+// refreshDue re-discovers every provider whose scheduled refresh has come due.
+// Each provider runs on its own goroutine so one slow upstream cannot delay the
+// rest, but the fan-out is bounded by refreshConcurrency: a tick that finds many
+// account x provider rows due at once must not open an unbounded burst of
+// simultaneous outbound discovery requests. A provider that cannot get a slot
+// waits for one; the per-refresh timeout starts only once it is admitted, so the
+// bound delays work rather than failing it.
 func (m *Manager) refreshDue(ctx context.Context) {
 	refs, err := m.store.DueProviders(ctx, database.Now())
 	if err != nil {
 		return
 	}
+	sem := make(chan struct{}, refreshConcurrency)
 	for _, ref := range refs {
 		go func(accountID, providerID string) {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
 			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 			defer cancel()
 			_ = m.Refresh(refreshCtx, accountID, providerID)

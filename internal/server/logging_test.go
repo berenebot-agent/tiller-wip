@@ -962,6 +962,122 @@ func TestOutputObserverNilSafe(t *testing.T) {
 	obs.observe()
 }
 
+// TestRecordLastOutcomeIgnoresRecoveredAttempt covers the stale-OAuth recovery
+// path: the pre-refresh 401 stays in Activity as a failed attempt, but because
+// the router repaired the credentials and retried the same target it must not be
+// recorded as a target-health signal.
+func TestRecordLastOutcomeIgnoresRecoveredAttempt(t *testing.T) {
+	t.Parallel()
+	app := &Server{}
+	recoveredRow := &logRow{
+		accountID:       database.LocalAccountID,
+		clientRequestID: "req-recovered",
+		attempts:        []requestAttempt{{providerModelID: "pm-selfhealed", provider: "p", model: "m", result: "failed", httpStatus: 401, failureClass: "http_401", recovered: true}},
+	}
+	app.recordLastOutcome(recoveredRow)
+	app.lastOutcomeMu.Lock()
+	_, recorded := app.lastOutcome[tenantKey(database.LocalAccountID, "pm-selfhealed")]
+	app.lastOutcomeMu.Unlock()
+	if recorded {
+		t.Fatal("recovered OAuth failure degraded the target")
+	}
+
+	// A genuine (unrecovered) failure still degrades, so the guard is not
+	// swallowing ordinary target-health signals.
+	app.recordLastOutcome(&logRow{
+		accountID:       database.LocalAccountID,
+		clientRequestID: "req-genuine",
+		attempts:        []requestAttempt{{providerModelID: "pm-genuine", provider: "p", model: "m", result: "failed", httpStatus: 500, failureClass: "http_500"}},
+	})
+	app.lastOutcomeMu.Lock()
+	_, recorded = app.lastOutcome[tenantKey(database.LocalAccountID, "pm-genuine")]
+	app.lastOutcomeMu.Unlock()
+	if !recorded {
+		t.Fatal("genuine upstream failure no longer degrades the target")
+	}
+}
+
+// TestCooldownSetOnlyExtends locks in that a shorter failure window never
+// releases a target that is already cooling for longer.
+func TestCooldownSetOnlyExtends(t *testing.T) {
+	t.Parallel()
+	store := newCooldownStore()
+	now := time.Now()
+	long := now.Add(10 * time.Minute)
+	store.set("acct", "pm-1", now, long, "provider-a", "model-a", "origin-long", "http_500", "boom")
+
+	// A later failure would schedule a shorter window: it must not shorten the
+	// open one.
+	store.set("acct", "pm-1", now, now.Add(time.Minute), "provider-a", "model-a", "origin-short", "http_500", "boom")
+	entry, ok := store.statusByName("acct", "provider-a", "model-a", now)
+	if !ok || !entry.until.Equal(long) {
+		t.Fatalf("shorter cooldown replaced a longer one: %+v ok=%v", entry, ok)
+	}
+	if entry.originRequestLogID != "origin-long" {
+		t.Fatalf("origin detail overwritten by a shorter window: %q", entry.originRequestLogID)
+	}
+
+	// A longer window does extend and takes the newer origin.
+	extended := now.Add(20 * time.Minute)
+	store.set("acct", "pm-1", now, extended, "provider-a", "model-a", "origin-longer", "http_500", "boom")
+	entry, ok = store.statusByName("acct", "provider-a", "model-a", now)
+	if !ok || !entry.until.Equal(extended) || entry.originRequestLogID != "origin-longer" {
+		t.Fatalf("longer cooldown did not extend: %+v ok=%v", entry, ok)
+	}
+}
+
+// TestCooldownNameLookupIsDeterministic covers two provider_model rows sharing
+// provider+model names: statusByName must return the earliest expiry rather than
+// depend on map iteration order, and removeByName must clear every row that
+// shares the name.
+func TestCooldownNameLookupIsDeterministic(t *testing.T) {
+	t.Parallel()
+	store := newCooldownStore()
+	now := time.Now()
+	earlier := now.Add(5 * time.Minute)
+	later := now.Add(30 * time.Minute)
+	store.set("acct", "pm-later", now, later, "provider-a", "model-a", "origin-later", "http_500", "boom")
+	store.set("acct", "pm-earlier", now, earlier, "provider-a", "model-a", "origin-earlier", "http_500", "boom")
+
+	entry, ok := store.statusByName("acct", "provider-a", "model-a", now)
+	if !ok || entry.providerModelID != "pm-earlier" {
+		t.Fatalf("statusByName not deterministic: %+v ok=%v", entry, ok)
+	}
+	if !store.removeByName("acct", "provider-a", "model-a") {
+		t.Fatal("removeByName reported nothing removed")
+	}
+	if _, ok := store.statusByName("acct", "provider-a", "model-a", now); ok {
+		t.Fatal("a name-colliding cooldown survived removeByName")
+	}
+	if len(store.until) != 0 {
+		t.Fatalf("cooldown entries remained after removeByName: %+v", store.until)
+	}
+}
+
+// TestCooldownIndexTracksRescheduledEntry covers the name index staying correct
+// when the same provider_model_id is rescheduled under a different name (a model
+// rename between failures): the stale name must stop resolving to it.
+func TestCooldownIndexTracksRescheduledEntry(t *testing.T) {
+	t.Parallel()
+	store := newCooldownStore()
+	now := time.Now()
+	store.set("acct", "pm-1", now, now.Add(time.Minute), "provider-a", "old-name", "origin-1", "http_500", "boom")
+	store.set("acct", "pm-1", now, now.Add(time.Minute), "provider-a", "new-name", "origin-2", "http_500", "boom")
+
+	if _, ok := store.statusByName("acct", "provider-a", "old-name", now); ok {
+		t.Fatal("stale name still resolves after the entry was re-indexed")
+	}
+	if entry, ok := store.statusByName("acct", "provider-a", "new-name", now); !ok || entry.providerModelID != "pm-1" {
+		t.Fatalf("current name did not resolve: %+v ok=%v", entry, ok)
+	}
+	if store.removeByName("acct", "provider-a", "new-name") != true {
+		t.Fatal("removeByName missed the re-indexed entry")
+	}
+	if len(store.until) != 0 {
+		t.Fatalf("entries remained after removal: %+v", store.until)
+	}
+}
+
 // TestResponsesEventHasOutput pins which Responses events count as the first
 // client-visible frame. Reasoning-summary deltas count, so a Codex prefill
 // driven by summary:auto is not mistaken for silence.

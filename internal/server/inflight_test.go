@@ -36,6 +36,17 @@ func TestInflightTrackerClientTransitions(t *testing.T) {
 	if len(deltas) != 3 || deltas[0] != (inflightDelta{ID: "route-1", ClientID: "client-1", Active: 1, RequestedModel: "main"}) || deltas[1] != (inflightDelta{ID: "route-1", ClientID: "client-1", Streaming: 1}) || deltas[2] != (inflightDelta{ID: "route-1", ClientID: "client-1", Active: -1, Streaming: -1}) {
 		t.Fatalf("client deltas = %+v", deltas)
 	}
+	// An end with no ticket held must not emit a release delta: a duplicate or
+	// mismatched end would otherwise drive a live consumer's counter negative.
+	before := len(deltas)
+	tracker.clientEnd(testAcct, "client-1", "route-1", false)
+	if len(deltas) != before {
+		t.Fatalf("no-ticket clientEnd emitted a delta: %+v", deltas[before:])
+	}
+	tracker.targetEnd(testAcct, "route-1", "target-1")
+	if len(deltas) != before {
+		t.Fatalf("no-ticket targetEnd emitted a delta: %+v", deltas[before:])
+	}
 }
 
 func TestInflightTrackerKeepsConcurrentClientRequests(t *testing.T) {

@@ -785,6 +785,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if route.RoutingMode == "ordered_fallback" {
 		cooldownSeconds, _ = s.scope(r).GetFallbackCooldownSeconds(r.Context())
 	}
+	// The per-attempt time-to-first-header bound is request-static, so resolve
+	// its HTTP client once here rather than issuing a settings read on every
+	// fallback attempt.
+	upstreamClient := s.upstreamHTTPClient(r)
 	skippedCooled := false
 	allAttemptedFailed := true
 	var success bool
@@ -1048,7 +1052,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// real route this is the single 1:1 leg, so the Activity graph can
 			// light it (and dim it on failure) while the request is in flight.
 			s.inflight.targetStart(row.accountID, route.RouteModelID, targetID)
-			response, e := s.upstreamHTTPClient(r).Do(req)
+			response, e := upstreamClient.Do(req)
 			if e != nil {
 				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				attemptCancel()
@@ -1195,6 +1199,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
 						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), identity.AccountID, &candidate.Provider); refreshErr == nil {
 							oauthRefreshed[candidate.Provider.ID] = true
+							// The credentials just rotated, so this failure is
+							// the router's to repair, not evidence the target is
+							// unhealthy: mark it after the refresh succeeds so
+							// recordLastOutcome never degrades the target for a
+							// self-healed token expiry. The attempt keeps its red
+							// leg in Activity.
+							row.attempts[len(row.attempts)-1].recovered = true
 							// Propagate the fresh credential to every candidate
 							// sharing this provider so later targets don't retry
 							// with the stale token that just 401'd.
