@@ -271,6 +271,13 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	case <-ctx.Done():
 		return ClientIdentity{}, false, false
 	default:
+		// Admission is bounded, not queued: a cache miss with no slot returns
+		// available=false and the caller answers 429 with Retry-After rather
+		// than parking the request behind a verification. The cap exists
+		// because verification is deliberately expensive (a memory-hard KDF for
+		// legacy hashes), so this bound is the intended backpressure under a
+		// cold-cache burst, not a bug. Keep it small and fixed rather than
+		// scaling it with plan concurrency.
 		return ClientIdentity{}, false, false
 	}
 	defer func() { <-a.sem }()
