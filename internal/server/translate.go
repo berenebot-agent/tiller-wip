@@ -1202,7 +1202,10 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 			finish = "tool_calls"
 		}
 		if u, ok := usage.(map[string]any); ok {
-			usage = map[string]any{"prompt_tokens": u["input_tokens"], "completion_tokens": u["output_tokens"], "total_tokens": number(u["input_tokens"]) + number(u["output_tokens"])}
+			// Anthropic's total_tokens is the canonical sum when present;
+			// otherwise it must include cached input tokens (input_tokens
+			// excludes cache_read), not just input+output.
+			usage = map[string]any{"prompt_tokens": u["input_tokens"], "completion_tokens": u["output_tokens"], "total_tokens": anthropicTotalTokens(u)}
 		}
 	} else {
 		content := []any{}
@@ -1821,7 +1824,12 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"output_tokens": u["output_tokens"]}})
 			}
 			if delta, ok := payload["delta"].(map[string]any); ok {
-				out = append(out, canonicalDelta{Kind: "finish", Finish: fmt.Sprint(delta["stop_reason"])})
+				// Guard: a malformed message_delta without stop_reason would
+				// otherwise become the literal string "<nil>", producing a
+				// client-visible bogus finish reason.
+				if stop, ok := delta["stop_reason"].(string); ok && stop != "" {
+					out = append(out, canonicalDelta{Kind: "finish", Finish: stop})
+				}
 			}
 		case "message_stop":
 			state.completed = true
@@ -1840,9 +1848,13 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			}
 		}
 	case "response.output_text.delta":
-		out = append(out, canonicalDelta{Kind: "text", Text: fmt.Sprint(payload["delta"])})
+		if text, ok := payload["delta"].(string); ok {
+			out = append(out, canonicalDelta{Kind: "text", Text: text})
+		}
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-		out = append(out, canonicalDelta{Kind: "reasoning", Text: fmt.Sprint(payload["delta"])})
+		if text, ok := payload["delta"].(string); ok {
+			out = append(out, canonicalDelta{Kind: "reasoning", Text: text})
+		}
 	case "response.function_call_arguments.delta":
 		index, hasIndex := coerceInt64(payload["output_index"])
 		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"])})

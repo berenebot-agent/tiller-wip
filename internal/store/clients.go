@@ -43,7 +43,6 @@ type ClientKeyRow struct {
 	SingleTargetType      string
 	SingleTargetID        string
 	SingleTargetCanonical string
-	SingleTargetAvailable bool
 }
 
 // ClientKeyFilter narrows ListClientKeys.
@@ -61,10 +60,7 @@ func (s *Scope) ListClientKeys(ctx context.Context, filter ClientKeyFilter) ([]C
 coalesce(b.exposed_model_name,''),
 CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
 coalesce(b.real_model_id,b.virtual_model_id,''),
-CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END,
-CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.enabled=1 AND rm.available=1,0)
-WHEN b.virtual_model_id IS NOT NULL THEN EXISTS(SELECT 1 FROM virtual_model_targets vt JOIN provider_models pm ON pm.id=vt.provider_model_id JOIN providers p ON p.id=pm.provider_id WHERE vt.virtual_model_id=b.virtual_model_id AND vt.enabled=1 AND pm.available=1 AND p.enabled=1)
-ELSE 0 END
+CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END
 FROM client_keys c LEFT JOIN client_single_bindings b ON b.client_key_id=c.id
 LEFT JOIN provider_models rm ON rm.id=b.real_model_id LEFT JOIN providers rp ON rp.id=rm.provider_id
 LEFT JOIN virtual_models vm ON vm.id=b.virtual_model_id LEFT JOIN virtual_provider_groups vg ON vg.id=vm.virtual_group_id
@@ -84,13 +80,12 @@ WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.accoun
 	out := []ClientKeyRow{}
 	for rows.Next() {
 		var v ClientKeyRow
-		var enabled, loggingEnabled, targetAvailable int
-		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &targetAvailable); err != nil {
+		var enabled, loggingEnabled int
+		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical); err != nil {
 			return nil, err
 		}
 		v.Enabled = enabled != 0
 		v.LoggingEnabled = loggingEnabled != 0
-		v.SingleTargetAvailable = targetAvailable != 0
 		out = append(out, v)
 	}
 	return out, rows.Err()

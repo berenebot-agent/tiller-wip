@@ -117,13 +117,21 @@ func argon2idHash(secret string) (string, error) {
 // argon2idVerify is the canonical Argon2id verification. Both Argon2Hasher and
 // the package-level VerifySecret acquire the KDF slot before delegating here; it
 // must not acquire again, so direct callers are responsible for holding a slot.
+//
+// Verification is drift-tolerant downward and bounded by the current parameters
+// (see docs/back_compat.md): rows encoded with weaker (smaller) parameters keep
+// verifying so a future parameter change can be adopted lazily via the
+// NeedsRehash upgrade path instead of locking every stored credential out.
+// Anything above the current parameters fails closed, verify cost can therefore
+// never exceed today's peak, and the encoded string only ever comes from this
+// package's own storage — never from request input.
 func argon2idVerify(secret, encoded string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {
 		return false
 	}
 	memory, iterations, parallelism, err := ArgonParameters(encoded)
-	if err != nil || memory != argonMemory || iterations != argonIterations || parallelism != argonParallelism {
+	if err != nil || memory == 0 || memory > argonMemory || iterations == 0 || iterations > argonIterations || parallelism == 0 || parallelism > argonParallelism {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
@@ -577,7 +585,20 @@ func (s *SessionStore) VerifyCredential(username, password string) bool {
 	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&stored); err != nil {
 		return false
 	}
-	return s.credentialHasher.Verify(username+"\x00"+password, stored)
+	if !s.credentialHasher.Verify(username+"\x00"+password, stored) {
+		return false
+	}
+	// Lazy upgrade, mirroring rehashSessionToken's best-effort CAS: inert while
+	// the stored fingerprint carries the current Argon2id parameters, but the
+	// first successful verify under drifted parameters re-hashes it so the row
+	// converges on the current format. A concurrent rotation breaks the CAS and
+	// is simply retried on the next login.
+	if s.credentialHasher.NeedsRehash(stored) {
+		if upgraded, err := s.credentialHasher.Hash(username + "\x00" + password); err == nil {
+			_, _ = s.db.Exec(`UPDATE platform_settings SET value=?,updated_at=? WHERE key=? AND value=?`, upgraded, formatUTC(time.Now()), credentialHashKey, stored)
+		}
+	}
+	return true
 }
 
 // CredentialConfigured reports whether an admin credential exists. It is the

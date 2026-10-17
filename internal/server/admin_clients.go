@@ -47,7 +47,6 @@ type clientKeyView struct {
 	SingleTargetType      string  `json:"single_target_type,omitempty"`
 	SingleTargetID        string  `json:"single_target_id,omitempty"`
 	SingleTargetCanonical string  `json:"single_target_canonical,omitempty"`
-	SingleTargetAvailable bool    `json:"single_target_available"`
 }
 
 var clientModelNamePattern = regexp.MustCompile(`^[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?$`)
@@ -83,7 +82,6 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 			SingleTargetType:      row.SingleTargetType,
 			SingleTargetID:        row.SingleTargetID,
 			SingleTargetCanonical: row.SingleTargetCanonical,
-			SingleTargetAvailable: row.SingleTargetAvailable,
 		}
 		if row.RotatedAt.Valid {
 			rotated := row.RotatedAt.String

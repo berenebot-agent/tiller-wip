@@ -68,7 +68,6 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .route-confirm-tick:hover{background:#cdeeda;color:#1d6b49}
 .route-confirm-cancel{background:var(--red-bg);border-color:#e1aaa7;color:var(--red)}
 .route-confirm-cancel:hover{background:#f6d3d0;color:#96332f}
-.route-picker-error .combobox input[type="text"]{border-color:#d9a19e;background:var(--red-bg)}
 #catalogue-config{display:flex;flex:1;min-height:0;flex-direction:column}
 #catalogue-config[hidden]{display:none}
 .permissions-dialog #permissions-error{padding:0 22px}
@@ -135,8 +134,6 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .client-card-field:last-of-type{border-bottom:0}
 .client-card-label{color:var(--muted);font:700 10px var(--mono);letter-spacing:.07em;text-transform:uppercase}
 .client-card-route{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.client-route-broken{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;background:var(--red-bg);color:var(--red);font:700 10px var(--mono);letter-spacing:.04em;text-transform:uppercase}
-.client-route-unavailable{color:var(--red)}
 .client-card-usage{display:flex;gap:16px;flex-wrap:wrap}
 .client-card-usage>span{display:grid;gap:3px;min-width:0;flex:1;text-align:center}
 .client-card-usage>span small{color:var(--muted);font:700 9px var(--mono);letter-spacing:.06em;text-transform:uppercase}
