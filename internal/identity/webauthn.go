@@ -379,8 +379,13 @@ func (s *Store) RenamePasskey(ctx context.Context, userID, rowID, name string) e
 // DeletePasskey removes a passkey. It refuses when doing so would leave the
 // account with no sign-in method at all: no password, no Google identity, and
 // no other passkey. The check and the delete run in one transaction so two
-// concurrent deletes of the last two passkeys can never both pass the guard.
+// concurrent deletes of the last two passkeys can never both pass the guard,
+// and authMethodsMu additionally serializes this guard's reads against the
+// other mutators that change the method set (password toggle, Google
+// link/unlink), which WAL snapshot isolation would otherwise let interleave.
 func (s *Store) DeletePasskey(ctx context.Context, userID, rowID string) error {
+	s.authMethodsMu.Lock()
+	defer s.authMethodsMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -432,6 +437,12 @@ func (s *Store) SetPasswordSignInEnabled(ctx context.Context, userID, keepSessio
 			keepSelector = selector
 		}
 	}
+	// Serialized with the other sign-in-method mutators via authMethodsMu (see
+	// Store): the passkey-count guard must not read a snapshot whose password
+	// toggle lands after our commit, and the enable/disable write must not
+	// land inside DeletePasskey's guard window.
+	s.authMethodsMu.Lock()
+	defer s.authMethodsMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err

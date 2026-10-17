@@ -933,6 +933,20 @@ func (s *SessionStore) InvalidateAll() error {
 	return err
 }
 
+// PruneExpiredSessions removes expired admin session rows. They can no longer
+// authenticate — Validate and the cached path re-check the row's expiry — so
+// this is a size-control measure for the core database and its snapshots, not
+// a security one. It is run by the scheduled maintenance pass in local mode.
+// Expired cache entries self-clean on read and in the sweep, so no explicit
+// cache invalidation is needed here.
+func (s *SessionStore) PruneExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM admin_sessions WHERE expires_at < ?`, formatUTC(now))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // ParseSessionToken splits a session token into its selector and secret
 // components. Exported for use by tests in external packages.
 func ParseSessionToken(token string) (selector, secret string, ok bool) {

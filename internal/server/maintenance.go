@@ -74,6 +74,22 @@ func (s *Server) startAuditMaintenance(ctx context.Context) {
 			} else if pruned > 0 {
 				slog.Info("pending account prune completed", "reclaimed", pruned)
 			}
+			// Expired customer/platform sessions can no longer authenticate;
+			// the prune bounds core-database growth as login history accrues.
+			if pruned, err := s.identity.PruneExpiredSessions(ctx, time.Now()); err != nil {
+				s.warnBackup("scheduled session prune failed", err)
+			} else if pruned > 0 {
+				slog.Info("session prune completed", "reclaimed", pruned)
+			}
+		}
+		// Local mode has no identity sessions to prune but does accrue expired
+		// admin_sessions rows; hosted mode leaves s.sessions nil.
+		if s.sessions != nil {
+			if pruned, err := s.sessions.PruneExpiredSessions(ctx, time.Now()); err != nil {
+				s.warnBackup("scheduled admin session prune failed", err)
+			} else if pruned > 0 {
+				slog.Info("admin session prune completed", "reclaimed", pruned)
+			}
 		}
 		if s.outbox != nil {
 			if _, err := s.outbox.Cleanup(ctx, mailOutboxRetention); err != nil {
