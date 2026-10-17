@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sync"
 )
 
 // Sentinel errors returned by client/permission operations so the transport
@@ -427,9 +426,6 @@ func (s *Scope) RotateClientKey(ctx context.Context, id, selector, hash, fingerp
 // attempting the separate-file delete. The record also makes retries safe when
 // the core key has already gone.
 func (s *Scope) DeleteClientKey(ctx context.Context, id string) (bool, error) {
-	if s.cleanupMu == nil {
-		s.cleanupMu = &sync.Mutex{}
-	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 	var exists int

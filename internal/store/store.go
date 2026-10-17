@@ -40,9 +40,12 @@ func ActiveTenantTransactions() int64 { return activeTenantTxs.Load() }
 
 // Store owns the database handles and hands out account-scoped handles.
 type Store struct {
-	db            *sql.DB
-	activity      *sql.DB
-	cipher        SecretCipher
+	db       *sql.DB
+	activity *sql.DB
+	cipher   SecretCipher
+	// cleanupMu is shared with every Scope the Store hands out (For, RunTx) so
+	// Activity cleanup serializes process-wide. New always sets it; there is no
+	// lazy init, so a nil mutex is a construction bug, not a runtime state.
 	cleanupMu     *sync.Mutex
 	enforceLimits bool
 }
@@ -93,9 +96,6 @@ func (s *Store) DB() *sql.DB { return s.db }
 // best-effort Activity delete. The record survives an unavailable Activity
 // handle and is retried by ReconcileActivityCleanup.
 func (s *Store) DeleteAccountActivity(accountID string) error {
-	if s.cleanupMu == nil {
-		s.cleanupMu = &sync.Mutex{}
-	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 	if _, err := s.db.ExecContext(context.Background(), `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, accountID, "", now()); err != nil {
@@ -112,9 +112,6 @@ func (s *Store) DeleteAccountActivity(accountID string) error {
 // the corresponding core rows are removed. The intent remains durable until a
 // caller has drained the asynchronous Activity writer and retired it.
 func (s *Store) BeginActivityCleanup(accountID, clientKeyID string) error {
-	if s.cleanupMu == nil {
-		s.cleanupMu = &sync.Mutex{}
-	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 	_, err := s.db.ExecContext(context.Background(), `INSERT INTO activity_cleanup(account_id,client_key_id,created_at) VALUES(?,?,?) ON CONFLICT(account_id,client_key_id) DO NOTHING`, accountID, clientKeyID, now())
@@ -125,9 +122,6 @@ func (s *Store) BeginActivityCleanup(accountID, clientKeyID string) error {
 // cleanup intent. The caller must drain any asynchronous writer before
 // retiring that intent.
 func (s *Store) DeleteActivityRows(ctx context.Context, accountID, clientKeyID string) error {
-	if s.cleanupMu == nil {
-		s.cleanupMu = &sync.Mutex{}
-	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 	if s.activity == nil {
@@ -146,9 +140,6 @@ func (s *Store) DeleteActivityRows(ctx context.Context, accountID, clientKeyID s
 // RetireActivityCleanup removes a cleanup intent after Activity rows and all
 // queued writes for the scope have been handled.
 func (s *Store) RetireActivityCleanup(accountID, clientKeyID string) error {
-	if s.cleanupMu == nil {
-		s.cleanupMu = &sync.Mutex{}
-	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 	_, err := s.db.ExecContext(context.Background(), `DELETE FROM activity_cleanup WHERE account_id=? AND client_key_id=?`, accountID, clientKeyID)
@@ -186,9 +177,6 @@ func (s *Store) ReconcileActivityCleanup(ctx context.Context) error {
 }
 
 func (s *Store) reconcileActivityCleanup(ctx context.Context, accountID, keyID string) error {
-	if s.cleanupMu == nil {
-		s.cleanupMu = &sync.Mutex{}
-	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 	return s.reconcileActivityCleanupLocked(ctx, accountID, keyID)
@@ -244,11 +232,14 @@ var errNestedTx = errors.New("store: cannot begin transaction within a transacti
 // Scope is an account-scoped view of the tenant tables. Its methods can only
 // touch rows belonging to AccountID.
 type Scope struct {
-	db            *sql.DB
-	q             querier
-	accountID     string
-	activity      *sql.DB
-	cipher        SecretCipher
+	db        *sql.DB
+	q         querier
+	accountID string
+	activity  *sql.DB
+	cipher    SecretCipher
+	// cleanupMu is the Store's process-wide cleanup lock, never per-scope and
+	// never nil: it is inherited from the Store that produced this Scope (For,
+	// RunTx). It is always shared, so cleanup ordering holds across requests.
 	cleanupMu     *sync.Mutex
 	enforceLimits bool
 }
