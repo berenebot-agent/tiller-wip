@@ -21,7 +21,14 @@ fi
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 name=tiller-runtime-readonly
 password=runtime-readonly-test-password
-port=18081
+
+# Dynamically allocated ports. A fixed port collides with a second concurrent
+# run of this tier (and with anything else already bound); every other test
+# runner here allocates via this helper.
+probe_port() {
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()'
+}
+port=$(probe_port)
 base="http://127.0.0.1:$port"
 
 cleanup() {
@@ -178,6 +185,7 @@ echo "==> Default (adoption-first) posture: root-at-boot self-heals a fresh ./da
 # must chown it to 65532:65532 and the running process must be non-root
 # after boot.
 default_dir=$(mktemp -d)
+default_port=$(probe_port)
 dc=dropped-$$
 docker run --rm -d --name "$dc" --network host \
     --read-only \
@@ -186,13 +194,13 @@ docker run --rm -d --name "$dc" --network host \
     -v "$default_dir:/data" \
     -e TILLER_USERNAME=admin \
     -e TILLER_PASSWORD="$password" \
-    -e TILLER_LISTEN_ADDR="127.0.0.1:18082" \
+    -e TILLER_LISTEN_ADDR="127.0.0.1:$default_port" \
     -e TILLER_DATA_DIR=/data \
     "$ROUTER_IMAGE" >/dev/null
 ready=0
 i=0
 while [ "$i" -lt 60 ]; do
-    if curl -fsS "http://127.0.0.1:18082/health/ready" >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:$default_port/health/ready" >/dev/null 2>&1; then
         ready=1
         break
     fi
@@ -218,6 +226,7 @@ echo "    fresh ./data -> $owner (owner of tiller-router.db)"
 # /proc/1/status parser. (We can't `docker exec` into the scratch image
 # because there's no shell.)
 probe_dir=$(mktemp -d)
+proc_port=$(probe_port)
 pc=probe-$$
 docker run --rm -d --name "$pc" --network host \
     --read-only \
@@ -226,13 +235,13 @@ docker run --rm -d --name "$pc" --network host \
     -v "$probe_dir:/data" \
     -e TILLER_USERNAME=admin \
     -e TILLER_PASSWORD="$password" \
-    -e TILLER_LISTEN_ADDR="127.0.0.1:18083" \
+    -e TILLER_LISTEN_ADDR="127.0.0.1:$proc_port" \
     -e TILLER_DATA_DIR=/data \
     "$ROUTER_IMAGE" >/dev/null
 probe_ready=0
 i=0
 while [ "$i" -lt 60 ]; do
-    if curl -fsS "http://127.0.0.1:18083/health/ready" >/dev/null 2>&1; then
+    if curl -fsS "http://127.0.0.1:$proc_port/health/ready" >/dev/null 2>&1; then
         probe_ready=1
         break
     fi
