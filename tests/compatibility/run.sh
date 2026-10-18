@@ -58,11 +58,21 @@ stop_containers
 
 export DOCKER_BUILDKIT=1
 . "$repo_dir/tests/scripts/build-router.sh"
-docker build --pull=false -t tiller-router-sdk-probes:dev "$repo_dir/tests/compatibility"
-if ! docker image inspect tiller-router-hermes-probe:dev >/dev/null 2>&1; then
-    docker build --pull=false -f "$repo_dir/tests/compatibility/hermes.Dockerfile" -t tiller-router-hermes-probe:dev "$repo_dir/tests/compatibility"
+. "$repo_dir/tests/scripts/image-hashes.sh"
+# Content-derived tags (see image-hashes.sh) so an unchanged probe reuses the
+# prepared image instead of reinstalling nodejs + three global CLIs + pip deps
+# on every run. TILLER_COMPAT_REBUILD=1 forces a rebuild.
+if [ "${TILLER_COMPAT_REBUILD:-0}" = "1" ] || ! docker image inspect "$SDK_PROBE_IMAGE" >/dev/null 2>&1; then
+    echo "==> Building $SDK_PROBE_IMAGE"
+    docker build --pull=false -t "$SDK_PROBE_IMAGE" "$repo_dir/tests/compatibility"
 else
-    echo "==> tiller-router-hermes-probe:dev (cached)"
+    echo "==> $SDK_PROBE_IMAGE (cached, skip build; set TILLER_COMPAT_REBUILD=1 to force)"
+fi
+if [ "${TILLER_COMPAT_REBUILD:-0}" = "1" ] || ! docker image inspect "$HERMES_PROBE_IMAGE" >/dev/null 2>&1; then
+    echo "==> Building $HERMES_PROBE_IMAGE"
+    docker build --pull=false -f "$repo_dir/tests/compatibility/hermes.Dockerfile" -t "$HERMES_PROBE_IMAGE" "$repo_dir/tests/compatibility"
+else
+    echo "==> $HERMES_PROBE_IMAGE (cached, skip build)"
 fi
 
 start_mock() {
@@ -102,7 +112,7 @@ docker run --rm --network host \
     -e TILLER_COMPAT_BASE_URL="http://127.0.0.1:$sdk_router_port" \
     -e TILLER_COMPAT_MOCK_BASE_URL="http://127.0.0.1:$sdk_mock_port/v1" \
     -e TILLER_COMPAT_ADMIN_PASSWORD="$password" \
-    tiller-router-sdk-probes:dev &
+    "$SDK_PROBE_IMAGE" &
 sdk_pid=$!
 
 # Preserve the existing restart coverage for the Hermes environment.
@@ -112,7 +122,7 @@ docker run --rm --network host \
     -e TILLER_COMPAT_BASE_URL="http://127.0.0.1:$hermes_router_port" \
     -e TILLER_COMPAT_MOCK_BASE_URL="http://127.0.0.1:$hermes_mock_port/v1" \
     -e TILLER_COMPAT_ADMIN_PASSWORD="$password" \
-    tiller-router-hermes-probe:dev &
+    "$HERMES_PROBE_IMAGE" &
 hermes_pid=$!
 sdk_status=0
 hermes_status=0
