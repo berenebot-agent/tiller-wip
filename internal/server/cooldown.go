@@ -101,20 +101,14 @@ func (c *cooldownStore) statusByName(accountID, provider, model string, now time
 	found := false
 	prefix := accountID + "\x00"
 	for key, e := range c.until {
-		if !strings.HasPrefix(key, prefix) || e.provider != provider || e.model != model {
+		if !strings.HasPrefix(key, prefix) || e.provider != provider || e.model != model || !now.Before(e.until) {
 			continue
 		}
 		if !found || e.until.Before(best.until) || (e.until.Equal(best.until) && e.providerModelID < best.providerModelID) {
 			best, found = e, true
 		}
 	}
-	if !found {
-		return cooldownEntry{}, false
-	}
-	if now.Before(best.until) {
-		return best, true
-	}
-	return cooldownEntry{}, false
+	return best, found
 }
 
 func (c *cooldownStore) clearFor(accountID string) {

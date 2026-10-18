@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -181,5 +182,99 @@ func TestRefreshReloadsProviderUnderLock(t *testing.T) {
 		}
 	default:
 		t.Fatal("provider was never discovered")
+	}
+}
+
+// TestRefreshDueBoundsDiscoveryConcurrency verifies that a large due batch
+// cannot create more than four simultaneous background discovery requests and
+// that every eligible provider is eventually processed.
+func TestRefreshDueBoundsDiscoveryConcurrency(t *testing.T) {
+	t.Parallel()
+	var active, peak, total atomic.Int32
+	started := make(chan struct{}, refreshConcurrency+1)
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			http.Error(w, "unexpected path", http.StatusNotFound)
+			return
+		}
+		n := active.Add(1)
+		for {
+			old := peak.Load()
+			if n <= old || peak.CompareAndSwap(old, n) {
+				break
+			}
+		}
+		total.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		defer active.Add(-1)
+		<-release
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"id": "model-a"}}})
+	}))
+	defer upstream.Close()
+
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano)
+	for i := 0; i < 10; i++ {
+		providerID := fmt.Sprintf("provider-batch-%d", i)
+		name := fmt.Sprintf("batch-%d", i)
+		if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES(?,'real',?)`, name, providerID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,credential_secret,enabled,protocols,next_refresh_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			providerID, name, "opencode-free", upstream.URL+"/v1", nil, 1, EncodeProtocols([]Protocol{ProtocolChat, ProtocolResponses}), past, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	manager := NewManager(store.New(db.SQL), NewRegistry())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.refreshDue(ctx)
+	}()
+	for i := 0; i < refreshConcurrency; i++ {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("expected four concurrent discovery requests")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("more than four background requests admitted concurrently")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := peak.Load(); got != refreshConcurrency {
+		t.Fatalf("peak discoveries=%d, want %d", got, refreshConcurrency)
+	}
+	close(release)
+	released = true
+	select {
+	case <-done:
+	case <-ctx.Done():
+		t.Fatal("background discovery workers did not finish")
+	}
+	if got := total.Load(); got != 10 {
+		t.Fatalf("processed %d providers, want 10", got)
+	}
+	if got := peak.Load(); got > refreshConcurrency {
+		t.Fatalf("peak discoveries=%d exceeds limit %d", got, refreshConcurrency)
 	}
 }

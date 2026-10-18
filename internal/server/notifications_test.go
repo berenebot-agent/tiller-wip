@@ -476,7 +476,7 @@ func TestNotificationCooldownHonoursLongWindow(t *testing.T) {
 	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 
 	app.notifyCooldownMu.Lock()
-	deadline := app.notifyLastSent[key]
+	deadline := app.notifyLastSent[key].until
 	// Prune as if 61 seconds had passed: the entry must survive.
 	app.pruneNotificationCooldownsLocked(time.Now().Add(61 * time.Second))
 	_, survives := app.notifyLastSent[key]
@@ -492,12 +492,14 @@ func TestNotificationCooldownHonoursLongWindow(t *testing.T) {
 	}
 }
 
-// TestNotificationCooldownLoweredAppliesToOpenWindow guards the config-change
-// path: a window recorded under a long cooldown must be capped to the newly
-// configured one instead of suppressing for the originally calculated hour.
+// TestNotificationCooldownLoweredAppliesToOpenWindow checks both suppression
+// and expiry after lowering a cooldown. Merely shortening the stored timestamp
+// is insufficient if the triggering event is delivered prematurely.
 func TestNotificationCooldownLoweredAppliesToOpenWindow(t *testing.T) {
 	t.Parallel()
+	var delivered atomic.Int32
 	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		delivered.Add(1)
 		w.WriteHeader(200)
 	}))
 	scope := app.store.For(database.LocalAccountID)
@@ -507,25 +509,76 @@ func TestNotificationCooldownLoweredAppliesToOpenWindow(t *testing.T) {
 	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
 	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
 	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
-	app.notifyCooldownMu.Lock()
-	hourDeadline := app.notifyLastSent[key]
-	app.notifyCooldownMu.Unlock()
-	if hourDeadline.IsZero() {
-		t.Fatal("successful delivery recorded no cooldown")
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("initial delivery count=%d, want 1", got)
 	}
+	app.notifyCooldownMu.Lock()
+	original := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
 
-	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "1"); err != nil {
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "60"); err != nil {
+		t.Fatal(err)
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("lowering to 60s caused premature delivery: count=%d", got)
+	}
+	app.notifyCooldownMu.Lock()
+	shortened := app.notifyLastSent[key]
+	// Simulate a later triggering event without sleeping. The old 1-hour
+	// window is still open, but 60s has elapsed since successful delivery.
+	shortened.sentAt = time.Now().Add(-2 * time.Minute)
+	shortened.until = shortened.sentAt.Add(time.Hour)
+	app.notifyLastSent[key] = shortened
+	app.notifyCooldownMu.Unlock()
+	if !original.until.After(shortened.sentAt.Add(60 * time.Second)) {
+		t.Fatal("test setup has no shorter expiry to apply")
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	if got := delivered.Load(); got != 2 {
+		t.Fatalf("expired shortened cooldown did not deliver: count=%d", got)
+	}
+	app.notifyCooldownMu.Lock()
+	reset := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if reset.until.Before(time.Now().Add(55*time.Second)) || reset.until.After(time.Now().Add(65*time.Second)) {
+		t.Fatalf("new successful delivery did not reset 60s window: %v", reset.until)
+	}
+}
+
+func TestNotificationCooldownIncreaseAndDisable(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		delivered.Add(1)
+		w.WriteHeader(200)
+	}))
+	scope := app.store.For(database.LocalAccountID)
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "60"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	app.notifyCooldownMu.Lock()
+	initial := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "3600"); err != nil {
 		t.Fatal(err)
 	}
 	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
 	app.notifyCooldownMu.Lock()
-	minuteDeadline := app.notifyLastSent[key]
+	unchanged := app.notifyLastSent[key]
 	app.notifyCooldownMu.Unlock()
-	if !minuteDeadline.Before(hourDeadline) {
-		t.Fatalf("lowered cooldown did not shorten the open window: hour=%v after=%v", hourDeadline, minuteDeadline)
+	if got := delivered.Load(); got != 1 || !initial.until.Equal(unchanged.until) {
+		t.Fatalf("increasing cooldown extended window or duplicated notification: count=%d before=%v after=%v", got, initial.until, unchanged.until)
 	}
-	if minuteDeadline.After(time.Now().Add(2 * time.Second)) {
-		t.Fatalf("open window deadline %v ignores the new 1s cooldown", minuteDeadline)
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "0"); err != nil {
+		t.Fatal(err)
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	if got := delivered.Load(); got != 2 {
+		t.Fatalf("zero cooldown did not allow another delivery: count=%d", got)
 	}
 }
 
@@ -981,9 +1034,9 @@ func TestNotificationCooldownPruning(t *testing.T) {
 
 	now := time.Now()
 	app.notifyCooldownMu.Lock()
-	// The stored value is the instant the entry stops suppressing.
-	app.notifyLastSent["fresh|fallback|vm"] = now.Add(time.Hour)
-	app.notifyLastSent["stale|fallback|vm"] = now.Add(-2 * time.Hour)
+	// Each entry carries the delivery time and the suppression deadline.
+	app.notifyLastSent["fresh|fallback|vm"] = notificationCooldownEntry{sentAt: now, until: now.Add(time.Hour)}
+	app.notifyLastSent["stale|fallback|vm"] = notificationCooldownEntry{sentAt: now.Add(-3 * time.Hour), until: now.Add(-2 * time.Hour)}
 	app.pruneNotificationCooldownsLocked(now)
 	_, freshOK := app.notifyLastSent["fresh|fallback|vm"]
 	_, staleGone := app.notifyLastSent["stale|fallback|vm"]
