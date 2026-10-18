@@ -284,46 +284,70 @@ func toCatalogueModels(models []Model) []store.CatalogueModel {
 }
 
 func (m *Manager) StartScheduler(ctx context.Context) {
-	ticker := time.NewTicker(15 * time.Minute)
 	go func() {
-		defer ticker.Stop()
+		timer := time.NewTimer(15 * time.Minute)
+		defer timer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
+				// Wait for the entire batch, then schedule the next pass.
+				// No two background batches can overlap.
 				m.refreshDue(ctx)
+				if ctx.Err() != nil {
+					return
+				}
+				timer.Reset(15 * time.Minute)
 			}
 		}
 	}()
 }
 
-// refreshDue re-discovers every provider whose scheduled refresh has come due.
-// Each provider runs on its own goroutine so one slow upstream cannot delay the
-// rest, but the fan-out is bounded by refreshConcurrency: a tick that finds many
-// account x provider rows due at once must not open an unbounded burst of
-// simultaneous outbound discovery requests. A provider that cannot get a slot
-// waits for one; the per-refresh timeout starts only once it is admitted, so the
-// bound delays work rather than failing it.
+// refreshDue processes providers due for discovery with a fixed worker pool.
+// There are at most refreshConcurrency background requests in flight, even if
+// thousands of providers are due. Work waiting for a worker uses no goroutine
+// of its own, and its three-minute timeout begins only when work starts.
+// Manual Refresh calls bypass this queue and retain the provider-level lock.
 func (m *Manager) refreshDue(ctx context.Context) {
 	refs, err := m.store.DueProviders(ctx, database.Now())
-	if err != nil {
+	if err != nil || len(refs) == 0 || ctx.Err() != nil {
 		return
 	}
-	sem := make(chan struct{}, refreshConcurrency)
-	for _, ref := range refs {
-		go func(accountID, providerID string) {
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				return
+
+	jobs := make(chan store.ProviderRef)
+	var workers sync.WaitGroup
+	for i := 0; i < refreshConcurrency && i < len(refs); i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ref, ok := <-jobs:
+					if !ok || ctx.Err() != nil {
+						return
+					}
+					refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+					_ = m.Refresh(refreshCtx, ref.AccountID, ref.ProviderID)
+					cancel()
+				}
 			}
-			defer func() { <-sem }()
-			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-			defer cancel()
-			_ = m.Refresh(refreshCtx, accountID, providerID)
-		}(ref.AccountID, ref.ProviderID)
+		}()
 	}
+
+	for _, ref := range refs {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			return
+		case jobs <- ref:
+		}
+	}
+	close(jobs)
+	workers.Wait()
 }
 
 func (m *Manager) providerLock(accountID, providerID string) *sync.Mutex {

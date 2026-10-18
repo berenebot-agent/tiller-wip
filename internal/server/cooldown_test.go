@@ -814,3 +814,30 @@ func TestCooldownDoesNotApplyToDirectRealRoute(t *testing.T) {
 	}
 	_ = secret
 }
+
+// TestCooldownNameLookupIgnoresExpiredDuplicate ensures an expired row with
+// the earlier expiry does not hide another actively cooling row by the same
+// provider/model name. Routing itself uses provider model IDs.
+func TestCooldownNameLookupIgnoresExpiredDuplicate(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	start := now.Add(-10 * time.Minute)
+	cooldowns := newCooldownStore()
+	cooldowns.set("account-a", "old", start, now.Add(-time.Minute), "provider", "model", "", "", "")
+	cooldowns.set("account-a", "active", start, now.Add(5*time.Minute), "provider", "model", "", "", "")
+	cooldowns.set("account-b", "another-account", start, now.Add(30*time.Minute), "provider", "model", "", "", "")
+
+	got, ok := cooldowns.statusByName("account-a", "provider", "model", now)
+	if !ok || got.providerModelID != "active" {
+		t.Fatalf("expired duplicate hid active cooldown: ok=%t id=%q", ok, got.providerModelID)
+	}
+	if _, ok := cooldowns.statusByName("account-a", "provider", "other", now); ok {
+		t.Fatal("unrelated model reported cooling")
+	}
+	if _, ok := cooldowns.statusByName("account-a", "provider", "model", now.Add(6*time.Minute)); ok {
+		t.Fatal("all-expired duplicates reported cooling")
+	}
+	if got, ok := cooldowns.statusByName("account-b", "provider", "model", now); !ok || got.providerModelID != "another-account" {
+		t.Fatalf("cross-account cooldown lookup failed: ok=%t id=%q", ok, got.providerModelID)
+	}
+}

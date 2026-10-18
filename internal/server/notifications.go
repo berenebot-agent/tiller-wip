@@ -310,15 +310,19 @@ func (s *Server) releaseNotification(accountID string) {
 	s.notifyCooldownMu.Unlock()
 }
 
-// pruneNotificationCooldownsLocked drops cooldown entries whose suppression
-// window has closed. The map is keyed by account+event+model and would
-// otherwise grow for the process lifetime as accounts and models churn. Each
-// entry stores the instant it stops suppressing, so the window follows the
-// cooldown configured when it was recorded (any value up to the operator's
-// choice in local mode; 60s in hosted). Caller holds notifyCooldownMu.
+// notificationCooldownEntry retains the last successful delivery time so
+// shortening an open cooldown is measured from delivery, not from the next
+// event. The deadline is mutable only when a configured cooldown is reduced.
+type notificationCooldownEntry struct {
+	sentAt time.Time
+	until  time.Time
+}
+
+// pruneNotificationCooldownsLocked drops closed windows to bound memory as
+// accounts and models churn. Caller holds notifyCooldownMu.
 func (s *Server) pruneNotificationCooldownsLocked(now time.Time) {
-	for key, until := range s.notifyLastSent {
-		if !now.Before(until) {
+	for key, entry := range s.notifyLastSent {
+		if !now.Before(entry.until) {
 			delete(s.notifyLastSent, key)
 		}
 	}
@@ -352,18 +356,20 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 			s.notifyInFlight = map[string]bool{}
 		}
 		if s.notifyLastSent == nil {
-			s.notifyLastSent = map[string]time.Time{}
+			s.notifyLastSent = map[string]notificationCooldownEntry{}
 		}
 		now := time.Now()
 		s.pruneNotificationCooldownsLocked(now)
 		if cfg.CooldownSeconds > 0 {
-			if until, ok := s.notifyLastSent[key]; ok && now.Before(until) {
-				// Shorten an already-open window if the cooldown was lowered
-				// since it was recorded, so a config change takes effect at the
-				// next send rather than after the window the old value bought.
-				if capped := now.Add(time.Duration(cfg.CooldownSeconds) * time.Second); capped.Before(until) {
-					s.notifyLastSent[key] = capped
-				} else {
+			if entry, ok := s.notifyLastSent[key]; ok {
+				// Apply a shorter setting relative to the actual successful
+				// delivery. Increasing the setting does not extend a window
+				// already open under the previous configuration.
+				if capped := entry.sentAt.Add(time.Duration(cfg.CooldownSeconds) * time.Second); capped.Before(entry.until) {
+					entry.until = capped
+					s.notifyLastSent[key] = entry
+				}
+				if now.Before(entry.until) {
 					s.notifyCooldownMu.Unlock()
 					return
 				}
@@ -415,9 +421,12 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 	}
 	if reserved {
 		s.notifyCooldownMu.Lock()
-		// Store the instant this key stops suppressing, so the window follows
-		// the cooldown configured at record time rather than a fixed floor.
-		s.notifyLastSent[key] = time.Now().Add(time.Duration(cfg.CooldownSeconds) * time.Second)
+		// Only successful deliveries open a cooldown window.
+		sentAt := time.Now()
+		s.notifyLastSent[key] = notificationCooldownEntry{
+			sentAt: sentAt,
+			until:  sentAt.Add(time.Duration(cfg.CooldownSeconds) * time.Second),
+		}
 		s.notifyCooldownMu.Unlock()
 	}
 }
