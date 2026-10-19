@@ -608,3 +608,97 @@ func TestFetchZAI(t *testing.T) {
 		t.Fatalf("window label = %q, want 5h", snap.Windows[0].Label)
 	}
 }
+
+func TestOnDemandRefreshInflightAndMinuteClamp(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	adapters["test-on-demand"] = func(ctx context.Context, _ *http.Client, _ Credential) (Snapshot, error) {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return Snapshot{}, ctx.Err()
+		}
+		pct := 35.0
+		return Snapshot{Available: true, Windows: []Window{{Label: "5h", UsedPercent: &pct}}}, nil
+	}
+	defer delete(adapters, "test-on-demand")
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	p.ReconcileAccount("acct", []ProviderRef{{AccountID: "acct", ProviderID: "prov", Type: "test-on-demand"}})
+	now := time.Now().UTC()
+	if !p.TriggerIfDue("acct", "prov", now) {
+		t.Fatal("first on-demand refresh was not admitted")
+	}
+	status := p.PollStatesForAccount("acct")["prov"]
+	if !status.Refreshing || status.LastAttemptAt == nil || status.LastSuccessAt != nil {
+		t.Fatalf("in-flight status = %+v", status)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("upstream check did not start")
+	}
+	if p.TriggerIfDue("acct", "prov", now.Add(60*time.Second)) {
+		t.Fatal("another check started while one was in flight")
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for p.PollStatesForAccount("acct")["prov"].Refreshing && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	status = p.PollStatesForAccount("acct")["prov"]
+	if status.Refreshing || status.Failed || status.LastSuccessAt == nil {
+		t.Fatalf("finished status = %+v", status)
+	}
+	if p.TriggerIfDue("acct", "prov", now.Add(59*time.Second)) {
+		t.Fatal("the 60-second floor did not reject an early poll")
+	}
+}
+
+func TestFailedQuotaCheckRetainsLastSuccess(t *testing.T) {
+	var calls int
+	adapters["test-retain"] = func(context.Context, *http.Client, Credential) (Snapshot, error) {
+		calls++
+		if calls == 2 {
+			return Snapshot{}, nil
+		}
+		pct := 20.0
+		return Snapshot{Available: true, Windows: []Window{{Label: "5h", UsedPercent: &pct}}}, nil
+	}
+	defer delete(adapters, "test-retain")
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	p.Register(ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "test-retain"})
+	now := time.Now().UTC()
+	first, ok := p.RefreshIfDue(context.Background(), "acct", "prov", true, now)
+	if !ok || !first.Available {
+		t.Fatalf("first check: %+v, %v", first, ok)
+	}
+	second, ok := p.RefreshIfDue(context.Background(), "acct", "prov", true, now.Add(60*time.Second))
+	if !ok || !second.Available || !second.FetchedAt.Equal(first.FetchedAt) {
+		t.Fatalf("failed check discarded successful usage: %+v", second)
+	}
+	status := p.PollStatesForAccount("acct")["prov"]
+	if !status.Failed || status.LastSuccessAt == nil || status.LastAttemptAt == nil ||
+		!status.LastSuccessAt.Equal(now) || !status.LastAttemptAt.Equal(now.Add(60*time.Second)) {
+		t.Fatalf("invalid status timestamps: %+v", status)
+	}
+	if _, polled := p.RefreshIfDue(context.Background(), "acct", "prov", true, now.Add(119*time.Second)); polled {
+		t.Fatal("failed check bypassed the 60-second clamp")
+	}
+}
+
+func TestQuotaReconcileAccountIsolation(t *testing.T) {
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	a := ProviderRef{AccountID: "alice", ProviderID: "a", Type: "codex-subscription"}
+	b := ProviderRef{AccountID: "alice", ProviderID: "b", Type: "codex-subscription"}
+	c := ProviderRef{AccountID: "bob", ProviderID: "c", Type: "codex-subscription"}
+	p.ReconcileAccount("alice", []ProviderRef{a, b})
+	p.ReconcileAccount("bob", []ProviderRef{c})
+	p.ReconcileAccount("alice", []ProviderRef{a})
+	if _, ok := p.PollStatesForAccount("alice")["b"]; ok {
+		t.Fatal("deleted provider was still registered")
+	}
+	if _, ok := p.PollStatesForAccount("bob")["c"]; !ok {
+		t.Fatal("another account's provider was evicted")
+	}
+}

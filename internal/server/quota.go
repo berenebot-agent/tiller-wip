@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/providerquota"
@@ -55,54 +54,25 @@ func (s *Server) hydrateQuotaCredential(ctx context.Context, ref providerquota.P
 	return p.Credential, nil
 }
 
-// startQuotaPoller launches the background loop that registers quota-capable
-// providers and refreshes them on the cadence (30 min idle, 60 s active). A
-// failure to list providers is non-fatal: the poller simply has nothing to do
-// until the next tick.
-func (s *Server) startQuotaPoller(ctx context.Context) {
+// quotaEndpoint returns cached results immediately and initiates due checks
+// only for the authenticated account's quota-capable providers.
+func (s *Server) quotaEndpoint(w http.ResponseWriter, r *http.Request) {
+	accountID := s.scope(r).AccountID()
 	if s.quota == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"providers":   map[string]any{},
+			"poll_status": map[string]any{},
+		})
 		return
 	}
-	// Register the currently eligible providers once at startup, then keep the
-	// registry fresh on each tick (providers may be created or disabled at
-	// runtime).
-	s.registerQuotaProviders(ctx)
-	go func() {
-		// Poll once on boot so the snapshot cache is warm within seconds rather
-		// than waiting a full background interval, or an admin opening the
-		// Providers page. It runs in this goroutine (not before it) so a cold
-		// provider endpoint cannot delay startup. A provider still shows
-		// "loading" until this completes; a transient failure is then retried on
-		// the short FailureRetry cadence.
-		s.refreshQuotaProviders(ctx)
-		ticker := time.NewTicker(providerquota.ActiveInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				s.refreshQuotaProviders(ctx)
-			}
-		}
-	}()
-}
-
-// registerQuotaProviders (re)builds the poller's provider registry from the
-// store. Called at startup and on demand; it does not poll. It reconciles
-// rather than adds: a provider that has been deleted or disabled (or whose type
-// no longer has an adapter) is unregistered along with its cached snapshot, so
-// /api/admin/quota cannot keep showing a card for a provider that is gone. A
-// store error returns early and leaves the existing registry untouched — an
-// unavailable database must never be read as "no providers configured".
-func (s *Server) registerQuotaProviders(ctx context.Context) []providerquota.ProviderRef {
-	refs, err := s.storeHandle().QuotaProviders(ctx, quotaProviderTypes())
+	refs, err := s.scope(r).QuotaProviders(r.Context(), quotaProviderTypes())
 	if err != nil {
-		return nil
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load provider usage.")
+		return
 	}
-	out := make([]providerquota.ProviderRef, 0, len(refs))
+	registered := make([]providerquota.ProviderRef, 0, len(refs))
 	for _, ref := range refs {
-		out = append(out, providerquota.ProviderRef{
+		registered = append(registered, providerquota.ProviderRef{
 			AccountID:  ref.AccountID,
 			ProviderID: ref.ProviderID,
 			Name:       ref.Name,
@@ -110,67 +80,13 @@ func (s *Server) registerQuotaProviders(ctx context.Context) []providerquota.Pro
 			BaseURL:    ref.BaseURL,
 		})
 	}
-	s.quota.Reconcile(out)
-	return out
-}
-
-// refreshQuotaProviders polls every registered provider that is due under the
-// cadence.
-func (s *Server) refreshQuotaProviders(ctx context.Context) {
-	refs := s.registerQuotaProviders(ctx)
+	s.quota.ReconcileAccount(accountID, registered)
 	now := time.Now().UTC()
-	for _, ref := range refs {
-		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		s.quota.RefreshIfDue(pollCtx, ref.AccountID, ref.ProviderID, false, now)
-		cancel()
+	for _, ref := range registered {
+		s.quota.TriggerIfDue(accountID, ref.ProviderID, now)
 	}
-}
-
-// quotaEndpoint returns the cached quota snapshot for every provider in the
-// signed-in account, refreshing the eligible ones immediately subject to the
-// 30 s floor. It is admin-gated (registered under the authenticated admin
-// group). The immediate-on-view refresh is best-effort: cached data is always
-// returned.
-func (s *Server) quotaEndpoint(w http.ResponseWriter, r *http.Request) {
-	accountID := s.scope(r).AccountID()
-	if s.quota == nil {
-		writeJSON(w, 200, map[string]any{"providers": map[string]any{}})
-		return
-	}
-	// Register/poll on view so a fresh provider appears even before the next
-	// background tick, respecting the MinInterval floor the poller enforces.
-	// The on-view refreshes run concurrently: the poller coalesces duplicates
-	// through its own inflight map, so a serially-polled account with several
-	// slow providers would otherwise hold the response open for N x 10s.
-	refs := s.registerQuotaProviders(r.Context())
-	now := time.Now().UTC()
-	var wg sync.WaitGroup
-	for _, ref := range refs {
-		if ref.AccountID != accountID {
-			continue
-		}
-		wg.Add(1)
-		go func(account, provider string) {
-			defer wg.Done()
-			pollCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-			defer cancel()
-			s.quota.RefreshIfDue(pollCtx, account, provider, true, now)
-		}(ref.AccountID, ref.ProviderID)
-	}
-	wg.Wait()
-	out := s.quota.SnapshotForAccount(accountID)
-	if out == nil {
-		out = map[string]providerquota.Snapshot{}
-	}
-	writeJSON(w, 200, map[string]any{"providers": out})
-}
-
-// markProviderActive records that a provider served a request, so the quota
-// poller tightens its cadence for that provider. It is a no-op when the poller
-// is not configured.
-func (s *Server) markProviderActive(accountID, providerID string) {
-	if s.quota == nil || providerID == "" {
-		return
-	}
-	s.quota.MarkActive(accountID, providerID, time.Now().UTC())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"providers":   s.quota.SnapshotForAccount(accountID),
+		"poll_status": s.quota.PollStatesForAccount(accountID),
+	})
 }
