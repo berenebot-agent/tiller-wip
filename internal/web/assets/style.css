@@ -618,3 +618,9 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .api-guide-table td{padding:9px 12px;border-top:1px solid #e2e8ed;vertical-align:top;font-size:13px}
 .api-guide ul{margin:10px 0 10px 18px;padding:0}
 .api-guide li{margin:4px 0}
+
+/* Quiet quota check age and in-flight indicator on provider cards. */
+.provider-quota-age{display:flex;align-items:center;gap:5px;min-height:14px;color:var(--muted);font-size:10px;line-height:1.4}
+.provider-quota-spinner{display:inline-block;width:10px;height:10px;flex:0 0 10px;border:1.5px solid var(--line-dark);border-top-color:var(--blue);border-radius:50%;animation:provider-quota-spin .8s linear infinite}
+@keyframes provider-quota-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.provider-quota-spinner{animation:none;border-top-color:var(--blue)}}

@@ -40,3 +40,25 @@ test('ollama cloud card shows percentage windows and a credits balance', async (
   await expect(card).toContainText('$12.50 left');
   await expect(card).not.toContainText('Unlimited');
 });
+
+test('quota age and spinner show a running check then its cached result', async ({ page }) => {
+  await page.route(/\/api\/admin\/providers\?/, route => route.fulfill({ json: { data: [{ id: 'sub', name: 'subscription', type: 'codex-subscription', enabled: true, protocols: ['responses'], available_model_count: 1, model_count: 1 }] } }));
+  await page.route('**/api/admin/models?all=1', route => route.fulfill({ json: { data: [{ id: 'model', provider_id: 'sub', provider_name: 'subscription', canonical_model_id: 'subscription/model', upstream_model_id: 'model', available: true }] } }));
+  let calls = 0;
+  const timestamp = new Date().toISOString();
+  await page.route('**/api/admin/quota', route => {
+    calls++;
+    route.fulfill({ json: {
+      providers: { sub: { available: true, fetched_at: timestamp, windows: [{ label: '5h', used_percent: 42 }] } },
+      poll_status: { sub: { refreshing: calls === 1, failed: false, last_success_at: timestamp, last_attempt_at: timestamp } },
+    } });
+  });
+  await openAdmin(page);
+  await page.locator('a[data-view="providers"]').first().click();
+  const card = page.locator('[data-provider-id="sub"]');
+  await expect(card.locator('.provider-quota-spinner')).toHaveCount(1);
+  await expect(card).toContainText('Refreshing · last updated just now');
+  await expect(card.locator('.provider-quota-spinner')).toHaveCount(0, { timeout: 6000 });
+  await expect(card).toContainText('Updated just now');
+  await expect(card.locator('progress')).toHaveAttribute('value', '42');
+});
