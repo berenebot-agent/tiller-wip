@@ -1511,7 +1511,6 @@ routeDone:
 	}
 	// Tighten the quota-poll cadence for this provider while it is active. A
 	// no-op when the poller is not configured.
-	s.markProviderActive(row.accountID, selected.Provider.ID)
 	s.inflight.clientResolved(row.accountID, row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
