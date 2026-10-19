@@ -523,7 +523,6 @@ func (s *Server) StartBackground(ctx context.Context) {
 		s.logger.Warn("activity cleanup reconciliation failed", "error_class", fmt.Sprintf("%T", err))
 	}
 	s.providers.StartScheduler(ctx)
-	s.startQuotaPoller(ctx)
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}

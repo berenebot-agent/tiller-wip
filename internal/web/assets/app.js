@@ -788,7 +788,7 @@ const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github
 // the label, an inline bar, the used percentage and a short reset countdown.
 // The plan name and freshness line are deliberately omitted to keep the card
 // short.
-function providerQuotaHTML(provider) {
+function providerQuotaDataHTML(provider) {
   if (!quotaProviderTypes.includes(provider.type)) return '';
   const snap = state.providerQuota?.[provider.id];
   if (!snap) return '<p class="provider-quota-status">Quota: loading…</p>';
@@ -813,6 +813,28 @@ function providerQuotaHTML(provider) {
   // collapse anything beyond that (e.g. org spend caps) behind a toggle.
   const inline = 3;
   return `<div class="provider-quota">${rows.slice(0, inline).join('')}${rows.length > inline ? `<details><summary>${rows.length - inline} more limits</summary>${rows.slice(inline).join('')}</details>` : ''}</div>`;
+}
+
+// Keep successful data age distinct from the time of a failed poll.
+function quotaAge(when) {
+  const elapsed = Math.max(0, Math.floor((Date.now() - new Date(when).getTime()) / 60000));
+  if (!Number.isFinite(elapsed)) return 'unknown';
+  if (elapsed < 1) return 'just now';
+  if (elapsed < 60) return elapsed + 'm ago';
+  if (elapsed < 1440) return Math.floor(elapsed / 60) + 'h ago';
+  return Math.floor(elapsed / 1440) + 'd ago';
+}
+function providerQuotaHTML(provider) {
+  if (!quotaProviderTypes.includes(provider.type)) return '';
+  const status = state.providerQuotaStatus?.[provider.id] || {};
+  const snapshot = state.providerQuota?.[provider.id];
+  const lastSuccess = status.last_success_at || (snapshot?.available ? snapshot.fetched_at : null);
+  const age = lastSuccess ? 'last updated ' + quotaAge(lastSuccess) : (status.last_attempt_at ? 'checked ' + quotaAge(status.last_attempt_at) : 'not checked yet');
+  const label = status.refreshing ? 'Refreshing · ' + age
+    : status.failed ? 'Check failed · ' + age
+    : lastSuccess ? 'Updated ' + quotaAge(lastSuccess) : 'Not checked yet';
+  const spinner = status.refreshing ? '<span class="provider-quota-spinner" aria-hidden="true"></span>' : '';
+  return providerQuotaDataHTML(provider) + '<div class="provider-quota-age" aria-live="polite">' + spinner + h(label) + '</div>';
 }
 
 // providerCostHTML renders the router usage cost for pay-per-token providers
@@ -2843,23 +2865,43 @@ function renderProviderUsage() {
   });
 }
 
-// loadQuota fetches cached subscription/quota snapshots and re-renders the
-// provider-card usage blocks.
+// Cache-first provider quota polling. Follow running checks without making
+// further upstream requests: the server enforces a 60-second per-provider floor.
+let quotaStatusTimer = null;
+let quotaLoading = false;
 async function loadQuota() {
+  if (quotaLoading || state.view !== 'providers' || document.hidden) return;
+  quotaLoading = true;
   try {
     const payload = await api('/api/admin/quota');
     state.providerQuota = payload?.providers || {};
+    state.providerQuotaStatus = payload?.poll_status || {};
     renderProviderUsage();
   } catch {
     state.providerQuota = state.providerQuota || {};
+    state.providerQuotaStatus = state.providerQuotaStatus || {};
     renderProviderUsage();
+  } finally {
+    quotaLoading = false;
+    clearTimeout(quotaStatusTimer);
+    quotaStatusTimer = null;
+    if (state.view === 'providers' && !document.hidden &&
+        Object.values(state.providerQuotaStatus || {}).some(status => status.refreshing)) {
+      quotaStatusTimer = setTimeout(loadQuota, 2000);
+    }
   }
 }
-// Viewing Providers keeps the displayed snapshots fresh; the server owns the
-// 30-minute idle / 60-second active cadence and the 30-second on-view floor.
+// Refresh eligible providers while their page is visible.
 setInterval(() => {
   if (state.view === 'providers' && !document.hidden) loadQuota();
 }, 60000);
+// Relative age changes without additional network requests.
+setInterval(() => {
+  if (state.view === 'providers' && !document.hidden) renderProviderUsage();
+}, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (state.view === 'providers' && !document.hidden) loadQuota();
+});
 
 // renderQuotaProvider renders one provider's quota snapshot.
 function renderQuotaProvider(snap) {
