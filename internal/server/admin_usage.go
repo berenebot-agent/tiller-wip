@@ -54,12 +54,28 @@ func (s *Server) usage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// usageAggregateTTL bounds reuse of the DB-derived usage aggregates. It is
-// short enough that token counters stay effectively live, but long enough that
-// the baseline SSE snapshot emitted on connect, the page's parallel
-// /api/admin/usage request, and any other open admin tab share one set of
-// request_logs scans instead of each paying for a full recompute.
+// usageAggregateTTL is the floor for reuse of the DB-derived usage
+// aggregates. It is short enough that token counters stay effectively live,
+// but long enough that the baseline SSE snapshot emitted on connect, the
+// page's parallel /api/admin/usage request, and any other open admin tab
+// share one set of request_logs scans instead of each paying for a full
+// recompute.
+//
+// The effective window is usually longer: it is derived from how long the
+// last recompute actually took (see usageAggregateTTLFor), so an expensive
+// scan is not repeated often enough to dominate the process.
 const usageAggregateTTL = 2 * time.Second
+
+// usageAggregateMaxTTL is the ceiling on the derived reuse window: however
+// expensive a recompute was, the dashboard's counters never go more than this
+// stale.
+const usageAggregateMaxTTL = time.Minute
+
+// usageAggregateBackoff is the duty-cycle target for the DB-derived
+// aggregates. The reuse window is derived from the cost of the recompute that
+// produced it, so the aggregate work occupies at most 1/N of the time
+// regardless of how large the Activity table or the traffic becomes.
+const usageAggregateBackoff = 20
 
 // usageAggregates is the DB-derived portion of the usage snapshot (the
 // request_logs aggregations). The live in-memory state — last outcomes,
@@ -141,30 +157,68 @@ type usageAggEntry struct {
 	mu  sync.Mutex
 	agg *usageAggregates
 	at  time.Time
+	// ttl is the reuse window derived from the cost of the recompute that
+	// produced agg. It is per account because the recompute cost is per
+	// account.
+	ttl time.Duration
+}
+
+// usageAggregateTTLFor derives the reuse window for a computed usage aggregate
+// from the cost of the recompute that produced it:
+//
+//	window = max(floor, min(cost × usageAggregateBackoff, usageAggregateMaxTTL))
+//
+// Keying the window to the cost rather than to a fixed interval is what keeps
+// the aggregate work bounded: the duty cycle is cost/window = 1/backoff, so it
+// stays constant as the Activity table grows and as traffic rises. A fixed
+// window instead degrades into a CPU hog exactly when the scans get expensive,
+// which is when it matters most.
+//
+// floor is the minimum reuse window — an explicit override (a test's minute,
+// say) always wins over the derived window, and is never shortened by it. A
+// non-positive floor means reuse is disabled and the caller must not use the
+// result.
+func usageAggregateTTLFor(floor, cost time.Duration) time.Duration {
+	if floor <= 0 {
+		return floor
+	}
+	window := cost * usageAggregateBackoff
+	if window > usageAggregateMaxTTL {
+		window = usageAggregateMaxTTL
+	}
+	if window < floor {
+		return floor
+	}
+	return window
 }
 
 // usageAggregates returns the DB-derived usage aggregates, reusing a recently
-// computed set within usageCacheTTL. A zero TTL disables reuse. Callers for the
-// same account coalesce onto one set of scans rather than stampeding the
-// database.
+// computed set within the derived reuse window. A zero floor disables reuse.
+// Callers for the same account coalesce onto one set of scans rather than
+// stampeding the database.
 func (s *Server) usageAggregates(ctx context.Context, accountID string, now time.Time) (usageAggregates, error) {
 	entry := s.usageAggEntryFor(accountID)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 	if s.usageCacheTTL > 0 && entry.agg != nil {
-		if now.Sub(entry.at) < s.usageCacheTTL {
+		if now.Sub(entry.at) < entry.ttl {
 			return *entry.agg, nil
 		}
 		// Drop the stale set: otherwise every account that ever opened a
 		// dashboard leaves its aggregates resident for the process life.
 		entry.agg = nil
 	}
+	start := time.Now()
 	agg, err := s.computeUsageAggregates(ctx, accountID, now)
 	if err != nil {
 		return usageAggregates{}, err
 	}
 	if s.usageCacheTTL > 0 {
 		entry.agg, entry.at = &agg, now
+		// The window is derived from the cost of the recompute just paid, so
+		// the aggregate work keeps a bounded duty cycle as the Activity table
+		// grows. See usageAggregateTTLFor.
+		entry.ttl = usageAggregateTTLFor(s.usageCacheTTL, time.Since(start))
 	}
 	return agg, nil
 }

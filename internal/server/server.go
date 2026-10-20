@@ -194,8 +194,10 @@ type Server struct {
 	// request_logs scans are reused.
 	usageAggMu sync.Mutex
 	usageAgg   map[string]*usageAggEntry
-	// usageCacheTTL bounds how long a computed usage aggregate is reused. Zero
-	// disables caching (tests use this for determinism).
+	// usageCacheTTL is the minimum reuse window for a computed usage aggregate.
+	// Zero disables caching (tests use this for determinism). The effective
+	// window is derived from the cost of the recompute and is never shorter
+	// than this; see usageAggregateTTLFor.
 	usageCacheTTL time.Duration
 	// sseKeepalive overrides the streaming keepalive interval. Zero uses the
 	// production default (sseKeepaliveInterval); tests set it short so the
