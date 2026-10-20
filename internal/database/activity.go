@@ -104,6 +104,14 @@ CREATE TABLE IF NOT EXISTS request_attempts (
 
 CREATE INDEX IF NOT EXISTS request_attempts_request ON request_attempts(request_log_id, attempt_number);
 CREATE INDEX IF NOT EXISTS request_attempts_account ON request_attempts(account_id, request_log_id);
+-- request_attempts_account_created covers the Activity target-health
+-- aggregate, which filters on account_id and a created_at window. Without it
+-- that query walks every attempt row the account has ever written and
+-- filters created_at in the WHERE clause, which makes it the single most
+-- expensive query in the usage snapshot. The index is created on the next
+-- boot for an existing Activity database: this schema block is executed on
+-- every open and every statement in it is idempotent.
+CREATE INDEX IF NOT EXISTS request_attempts_account_created ON request_attempts(account_id, created_at);
 `
 
 // servicePragmas are the pragmas shared by the central database and the
