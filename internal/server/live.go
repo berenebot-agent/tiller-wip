@@ -275,7 +275,7 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	}
 	// Claim a subscriber slot BEFORE committing SSE headers: a capped account
 	// must get a normal 429 JSON error, not a 200 stream that immediately
-	// closes (docs/pre_saas_release_review.md TR-007).
+	// closes (../docs/pre_saas_release_review.md TR-007).
 	accountID := s.scope(r).AccountID()
 	ch, admitted := s.liveHub.subscribe(accountID)
 	if !admitted {

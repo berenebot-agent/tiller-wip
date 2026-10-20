@@ -511,7 +511,7 @@ func (s *Server) auditActorFor(r *http.Request) auditActor {
 // recordResourceAudit writes the account-scoped audit event for a
 // tenant-config mutation, best-effort (a failed write never fails the
 // operation), skipping silently when there is no authenticated principal.
-// (docs/pre_saas_release_review.md TR-014.)
+// (../docs/pre_saas_release_review.md TR-014.)
 func (s *Server) recordResourceAudit(r *http.Request, accountID string, event store.AuditEvent) {
 	actor := s.auditActorFor(r)
 	if actor.id == "" {

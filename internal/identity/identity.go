@@ -225,7 +225,7 @@ func (s *Store) SetCacheTTL(d time.Duration) {
 // SetPlatformSessionTTL overrides the platform-operator session lifetime. It is
 // called once at construction time; the platform console is the
 // highest-privilege session and gets a shorter window than customer sessions
-// (docs/pre_saas_release_review.md TR-010).
+// (../docs/pre_saas_release_review.md TR-010).
 func (s *Store) SetPlatformSessionTTL(d time.Duration) {
 	if d <= 0 {
 		return
@@ -408,7 +408,7 @@ const (
 // install when the legacy credentials are omitted. The caller must run this
 // before syncing the hosted platform credential.
 //
-// ONE-TIME UPGRADE GUARD (see docs/back_compat.md): the
+// ONE-TIME UPGRADE GUARD (see ../docs/back_compat.md): the
 // 'hosted_bootstrap_complete' marker is a deliberate one-time migration gate,
 // not recurring compat. It stays permanently so an install started before
 // hosted identity existed can convert exactly once. It recognises two subjects:

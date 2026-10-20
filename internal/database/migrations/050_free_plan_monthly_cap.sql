@@ -1,4 +1,4 @@
--- TR-003 (docs/pre_saas_release_review.md): the public free beta needs a
+-- TR-003 (../docs/pre_saas_release_review.md): the public free beta needs a
 -- finite default monthly request allowance. The free plan was seeded with the
 -- unlimited sentinel (-1) for the private alpha (042_plans.sql); this
 -- migration gives it a 20,000/month default.

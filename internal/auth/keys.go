@@ -119,7 +119,7 @@ func argon2idHash(secret string) (string, error) {
 // must not acquire again, so direct callers are responsible for holding a slot.
 //
 // Verification is drift-tolerant downward and bounded by the current parameters
-// (see docs/back_compat.md): rows encoded with weaker (smaller) parameters keep
+// (see ../docs/back_compat.md): rows encoded with weaker (smaller) parameters keep
 // verifying so a future parameter change can be adopted lazily via the
 // NeedsRehash upgrade path instead of locking every stored credential out.
 // Anything above the current parameters fails closed, verify cost can therefore

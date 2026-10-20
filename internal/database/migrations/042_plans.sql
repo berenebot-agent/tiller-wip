@@ -22,7 +22,7 @@ CREATE TABLE plans (
 
 INSERT INTO plans(name, max_providers, max_client_keys, max_virtual_models, max_concurrent_streams, activity_retention_days, monthly_requests, updated_at)
 VALUES ('free', 3, 5, 5, 5, 7, -1, '2026-09-21T00:00:00.000000000Z');
--- TR-003 (docs/pre_saas_release_review.md): the free plan is seeded here with
+-- TR-003 (../docs/pre_saas_release_review.md): the free plan is seeded here with
 -- an UNLIMITED monthly request allowance for the private alpha — the tier is
 -- BYOK, so the operator's marginal request cost is bandwidth/CPU only.
 -- Migration 050 then gives the public free beta a finite 20,000/month default

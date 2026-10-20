@@ -1289,7 +1289,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			// LAN by design, so it must never advertise an HTTPS-only policy.
 			// No includeSubDomains — an operator may run unrelated services on
 			// sibling subdomains and this app cannot vouch for them.
-			// (docs/pre_saas_release_review.md TR-008.)
+			// (../docs/pre_saas_release_review.md TR-008.)
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 			if s.platformPreventSearchIndexing() {
 				w.Header().Set("X-Robots-Tag", "noindex, nofollow")
@@ -1315,7 +1315,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 // middleware sets; a pointer stashed in the context closes that gap (the
 // middleware mutates, the tail reads). The account id is the pseudonymous
 // account UUID — never an email, client key name, or credential.
-// (docs/pre_saas_release_review.md TR-014.)
+// (../docs/pre_saas_release_review.md TR-014.)
 type requestInfo struct {
 	// AccountID is the verified principal's account, set by the auth
 	// middleware. Empty for unauthenticated paths.
