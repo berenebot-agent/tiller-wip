@@ -20,7 +20,7 @@ const (
 	// maxConcurrentBodyReads caps how many requests may be reading a body at
 	// once process-wide. The product of the gate and the largest body cap is
 	// the process's worst-case body-buffer budget: 64 x 8 MiB = 512 MiB. The
-	// pre-release review (docs/pre_saas_release_review.md TR-002) sized both
+	// pre-release review (../docs/pre_saas_release_review.md TR-002) sized both
 	// constants so the aggregate fits well inside a small container; a single
 	// flood cannot hold gigabytes in unread request bodies.
 	maxConcurrentBodyReads = 64

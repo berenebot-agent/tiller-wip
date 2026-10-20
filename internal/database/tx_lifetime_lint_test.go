@@ -18,6 +18,7 @@ import (
 // internal/server proves the current inference path; this lint catches a future
 // callback that reaches for a network/IO call inside the transaction.
 func TestNoTenantTxAcrossIOInSource(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("..", "..")
 	targets := []string{
 		filepath.Join(root, "internal", "store"),

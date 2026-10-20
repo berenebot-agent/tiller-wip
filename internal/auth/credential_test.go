@@ -37,6 +37,7 @@ func fastStore(t *testing.T, db *database.DB, username, password string) *auth.S
 // TestCredentialStoreUnconfigured proves an empty boot writes no credential and
 // reports the first-run state, so the setup page is offered.
 func TestCredentialStoreUnconfigured(t *testing.T) {
+	t.Parallel()
 	db := newCredentialDB(t)
 	store := fastStore(t, db, "", "")
 	if store.CredentialConfigured() {
@@ -60,6 +61,7 @@ func TestCredentialStoreUnconfigured(t *testing.T) {
 // TestEnvCredentialSyncsAndVerifies covers the env-admin path: boot writes the
 // hash and the display username from environment values.
 func TestEnvCredentialSyncsAndVerifies(t *testing.T) {
+	t.Parallel()
 	db := newCredentialDB(t)
 	store := fastStore(t, db, "env-admin", "env-password")
 	if !store.CredentialConfigured() {
@@ -80,6 +82,7 @@ func TestEnvCredentialSyncsAndVerifies(t *testing.T) {
 // rotation mechanism: a changed env credential rewrites the hash and revokes
 // existing sessions.
 func TestEnvCredentialChangeInvalidatesSessions(t *testing.T) {
+	t.Parallel()
 	db := newCredentialDB(t)
 	first := fastStore(t, db, "admin", "old-password")
 	session, err := first.Create()
@@ -101,6 +104,7 @@ func TestEnvCredentialChangeInvalidatesSessions(t *testing.T) {
 // TestSetCredentialIsOneShot is the first-run claim contract: the write lands
 // once, and a second claim can never replace the administrator.
 func TestSetCredentialIsOneShot(t *testing.T) {
+	t.Parallel()
 	db := newCredentialDB(t)
 	store := fastStore(t, db, "", "")
 	if err := store.SetCredential("wizard-admin", "wizard-password"); err != nil {
@@ -127,6 +131,7 @@ func TestSetCredentialIsOneShot(t *testing.T) {
 // TestSetCredentialInvalidatesSessions proves any pre-existing session is
 // revoked when the credential is first claimed.
 func TestSetCredentialInvalidatesSessions(t *testing.T) {
+	t.Parallel()
 	db := newCredentialDB(t)
 	store := fastStore(t, db, "", "")
 	session, err := store.Create()
@@ -145,6 +150,7 @@ func TestSetCredentialInvalidatesSessions(t *testing.T) {
 // environment, is authoritative: a restart with no env credentials still
 // authenticates and reports the stored username.
 func TestWizardCredentialSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
@@ -176,6 +182,7 @@ func TestWizardCredentialSurvivesRestart(t *testing.T) {
 // TestPartialCredentialRejected proves boot cannot half-configure: both values
 // or neither.
 func TestPartialCredentialRejected(t *testing.T) {
+	t.Parallel()
 	db := newCredentialDB(t)
 	if _, err := auth.NewSessionStoreWithHasher(db.SQL, "admin", "", time.Hour, fastsecret.Hasher{}); !errors.Is(err, auth.ErrPartialCredential) {
 		t.Fatalf("username-only boot err = %v, want ErrPartialCredential", err)

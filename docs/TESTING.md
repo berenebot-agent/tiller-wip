@@ -32,6 +32,25 @@ the right tool for a tight edit loop (Tier A: one package or one spec). Use the
 runner when you want a known set of tiers with a single summary and guaranteed
 detail on disk.
 
+The runner is serial by default. `TILLER_TEST_JOBS=2` runs the browser tier in a
+parallel lane while the remaining tiers run serially, which cut wall-clock
+112s → 71s on an idle 6-core box. The default of 1 is deliberate: every source
+change forces a router-image rebuild, and with that rebuild running alongside,
+the host is starved and a timing-sensitive unit test fails. Raise it only on a
+large, quiet machine.
+
+For a targeted containerized browser run, name only the relevant specs:
+
+```bash
+TILLER_BROWSER_SPECS="live-requests.spec.js activity-graph.spec.js" ./tests/browser/run.sh
+```
+
+This uses one isolated test shard and skips the additional Activity and
+first-run suites. Without this override the normal lanes are unchanged;
+`live-requests.spec.js` is included in the Activity lane. Its coverage combines
+real routing/logging integration with deterministic request-row lifecycle,
+expiry, fallback expansion, recovery, and completed-row-cap checks.
+
 ## Tiers
 
 | Tier | What it runs | Typical |
@@ -43,6 +62,13 @@ detail on disk.
 | `runtime` | `tests/runtime-readonly.sh` (read-only rootfs / caps / backup) | ~15 s |
 
 Default preset is `unit + vet + runtime`. Use `--all` for the full sweep.
+
+The compat tier's SDK and Hermes probe images are tagged by a content hash of
+their Dockerfile, requirements and probe script, so an unchanged probe is
+reused instead of reinstalled on every run; `TILLER_COMPAT_REBUILD=1` forces a
+rebuild. The browser tier sizes its Playwright shard count to the host, and
+each lane writes its own Playwright results subdirectory;
+`TILLER_BROWSER_WORKERS` overrides the shard count.
 
 ## Run folder layout
 

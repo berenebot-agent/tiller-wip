@@ -15,6 +15,7 @@ import (
 )
 
 func TestGeneratedPNG(t *testing.T) {
+	t.Parallel()
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(pngDataURL(), "data:image/png;base64,"))
 	if err != nil {
 		t.Fatal(err)
@@ -26,6 +27,7 @@ func TestGeneratedPNG(t *testing.T) {
 }
 
 func TestReplyVerificationAndToolContinuation(t *testing.T) {
+	t.Parallel()
 	for _, body := range []string{"", "   ", "OK", "Acknowledged"} {
 		result := &gateway.Result{Choices: []gateway.Choice{{Content: body}}}
 		if usableReply(result) != (strings.TrimSpace(body) != "") {
@@ -71,6 +73,7 @@ func TestReplyVerificationAndToolContinuation(t *testing.T) {
 }
 
 func TestEmptyChatAndStreamFail(t *testing.T) {
+	t.Parallel()
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)

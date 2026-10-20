@@ -40,6 +40,7 @@ func testProviderID(t *testing.T, api *testAPI) string {
 }
 
 func TestManualModelLookupAddAndDelete(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, manualModelUpstream())
 	providerID := testProviderID(t, api)
 
@@ -111,6 +112,7 @@ func TestManualModelLookupAddAndDelete(t *testing.T) {
 }
 
 func TestManualModelValidation(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, manualModelUpstream())
 	providerID := testProviderID(t, api)
 

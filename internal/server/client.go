@@ -32,7 +32,7 @@ const maxUpstreamNonStreamBytes int64 = 16 << 20
 // legitimate request is lost, while the product of the body-read gate
 // (maxConcurrentBodyReads) and this constant is the process's worst-case
 // inbound buffer budget: 64 x 8 MiB = 512 MiB
-// (docs/pre_saas_release_review.md TR-002).
+// (../docs/pre_saas_release_review.md TR-002).
 const maxInferenceBodyBytes int64 = 8 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
@@ -621,7 +621,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// million tokens of text — beyond every model's context window — so no
 	// legitimate request is lost, while the process-wide product of the
 	// body-read gate and this cap stays inside a small container's memory
-	// (docs/pre_saas_release_review.md TR-002).
+	// (../docs/pre_saas_release_review.md TR-002).
 	r.Body = http.MaxBytesReader(w, r.Body, maxInferenceBodyBytes)
 	// Bound the body phase before it can hold a connection indefinitely, and
 	// admit it through the process-wide gate so a slow-upload flood cannot park
@@ -670,6 +670,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		clientRequestID: newRequestID(),
 		createdAt:       database.Now(),
 	}
+	row.liveEnabled, _ = s.scope(r).ClientKeyLoggingEnabled(r.Context(), identity.ID)
+	s.publishLiveRequest(row, false)
 	logErrorBodies := false
 	if s.config.Mode != config.ModeHosted {
 		logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
@@ -718,6 +720,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		// request writes no Activity row and consumes no monthly slot.
 		if !quotaRejected {
 			s.writeLog(context.Background(), row)
+		}
+		if quotaRejected {
+			row.liveEnabled = false
+		}
+		if row.liveEnabled {
+			s.publishLiveRequest(row, true)
+		} else if s.liveHub != nil && row.liveRevision > 0 {
+			s.liveHub.withdrawRequest(row.accountID, row.clientRequestID)
 		}
 	}()
 	w.Header().Set("X-Tiller-Request-Id", row.clientRequestID)
@@ -775,6 +785,10 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	if route.RoutingMode == "ordered_fallback" {
 		cooldownSeconds, _ = s.scope(r).GetFallbackCooldownSeconds(r.Context())
 	}
+	// The per-attempt time-to-first-header bound is request-static, so resolve
+	// its HTTP client once here rather than issuing a settings read on every
+	// fallback attempt.
+	upstreamClient := s.upstreamHTTPClient(r)
 	skippedCooled := false
 	allAttemptedFailed := true
 	var success bool
@@ -810,6 +824,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		}
 		for i := 0; i < len(candidates); i++ {
 			candidate := candidates[i]
+			row.liveFallback = row.liveFallback || (route.RoutingMode == "ordered_fallback" && (i > 0 || pass > 0))
+			row.liveAttempt = &requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID}
+			s.publishLiveRequest(row, false)
 			if ctxErr := r.Context().Err(); ctxErr != nil {
 				class := "client_cancelled"
 				if errors.Is(ctxErr, context.DeadlineExceeded) {
@@ -1035,7 +1052,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			// real route this is the single 1:1 leg, so the Activity graph can
 			// light it (and dim it on failure) while the request is in flight.
 			s.inflight.targetStart(row.accountID, route.RouteModelID, targetID)
-			response, e := s.upstreamHTTPClient(r).Do(req)
+			response, e := upstreamClient.Do(req)
 			if e != nil {
 				s.inflight.targetEnd(row.accountID, route.RouteModelID, targetID)
 				attemptCancel()
@@ -1182,6 +1199,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					if descriptor, ok := providers.Lookup(candidate.Provider.Type); ok && descriptor.AuthMode == providers.AuthModeOAuth {
 						if refreshErr := s.providers.ForceOAuthRefresh(r.Context(), identity.AccountID, &candidate.Provider); refreshErr == nil {
 							oauthRefreshed[candidate.Provider.ID] = true
+							// The credentials just rotated, so this failure is
+							// the router's to repair, not evidence the target is
+							// unhealthy: mark it after the refresh succeeds so
+							// recordLastOutcome never degrades the target for a
+							// self-healed token expiry. The attempt keeps its red
+							// leg in Activity.
+							row.attempts[len(row.attempts)-1].recovered = true
 							// Propagate the fresh credential to every candidate
 							// sharing this provider so later targets don't retry
 							// with the stale token that just 401'd.
@@ -1487,7 +1511,6 @@ routeDone:
 	}
 	// Tighten the quota-poll cadence for this provider while it is active. A
 	// no-op when the poller is not configured.
-	s.markProviderActive(row.accountID, selected.Provider.ID)
 	s.inflight.clientResolved(row.accountID, row.clientKeyID, route.RouteModelID, selected.Provider.Name+"/"+selected.UpstreamModelID)
 	defer resp.Body.Close()
 	copySafeResponseHeaders(w.Header(), resp.Header)
@@ -1560,6 +1583,7 @@ routeDone:
 		if streamingResponse {
 			streamed = true
 			row.streaming = true
+			s.publishLiveRequest(row, false)
 			s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 			ensureStreamKeepalive()
 		}
@@ -1608,7 +1632,7 @@ routeDone:
 		}
 		if err := translateResponseObserved(w, streamKeepalive, translatedReader, incoming, target, selected, usage, outputObs); err != nil {
 			idle.Stop()
-			class := "translation_error"
+			class := translatedStreamFailureClass(err)
 			if attemptTimedOut.Load() {
 				class = "upstream_timeout"
 			}
@@ -1623,7 +1647,14 @@ routeDone:
 					streamKeepalive.Flush()
 				}
 			}
-			s.logger.Warn("protocol translation stream ended", "protocol", incoming, "upstream_protocol", target, "error_class", fmt.Sprintf("%T", err))
+			s.logger.Warn("protocol translation stream ended",
+				"client_request_id", row.clientRequestID,
+				"provider", selected.Provider.Name,
+				"model", selected.UpstreamModelID,
+				"protocol", incoming,
+				"upstream_protocol", target,
+				"failure_class", class,
+				"error_class", fmt.Sprintf("%T", err))
 		} else {
 			clearSelectedCooldown()
 		}
@@ -1633,6 +1664,7 @@ routeDone:
 	if upstreamStreams {
 		streamed = true
 		row.streaming = true
+		s.publishLiveRequest(row, false)
 		s.inflight.clientStreaming(row.accountID, row.clientKeyID, route.RouteModelID)
 		ensureStreamKeepalive()
 		row.httpStatus = resp.StatusCode
@@ -1910,7 +1942,7 @@ func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 // nonStreamBufferGate bounds how many non-streaming upstream responses may be
 // buffered at once, process-wide. The product of this gate and
 // maxUpstreamNonStreamBytes is the worst-case outbound buffer budget:
-// 32 x 16 MiB = 512 MiB (docs/pre_saas_release_review.md TR-002). Plan
+// 32 x 16 MiB = 512 MiB (../docs/pre_saas_release_review.md TR-002). Plan
 // concurrency bounds each account, but plans are per-account data, so a global
 // gate is the only aggregate bound. Streaming responses take the 1-byte-peek
 // path and are never gated. The slot is held until the buffered body is closed
@@ -2434,6 +2466,8 @@ func (s *Server) openCooldown(candidate resolvedRoute, class string, row *logRow
 }
 
 func (s *Server) logAttempt(row *logRow, attempt requestAttempt) {
+	row.liveAttempt = nil
+	s.publishLiveRequest(row, false)
 	if s.logger == nil {
 		return
 	}

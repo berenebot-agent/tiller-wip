@@ -117,13 +117,21 @@ func argon2idHash(secret string) (string, error) {
 // argon2idVerify is the canonical Argon2id verification. Both Argon2Hasher and
 // the package-level VerifySecret acquire the KDF slot before delegating here; it
 // must not acquire again, so direct callers are responsible for holding a slot.
+//
+// Verification is drift-tolerant downward and bounded by the current parameters
+// (see ../docs/back_compat.md): rows encoded with weaker (smaller) parameters keep
+// verifying so a future parameter change can be adopted lazily via the
+// NeedsRehash upgrade path instead of locking every stored credential out.
+// Anything above the current parameters fails closed, verify cost can therefore
+// never exceed today's peak, and the encoded string only ever comes from this
+// package's own storage — never from request input.
 func argon2idVerify(secret, encoded string) bool {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != "v=19" {
 		return false
 	}
 	memory, iterations, parallelism, err := ArgonParameters(encoded)
-	if err != nil || memory != argonMemory || iterations != argonIterations || parallelism != argonParallelism {
+	if err != nil || memory == 0 || memory > argonMemory || iterations == 0 || iterations > argonIterations || parallelism == 0 || parallelism > argonParallelism {
 		return false
 	}
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
@@ -263,6 +271,13 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	case <-ctx.Done():
 		return ClientIdentity{}, false, false
 	default:
+		// Admission is bounded, not queued: a cache miss with no slot returns
+		// available=false and the caller answers 429 with Retry-After rather
+		// than parking the request behind a verification. The cap exists
+		// because verification is deliberately expensive (a memory-hard KDF for
+		// legacy hashes), so this bound is the intended backpressure under a
+		// cold-cache burst, not a bug. Keep it small and fixed rather than
+		// scaling it with plan concurrency.
 		return ClientIdentity{}, false, false
 	}
 	defer func() { <-a.sem }()
@@ -577,7 +592,20 @@ func (s *SessionStore) VerifyCredential(username, password string) bool {
 	if err := s.db.QueryRow(`SELECT value FROM platform_settings WHERE key=?`, credentialHashKey).Scan(&stored); err != nil {
 		return false
 	}
-	return s.credentialHasher.Verify(username+"\x00"+password, stored)
+	if !s.credentialHasher.Verify(username+"\x00"+password, stored) {
+		return false
+	}
+	// Lazy upgrade, mirroring rehashSessionToken's best-effort CAS: inert while
+	// the stored fingerprint carries the current Argon2id parameters, but the
+	// first successful verify under drifted parameters re-hashes it so the row
+	// converges on the current format. A concurrent rotation breaks the CAS and
+	// is simply retried on the next login.
+	if s.credentialHasher.NeedsRehash(stored) {
+		if upgraded, err := s.credentialHasher.Hash(username + "\x00" + password); err == nil {
+			_, _ = s.db.Exec(`UPDATE platform_settings SET value=?,updated_at=? WHERE key=? AND value=?`, upgraded, formatUTC(time.Now()), credentialHashKey, stored)
+		}
+	}
+	return true
 }
 
 // CredentialConfigured reports whether an admin credential exists. It is the
@@ -910,6 +938,20 @@ func (s *SessionStore) InvalidateAll() error {
 	s.cache = make(map[string]sessionCacheEntry)
 	s.mu.Unlock()
 	return err
+}
+
+// PruneExpiredSessions removes expired admin session rows. They can no longer
+// authenticate — Validate and the cached path re-check the row's expiry — so
+// this is a size-control measure for the core database and its snapshots, not
+// a security one. It is run by the scheduled maintenance pass in local mode.
+// Expired cache entries self-clean on read and in the sweep, so no explicit
+// cache invalidation is needed here.
+func (s *SessionStore) PruneExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM admin_sessions WHERE expires_at < ?`, formatUTC(now))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ParseSessionToken splits a session token into its selector and secret

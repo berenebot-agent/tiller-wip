@@ -1,4 +1,4 @@
-// Activity living pane: one shared force-layout SVG with three soft lanes
+// Activity living pane: one shared SVG with three aligned lanes
 // (clients → tiller models → real-model targets). Only active routes are
 // shown: nodes and legs materialize from live `activity` deltas and fade away
 // FADE_MS after going quiet. No provider nodes — a leg points at the real
@@ -9,8 +9,8 @@
 // applied perpendicular to each leg's own chord, because legs from one node
 // have different horizontal spans and a fixed vertical offset makes the short
 // leg dive early and graze its longer sibling. Active legs are drawn in a front
-// layer; idle legs absorb a best-effort bow to route around them, and a bounded
-// barycenter pass reorders lanes only when independent chains are inverted. An
+// layer; legs absorb a best-effort bow to clear labels and earlier legs, and a
+// bounded ordering pass minimises crossings across direct and virtual paths. An
 // orphan leg is never rendered: a route requires a client ingress and a target
 // requires a fed route or direct client.
 //
@@ -66,6 +66,7 @@ let emptyEl = null;
 let nodeClickHandler = null;
 let rafId = 0;
 let layoutTimer = 0;
+let layoutDirty = true;
 
 // nodes: [{id, kind, label, sub, state, x, y, ...}] — d3 mutates x/y/fx/fy.
 // Only nodes with at least one live leg exist here.
@@ -97,6 +98,7 @@ const hotLegs = new Map(); // edgeKey -> active in-flight count
 
 const W = 1180;
 const H = 600;
+let layoutHeight = H;
 const laneX = d => (d.kind === 'client' ? W * 0.14 : d.kind === 'route' ? W * 0.45 : W * 0.84);
 const nodeRadius = d => (d.kind === 'target' ? 12 : d.kind === 'route' ? 15 : 13);
 const nodeFill = d => (d.kind === 'client' ? BLUE : d.kind === 'route' ? PURP : GREEN);
@@ -106,6 +108,10 @@ function edgeKey(a, b) {
 }
 
 const LABEL_WRAP = 24;
+// Keep text bounds in sync with activity-graph.css (17px labels, 14px subtext).
+const LABEL_LINE_HEIGHT = 21;
+const SUB_LINE_HEIGHT = 18;
+const LABEL_HALF_WIDTH = 135;
 function wrapLabel(label) {
   if (!label) return [''];
   const out = [];
@@ -319,110 +325,159 @@ function clampFansToLane() {
 
 // labelBox: the wrapped label/sub block *below* a node — not the disc. Legs
 // legally pass behind discs (paint order + halo handle that); text is what
-// must stay clear. Half-width 85 covers the 24-char mono wrap at 11px.
+// must stay clear. The half-width covers the 24-char mono wrap at 17px.
 function labelBox(n) {
   const lines = wrapLabel(n.label || '').length;
-  const h = 30 + lines * 13 + (n.sub ? 14 : 0);
-  return { x0: n.x - 85, x1: n.x + 85, y0: n.y + nodeRadius(n) + 2, y1: n.y + h + 6 };
+  const h = 30 + lines * LABEL_LINE_HEIGHT + (n.sub ? SUB_LINE_HEIGHT : 0);
+  return { x0: n.x - LABEL_HALF_WIDTH, x1: n.x + LABEL_HALF_WIDTH, y0: n.y + nodeRadius(n) + 2, y1: n.y + h + 6 };
 }
 
 function rectHit(pts, box) {
   return pts.some(p => p.x > box.x0 && p.x < box.x1 && p.y > box.y0 && p.y < box.y1);
 }
 
-// recomputeRoutes lets idle legs bow out of the way of active ones and out of
-// their own endpoints' label blocks. Best-effort only: it never moves active
-// legs, and caps work on edge count.
+// Route active legs first, then quiet legs. All legs avoid label blocks (including
+// intermediate route labels on direct client → target paths). Work is bounded;
+// bows are only a finishing pass, not a substitute for ordering the lanes.
 function recomputeRoutes() {
   if (!sim || EDGES.size === 0 || EDGES.size > 45) return;
-  const active = [];
-  EDGES.forEach(e => {
-    if (e.state === 'req' || e.state === 'pending') active.push(e);
-  });
-  if (active.length === 0) {
-    EDGES.forEach(e => { e.bow = 0; });
-    return;
-  }
-  const activeSamples = active.map(e => sampleCurve(controlPoints(e, 0), ROUTE_SAMPLES));
-  EDGES.forEach(e => {
-    if (e.state === 'req' || e.state === 'pending') {
-      e.bow = 0;
-      return;
-    }
+  const isActive = e => e.state === 'req' || e.state === 'pending';
+  const list = Array.from(EDGES.values()).sort((a, b) => Number(isActive(b)) - Number(isActive(a)));
+  const routed = [];
+  const boxes = nodes.map(n => ({ n, box: labelBox(n) }));
+  list.forEach(e => {
     let best = 0;
     let bestScore = Infinity;
-    const boxA = labelBox(e.a);
-    const boxB = labelBox(e.b);
     for (const bow of ROUTE_BOWS) {
       const pts = sampleCurve(controlPoints(e, bow), ROUTE_SAMPLES);
       let score = Math.abs(bow) * 0.01;
-      for (const ap of activeSamples) {
-        if (polylinesCross(pts, ap)) score += 1;
+      for (const previous of routed) {
+        if (polylinesCross(pts, previous.pts)) score += 1;
       }
-      // A candidate bow that crosses either endpoint's wrapped label block
-      // scores worse than one crossing an active leg — text legibility wins.
-      if (rectHit(pts, boxA) || rectHit(pts, boxB)) score += 1.5;
+      for (const { n, box } of boxes) {
+        if (rectHit(pts, box)) score += 1.5;
+        if (n !== e.a && n !== e.b && pts.some(p => Math.hypot(p.x - n.x, p.y - n.y) < nodeRadius(n) + 8)) score += 1.5;
+      }
       if (score < bestScore) {
         bestScore = score;
         best = bow;
       }
     }
     e.bow = best;
+    routed.push({ pts: sampleCurve(controlPoints(e, best), ROUTE_SAMPLES) });
   });
 }
 
-// independentCrossings returns pairs of legs that share no node yet swap
-// vertical order between their endpoints — the cases that must cross.
-function independentCrossings() {
-  const list = Array.from(EDGES.values());
-  const out = [];
-  for (let i = 0; i < list.length; i++) {
-    for (let j = i + 1; j < list.length; j++) {
-      const e1 = list[i];
-      const e2 = list[j];
-      if (e1.a === e2.a || e1.a === e2.b || e1.b === e2.a || e1.b === e2.b) continue;
-      if ((e1.a.y - e2.a.y) * (e1.b.y - e2.b.y) < 0) out.push([e1, e2]);
-    }
-  }
-  return out;
-}
-
-function barycenter(n, neighborKind) {
+function barycenter(n, positions, incoming) {
   let sum = 0;
   let count = 0;
   EDGES.forEach(e => {
-    if (e.a === n && e.b.kind === neighborKind) {
-      sum += e.b.y;
-      count++;
-    } else if (e.b === n && e.a.kind === neighborKind) {
-      sum += e.a.y;
+    const neighbor = incoming ? (e.b === n ? e.a : null) : (e.a === n ? e.b : null);
+    if (neighbor) {
+      sum += positions.get(neighbor).y;
       count++;
     }
   });
-  return count ? sum / count : n.y;
+  return count ? sum / count : positions.get(n).y;
 }
 
-// orderLane orders one lane by the mean y of its neighbours and anchors the
-// nodes to evenly-spaced slots. Anchors live only between layout passes, so the
-// force layout resumes as soon as the crossings are gone.
-function orderLane(kind, neighborKind) {
-  const list = nodes.filter(n => n.kind === kind && !n.dragging);
-  if (list.length < 2) return;
-  list.forEach(n => { n._bary = barycenter(n, neighborKind); });
-  list.sort((x, y) => (x._bary - y._bary) || (x.id < y.id ? -1 : 1));
-  const step = Math.min(100, (H - 140) / (list.length - 1));
-  const start = H / 2 - (step * (list.length - 1)) / 2;
-  list.forEach((n, i) => { n.fy = start + i * step; });
+function laneSpacing(list) {
+  return Math.max(90, ...list.map(n => 30 + wrapLabel(n.label || '').length * LABEL_LINE_HEIGHT + (n.sub ? SUB_LINE_HEIGHT : 0) + 30));
 }
 
-// resolveCrossings reorders lanes only when independent chains are actually
-// inverted. Once anchored, nodes stay put (the force layout does not resume and
-// drift them back into a crossing), which keeps the pane from oscillating.
+function lanePositions(lanes) {
+  const positions = new Map(nodes.map(n => [n, { x: n.x, y: n.y }]));
+  lanes.forEach(list => {
+    const step = laneSpacing(list);
+    const start = layoutHeight / 2 - step * (list.length - 1) / 2;
+    list.forEach((n, i) => positions.set(n, { x: laneX(n), y: start + i * step }));
+  });
+  return positions;
+}
+
+// Use actual segment intersections, not just endpoint-order inversions: direct
+// edges span two lanes, while virtual legs span one, so their x ranges differ.
+function layoutScore(positions) {
+  const list = Array.from(EDGES.values());
+  let score = 0;
+  for (let i = 0; i < list.length; i++) {
+    const e = list[i];
+    const a = positions.get(e.a);
+    const b = positions.get(e.b);
+    for (let j = i + 1; j < list.length; j++) {
+      const other = list[j];
+      if (e.a === other.a || e.a === other.b || e.b === other.a || e.b === other.b) continue;
+      if (segmentsCross(a, b, positions.get(other.a), positions.get(other.b))) score += 10;
+    }
+    // Keep direct paths out of intermediate roundels and their wrapped labels.
+    nodes.forEach(n => {
+      const p = positions.get(n);
+      if (n === e.a || n === e.b || p.x <= a.x || p.x >= b.x) return;
+      const y = a.y + (b.y - a.y) * (p.x - a.x) / (b.x - a.x);
+      const bottom = 30 + wrapLabel(n.label || '').length * LABEL_LINE_HEIGHT + (n.sub ? SUB_LINE_HEIGHT : 0);
+      if (y > p.y - nodeRadius(n) - 8 && y < p.y + bottom + 8) score += 1;
+    });
+  }
+  return score;
+}
+
+// Structural changes trigger a bounded forward/backward barycenter search,
+// followed by adjacent swaps that only improve the score. Include BOTH direct
+// clients and virtual routes when ordering targets. Pin the resulting slots so
+// the force simulation cannot pull a clean layout back into a crossing.
 function resolveCrossings() {
-  if (!sim) return;
-  if (independentCrossings().length === 0) return;
-  orderLane('route', 'client');
-  orderLane('target', 'route');
+  if (!sim || !layoutDirty) return;
+  layoutDirty = false;
+  const lanes = ['client', 'route', 'target'].map(kind => nodes
+    .filter(n => n.kind === kind && !n.dragging)
+    .sort((a, b) => (a.y - b.y) || a.id.localeCompare(b.id)));
+  layoutHeight = Math.max(H, ...lanes.map(list => 160 + Math.max(0, list.length - 1) * laneSpacing(list)));
+  svg.setAttribute('viewBox', `0 0 ${W} ${layoutHeight}`);
+  svg.style.setProperty('--graph-extra-height', `${layoutHeight - H}px`);
+  let best = lanes.map(list => list.slice());
+  let positions = lanePositions(lanes);
+  const optimise = EDGES.size <= 45 && nodes.length <= 40;
+  let bestScore = optimise ? layoutScore(positions) : Infinity;
+  // Bound the quadratic scoring work for unusually busy panes. They still get
+  // neighbour ordering and label spacing, without the adjacent-swap search.
+  for (let pass = 0; pass < (optimise ? 4 : 1); pass++) {
+    const incoming = pass % 2 === 0;
+    const order = incoming ? [1, 2] : [1, 0];
+    order.forEach(index => {
+      const centers = new Map(lanes[index].map(n => [n, barycenter(n, positions, incoming)]));
+      lanes[index].sort((a, b) => centers.get(a) - centers.get(b));
+      positions = lanePositions(lanes);
+    });
+    const score = optimise ? layoutScore(positions) : 0;
+    if (score < bestScore) {
+      best = lanes.map(list => list.slice());
+      bestScore = score;
+    }
+  }
+  if (optimise) {
+    for (let pass = 0; pass < 3; pass++) {
+      let improved = false;
+      best.forEach(list => {
+        for (let i = 0; i + 1 < list.length; i++) {
+          [list[i], list[i + 1]] = [list[i + 1], list[i]];
+          const score = layoutScore(lanePositions(best));
+          if (score < bestScore) {
+            bestScore = score;
+            improved = true;
+          } else {
+            [list[i], list[i + 1]] = [list[i + 1], list[i]];
+          }
+        }
+      });
+      if (!improved) break;
+    }
+  }
+  lanePositions(best).forEach((p, n) => {
+    if (n.dragging) return;
+    n.fx = n.x = p.x;
+    n.fy = n.y = p.y;
+    n.vx = n.vy = 0;
+  });
 }
 
 // scheduleLayoutPass coalesces fan/route/reorder work triggered by structural
@@ -451,6 +506,7 @@ function activateNode(d) {
 // from rebinding the wrong DOM groups when nodes come and go.
 function syncSim() {
   if (!sim) return;
+  layoutDirty = true;
   sim.nodes(nodes);
   if (linkForce) linkForce.links(forceLinks);
   nodeSel = gN.selectAll('g').data(nodes, d => d.id).join(
@@ -484,8 +540,9 @@ function syncSim() {
         .on('end', (e, d) => {
           if (sim) sim.alphaTarget(0);
           d.dragging = false;
-          d.fx = null;
+          d.fx = laneX(d);
           d.fy = null;
+          layoutDirty = true;
           scheduleLayoutPass();
         }));
       g.append('circle').attr('class', 'node-ring').attr('r', d => nodeRadius(d) + 5).attr('fill', 'none');
@@ -495,7 +552,7 @@ function syncSim() {
         .each(function (d) {
           renderNodeLabel(d3.select(this), d.label);
         });
-      g.append('text').attr('class', 'node-sub').attr('dy', d => 30 + wrapLabel(d.label || '').length * 13).attr('text-anchor', 'middle')
+      g.append('text').attr('class', 'node-sub').attr('dy', d => 30 + wrapLabel(d.label || '').length * LABEL_LINE_HEIGHT).attr('text-anchor', 'middle')
         .text(d => d.sub || '');
       return g;
     },
@@ -519,7 +576,7 @@ function syncSim() {
 function ensureNode(kind, id, label, sub) {
   let n = byId.get(id);
   if (n) return n;
-  n = { id, kind, label, sub: sub || '', state: 'idle', x: laneX({ kind }), y: H / 2 + (Math.random() - 0.5) * 240 };
+  n = { id, kind, label, sub: sub || '', state: 'idle', x: laneX({ kind }), fx: laneX({ kind }), y: layoutHeight / 2 + (Math.random() - 0.5) * 240 };
   nodes.push(n);
   byId.set(id, n);
   syncSim();
@@ -872,10 +929,20 @@ function missingIds(delta) {
   return out;
 }
 
+// isCooling reports whether a provider_model_id is in fallback cooldown. The
+// live snapshot keys target_cooldown by provider_model_id, so the id is the
+// primary key; the provider/upstream form is the legacy key shape and is only a
+// fallback when the catalogue entry (and so the names) is known.
+function isCooling(pmID, idx) {
+  return coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+}
+
 // relabelNode rewrites a live node's label/sub after updateCatalogue fills in
 // an id that was unknown when the node first materialized. Nodes are keyed by
 // id and never re-enter, so the raw-id fallback would otherwise stick forever.
 function relabelNode(n) {
+  const oldLabel = n.label;
+  const oldSub = n.sub;
   if (n.kind === 'route') {
     const rec = routeIndex.get(n.id.slice(2));
     if (rec) {
@@ -887,18 +954,22 @@ function relabelNode(n) {
     const idx = modelIndex.get(pmID);
     if (idx) {
       n.label = idx.provider + '/' + idx.upstream;
-      n.cooling = coolingSet.has(pmID) || coolingSet.has(idx.provider + '/' + idx.upstream);
+      n.cooling = isCooling(pmID, idx);
       applyNodeState(n);
     }
   } else if (n.kind === 'client') {
     const name = clientIndex.get(n.id.slice(2));
     if (name) n.label = name;
   }
+  if (n.label !== oldLabel || n.sub !== oldSub) {
+    layoutDirty = true;
+    scheduleLayoutPass();
+  }
   if (!nodeSel) return;
   const g = nodeSel.filter(d => d.id === n.id);
   if (g.empty()) return;
   renderNodeLabel(g.select('.node-label'), n.label);
-  g.select('.node-sub').attr('dy', 30 + wrapLabel(n.label || '').length * 13).text(n.sub || '');
+  g.select('.node-sub').attr('dy', 30 + wrapLabel(n.label || '').length * LABEL_LINE_HEIGHT).text(n.sub || '');
   g.attr('aria-label', `Open activity for ${n.label}`);
 }
 
@@ -935,7 +1006,7 @@ function ensureTargetNode(pmID) {
   const idx = modelIndex.get(pmID);
   const label = idx ? idx.provider + '/' + idx.upstream : pmID;
   const node = ensureNode('target', 't:' + pmID, label, '');
-  node.cooling = coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+  node.cooling = isCooling(pmID, idx);
   applyNodeState(node);
   return node;
 }
@@ -1243,7 +1314,7 @@ function onCooldowns(map) {
     if (n.kind !== 'target') return;
     const pmID = n.id.slice(2);
     const idx = modelIndex.get(pmID);
-    const cooling = coolingSet.has(pmID) || !!(idx && coolingSet.has(idx.provider + '/' + idx.upstream));
+    const cooling = isCooling(pmID, idx);
     if (n.cooling !== cooling) {
       n.cooling = cooling;
       applyNodeState(n);
@@ -1280,6 +1351,8 @@ export function init(root, data, options = {}) {
 }
 
 export function destroy() {
+  layoutDirty = true;
+  layoutHeight = H;
   if (rafId) {
     cancelAnimationFrame(rafId);
     rafId = 0;
@@ -1293,7 +1366,11 @@ export function destroy() {
     sim = null;
   }
   linkForce = null;
-  if (svg) d3.select(svg).selectAll('*').remove();
+  if (svg) {
+    d3.select(svg).selectAll('*').remove();
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    svg.style.removeProperty('--graph-extra-height');
+  }
   svg = gLIdle = gLActive = gN = gP = nodeSel = null;
   emptyEl = null;
   nodeClickHandler = null;

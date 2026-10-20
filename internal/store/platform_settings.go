@@ -9,26 +9,27 @@ import (
 )
 
 const (
-	PlatformSettingHostedSignupEnabled = "hosted_signup_enabled"
-	PlatformSettingMailProvider        = "mail_provider"
-	PlatformSettingMailFrom            = "mail_from"
-	PlatformSettingMailResendAPIKey    = "mail_resend_api_key"
-	PlatformSettingMailBrevoAPIKey     = "mail_brevo_api_key"
-	PlatformSettingMailSMTPHost        = "mail_smtp_host"
-	PlatformSettingMailSMTPPort        = "mail_smtp_port"
-	PlatformSettingMailSMTPUsername    = "mail_smtp_username"
-	PlatformSettingMailSMTPPassword    = "mail_smtp_password"
-	PlatformSettingMailSMTPMode        = "mail_smtp_mode"
-	PlatformSettingGoogleEnabled       = "google_signin_enabled"
-	PlatformSettingGoogleClientID      = "google_client_id"
-	PlatformSettingGoogleClientSecret  = "google_client_secret"
-	PlatformSettingTurnstileEnabled    = "turnstile_enabled"
-	PlatformSettingTurnstileSiteKey    = "turnstile_site_key"
-	PlatformSettingTurnstileSecret     = "turnstile_secret"
-	PlatformSettingAnalyticsEnabled    = "analytics_enabled"
-	PlatformSettingAnalyticsProvider   = "analytics_provider"
-	PlatformSettingAnalyticsScriptURL  = "analytics_script_url"
-	PlatformSettingAnalyticsSiteID     = "analytics_site_id"
+	PlatformSettingHostedSignupEnabled   = "hosted_signup_enabled"
+	PlatformSettingMailProvider          = "mail_provider"
+	PlatformSettingMailFrom              = "mail_from"
+	PlatformSettingMailResendAPIKey      = "mail_resend_api_key"
+	PlatformSettingMailBrevoAPIKey       = "mail_brevo_api_key"
+	PlatformSettingMailSMTPHost          = "mail_smtp_host"
+	PlatformSettingMailSMTPPort          = "mail_smtp_port"
+	PlatformSettingMailSMTPUsername      = "mail_smtp_username"
+	PlatformSettingMailSMTPPassword      = "mail_smtp_password"
+	PlatformSettingMailSMTPMode          = "mail_smtp_mode"
+	PlatformSettingGoogleEnabled         = "google_signin_enabled"
+	PlatformSettingGoogleClientID        = "google_client_id"
+	PlatformSettingGoogleClientSecret    = "google_client_secret"
+	PlatformSettingTurnstileEnabled      = "turnstile_enabled"
+	PlatformSettingTurnstileSiteKey      = "turnstile_site_key"
+	PlatformSettingTurnstileSecret       = "turnstile_secret"
+	PlatformSettingAnalyticsEnabled      = "analytics_enabled"
+	PlatformSettingAnalyticsProvider     = "analytics_provider"
+	PlatformSettingAnalyticsScriptURL    = "analytics_script_url"
+	PlatformSettingAnalyticsSiteID       = "analytics_site_id"
+	PlatformSettingPreventSearchIndexing = "prevent_search_indexing"
 )
 
 var platformSecretSettings = map[string]bool{
@@ -93,11 +94,12 @@ type PlatformMailSettings struct {
 }
 
 type PlatformSettingsProposal struct {
-	HostedSignupEnabled bool
-	AuditRetentionDays  int
-	Mail                PlatformMailSettings
-	Auth                PlatformAuthSettings
-	Analytics           PlatformAnalyticsSettings
+	HostedSignupEnabled   bool
+	AuditRetentionDays    int
+	PreventSearchIndexing bool
+	Mail                  PlatformMailSettings
+	Auth                  PlatformAuthSettings
+	Analytics             PlatformAnalyticsSettings
 }
 
 // PlatformAnalyticsSettings is the operator-configured, consent-gated web
@@ -143,6 +145,9 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 	if err := upsert(PlatformSettingHostedSignupEnabled, boolString(proposal.HostedSignupEnabled)); err != nil {
 		return err
 	}
+	if err := upsert(PlatformSettingPreventSearchIndexing, boolString(proposal.PreventSearchIndexing)); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO audit_meta(key,value,updated_at) VALUES('audit_retention_days',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, strconv.Itoa(proposal.AuditRetentionDays), now()); err != nil {
 		return err
 	}
@@ -169,6 +174,20 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		}
 	}
 	return tx.Commit()
+}
+
+// GetPlatformPreventSearchIndexing reports whether hosted responses should
+// carry a no-index directive. Missing rows default to false for existing
+// installations.
+func (s *Store) GetPlatformPreventSearchIndexing(ctx context.Context) (bool, error) {
+	value, err := s.GetPlatformSetting(ctx, PlatformSettingPreventSearchIndexing)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return value == "1" || strings.EqualFold(value, "true"), nil
 }
 
 // GetPlatformAuthSettings reads hosted sign-in and CAPTCHA settings. Missing

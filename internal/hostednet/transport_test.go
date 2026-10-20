@@ -16,6 +16,7 @@ func (f resolverFunc) LookupNetIP(ctx context.Context, network, host string) ([]
 }
 
 func TestValidateHostedURL(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{
 		"http://example.com",
 		"https://example.com:8443/path",
@@ -37,6 +38,7 @@ func TestValidateHostedURL(t *testing.T) {
 }
 
 func TestAllowedAddressRejectsSpecialUseRanges(t *testing.T) {
+	t.Parallel()
 	for _, raw := range []string{
 		"0.0.0.0", "10.0.0.1", "100.64.0.1", "127.0.0.1",
 		"169.254.169.254", "172.16.0.1", "192.168.1.1", "224.0.0.1",
@@ -62,6 +64,7 @@ func TestAllowedAddressRejectsSpecialUseRanges(t *testing.T) {
 }
 
 func TestTransportRejectsAnyPrivateDNSAnswer(t *testing.T) {
+	t.Parallel()
 	transport := newTransport(resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
 		return []netip.Addr{
 			netip.MustParseAddr("93.184.216.34"),
@@ -78,6 +81,7 @@ func TestTransportRejectsAnyPrivateDNSAnswer(t *testing.T) {
 }
 
 func TestTransportRevalidatesAddressAtDial(t *testing.T) {
+	t.Parallel()
 	stop := errors.New("stop after dial validation")
 	var dialed string
 	transport := newTransport(resolverFunc(func(context.Context, string, string) ([]netip.Addr, error) {
@@ -96,6 +100,7 @@ func TestTransportRevalidatesAddressAtDial(t *testing.T) {
 }
 
 func TestTransportRejectsInvalidRoundTripURL(t *testing.T) {
+	t.Parallel()
 	transport := NewTransport()
 	request, err := http.NewRequest(http.MethodGet, "http://example.com", nil)
 	if err != nil {
@@ -107,6 +112,7 @@ func TestTransportRejectsInvalidRoundTripURL(t *testing.T) {
 }
 
 func TestCheckRedirectRevalidatesAndBoundsChain(t *testing.T) {
+	t.Parallel()
 	transport := NewTransport()
 	request, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	if err != nil {

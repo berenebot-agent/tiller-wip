@@ -27,6 +27,7 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 }
 
 func TestSignupVerifySessionAndReset(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
 	result, err := st.CreateSignup(ctx, " User@Example.COM ", "correct horse battery staple")
@@ -77,6 +78,7 @@ func TestSignupVerifySessionAndReset(t *testing.T) {
 }
 
 func TestAccountSuspensionInvalidatesSessions(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	result, err := st.CreateSignup(ctx, "suspend@example.com", "correct horse battery staple")
@@ -100,6 +102,7 @@ func TestAccountSuspensionInvalidatesSessions(t *testing.T) {
 }
 
 func TestUserSessionRejectsMismatchedAccountOwner(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
 	firstSignup, err := st.CreateSignup(ctx, "first@example.com", "correct horse battery staple")
@@ -139,6 +142,7 @@ func TestUserSessionRejectsMismatchedAccountOwner(t *testing.T) {
 }
 
 func TestPlatformCounts(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
 	if _, err := st.CreateSignup(ctx, "pending@example.com", "correct horse battery staple"); err != nil {
@@ -174,6 +178,7 @@ func TestPlatformCounts(t *testing.T) {
 }
 
 func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
 	outcome, err := st.BootstrapHostedCustomer(ctx, "Owner@Example.COM", "correct horse battery staple", true)
@@ -207,6 +212,7 @@ func TestBootstrapHostedCustomerMigratesLocalAccountOnce(t *testing.T) {
 }
 
 func TestBootstrapHostedFreshInstallCreatesNoCustomer(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	outcome, err := st.BootstrapHostedCustomer(context.Background(), "", "", true)
 	if err != nil {
@@ -234,6 +240,7 @@ func TestBootstrapHostedFreshInstallCreatesNoCustomer(t *testing.T) {
 // input on a fresh install, by keying its warning on db.FreshInstall. Pinned here
 // so a future "fix" does not relocate that refusal somewhere it would never run.
 func TestBootstrapHostedStoreMigratesWhenInvokedDirectly(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	outcome, err := st.BootstrapHostedCustomer(context.Background(), "owner@example.com", "correct horse battery staple", true)
 	if err != nil {
@@ -256,6 +263,7 @@ func TestBootstrapHostedStoreMigratesWhenInvokedDirectly(t *testing.T) {
 // a fresh hosted install, so the store reports Skipped and creates nothing —
 // which is why the server cannot rely on the Fresh outcome to detect it.
 func TestBootstrapHostedFreshHostedDatabaseCreatesNoCustomer(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), database.WithHostedMode(true))
 	if err != nil {
 		t.Fatal(err)
@@ -288,6 +296,7 @@ func TestBootstrapHostedFreshHostedDatabaseCreatesNoCustomer(t *testing.T) {
 // An existing local database (not a fresh install) with valid credentials
 // migrates, and only once.
 func TestBootstrapHostedExistingDatabaseMigratesOnce(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -318,6 +327,7 @@ func TestBootstrapHostedExistingDatabaseMigratesOnce(t *testing.T) {
 // id, so passkeys survive) rather than inserting a second user that the
 // owner_user_id IS NULL gate would reject as a collision.
 func TestBootstrapHostedCustomerConvertsExistingLocalOperatorInPlace(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
 	operator, err := st.EnsureLocalOperator(ctx, "operator", "correct horse battery staple", "")
@@ -352,6 +362,7 @@ func TestBootstrapHostedCustomerConvertsExistingLocalOperatorInPlace(t *testing.
 }
 
 func TestBootstrapHostedInvalidCredentialsDoNotMutate(t *testing.T) {
+	t.Parallel()
 	st, db := newTestStore(t)
 	if _, err := st.BootstrapHostedCustomer(context.Background(), "not-an-email", "short", false); !errors.Is(err, ErrBootstrapInvalid) {
 		t.Fatalf("invalid bootstrap error = %v", err)

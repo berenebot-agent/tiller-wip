@@ -7,6 +7,7 @@ import (
 )
 
 func TestNormalizeDeepSeekRequestMapsToggleToThinkingType(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name                 string
 		body                 string
@@ -72,6 +73,7 @@ func TestNormalizeDeepSeekRequestMapsToggleToThinkingType(t *testing.T) {
 }
 
 func TestNormalizeDeepSeekRequestBackfillsReasoningContent(t *testing.T) {
+	t.Parallel()
 	tools := `[{"type":"function","function":{"name":"get_time"}}]`
 	noTools := `[]`
 	cases := []struct {
@@ -183,6 +185,7 @@ func assistantValues(body map[string]any, key string) []any {
 }
 
 func TestIsReasoningRoundtripError(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		message string
 		want    bool

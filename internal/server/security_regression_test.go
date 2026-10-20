@@ -17,6 +17,7 @@ import (
 )
 
 func TestClientIPTrustBoundary(t *testing.T) {
+	t.Parallel()
 	trusted := netip.MustParsePrefix("172.18.0.0/16")
 	tests := []struct {
 		name, remote, forwarded string
@@ -43,6 +44,7 @@ func TestClientIPTrustBoundary(t *testing.T) {
 }
 
 func TestRequestClientIPTrustBoundary(t *testing.T) {
+	t.Parallel()
 	trusted := netip.MustParsePrefix("172.18.0.0/16")
 	trustedV6 := netip.MustParsePrefix("2001:db8::/32")
 	tests := []struct {
@@ -81,6 +83,7 @@ func TestRequestClientIPTrustBoundary(t *testing.T) {
 }
 
 func TestEveryAdministrativeRouteRequiresAuthentication(t *testing.T) {
+	t.Parallel()
 	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/admin/session"}, {http.MethodDelete, "/api/admin/session"},
@@ -114,6 +117,7 @@ func TestEveryAdministrativeRouteRequiresAuthentication(t *testing.T) {
 }
 
 func TestPlatformStatsRequireAuthentication(t *testing.T) {
+	t.Parallel()
 	app, _ := newSecurityTestServer(t, config.Config{
 		Mode: config.ModeHosted, TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
 		DataDir: t.TempDir(), ListenAddr: ":8080", PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"),
@@ -127,6 +131,7 @@ func TestPlatformStatsRequireAuthentication(t *testing.T) {
 }
 
 func TestPlatformStatsRequirePlatformAuthentication(t *testing.T) {
+	t.Parallel()
 	_, userAPI, _ := hostedServerHarness(t, false)
 	status, payload, _ := userAPI.request(http.MethodGet, "/api/platform/stats", nil)
 	if status != http.StatusUnauthorized {
@@ -146,6 +151,7 @@ func newSecurityTestServer(t *testing.T, cfg config.Config) (*Server, *database.
 }
 
 func TestAdminSessionCookieFlagsAndCSRF(t *testing.T) {
+	t.Parallel()
 	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
@@ -218,6 +224,7 @@ func TestAdminSessionCookieFlagsAndCSRF(t *testing.T) {
 }
 
 func TestSecureCookieTrustedProxyAndTLS(t *testing.T) {
+	t.Parallel()
 	trusted := netip.MustParsePrefix("127.0.0.0/8")
 	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
 	router := httptest.NewServer(app.Handler())
@@ -252,6 +259,7 @@ func TestSecureCookieTrustedProxyAndTLS(t *testing.T) {
 }
 
 func TestSpoofedForwardedProtoFromUntrustedPeerDoesNotSetSecureCookie(t *testing.T) {
+	t.Parallel()
 	trusted := netip.MustParsePrefix("172.18.0.0/16")
 	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
 	router := httptest.NewServer(app.Handler())

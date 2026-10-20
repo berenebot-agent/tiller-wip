@@ -16,6 +16,7 @@ import (
 )
 
 func TestPreflightResponseLimitRejectsOverflowWithoutTruncatingAcceptedBodies(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name    string
 		body    string
@@ -52,6 +53,7 @@ func TestPreflightResponseLimitRejectsOverflowWithoutTruncatingAcceptedBodies(t 
 }
 
 func TestCompatibleProtocolPrefersNativeModelProtocol(t *testing.T) {
+	t.Parallel()
 	if got := compatibleProtocol([]providers.Protocol{providers.ProtocolChat, providers.ProtocolResponses, providers.ProtocolMessages}, providers.ProtocolResponses, providers.ProtocolChat); got != providers.ProtocolResponses {
 		t.Fatalf("native protocol was not selected: got %q", got)
 	}
@@ -64,6 +66,7 @@ func TestCompatibleProtocolPrefersNativeModelProtocol(t *testing.T) {
 }
 
 func TestCrossProtocolResponsesRejectsStatefulFeatures(t *testing.T) {
+	t.Parallel()
 	for _, field := range []string{"conversation", "previous_response_id", "store", "background", "files"} {
 		body := []byte(`{"model":"virtual/coding","input":"hello","` + field + `":"value"}`)
 		_, err := translateRequest(body, providers.ProtocolResponses, providers.ProtocolChat, "real-model")
@@ -75,6 +78,7 @@ func TestCrossProtocolResponsesRejectsStatefulFeatures(t *testing.T) {
 }
 
 func TestCrossProtocolStatefulFeatureReturnsMachineReadableError(t *testing.T) {
+	t.Parallel()
 	api, _, _, secret := loggingTestHarness(t, mockUpstream(t))
 	resp, payload := clientCall(t, api.base, secret, "/v1/responses", map[string]any{
 		"model":                "provider-a/model-a",
@@ -91,6 +95,7 @@ func TestCrossProtocolStatefulFeatureReturnsMachineReadableError(t *testing.T) {
 }
 
 func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"model":"virtual/coding","messages":[{"role":"assistant","content":"","tool_calls":[{"id":"call_123","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Perth\"}"}}]},{"role":"tool","tool_call_id":"call_123","content":"sunny"}],"tools":[{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}]}`)
 	messages, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolMessages, "claude-real")
 	if err != nil {
@@ -108,6 +113,7 @@ func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
 }
 
 func TestChatToResponsesFoldsSystemAndDeveloperIntoInstructions(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"hello"},{"role":"system","content":[{"type":"text","text":"system rule"}]},{"role":"developer","content":[{"type":"text","text":"developer rule"}]}]}`)
 	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
 	if err != nil {
@@ -135,6 +141,7 @@ func TestChatToResponsesFoldsSystemAndDeveloperIntoInstructions(t *testing.T) {
 }
 
 func TestChatToResponsesSupportsToolChoice(t *testing.T) {
+	t.Parallel()
 	// The Responses relay accepts only the string "auto" for tool_choice.
 	// "none" (do not call tools) is represented safely by omitting tools
 	// entirely — returning tool_choice while tools are still present would
@@ -200,6 +207,7 @@ func TestChatToResponsesSupportsToolChoice(t *testing.T) {
 }
 
 func TestChatToResponsesRejectsNonFunctionTools(t *testing.T) {
+	t.Parallel()
 	// A Chat tool without the function wrapper, or with a non-function type,
 	// must surface as an unsupportedFeature error rather than be converted
 	// into a malformed Responses tool entry.
@@ -224,6 +232,7 @@ func TestChatToResponsesRejectsNonFunctionTools(t *testing.T) {
 }
 
 func TestChatToResponsesOmitsEmptyAssistantTextWithToolCalls(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"look up the weather"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_123","type":"function","function":{"name":"lookup","arguments":"{}"}}]},{"role":"assistant","content":"I found it.","tool_calls":[{"id":"call_456","type":"function","function":{"name":"lookup","arguments":"{\"city\":\"Perth\"}"}}]},{"role":"tool","tool_call_id":"call_123","content":"sunny"}]}`)
 	translated, err := translateRequest(body, providers.ProtocolChat, providers.ProtocolResponses, "real-model")
 	if err != nil {
@@ -250,6 +259,7 @@ func TestChatToResponsesOmitsEmptyAssistantTextWithToolCalls(t *testing.T) {
 }
 
 func TestChatToResponsesRejectsUnsupportedRolesAndContentBlocks(t *testing.T) {
+	t.Parallel()
 	for _, body := range []string{
 		`{"model":"virtual/coding","messages":[{"role":"function","content":"unsupported"}]}`,
 		`{"model":"virtual/coding","messages":[{"role":"user","content":[{"type":"audio","data":"unsupported"}]}]}`,
@@ -278,6 +288,7 @@ func FuzzProtocolRequestParser(f *testing.F) {
 // relay 500s when these models are called via /v1/chat/completions — only the
 // Responses endpoint serves them.
 func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	recordPath := ""
 	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -399,6 +410,7 @@ func TestOpenCodeFreeMuseSparkRoutesToResponsesAPI(t *testing.T) {
 // bearer with 401. A direct request fails with a 400 naming the keyless
 // opencode-free provider (remediation); the attempt is never sent upstream.
 func TestFreeModelViaKeyedZenFailsLoud(t *testing.T) {
+	t.Parallel()
 	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -496,6 +508,7 @@ func TestFreeModelViaKeyedZenFailsLoud(t *testing.T) {
 // 400, while a request without the field gets the minimum supplied as the
 // default and succeeds.
 func TestOpenCodeFreeMinOutputTokensRejectsExplicitLowLimit(t *testing.T) {
+	t.Parallel()
 	dedicated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -597,6 +610,7 @@ func TestOpenCodeFreeMinOutputTokensRejectsExplicitLowLimit(t *testing.T) {
 // X-Opencode-Client relay tell — and a Console-wrapped FreeTierError fails
 // loud with the router-owned free_tier_rejected code.
 func TestOpenCodeFreeShadowWireShape(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var gotAuth, gotUA, gotAccept, gotClient, gotSession, gotAffinity, gotSessionID string
 	reject := false
@@ -740,6 +754,7 @@ func TestOpenCodeFreeShadowWireShape(t *testing.T) {
 // unsupported_feature rather than a misleading 503 virtual_model_unavailable.
 // Nothing is unavailable — the request simply cannot be represented.
 func TestVirtualAllTargetsBelowMinOutputReturns400(t *testing.T) {
+	t.Parallel()
 	// Each dedicated server acts as an opencode-free provider (>= 16 output
 	// tokens). They expose distinct upstream model IDs so they can both be
 	// attached as virtual targets. The -free suffix is required for the
@@ -915,6 +930,7 @@ func postChat(t *testing.T, api *testAPI, secret, model string, extra map[string
 // Chat request to a disablable target arrives upstream with an explicit
 // disable, while explicit client selectors and unknown caps pass through.
 func TestPlainChatDefaultDisableReachesUpstream(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var seen []string
 	api, db, _, clientSecret := loggingTestHarness(t, recordingChatUpstream([]string{"model-a"}, &seen, &mu))
@@ -970,6 +986,7 @@ func TestPlainChatDefaultDisableReachesUpstream(t *testing.T) {
 // provider applies its own default reasoning, matching OpenRouter, where
 // `mandatory: true` only forbids `reasoning_effort: "none"`.
 func TestMandatoryReasoningServesPlainChat(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var seen []string
 	api, db, _, _ := loggingTestHarness(t, recordingChatUpstream([]string{"model-a", "model-b"}, &seen, &mu))
@@ -1078,6 +1095,7 @@ func TestMandatoryReasoningServesPlainChat(t *testing.T) {
 // catalogue advertises mandatory reasoning, and a plain Chat request must be
 // forwarded unchanged and succeed rather than surfacing as an upstream 400.
 func TestDiscoveredMandatoryReasoningServesPlainChat(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var seen []string
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1121,6 +1139,7 @@ func TestDiscoveredMandatoryReasoningServesPlainChat(t *testing.T) {
 // have its request translated to the Chat target and served, not rejected for
 // a missing selector.
 func TestPlainResponsesRequestToChatTargetNotRejected(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var seen []string
 	api, _, _, clientSecret := loggingTestHarness(t, recordingChatUpstream([]string{"model-a"}, &seen, &mu))
@@ -1156,6 +1175,7 @@ func TestPlainResponsesRequestToChatTargetNotRejected(t *testing.T) {
 // unadvertised efforts are stripped, and unknown capabilities are never
 // assumed to accept the value (selector stripped, provider default applies).
 func TestExplicitSelectorSameProtocolChatValidated(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var seen []string
 	api, db, _, clientSecret := loggingTestHarness(t, recordingChatUpstream([]string{"model-a"}, &seen, &mu))
@@ -1263,6 +1283,7 @@ func opusFreeHandler(modelID string) http.Handler {
 }
 
 func TestCheckMinOutputTokens(t *testing.T) {
+	t.Parallel()
 	// Absent field: minimum supplied, compatible.
 	out, ok, err := checkMinOutputTokens([]byte(`{"model":"m"}`), 16, providers.ProtocolChat)
 	if err != nil || !ok {

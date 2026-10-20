@@ -148,6 +148,7 @@ func waitForNotification(t *testing.T, ch <-chan receivedNotification) receivedN
 }
 
 func TestNotificationSettingsRoundTrip(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	status, payload, _ := api.request("GET", "/api/admin/settings", nil)
 	if status != 200 {
@@ -251,6 +252,7 @@ func TestNotificationSettingsRoundTrip(t *testing.T) {
 }
 
 func TestNotificationTestEndpoint(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -283,6 +285,7 @@ func TestNotificationTestEndpoint(t *testing.T) {
 }
 
 func TestNotificationTestEndpointSanitisesTransportErrors(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	const secret = "must-not-appear"
 	status, _, _ := api.request("PUT", "/api/admin/settings", map[string]any{"notifications_webhook_url": "http://127.0.0.1:1/notify?token=" + secret})
@@ -300,6 +303,7 @@ func TestNotificationTestEndpointSanitisesTransportErrors(t *testing.T) {
 }
 
 func TestNotificationFallbackEvent(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer webhook-token" {
@@ -343,6 +347,7 @@ func TestNotificationFallbackEvent(t *testing.T) {
 }
 
 func TestNotificationAllTargetsFailedEvent(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -385,6 +390,7 @@ func TestNotificationAllTargetsFailedEvent(t *testing.T) {
 }
 
 func TestNotificationEventToggleRespected(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -416,6 +422,7 @@ func TestNotificationEventToggleRespected(t *testing.T) {
 }
 
 func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 2)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -453,7 +460,130 @@ func TestNotificationCooldownSuppressesDuplicates(t *testing.T) {
 	}
 }
 
+// TestNotificationCooldownHonoursLongWindow is the regression guard for the
+// truncation fix: a cooldown longer than the hosted 60s floor must still
+// suppress, and its entry must survive a prune that runs past that floor.
+func TestNotificationCooldownHonoursLongWindow(t *testing.T) {
+	t.Parallel()
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(200)
+	}))
+	if err := app.store.For(database.LocalAccountID).SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "3600"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+
+	app.notifyCooldownMu.Lock()
+	deadline := app.notifyLastSent[key].until
+	// Prune as if 61 seconds had passed: the entry must survive.
+	app.pruneNotificationCooldownsLocked(time.Now().Add(61 * time.Second))
+	_, survives := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if deadline.IsZero() {
+		t.Fatal("successful delivery recorded no cooldown")
+	}
+	if !survives {
+		t.Fatalf("prune dropped an unexpired cooldown entry (deadline %v)", deadline)
+	}
+	if deadline.Before(time.Now().Add(30 * time.Minute)) {
+		t.Fatalf("cooldown deadline %v does not honour the configured hour", deadline)
+	}
+}
+
+// TestNotificationCooldownLoweredAppliesToOpenWindow checks both suppression
+// and expiry after lowering a cooldown. Merely shortening the stored timestamp
+// is insufficient if the triggering event is delivered prematurely.
+func TestNotificationCooldownLoweredAppliesToOpenWindow(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		delivered.Add(1)
+		w.WriteHeader(200)
+	}))
+	scope := app.store.For(database.LocalAccountID)
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "3600"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("initial delivery count=%d, want 1", got)
+	}
+	app.notifyCooldownMu.Lock()
+	original := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "60"); err != nil {
+		t.Fatal(err)
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	if got := delivered.Load(); got != 1 {
+		t.Fatalf("lowering to 60s caused premature delivery: count=%d", got)
+	}
+	app.notifyCooldownMu.Lock()
+	shortened := app.notifyLastSent[key]
+	// Simulate a later triggering event without sleeping. The old 1-hour
+	// window is still open, but 60s has elapsed since successful delivery.
+	shortened.sentAt = time.Now().Add(-2 * time.Minute)
+	shortened.until = shortened.sentAt.Add(time.Hour)
+	app.notifyLastSent[key] = shortened
+	app.notifyCooldownMu.Unlock()
+	if !original.until.After(shortened.sentAt.Add(60 * time.Second)) {
+		t.Fatal("test setup has no shorter expiry to apply")
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	if got := delivered.Load(); got != 2 {
+		t.Fatalf("expired shortened cooldown did not deliver: count=%d", got)
+	}
+	app.notifyCooldownMu.Lock()
+	reset := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if reset.until.Before(time.Now().Add(55*time.Second)) || reset.until.After(time.Now().Add(65*time.Second)) {
+		t.Fatalf("new successful delivery did not reset 60s window: %v", reset.until)
+	}
+}
+
+func TestNotificationCooldownIncreaseAndDisable(t *testing.T) {
+	t.Parallel()
+	var delivered atomic.Int32
+	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		delivered.Add(1)
+		w.WriteHeader(200)
+	}))
+	scope := app.store.For(database.LocalAccountID)
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "60"); err != nil {
+		t.Fatal(err)
+	}
+	payload := notificationPayload{Event: eventFallback, VirtualModel: "virtual/coding", RequestedModel: "virtual/coding"}
+	key := database.LocalAccountID + "|" + eventFallback + "|" + payload.VirtualModel
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	app.notifyCooldownMu.Lock()
+	initial := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "3600"); err != nil {
+		t.Fatal(err)
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	app.notifyCooldownMu.Lock()
+	unchanged := app.notifyLastSent[key]
+	app.notifyCooldownMu.Unlock()
+	if got := delivered.Load(); got != 1 || !initial.until.Equal(unchanged.until) {
+		t.Fatalf("increasing cooldown extended window or duplicated notification: count=%d before=%v after=%v", got, initial.until, unchanged.until)
+	}
+	if err := scope.SetSetting(context.Background(), store.SettingNotificationsCooldownSeconds, "0"); err != nil {
+		t.Fatal(err)
+	}
+	app.deliverNotification(database.LocalAccountID, eventFallback, payload, testNotificationCfg(t, app))
+	if got := delivered.Load(); got != 2 {
+		t.Fatalf("zero cooldown did not allow another delivery: count=%d", got)
+	}
+}
+
 func TestAdminEventNotifications(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 4)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -516,6 +646,7 @@ func TestAdminEventNotifications(t *testing.T) {
 }
 
 func TestAdminEventToggleRespected(t *testing.T) {
+	t.Parallel()
 	received := make(chan receivedNotification, 1)
 	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -548,6 +679,7 @@ func TestAdminEventToggleRespected(t *testing.T) {
 // type to the real ntfy topic. It is opt-in (TILLER_NOTIFY_EXAMPLES=1) because
 // it hits the real network.
 func TestSendExampleNotificationsToNtfy(t *testing.T) {
+	t.Parallel()
 	if os.Getenv("TILLER_NOTIFY_EXAMPLES") == "" {
 		t.Skip("set TILLER_NOTIFY_EXAMPLES=1 to send example notifications to the real ntfy topic")
 	}
@@ -589,6 +721,7 @@ func TestSendExampleNotificationsToNtfy(t *testing.T) {
 // semantics: targets skipped without an upstream attempt (unavailable or
 // protocol-mismatched) are not "attempted" and must not inflate the count.
 func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
+	t.Parallel()
 	attempts := []requestAttempt{
 		{providerModelID: "pm-a", provider: "a", model: "m", result: "skipped", failureClass: "unavailable"},
 		{providerModelID: "pm-b", provider: "b", model: "m", result: "failed", failureClass: "http_500"},
@@ -608,6 +741,7 @@ func TestAttemptCountExcludesSkippedTargets(t *testing.T) {
 }
 
 func TestNotificationFailureDoesNotFailInference(t *testing.T) {
+	t.Parallel()
 	// Webhook that blocks until released, to prove delivery never blocks the
 	// response. The handler closes `started` when it begins handling, then
 	// waits for `release` before returning 200.
@@ -678,6 +812,7 @@ func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *
 }
 
 func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
+	t.Parallel()
 	var status atomic.Int32
 	var requests atomic.Int32
 	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -705,6 +840,7 @@ func TestNotificationHTTPStatusControlsDelivery(t *testing.T) {
 }
 
 func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
+	t.Parallel()
 	var status atomic.Int32
 	var requests atomic.Int32
 	app, _, _ := notificationDeliveryHarness(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -740,6 +876,7 @@ func TestNotificationFailureClearsReservationAndCooldown(t *testing.T) {
 }
 
 func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
+	t.Parallel()
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	var requests atomic.Int32
@@ -778,6 +915,7 @@ func TestNotificationConcurrentFallbacksReserveOneDelivery(t *testing.T) {
 }
 
 func TestNotificationTimeoutClearsReservation(t *testing.T) {
+	t.Parallel()
 	var phase atomic.Int32
 	var requests atomic.Int32
 	release := make(chan struct{})
@@ -816,6 +954,7 @@ func TestNotificationTimeoutClearsReservation(t *testing.T) {
 // admitted, so key churn against a slow endpoint cannot accumulate unbounded
 // concurrent work.
 func TestNotificationAdmissionBoundsConcurrency(t *testing.T) {
+	t.Parallel()
 	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
 
 	// Track every successful admission so the release count is exact.
@@ -867,6 +1006,7 @@ func TestNotificationAdmissionBoundsConcurrency(t *testing.T) {
 // TestNotificationProcessWideBound proves the global cap applies across
 // tenants.
 func TestNotificationProcessWideBound(t *testing.T) {
+	t.Parallel()
 	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
 
 	admitted := 0
@@ -887,23 +1027,25 @@ func TestNotificationProcessWideBound(t *testing.T) {
 }
 
 // TestNotificationCooldownPruning proves the cooldown map does not grow without
-// bound: entries older than the retention window are dropped.
+// bound: entries whose suppression window has closed are dropped.
 func TestNotificationCooldownPruning(t *testing.T) {
+	t.Parallel()
 	app := newTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"}, openTestDB(t))
 
 	now := time.Now()
 	app.notifyCooldownMu.Lock()
-	app.notifyLastSent["fresh|fallback|vm"] = now
-	app.notifyLastSent["stale|fallback|vm"] = now.Add(-2 * time.Hour)
+	// Each entry carries the delivery time and the suppression deadline.
+	app.notifyLastSent["fresh|fallback|vm"] = notificationCooldownEntry{sentAt: now, until: now.Add(time.Hour)}
+	app.notifyLastSent["stale|fallback|vm"] = notificationCooldownEntry{sentAt: now.Add(-3 * time.Hour), until: now.Add(-2 * time.Hour)}
 	app.pruneNotificationCooldownsLocked(now)
 	_, freshOK := app.notifyLastSent["fresh|fallback|vm"]
 	_, staleGone := app.notifyLastSent["stale|fallback|vm"]
 	app.notifyCooldownMu.Unlock()
 	if !freshOK {
-		t.Fatal("pruning removed a recent cooldown entry")
+		t.Fatal("pruning removed an unexpired cooldown entry")
 	}
 	if staleGone {
-		t.Fatal("pruning kept a stale cooldown entry")
+		t.Fatal("pruning kept an expired cooldown entry")
 	}
 }
 
@@ -911,6 +1053,7 @@ func TestNotificationCooldownPruning(t *testing.T) {
 // pre-SaaS review TR-004 fix: the first delivery for an account (whose budget
 // entry does not yet exist) must be admitted, not panic on a nil entry.
 func TestNotificationBudgetFirstDeliveryAdmitted(t *testing.T) {
+	t.Parallel()
 	b := newNotificationBudget(30, time.Hour)
 	if !b.admit("account-a", time.Now()) {
 		t.Fatal("first delivery for a new account was not admitted")
@@ -921,6 +1064,7 @@ func TestNotificationBudgetFirstDeliveryAdmitted(t *testing.T) {
 // an account is admitted exactly `budget` times within the window, rejected
 // after, and admitted again once the window has passed.
 func TestNotificationBudgetExhaustsAndExpires(t *testing.T) {
+	t.Parallel()
 	const budget = 3
 	b := newNotificationBudget(budget, time.Hour)
 	now := time.Now()
@@ -941,6 +1085,7 @@ func TestNotificationBudgetExhaustsAndExpires(t *testing.T) {
 // TestNotificationBudgetIsPerAccount confirms one account's exhausted budget
 // does not throttle another account.
 func TestNotificationBudgetIsPerAccount(t *testing.T) {
+	t.Parallel()
 	b := newNotificationBudget(1, time.Hour)
 	now := time.Now()
 	if !b.admit("account-a", now) {

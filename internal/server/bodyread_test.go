@@ -15,6 +15,7 @@ import (
 // reached and admits again after release, so a slow-upload flood cannot park an
 // unbounded number of body buffers.
 func TestBodyReadGateBoundsConcurrency(t *testing.T) {
+	t.Parallel()
 	g := &bodyReadGate{}
 	held := 0
 	for i := 0; i < maxConcurrentBodyReads; i++ {
@@ -41,6 +42,7 @@ func TestBodyReadGateBoundsConcurrency(t *testing.T) {
 // TestBodyReadGateConcurrentAcquireRelease exercises the counter under
 // contention so a race is caught by the race detector.
 func TestBodyReadGateConcurrentAcquireRelease(t *testing.T) {
+	t.Parallel()
 	g := &bodyReadGate{}
 	var wg sync.WaitGroup
 	for i := 0; i < 200; i++ {
@@ -62,6 +64,7 @@ func TestBodyReadGateConcurrentAcquireRelease(t *testing.T) {
 // returns its error, including on a writer that does not support deadlines
 // (httptest.NewRecorder), where the deadline is a graceful no-op.
 func TestWithBodyReadDeadlineRunsFunction(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	ran := false
 	err := withBodyReadDeadline(rec, func() error {
@@ -77,6 +80,9 @@ func TestWithBodyReadDeadlineRunsFunction(t *testing.T) {
 // body and then stalls is released by the read deadline instead of holding the
 // handler forever. The deadline is shortened for the test; the wire behaviour
 // (SetReadDeadline through http.ResponseController) is the same.
+//
+// Deliberately NOT parallel: it shortens the package-level bodyReadDeadline,
+// which the other decode tests read.
 func TestDecodeJSONBodyRejectsStalledUpload(t *testing.T) {
 	old := bodyReadDeadline
 	bodyReadDeadline = 50 * time.Millisecond
@@ -116,6 +122,7 @@ func TestDecodeJSONBodyRejectsStalledUpload(t *testing.T) {
 // TestDecodeJSONBodyAcceptsNormalBody guards against the deadline wiring
 // breaking the ordinary path.
 func TestDecodeJSONBodyAcceptsNormalBody(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"email":"a@b.test","password":"correct horse battery"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -134,6 +141,7 @@ func TestDecodeJSONBodyAcceptsNormalBody(t *testing.T) {
 // TestDecodeJSONBodyReportsMalformedJSON proves malformed JSON is still reported
 // as such and not confused with a timeout.
 func TestDecodeJSONBodyReportsMalformedJSON(t *testing.T) {
+	t.Parallel()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"email":`))
 	req.Header.Set("Content-Type", "application/json")
@@ -150,6 +158,7 @@ func TestDecodeJSONBodyReportsMalformedJSON(t *testing.T) {
 // TestIsTimeoutError keeps the timeout classifier honest for the error shapes
 // the deadline can surface.
 func TestIsTimeoutError(t *testing.T) {
+	t.Parallel()
 	if !isTimeoutError(errBodyReadTimeout) {
 		t.Fatal("errBodyReadTimeout not classified as a timeout")
 	}

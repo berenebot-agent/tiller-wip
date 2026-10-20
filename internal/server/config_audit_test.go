@@ -36,6 +36,7 @@ func auditEvents(t *testing.T, db *database.DB, accountID string) map[string]sto
 // account-audit events (best-effort), each with an actor, target, and no
 // secret values in metadata.
 func TestTenantMutationsWriteAuditEvents(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 
 	// loggingTestHarness already created a provider, a client key, and updated
@@ -92,6 +93,7 @@ func eventNames(events map[string]store.AuditRow) []string {
 // TestLiveSubscriberCap proves the per-account live-SSE connection cap
 // (TR-007): the cap is enforced, and unsubscribing frees a slot.
 func TestLiveSubscriberCap(t *testing.T) {
+	t.Parallel()
 	h := &liveHub{
 		outcomeCh:  make(chan outcomeEvent, liveOutcomeBuffer),
 		activityCh: make(chan activityEvent, liveOutcomeBuffer),
@@ -123,6 +125,7 @@ func TestLiveSubscriberCap(t *testing.T) {
 // TestRequestLogIncludesAccountID proves the second half of TR-014: an
 // authenticated request's log line carries the account id and principal kind.
 func TestRequestLogIncludesAccountID(t *testing.T) {
+	t.Parallel()
 	var buf strings.Builder
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {

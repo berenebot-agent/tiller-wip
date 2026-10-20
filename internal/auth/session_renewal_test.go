@@ -17,6 +17,7 @@ func (renewalTestHasher) Verify(secret, encoded string) bool { return secret == 
 func (renewalTestHasher) NeedsRehash(string) bool            { return false }
 
 func TestSessionRenewalCASConflictReloadsWinner(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 
 	"github.com/tiller-router/tiller-router/internal/database"
 )
@@ -51,10 +50,10 @@ func fixtureSelector(name string) string {
 	return enc
 }
 
-// outputDest is the writer for fixturectl client output. Swappable in tests.
-var outputDest io.Writer = os.Stdout
-
-func runClient(args []string) error {
+// runClient creates a client key and writes the machine-readable result to w.
+// The writer is a parameter (not a package global) so concurrent tests cannot
+// clobber each other's captured output.
+func runClient(args []string, w io.Writer) error {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
 	dbPath := fs.String("db", "", "path to the router SQLite database (required)")
 	name := fs.String("name", "", "client name (required, must be unique)")
@@ -162,7 +161,7 @@ func runClient(args []string) error {
 		Type:        *clientType,
 		Fingerprint: pinnedFingerprint,
 	}
-	enc := json.NewEncoder(outputDest)
+	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(out); err != nil {
 		return fmt.Errorf("encode output: %w", err)

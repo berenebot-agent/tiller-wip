@@ -19,6 +19,7 @@ func translatedSSE(t *testing.T, input string, incoming, target providers.Protoc
 }
 
 func TestTranslateMessagesReasoningFirstAllocatesIndexZero(t *testing.T) {
+	t.Parallel()
 	s := "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\n" +
 		"event: content_block_start\ndata: {\"content_block\":{\"type\":\"thinking\"}}\n\n" +
 		"event: content_block_delta\ndata: {\"delta\":{\"thinking\":\"plan\"}}\n\n" +
@@ -36,6 +37,7 @@ func TestTranslateMessagesReasoningFirstAllocatesIndexZero(t *testing.T) {
 }
 
 func TestTranslateResponsesReasoningOnlyCompletedOutput(t *testing.T) {
+	t.Parallel()
 	s := "event: response.created\ndata: {\"response\":{\"id\":\"r1\"}}\n\n" +
 		"event: response.reasoning_summary_text.delta\ndata: {\"delta\":\"thinking\"}\n\n" +
 		"event: response.completed\ndata: {\"response\":{}}\n\n"
@@ -52,6 +54,7 @@ func TestTranslateResponsesReasoningOnlyCompletedOutput(t *testing.T) {
 }
 
 func TestTranslateResponsesInterleavedReasoningTextUsesStableIndices(t *testing.T) {
+	t.Parallel()
 	s := "event: response.created\ndata: {\"response\":{\"id\":\"r2\"}}\n\n" +
 		"event: response.reasoning_summary_text.delta\ndata: {\"delta\":\"a\"}\n\n" +
 		"event: response.output_text.delta\ndata: {\"delta\":\"b\"}\n\n" +
@@ -68,6 +71,7 @@ func TestTranslateResponsesInterleavedReasoningTextUsesStableIndices(t *testing.
 }
 
 func TestTranslateNonstreamChatReasoningAlias(t *testing.T) {
+	t.Parallel()
 	body := []byte(`{"id":"c1","choices":[{"message":{"role":"assistant","content":"answer","reasoning":"plan"}}]}`)
 	out, err := translateNonstreamResponse(body, providers.ProtocolChat, providers.ProtocolChat, "m")
 	if err != nil || !strings.Contains(string(out), `"reasoning_content":"plan"`) || !strings.Contains(string(out), `"content":"answer"`) {

@@ -9,6 +9,7 @@ import (
 )
 
 func TestVacuumCoreReclaimsFreePages(t *testing.T) {
+	t.Parallel()
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +55,7 @@ func TestVacuumCoreReclaimsFreePages(t *testing.T) {
 }
 
 func TestVacuumCoreTruncatesWAL(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "router.db")
 	db, err := Open(context.Background(), path)
@@ -93,6 +95,7 @@ func TestVacuumCoreTruncatesWAL(t *testing.T) {
 }
 
 func TestVacuumActivityAndNilHandle(t *testing.T) {
+	t.Parallel()
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

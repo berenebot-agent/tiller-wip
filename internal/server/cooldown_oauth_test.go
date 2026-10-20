@@ -149,6 +149,7 @@ func oauthVirtualHarness(t *testing.T, failures int) (*testAPI, string, string, 
 // the target is NOT left in cooldown: a subsequent request still tries the
 // target first.
 func TestOAuth401RefreshSucceedsRetrySucceedsNoCooldown(t *testing.T) {
+	t.Parallel()
 	api, secret, canonical, _ := oauthVirtualHarness(t, 1)
 
 	// First call: 401 -> refresh -> retry -> 200.
@@ -166,6 +167,7 @@ func TestOAuth401RefreshSucceedsRetrySucceedsNoCooldown(t *testing.T) {
 // TestOAuth401RefreshSucceedsRetryStill401OpensCooldown verifies that when the
 // refreshed retry still 401s, cooldown opens for the target.
 func TestOAuth401RefreshSucceedsRetryStill401OpensCooldown(t *testing.T) {
+	t.Parallel()
 	api, secret, canonical, _ := oauthVirtualHarness(t, 100)
 
 	// First call: 401 -> refresh -> retry 401 again -> cooldown opens. With a
@@ -188,6 +190,7 @@ func TestOAuth401RefreshSucceedsRetryStill401OpensCooldown(t *testing.T) {
 // unavailable and is NOT left in cooldown; a different provider's target is
 // unaffected.
 func TestOAuthRefreshFailsFallsThroughNoCooldownForOthers(t *testing.T) {
+	t.Parallel()
 	// Build a harness whose OAuth server rejects every refresh, so
 	// ForceOAuthRefresh fails and the target transitions to reconnect_required
 	// (unavailable). We reuse oauthVirtualHarness but then point the routing

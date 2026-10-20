@@ -32,6 +32,7 @@ func openActivityStore(t *testing.T) (*database.DB, *store.Store) {
 // scope's account_id: a row written under one account is never visible to
 // another, across list, attempts, export, and clear.
 func TestActivityIsAccountScoped(t *testing.T) {
+	t.Parallel()
 	_, st := openActivityStore(t)
 	ctx := context.Background()
 	local := st.For(database.LocalAccountID)
@@ -62,6 +63,10 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	}
 	insert(local, "row-local", "ck-local")
 	insert(other, "row-other", "ck-other")
+	tracked, err := local.LiveActivityByIDs(ctx, []string{"row-local", "row-other"})
+	if err != nil || len(tracked) != 1 || tracked[0].ID != "row-local" {
+		t.Fatalf("live recovery crossed account boundary: %v %v", ids(tracked), err)
+	}
 
 	globalLocal, err := local.ListGlobalActivity(ctx, "", 100, 0)
 	if err != nil {
@@ -112,6 +117,7 @@ func TestActivityIsAccountScoped(t *testing.T) {
 // return the explicit sentinel (not an empty slice and not a nil error) when
 // the Activity handle is absent, so callers can surface an unavailable state.
 func TestActivityCleanupRecoversAfterUnavailable(t *testing.T) {
+	t.Parallel()
 	db, _ := openActivityStore(t)
 	ctx := context.Background()
 	_, err := db.Activity.Exec(`INSERT INTO request_logs(id,account_id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('cleanup-local',?,'key','model','chat',0,200,1,'cleanup-local',?)`, database.LocalAccountID, database.Now())
@@ -151,6 +157,7 @@ func TestActivityCleanupRecoversAfterUnavailable(t *testing.T) {
 }
 
 func TestActivityReadsReturnUnavailableWhenHandleMissing(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +182,7 @@ func TestActivityReadsReturnUnavailableWhenHandleMissing(t *testing.T) {
 }
 
 func TestDeleteClientKeyRetryWithPendingCleanup(t *testing.T) {
+	t.Parallel()
 	db, st := openActivityStore(t)
 	ctx := context.Background()
 	if _, err := db.SQL.Exec(`INSERT INTO client_keys(id,account_id,name,description,selector,secret_hash,secret_fingerprint,enabled,created_at,updated_at,logging_enabled,retention_days,key_type,key_group) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -204,6 +212,7 @@ func TestDeleteClientKeyRetryWithPendingCleanup(t *testing.T) {
 // aggregates: per-type sums are exact, and the provider-reported cost is
 // preferred over the estimate per row.
 func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
+	t.Parallel()
 	_, st := openActivityStore(t)
 	ctx := context.Background()
 	sc := st.For(database.LocalAccountID)

@@ -62,6 +62,7 @@ func (a *testAPI) request(method, path string, body any) (int, map[string]any, h
 }
 
 func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	discoveryFails := false
@@ -484,6 +485,7 @@ func TestV1VirtualRoutingRemapIsolationRotationAndBackup(t *testing.T) {
 }
 
 func TestCatalogueSurfacesCapabilities(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)

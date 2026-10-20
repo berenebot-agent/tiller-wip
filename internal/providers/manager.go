@@ -34,6 +34,12 @@ type Manager struct {
 	locks    map[string]*sync.Mutex
 }
 
+// refreshConcurrency bounds how many provider discoveries the scheduler runs at
+// once. Discovery is outbound network work against a provider-supplied endpoint,
+// so a tick that finds many providers due at the same moment is throttled to
+// this many in flight; the rest queue behind a slot.
+const refreshConcurrency = 4
+
 func NewManager(st *store.Store, registry *Registry) *Manager {
 	return &Manager{store: st, registry: registry, oauth: oauth.NewManager(st, 5*time.Minute), locks: make(map[string]*sync.Mutex)}
 }
@@ -79,10 +85,21 @@ func (m *Manager) oauthRefreshFunc(providerType string) oauth.RefreshFunc {
 }
 
 func (m *Manager) Refresh(ctx context.Context, accountID, providerID string) error {
+	// Load first: the per-provider lock is only dropped on a successful delete,
+	// so taking it for a provider that does not exist (a refresh of a bogus id)
+	// would leave a permanent entry in the map.
+	provider, err := m.loadProvider(ctx, accountID, providerID)
+	if err != nil {
+		return err
+	}
 	lock := m.providerLock(accountID, providerID)
 	lock.Lock()
 	defer lock.Unlock()
-	provider, err := m.loadProvider(ctx, accountID, providerID)
+	// Reload under the lock: the existence check above only bounds the lock map,
+	// and a concurrent refresh or admin edit may have changed the endpoint or
+	// credential since it ran. Discovering with a stale instance would apply a
+	// catalogue fetched from the old base URL.
+	provider, err = m.loadProvider(ctx, accountID, providerID)
 	if err != nil {
 		return err
 	}
@@ -267,32 +284,70 @@ func toCatalogueModels(models []Model) []store.CatalogueModel {
 }
 
 func (m *Manager) StartScheduler(ctx context.Context) {
-	ticker := time.NewTicker(15 * time.Minute)
 	go func() {
-		defer ticker.Stop()
+		timer := time.NewTimer(15 * time.Minute)
+		defer timer.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-timer.C:
+				// Wait for the entire batch, then schedule the next pass.
+				// No two background batches can overlap.
 				m.refreshDue(ctx)
+				if ctx.Err() != nil {
+					return
+				}
+				timer.Reset(15 * time.Minute)
 			}
 		}
 	}()
 }
 
+// refreshDue processes providers due for discovery with a fixed worker pool.
+// There are at most refreshConcurrency background requests in flight, even if
+// thousands of providers are due. Work waiting for a worker uses no goroutine
+// of its own, and its three-minute timeout begins only when work starts.
+// Manual Refresh calls bypass this queue and retain the provider-level lock.
 func (m *Manager) refreshDue(ctx context.Context) {
 	refs, err := m.store.DueProviders(ctx, database.Now())
-	if err != nil {
+	if err != nil || len(refs) == 0 || ctx.Err() != nil {
 		return
 	}
-	for _, ref := range refs {
-		go func(accountID, providerID string) {
-			refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-			defer cancel()
-			_ = m.Refresh(refreshCtx, accountID, providerID)
-		}(ref.AccountID, ref.ProviderID)
+
+	jobs := make(chan store.ProviderRef)
+	var workers sync.WaitGroup
+	for i := 0; i < refreshConcurrency && i < len(refs); i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ref, ok := <-jobs:
+					if !ok || ctx.Err() != nil {
+						return
+					}
+					refreshCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+					_ = m.Refresh(refreshCtx, ref.AccountID, ref.ProviderID)
+					cancel()
+				}
+			}
+		}()
 	}
+
+	for _, ref := range refs {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			return
+		case jobs <- ref:
+		}
+	}
+	close(jobs)
+	workers.Wait()
 }
 
 func (m *Manager) providerLock(accountID, providerID string) *sync.Mutex {

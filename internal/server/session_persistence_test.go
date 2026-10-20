@@ -17,6 +17,7 @@ import (
 // session persists across a full process/container restart (DB closed and
 // reopened, fresh server) without requiring the administrator to log in again.
 func TestAdminSessionSurvivesRestart(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	jar, _ := cookiejar.New(nil)
 
@@ -61,6 +62,7 @@ func TestAdminSessionSurvivesRestart(t *testing.T) {
 // the fix the operator users row kept A's synthetic email, so B was rejected
 // before the password was checked.
 func TestLocalOperatorCredentialChangeOnRestart(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 

@@ -113,6 +113,7 @@ func (a *testAPI) requestAuth(method, path string, body any, authorization strin
 }
 
 func TestManagementTokenLifecycle(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	id, token := createManagementToken(t, api, "hermes", map[string]int{"providers": auth.ScopeRead}, "")
 	if !strings.HasPrefix(token, "mt-tr-") {
@@ -188,6 +189,7 @@ func TestManagementTokenLifecycle(t *testing.T) {
 }
 
 func TestManagementTokenScopeCeilings(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	readID, readToken := createManagementToken(t, api, "reader", map[string]int{"providers": auth.ScopeRead}, "")
 	writeID, writeToken := createManagementToken(t, api, "writer", map[string]int{"providers": auth.ScopeWrite}, "")
@@ -250,6 +252,7 @@ func TestManagementTokenScopeCeilings(t *testing.T) {
 }
 
 func TestManagementTokenBlockedRoutes(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	_, token := createManagementToken(t, api, "full-power", map[string]int{
 		"providers": auth.ScopeDelete, "virtual": auth.ScopeDelete, "client_keys": auth.ScopeDelete,
@@ -286,6 +289,7 @@ func TestManagementTokenBlockedRoutes(t *testing.T) {
 }
 
 func TestManagementTokenCSRFBoundary(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	_, writeToken := createManagementToken(t, api, "csrf-writer", map[string]int{"client_keys": auth.ScopeWrite}, "")
 
@@ -323,6 +327,7 @@ func TestManagementTokenCSRFBoundary(t *testing.T) {
 }
 
 func TestManagementTokenSelf(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	_, token := createManagementToken(t, api, "introspect", map[string]int{"monitoring": auth.ScopeRead}, "")
 
@@ -351,6 +356,7 @@ func TestManagementTokenSelf(t *testing.T) {
 }
 
 func TestManagementTokenExpiryAndDisable(t *testing.T) {
+	t.Parallel()
 	api, db, _ := newManagementHarness(t)
 	id, token := createManagementToken(t, api, "expiring", map[string]int{"providers": auth.ScopeRead}, "")
 
@@ -400,6 +406,7 @@ func TestManagementTokenExpiryAndDisable(t *testing.T) {
 }
 
 func TestManagementTokenRevokeAll(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	_, first := createManagementToken(t, api, "one", map[string]int{"providers": auth.ScopeRead}, "")
 	_, second := createManagementToken(t, api, "two", map[string]int{"providers": auth.ScopeRead}, "")
@@ -421,6 +428,7 @@ func TestManagementTokenRevokeAll(t *testing.T) {
 }
 
 func TestManagementTokenAuthFailureLockout(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	_, token := createManagementToken(t, api, "lockout", map[string]int{"providers": auth.ScopeRead}, "")
 
@@ -452,6 +460,7 @@ func TestManagementTokenAuthFailureLockout(t *testing.T) {
 }
 
 func TestManagementTokenDuplicateNameConflicts(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	createManagementToken(t, api, "dup", map[string]int{"providers": auth.ScopeRead}, "")
 	status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": "dup", "scopes": map[string]int{"providers": auth.ScopeRead}})
@@ -461,6 +470,7 @@ func TestManagementTokenDuplicateNameConflicts(t *testing.T) {
 }
 
 func TestManagementTokenInvalidScopesRejected(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	for _, scopes := range []map[string]int{{"bogus": auth.ScopeRead}, {"providers": 9}, {"providers": 0}} {
 		status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": "bad", "scopes": scopes})
@@ -474,6 +484,7 @@ func TestManagementTokenInvalidScopesRejected(t *testing.T) {
 // and proves it authenticates the admin surface, and that a re-seed with a new
 // value replaces the old credential.
 func TestAdminAPIKeyBootSeed(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -535,6 +546,7 @@ func TestAdminAPIKeyBootSeed(t *testing.T) {
 }
 
 func TestAdminAPIKeyCountsAsConfigured(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -549,6 +561,7 @@ func TestAdminAPIKeyCountsAsConfigured(t *testing.T) {
 }
 
 func TestManagementTokenEmptyAuthorizationNeverFallsBack(t *testing.T) {
+	t.Parallel()
 	api, _, _ := newManagementHarness(t)
 	for _, present := range []bool{false, true} {
 		req, err := http.NewRequest("GET", api.base+"/api/admin/providers", nil)
@@ -577,6 +590,7 @@ func TestManagementTokenEmptyAuthorizationNeverFallsBack(t *testing.T) {
 }
 
 func TestAdminAPIKeyEnvironmentManagedLifecycle(t *testing.T) {
+	t.Parallel()
 	api, db, app := newManagementHarness(t)
 	seed := "mt-tr-B9HQyF1IQyLu.NJh92J65MNar2AZWWJU6rzFB8eHTYAabB6SYEHF7rLA"
 	app.config.AdminAPIKey = seed

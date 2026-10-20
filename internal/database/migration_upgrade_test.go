@@ -155,6 +155,7 @@ func seedMigrationFixture(t *testing.T, raw *sql.DB, checkpoint int) {
 }
 
 func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
+	t.Parallel()
 	entries, err := fsMigrationEntries()
 	if err != nil {
 		t.Fatal(err)
@@ -277,6 +278,7 @@ func TestMigrateFromEveryCheckpointPreservesData(t *testing.T) {
 }
 
 func TestMigration017UpgradesOpenCodeFreeProtocols(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "router.db")
 	openMigrationFixture(t, path, 16)
 	raw := openRawMigrationDB(t, path)
@@ -331,6 +333,7 @@ func TestMigration017UpgradesOpenCodeFreeProtocols(t *testing.T) {
 }
 
 func TestMigrationFailureDoesNotAdvanceVersion(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "router.db")
 	// Make migration 002 fail deterministically by applying its schema change
 	// without recording 002 in schema_migrations.

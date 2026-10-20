@@ -38,6 +38,7 @@ func readSSE(t *testing.T, r *bufio.Reader) (string, string) {
 
 // TestLiveRequiresAuth asserts the live endpoint is admin-gated.
 func TestLiveRequiresAuth(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	req, _ := http.NewRequest(http.MethodGet, api.base+"/api/admin/live", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -54,6 +55,7 @@ func TestLiveRequiresAuth(t *testing.T) {
 // proxied request through the mock upstream, and asserts the stream emits an
 // outcome delta followed by a debounced snapshot.
 func TestLiveStreamsOutcomeAndSnapshot(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 
 	req, _ := http.NewRequest(http.MethodGet, api.base+"/api/admin/live", nil)
@@ -133,6 +135,7 @@ func TestLiveStreamsOutcomeAndSnapshot(t *testing.T) {
 // disconnects, the dispatcher goroutine is cancelled (no leak) and a later
 // subscribe starts a fresh one.
 func TestLiveUnsubscribeStopsDispatcher(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	req, _ := http.NewRequest(http.MethodGet, api.base+"/api/admin/live", nil)
@@ -165,6 +168,7 @@ func TestLiveUnsubscribeStopsDispatcher(t *testing.T) {
 // TestLiveBroadcastFanout asserts a single outcome delta reaches multiple
 // subscribers.
 func TestLiveBroadcastFanout(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	h := api.server.liveHub
 
@@ -192,6 +196,7 @@ func TestLiveBroadcastFanout(t *testing.T) {
 }
 
 func TestLiveOutcomeIsDroppedWithoutSubscribers(t *testing.T) {
+	t.Parallel()
 	h := &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), timings: liveTimings{debounce: 10 * time.Millisecond, idle: 10 * time.Millisecond, sessionCheck: time.Millisecond}}
 	h.emitOutcome(database.LocalAccountID, map[string]lastOutcome{"pm": {IsSuccess: true}})
 
@@ -220,6 +225,7 @@ func TestLiveOutcomeIsDroppedWithoutSubscribers(t *testing.T) {
 // TestLiveContextCancelUnsubscribes asserts a subscriber whose request context
 // is cancelled is removed from the hub.
 func TestLiveContextCancelUnsubscribes(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	h := api.server.liveHub
 
@@ -251,6 +257,7 @@ func TestLiveContextCancelUnsubscribes(t *testing.T) {
 }
 
 func TestLiveTerminatesWhenSessionIsRevoked(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	req, _ := http.NewRequest(http.MethodGet, api.base+"/api/admin/live", nil)
 	cookie := api.client.Jar.Cookies(req.URL)[0]

@@ -561,19 +561,28 @@ func (s *Server) finishDevice(accountID, id string, generation int64, status str
 
 func (s *Server) providerOAuthStatus(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Snapshot the device state while holding the lock. The device-flow
+	// goroutine mutates the entry in place (setDevicePrompt, setDeviceConnected,
+	// finishDevice), so reading its fields after the lock is released would race
+	// with those writes; copy the value once, then read the copy.
 	s.oauthDeviceMu.Lock()
-	state := s.oauthDevices[tenantKey(s.scope(r).AccountID(), id)]
+	var device oauthDeviceState
+	haveDevice := false
+	if state := s.oauthDevices[tenantKey(s.scope(r).AccountID(), id)]; state != nil {
+		device = *state
+		haveDevice = true
+	}
 	s.oauthDeviceMu.Unlock()
-	if state != nil {
-		result := map[string]any{"status": state.Status}
-		if state.Prompt.VerificationURI != "" {
-			result["verification_uri"] = state.Prompt.VerificationURI
-			result["verification_uri_complete"] = state.Prompt.VerificationURIComplete
-			result["user_code"] = state.Prompt.UserCode
-			result["expires_in"] = state.Prompt.ExpiresIn
+	if haveDevice {
+		result := map[string]any{"status": device.Status}
+		if device.Prompt.VerificationURI != "" {
+			result["verification_uri"] = device.Prompt.VerificationURI
+			result["verification_uri_complete"] = device.Prompt.VerificationURIComplete
+			result["user_code"] = device.Prompt.UserCode
+			result["expires_in"] = device.Prompt.ExpiresIn
 		}
-		if state.Err != "" {
-			result["error"] = state.Err
+		if device.Err != "" {
+			result["error"] = device.Err
 		}
 		writeJSON(w, 200, result)
 		return

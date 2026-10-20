@@ -15,6 +15,7 @@ import (
 // TILLER_DEBUG_PPROF has not been enabled. The catch-all asset handler answers
 // the unmatched path, so the route must resolve to 404 (not 200/401).
 func TestDebugPprofDisabledByDefault(t *testing.T) {
+	t.Parallel()
 	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080"})
 	req := httptest.NewRequest(http.MethodGet, debugPprofPrefix+"heap", nil)
 	response := httptest.NewRecorder()
@@ -27,6 +28,7 @@ func TestDebugPprofDisabledByDefault(t *testing.T) {
 // TestDebugEndpointsRequireAdmin verifies both debug endpoints reject an
 // unauthenticated request when profiling is enabled.
 func TestDebugEndpointsRequireAdmin(t *testing.T) {
+	t.Parallel()
 	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", DebugPprof: true})
 	for _, path := range []string{"/api/admin/debug/memory", debugPprofPrefix + "heap", debugPprofPrefix} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
@@ -39,6 +41,7 @@ func TestDebugEndpointsRequireAdmin(t *testing.T) {
 }
 
 func TestDebugEndpointsRequirePlatformAdminInHostedMode(t *testing.T) {
+	t.Parallel()
 	app, _, _, _ := legalTestServer(t)
 	app.config.DebugPprof = true
 	server := httptest.NewServer(app.Handler())
@@ -76,6 +79,7 @@ func TestDebugEndpointsRequirePlatformAdminInHostedMode(t *testing.T) {
 // endpoint returns a runtime summary and the pprof handler proxies through to
 // the standard handlers, both behind the admin gate.
 func TestDebugEndpointsServeWhenEnabledAndAuthenticated(t *testing.T) {
+	t.Parallel()
 	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", DebugPprof: true})
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)

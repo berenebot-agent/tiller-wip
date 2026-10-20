@@ -7,6 +7,7 @@ import (
 )
 
 func TestTruncateReadCause(t *testing.T) {
+	t.Parallel()
 	if got := truncateReadCause(nil); got != "" {
 		t.Fatalf("nil = %q, want empty", got)
 	}

@@ -14,6 +14,7 @@ import (
 )
 
 func TestCooldownSlowFailureStillCools(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	slowA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +76,48 @@ func TestCooldownSlowFailureStillCools(t *testing.T) {
 	}
 }
 
+func TestCooldownCooledDoesNotPrune(t *testing.T) {
+	t.Parallel()
+	store := newCooldownStore()
+	now := time.Now()
+	store.set("acct", "pm-live", now, now.Add(time.Minute), "provider-a", "model-a", "req-1", "upstream_5xx", "boom")
+	// Insert the expired entry directly: set() prunes as it writes, so a set
+	// call cannot produce a stale entry to observe.
+	store.mu.Lock()
+	store.until[tenantKey("acct", "pm-expired")] = cooldownEntry{
+		providerModelID: "pm-expired", startedAt: now.Add(-2 * time.Hour), until: now.Add(-time.Hour),
+		provider: "provider-a", model: "model-b",
+	}
+	store.mu.Unlock()
+	if !store.cooled("acct", "pm-live", now) {
+		t.Fatal("live cooldown reported not cooling")
+	}
+	if store.cooled("acct", "pm-expired", now) {
+		t.Fatal("expired cooldown reported cooling")
+	}
+	// cooled() deliberately leaves pruning to set()/snapshot(): it runs once per
+	// candidate on every ordered-fallback request, so a full map scan there
+	// would be O(candidates x map size) on the routing path.
+	store.mu.Lock()
+	_, kept := store.until[tenantKey("acct", "pm-expired")]
+	store.mu.Unlock()
+	if !kept {
+		t.Fatal("cooled() pruned the map; the check must stay a single lookup")
+	}
+	// The off-hot-path readers still sweep, so the map stays bounded.
+	if _, ok := store.snapshot("acct", now)["pm-live"]; !ok {
+		t.Fatal("snapshot dropped the live entry")
+	}
+	store.mu.Lock()
+	_, stillKept := store.until[tenantKey("acct", "pm-expired")]
+	store.mu.Unlock()
+	if stillKept {
+		t.Fatal("snapshot did not prune the expired entry")
+	}
+}
+
 func TestCooldownStatusEligibilityMatrix(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		status   int
 		wantCool bool
@@ -143,6 +185,7 @@ func TestCooldownStatusEligibilityMatrix(t *testing.T) {
 }
 
 func TestCooldownEligibleStatusDoesNotApplyToFixedVirtualRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls int
 	var mu sync.Mutex
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -201,6 +244,7 @@ func TestCooldownEligibleStatusDoesNotApplyToFixedVirtualRoute(t *testing.T) {
 }
 
 func TestCooldownExcludedStatusDoesNotApplyToDirectRealRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls int
 	var mu sync.Mutex
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +295,7 @@ func TestCooldownExcludedStatusDoesNotApplyToDirectRealRoute(t *testing.T) {
 }
 
 func TestCooldownClientCancelDoesNotCool(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	releaseA := make(chan struct{})
@@ -296,7 +341,24 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 		resp, reqErr = http.DefaultClient.Do(req)
 		close(done)
 	}()
-	time.Sleep(18 * time.Millisecond)
+	// Wait until A has actually been attempted, then cancel the client request.
+	// A fixed sleep is not safe here: under load the router may not have
+	// dispatched to A within the window, in which case the cancel lands before A
+	// is ever tried and the "A is still attempted" assertion below sees only the
+	// follow-up hit. Polling makes the precondition deterministic.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		attemptedA := len(reached) > 0
+		mu.Unlock()
+		if attemptedA {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("router never dispatched to target A")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 	select {
 	case <-done:
@@ -341,6 +403,7 @@ func TestCooldownClientCancelDoesNotCool(t *testing.T) {
 // reading the response body. That read error is self-inflicted and must not
 // cool an otherwise healthy target (regression: gpt-5.6-luna cooled for 5m).
 func TestCooldownClientCancelDuringBodyReadDoesNotCool(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	bodyStarted := make(chan struct{}, 1)

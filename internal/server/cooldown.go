@@ -31,6 +31,12 @@ func newCooldownStore() *cooldownStore {
 	return &cooldownStore{until: map[string]cooldownEntry{}}
 }
 
+// cooled reports whether the given target is still cooling. The read path does
+// not prune: it treats an expired entry as not-cooled anyway, and cooling is
+// checked once per candidate on every ordered-fallback request, so a full map
+// scan here would put O(candidates x map size) work on the latency-sensitive
+// routing path. Expired entries are dropped by set() and snapshot() instead,
+// and their memory is bounded by cooldown churn.
 func (c *cooldownStore) cooled(accountID, id string, now time.Time) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -41,13 +47,32 @@ func (c *cooldownStore) cooled(accountID, id string, now time.Time) bool {
 	return now.Before(e.until)
 }
 
+// pruneExpiredLocked drops entries whose window has closed. Without it the map
+// only ever grows: an entry was otherwise removed only when a later request to
+// the same target succeeded or an admin released it. Caller holds c.mu.
+func (c *cooldownStore) pruneExpiredLocked(now time.Time) {
+	for key, e := range c.until {
+		if !now.Before(e.until) {
+			delete(c.until, key)
+		}
+	}
+}
+
 // set records a cooldown window for the given provider_model_id. startedAt is
 // the failure moment, until when the target becomes eligible again. The origin
 // fields describe the failure that opened the cooldown.
 func (c *cooldownStore) set(accountID, id string, startedAt, until time.Time, provider, model, originRequestLogID, originErrorClass, originErrorMessage string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.until[tenantKey(accountID, id)] = cooldownEntry{
+	c.pruneExpiredLocked(startedAt)
+	key := tenantKey(accountID, id)
+	// A cooldown only ever extends: a failure that would schedule a shorter
+	// window than the one already open must not release the target early. The
+	// longer window wins; ties keep the newer origin detail.
+	if existing, ok := c.until[key]; ok && existing.until.After(until) {
+		return
+	}
+	c.until[key] = cooldownEntry{
 		providerModelID:    id,
 		startedAt:          startedAt,
 		until:              until,
@@ -59,26 +84,31 @@ func (c *cooldownStore) set(accountID, id string, startedAt, until time.Time, pr
 	}
 }
 
+// deleteLocked removes a cooldown entry. Caller holds c.mu.
+func (c *cooldownStore) deleteLocked(key string) {
+	delete(c.until, key)
+}
+
 // statusByName returns the live cooldown entry for the given provider/model
 // pair if it is still cooling at now, and false otherwise. The store is keyed
-// by provider_model_id but the UI addresses targets by names, so this does a
-// linear match.
+// by provider_model_id but the UI addresses targets by names; when two model
+// rows share a provider+model name the earliest expiry wins so the answer is
+// deterministic rather than map-order dependent.
 func (c *cooldownStore) statusByName(accountID, provider, model string, now time.Time) (cooldownEntry, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var best cooldownEntry
+	found := false
 	prefix := accountID + "\x00"
 	for key, e := range c.until {
-		if !strings.HasPrefix(key, prefix) {
+		if !strings.HasPrefix(key, prefix) || e.provider != provider || e.model != model || !now.Before(e.until) {
 			continue
 		}
-		if e.provider == provider && e.model == model {
-			if now.Before(e.until) {
-				return e, true
-			}
-			return cooldownEntry{}, false
+		if !found || e.until.Before(best.until) || (e.until.Equal(best.until) && e.providerModelID < best.providerModelID) {
+			best, found = e, true
 		}
 	}
-	return cooldownEntry{}, false
+	return best, found
 }
 
 func (c *cooldownStore) clearFor(accountID string) {
@@ -95,26 +125,24 @@ func (c *cooldownStore) clearFor(accountID string) {
 func (c *cooldownStore) remove(accountID, id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	delete(c.until, tenantKey(accountID, id))
+	c.deleteLocked(tenantKey(accountID, id))
 }
 
-// removeByName deletes any cooldown entry matching the given provider/model
+// removeByName deletes every cooldown entry matching the given provider/model
 // names. The store is keyed by provider_model_id but the admin UI addresses
-// targets by names, so this does a linear match like statusByName. It reports
-// whether an entry was actually removed.
+// targets by names, so a manual release by name clears all rows that share it.
+// It reports whether an entry was actually removed.
 func (c *cooldownStore) removeByName(accountID, provider, model string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	removed := false
 	prefix := accountID + "\x00"
-	for key, e := range c.until {
-		if !strings.HasPrefix(key, prefix) {
+	for key, entry := range c.until {
+		if !strings.HasPrefix(key, prefix) || entry.provider != provider || entry.model != model {
 			continue
 		}
-		if e.provider == provider && e.model == model {
-			delete(c.until, key)
-			removed = true
-		}
+		delete(c.until, key)
+		removed = true
 	}
 	return removed
 }
@@ -134,6 +162,7 @@ type cooldownView struct {
 func (c *cooldownStore) snapshot(accountID string, now time.Time) map[string]cooldownView {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.pruneExpiredLocked(now)
 	out := make(map[string]cooldownView, len(c.until))
 	prefix := accountID + "\x00"
 	for key, e := range c.until {

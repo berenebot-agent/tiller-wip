@@ -41,6 +41,7 @@ type logRow struct {
 	// providerCostMicros is a provider-reported exact cost (OpenRouter
 	// usage.cost) when the upstream response carried one.
 	providerCostMicros   *int64
+	estimatedCostMicros  *int64
 	inputTokensSource    *string
 	outputTokensSource   *string
 	inputEstimate        int64
@@ -57,6 +58,10 @@ type logRow struct {
 	errorBody            *string
 	errorBodyTruncated   bool
 	createdAt            string
+	liveEnabled          bool
+	liveRevision         uint64
+	liveAttempt          *requestAttempt
+	liveFallback         bool
 }
 
 // copyUsage moves the captured token counts and any provider-reported cost from
@@ -93,6 +98,11 @@ type requestAttempt struct {
 	// (provider error message/code/param). It is never persisted or exposed via
 	// Activity; it exists only to build a client error response.
 	clientError string
+	// recovered marks a failed attempt that the router itself repaired, so the
+	// same target was retried with fresh credentials and may well have served
+	// the request. The attempt stays in Activity as a record of what happened,
+	// but it is not evidence the target is unhealthy and must not degrade it.
+	recovered bool
 }
 
 const maxLoggedBodyBytes = 1 << 20
@@ -127,6 +137,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 	s.recordLastOutcome(row)
 	enabled, err := s.scopeFor(row.accountID).ClientKeyLoggingEnabled(ctx, row.clientKeyID)
 	if err != nil || !enabled {
+		row.liveEnabled = false
 		return
 	}
 	// Write-time invariant: a 2xx "success" row must always carry a resolved
@@ -187,6 +198,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		}
 	}
 	attempts := make([]store.RequestAttemptInsert, 0, len(row.attempts))
+	row.estimatedCostMicros = estimatedCostMicros
 	for _, attempt := range row.attempts {
 		attempts = append(attempts, store.RequestAttemptInsert{
 			Provider:           attempt.provider,
@@ -276,6 +288,13 @@ func (s *Server) recordLastOutcome(row *logRow) {
 		// says nothing about the target. Never let it degrade the target or
 		// show up as a failed leg.
 		if attempt.result != "success" && clientCausedFailure(attempt) {
+			continue
+		}
+		// A failure the router repaired on the same target (stale OAuth
+		// credentials refreshed, then retried) is likewise not a target-health
+		// signal. It stays visible in Activity; it just never paints the target
+		// unhealthy.
+		if attempt.recovered {
 			continue
 		}
 		out := lastOutcome{At: recordedAt, Status: attempt.httpStatus, Result: attempt.result, FailureClass: attempt.failureClass}

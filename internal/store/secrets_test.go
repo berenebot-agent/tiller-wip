@@ -44,6 +44,7 @@ func createTestProvider(t *testing.T, sc *store.Scope, id, credential string) {
 }
 
 func TestSecretsAreEncryptedAtRest(t *testing.T) {
+	t.Parallel()
 	db, st := openStoreWithCipher(t, testCipher(t, 1))
 	ctx := context.Background()
 	sc := st.For(database.LocalAccountID)
@@ -111,6 +112,7 @@ func TestSecretsAreEncryptedAtRest(t *testing.T) {
 }
 
 func TestLockedCipherRefusesSecrets(t *testing.T) {
+	t.Parallel()
 	db, st := openStoreWithCipher(t, testCipher(t, 1))
 	ctx := context.Background()
 	createTestProvider(t, st.For(database.LocalAccountID), "p1", "sk-live-secret")
@@ -128,6 +130,7 @@ func TestLockedCipherRefusesSecrets(t *testing.T) {
 }
 
 func TestMigrateSecretsEncryptsPlaintext(t *testing.T) {
+	t.Parallel()
 	db, st := openStore(t)
 	ctx := context.Background()
 	createTestProvider(t, st.For(database.LocalAccountID), "p1", "sk-plain")
@@ -162,6 +165,7 @@ func TestMigrateSecretsEncryptsPlaintext(t *testing.T) {
 }
 
 func TestMigrateSecretsLockedOnWrongKey(t *testing.T) {
+	t.Parallel()
 	db, _ := openStore(t)
 	ctx := context.Background()
 	createTestProvider(t, store.New(db.SQL, store.WithCipher(testCipher(t, 1))).For(database.LocalAccountID), "p1", "sk-secret")
@@ -189,6 +193,7 @@ func TestMigrateSecretsLockedOnWrongKey(t *testing.T) {
 // TestRotateSecretsCoversMailOutbox proves key rotation re-encrypts a queued
 // outbox one-time token, which uses a distinct AAD from tenant secrets.
 func TestRotateSecretsCoversMailOutbox(t *testing.T) {
+	t.Parallel()
 	db, _ := openStore(t)
 	ctx := context.Background()
 	cipherA := testCipher(t, 1)
@@ -221,6 +226,7 @@ func TestRotateSecretsCoversMailOutbox(t *testing.T) {
 }
 
 func TestRotateSecrets(t *testing.T) {
+	t.Parallel()
 	db, _ := openStore(t)
 	ctx := context.Background()
 	createTestProvider(t, store.New(db.SQL, store.WithCipher(testCipher(t, 1))).For(database.LocalAccountID), "p1", "sk-rotate")
@@ -248,6 +254,7 @@ func TestRotateSecrets(t *testing.T) {
 }
 
 func TestAADBindsAccount(t *testing.T) {
+	t.Parallel()
 	db, _ := openStore(t)
 	st := store.New(db.SQL, store.WithCipher(testCipher(t, 1)))
 	ctx := context.Background()
@@ -266,6 +273,7 @@ func TestAADBindsAccount(t *testing.T) {
 }
 
 func TestHasEncryptedSecrets(t *testing.T) {
+	t.Parallel()
 	db, _ := openStore(t)
 	ctx := context.Background()
 	has, err := store.HasEncryptedSecrets(ctx, db.SQL)

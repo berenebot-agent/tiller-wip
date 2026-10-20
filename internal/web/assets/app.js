@@ -1,4 +1,5 @@
 import { LiveStream } from './live.js';
+import { LiveRequests } from './live-requests.js';
 const PROVIDER_LOGOS = {
   openai: '/media/providers/openai.svg', 'codex-subscription': '/media/providers/codex.svg',
   anthropic: '/media/providers/anthropic.svg', 'claude-subscription': '/media/providers/claude-code.svg',
@@ -103,6 +104,19 @@ const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 const date = value => value ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value)) : 'Never';
+// Coarse relative age for the live requests table's Age column. Deliberately
+// rounded to a single unit: the cell refreshes every second, so seconds-only
+// precision past a minute would just add flicker. `ms` is the elapsed time the
+// live panel already computed against the server clock offset.
+const relativeAge = ms => {
+  const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  if (s < 60) return `${s} sec ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const hr = Math.floor(m / 60);
+  if (hr < 24) return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+};
 // tokLoadingInner is the placeholder shown in a token cell before the usage /
 // health envelope has arrived. It is deliberately distinct from the "—" empty
 // state: "—" means "no traffic recorded" and only appears once usage is known,
@@ -774,7 +788,7 @@ const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github
 // the label, an inline bar, the used percentage and a short reset countdown.
 // The plan name and freshness line are deliberately omitted to keep the card
 // short.
-function providerQuotaHTML(provider) {
+function providerQuotaDataHTML(provider) {
   if (!quotaProviderTypes.includes(provider.type)) return '';
   const snap = state.providerQuota?.[provider.id];
   if (!snap) return '<p class="provider-quota-status">Quota: loading…</p>';
@@ -799,6 +813,28 @@ function providerQuotaHTML(provider) {
   // collapse anything beyond that (e.g. org spend caps) behind a toggle.
   const inline = 3;
   return `<div class="provider-quota">${rows.slice(0, inline).join('')}${rows.length > inline ? `<details><summary>${rows.length - inline} more limits</summary>${rows.slice(inline).join('')}</details>` : ''}</div>`;
+}
+
+// Keep successful data age distinct from the time of a failed poll.
+function quotaAge(when) {
+  const elapsed = Math.max(0, Math.floor((Date.now() - new Date(when).getTime()) / 60000));
+  if (!Number.isFinite(elapsed)) return 'unknown';
+  if (elapsed < 1) return 'just now';
+  if (elapsed < 60) return elapsed + 'm ago';
+  if (elapsed < 1440) return Math.floor(elapsed / 60) + 'h ago';
+  return Math.floor(elapsed / 1440) + 'd ago';
+}
+function providerQuotaHTML(provider) {
+  if (!quotaProviderTypes.includes(provider.type)) return '';
+  const status = state.providerQuotaStatus?.[provider.id] || {};
+  const snapshot = state.providerQuota?.[provider.id];
+  const lastSuccess = status.last_success_at || (snapshot?.available ? snapshot.fetched_at : null);
+  const age = lastSuccess ? 'last updated ' + quotaAge(lastSuccess) : (status.last_attempt_at ? 'checked ' + quotaAge(status.last_attempt_at) : 'not checked yet');
+  const label = status.refreshing ? 'Refreshing · ' + age
+    : status.failed ? 'Check failed · ' + age
+    : lastSuccess ? 'Updated ' + quotaAge(lastSuccess) : 'Not checked yet';
+  const spinner = status.refreshing ? '<span class="provider-quota-spinner" aria-hidden="true"></span>' : '';
+  return providerQuotaDataHTML(provider) + '<div class="provider-quota-age" aria-live="polite">' + spinner + h(label) + '</div>';
 }
 
 // providerCostHTML renders the router usage cost for pay-per-token providers
@@ -1788,10 +1824,10 @@ if (window.visualViewport) {
 function clientCard(client) {
   const statusDot = `<span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span>`;
   const routeSummary = client.type === 'single'
-    ? `<code class="model-id ${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</code>${client.single_target_available === false ? '<span class="client-route-broken">Unavailable</span>' : ''}`
+    ? `<code class="model-id">${h(client.single_target_canonical || 'Unavailable target')}</code>`
     : `<span class="meta-line">Catalogue — model permissions</span>`;
   const quickAction = client.type === 'single'
-    ? `<button class="client-route-button" data-client-route="${h(client.id)}" aria-label="Change route for ${h(client.name)}"><span>Current model</span><strong class="${client.single_target_available === false ? 'client-route-unavailable' : ''}">${h(client.single_target_canonical || 'Unavailable target')}</strong><i aria-hidden="true">›</i></button>`
+    ? `<button class="client-route-button" data-client-route="${h(client.id)}" aria-label="Change route for ${h(client.name)}"><span>Current model</span><strong>${h(client.single_target_canonical || 'Unavailable target')}</strong><i aria-hidden="true">›</i></button>`
     : `<button class="client-permission-button" data-client-models="${h(client.id)}" aria-label="Manage permissions for ${h(client.name)}"><span>Catalogue</span><strong>Manage permissions</strong><i aria-hidden="true">›</i></button>`;
   return `<article class="client-card" data-client-id="${h(client.id)}">
     <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
@@ -1822,7 +1858,7 @@ function clientCard(client) {
 }
 function clientRow(client) {
   const routeCell = client.type === 'single'
-    ? `<div class="client-route-picker ${client.single_target_available === false ? 'route-picker-error' : ''}" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
+    ? `<div class="client-route-picker" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
     : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
   return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong>${estimatedMark(client.id)}</div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h', state.usage?.client_cost?.[client.id]?.['1h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h', state.usage?.client_cost?.[client.id]?.['24h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d', state.usage?.client_cost?.[client.id]?.['7d'], state.usage?.client_tokens?.[client.id])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
@@ -2829,23 +2865,43 @@ function renderProviderUsage() {
   });
 }
 
-// loadQuota fetches cached subscription/quota snapshots and re-renders the
-// provider-card usage blocks.
+// Cache-first provider quota polling. Follow running checks without making
+// further upstream requests: the server enforces a 60-second per-provider floor.
+let quotaStatusTimer = null;
+let quotaLoading = false;
 async function loadQuota() {
+  if (quotaLoading || state.view !== 'providers' || document.hidden) return;
+  quotaLoading = true;
   try {
     const payload = await api('/api/admin/quota');
     state.providerQuota = payload?.providers || {};
+    state.providerQuotaStatus = payload?.poll_status || {};
     renderProviderUsage();
   } catch {
     state.providerQuota = state.providerQuota || {};
+    state.providerQuotaStatus = state.providerQuotaStatus || {};
     renderProviderUsage();
+  } finally {
+    quotaLoading = false;
+    clearTimeout(quotaStatusTimer);
+    quotaStatusTimer = null;
+    if (state.view === 'providers' && !document.hidden &&
+        Object.values(state.providerQuotaStatus || {}).some(status => status.refreshing)) {
+      quotaStatusTimer = setTimeout(loadQuota, 2000);
+    }
   }
 }
-// Viewing Providers keeps the displayed snapshots fresh; the server owns the
-// 30-minute idle / 60-second active cadence and the 30-second on-view floor.
+// Refresh eligible providers while their page is visible.
 setInterval(() => {
   if (state.view === 'providers' && !document.hidden) loadQuota();
 }, 60000);
+// Relative age changes without additional network requests.
+setInterval(() => {
+  if (state.view === 'providers' && !document.hidden) renderProviderUsage();
+}, 30000);
+document.addEventListener('visibilitychange', () => {
+  if (state.view === 'providers' && !document.hidden) loadQuota();
+});
 
 // renderQuotaProvider renders one provider's quota snapshot.
 function renderQuotaProvider(snap) {
@@ -3232,6 +3288,7 @@ async function ensureActivityGraph() {
   }
 }
 async function loadActivityView() {
+  liveRequests.start();
   const token = ++state.loadToken;
   const mod = await ensureActivityGraph();
   if (token !== state.loadToken) return;
@@ -3261,56 +3318,9 @@ async function loadActivityView() {
     // while the view was hidden (state keeps the client + leg lanes).
     if (activityGraphReady) noteActivityCatalogueMiss(mod.onSnapshotSeed({ inflight_client_routes: state.liveRoutes, inflight_targets: state.liveLegs }));
     if (activityGraphReady) mod.onCooldowns(state.usage?.target_cooldown || {});
-    renderMobileActivity();
   } catch (error) {
     flash(errorMessage(error), 'error');
   }
-}
-function mobileActivityCatalogue() {
-  return activityGraphData || { clients: [], virtualModels: [], models: [] };
-}
-function mobileActivityTarget(routeID, targetID) {
-  const data = mobileActivityCatalogue();
-  const virtual = data.virtualModels.find(model => model.id === routeID);
-  if (virtual) {
-    const target = (virtual.targets || []).find(item => item.provider_model_id === targetID || `${item.provider_name}/${item.upstream_model_id}` === targetID);
-    return target ? `${target.provider_name}/${target.upstream_model_id}` : targetID;
-  }
-  const model = data.models.find(item => item.id === targetID || item.canonical_model_id === targetID);
-  return model ? model.canonical_model_id : targetID;
-}
-function renderMobileActivity() {
-  const data = mobileActivityCatalogue();
-  const byRoute = new Map();
-  Object.entries(state.liveRoutes || {}).filter(([, item]) => item && item.active > 0).forEach(([key, item]) => {
-    const separator = key.indexOf('\u0000');
-    const clientID = item.client_id || (separator >= 0 ? key.slice(0, separator) : '');
-    const client = data.clients.find(candidate => candidate.id === clientID);
-    const routeID = item.route_id || item.routeID;
-    const virtual = data.virtualModels.find(model => model.id === routeID);
-    const real = data.models.find(model => model.id === routeID || model.canonical_model_id === routeID);
-    const routeLabel = virtual?.canonical_model_id || real?.canonical_model_id || item.requested_model || routeID || 'Unknown route';
-    const targets = Object.entries(state.liveLegs || {}).filter(([targetKey, target]) => targetKey.startsWith(`${routeID}\u0000`) && target?.active > 0).map(([targetKey]) => mobileActivityTarget(routeID, targetKey.slice(targetKey.indexOf('\u0000') + 1)));
-    const targetLabel = item.resolved_model || targets[0] || 'Waiting for upstream target';
-    const entryKey = `${clientID}\u0000${routeID}`;
-    const existing = byRoute.get(entryKey);
-    if (existing) {
-      existing.streaming = existing.streaming || item.streaming > 0;
-      existing.targets = [...new Set([...existing.targets, ...targets])];
-      if (item.resolved_model) existing.target = item.resolved_model;
-      return;
-    }
-    byRoute.set(entryKey, { client: client?.name || clientID || 'Unknown client', route: routeLabel, target: targetLabel, requested: item.requested_model || routeLabel, streaming: item.streaming > 0, targets });
-  });
-  const entries = [...byRoute.values()];
-  const list = $('#mobile-activity-body');
-  if (!list) return;
-  $('#mobile-activity-empty').hidden = entries.length > 0;
-  list.innerHTML = entries.map(entry => { const sameRoute = entry.requested === entry.route; const chain = sameRoute ? `<span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span>` : `<span>${h(entry.requested)}</span><b aria-hidden="true">→</b><span>${h(entry.route)}</span><b aria-hidden="true">→</b><span>${h(entry.target)}</span>`; return `<article class="live-activity-card"><div class="live-activity-top"><span class="live-pulse" aria-hidden="true"></span><strong>${h(entry.client)}</strong><span class="live-activity-state">${entry.streaming ? 'Streaming' : 'In flight'}</span></div><div class="live-activity-chain">${chain}</div>${entry.targets.length > 1 ? `<p class="live-activity-note">${entry.targets.length} upstream targets active</p>` : ''}<button class="btn btn-small btn-secondary" data-live-activity-client="${h(entry.client)}">View details</button></article>`; }).join('');
-  $$('[data-live-activity-client]', list).forEach(button => button.onclick = () => {
-    const client = data.clients.find(item => item.name === button.dataset.liveActivityClient);
-    if (client) openActivity(client);
-  });
 }
 function openGraphActivity(node, data) {
   const id = node.id.slice(2);
@@ -3327,6 +3337,7 @@ function openGraphActivity(node, data) {
   else openModelActivity(item, node.kind === 'route' ? 'virtual' : 'real');
 }
 function destroyActivityView() {
+  liveRequests.stop();
   if (activityGraphModule && activityGraphReady) {
     try { activityGraphModule.destroy(); } catch { /* teardown is best-effort */ }
   }
@@ -3344,6 +3355,9 @@ function destroyActivityView() {
 // cells; state is always kept current so a reconcile paint on close/nav is
 // instant.
 const live = new LiveStream('/api/admin/live', { onAuthFailure: () => showLogin() });
+const liveRequests = new LiveRequests($('#view-activity'), { api, h, date, when: relativeAge, requestIdentity, rowCache });
+live.on('request', row => liveRequests.onRequest(row));
+live.on('connection', payload => liveRequests.setConnection(payload.state));
 let livePendingReconcile = false;
 const liveDialogOpen = () => document.querySelector('dialog[open]') !== null;
 const liveViewActive = (...views) => views.includes(state.view);
@@ -3540,6 +3554,7 @@ live.on('outcome', payload => {
 });
 
 live.on('snapshot', payload => {
+  liveRequests.onSnapshot(payload.modules?.request_rows, payload.generated_at);
   if (!state.usage) state.usage = {};
   ['target_last_outcome', 'target_cooldown', 'target_health', 'virtual_models', 'client_keys', 'real_models', 'virtual_cache', 'client_cache', 'real_cache', 'client_cost', 'virtual_cost', 'real_cost', 'client_tokens', 'virtual_tokens', 'real_tokens', 'client_token_sources', 'virtual_token_sources', 'real_token_sources'].forEach(key => {
     if (payload[key] !== undefined) state.usage[key] = payload[key];
@@ -3553,7 +3568,6 @@ live.on('snapshot', payload => {
   if (payload.modules?.inflight_clients !== undefined) state.liveRequests = payload.modules.inflight_clients || {};
   if (payload.modules?.inflight_client_routes !== undefined) state.liveRoutes = payload.modules.inflight_client_routes || {};
   if (payload.modules?.inflight_targets !== undefined) state.liveLegs = payload.modules.inflight_targets || {};
-  if (liveViewActive('activity')) renderMobileActivity();
   // Activity living pane: seed currently-hot legs on every snapshot so a
   // missed delta self-heals without a refresh.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
@@ -3608,7 +3622,6 @@ live.on('activity', delta => {
         if (client) applyClientRoundel($('.status-roundel', card), client, state.liveRequests[delta.client_id]);
       }
     }
-    if (liveViewActive('activity')) renderMobileActivity();
   }
   if (delta.target_id) {
     const key = targetActivityKey(delta.id || '', delta.target_id);
@@ -3623,7 +3636,6 @@ live.on('activity', delta => {
       const target = model && (model.targets || []).find(item => (item.provider_model_id || `${item.provider_name}/${item.upstream_model_id}`) === delta.target_id);
       if (line && target) patchResolution(line, target);
     }
-    if (liveViewActive('activity')) renderMobileActivity();
   }
   // Activity living pane: client + target deltas drive the flow.
   if (liveViewActive('activity') && activityGraphReady && activityGraphModule) {
@@ -3648,7 +3660,7 @@ navigate = function (view) {
 };
 
 function liveStart() { live.start(); }
-function liveStop() { live.stop(); }
+function liveStop() { live.stop(); liveRequests.stop(); }
 
 // Analytics consent is stored client-side only. The analytics script is never
 // requested until the visitor explicitly accepts; declining is remembered so
@@ -3914,6 +3926,7 @@ async function loadPlatformSettings() {
   const settings = await api('/api/platform/settings');
   const form = $('#platform-settings-form');
   form.elements.hosted_signup_enabled.checked = !!settings.hosted_signup_enabled;
+  form.elements.prevent_search_indexing.checked = !!settings.prevent_search_indexing;
   form.elements.audit_retention_days.value = settings.audit_retention_days;
   form.elements.google_signin_enabled.checked = !!settings.google?.enabled;
   form.elements.google_client_id.value = settings.google?.client_id || '';
@@ -4110,6 +4123,7 @@ document.querySelector('#platform-settings-form').addEventListener('submit', asy
   const form = new FormData(event.currentTarget);
   const payload = {
     hosted_signup_enabled: form.get('hosted_signup_enabled') === 'on',
+    prevent_search_indexing: form.get('prevent_search_indexing') === 'on',
     audit_retention_days: Number(form.get('audit_retention_days')),
     google_signin_enabled: form.get('google_signin_enabled') === 'on',
     google_client_id: form.get('google_client_id'),

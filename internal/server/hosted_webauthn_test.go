@@ -214,6 +214,7 @@ func (a *testAPI) requestWithHeaders(method, path string, body any, headers map[
 // X-CSRF-Token header: the finish endpoint must reject a request that has a
 // valid session and challenge but no CSRF token.
 func TestPasskeyRegistrationRequiresCSRF(t *testing.T) {
+	t.Parallel()
 	_, api := hostedWebAuthnServer(t)
 	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{})
 	if status != 200 {
@@ -232,6 +233,7 @@ func TestPasskeyRegistrationRequiresCSRF(t *testing.T) {
 // TestPasskeyRegisterRenameDeleteFlow drives the account-page management
 // endpoints end to end with a real registration.
 func TestPasskeyRegisterRenameDeleteFlow(t *testing.T) {
+	t.Parallel()
 	_, api := hostedWebAuthnServer(t)
 	auth := newHTTPTestAuthenticator(t)
 
@@ -273,6 +275,7 @@ func TestPasskeyRegisterRenameDeleteFlow(t *testing.T) {
 // signs back in with a discoverable assertion. This is the user-visible login
 // path and would have failed before the backup-eligible fix.
 func TestPasskeyLoginE2E(t *testing.T) {
+	t.Parallel()
 	_, api := hostedWebAuthnServer(t)
 	auth := newHTTPTestAuthenticator(t)
 	auth.be, auth.bs = true, true
@@ -300,6 +303,7 @@ func TestPasskeyLoginE2E(t *testing.T) {
 // TestPasskeyLoginRateLimit proves a begin flood is charged against the
 // dedicated passkey begin limiter rather than being free.
 func TestPasskeyLoginRateLimit(t *testing.T) {
+	t.Parallel()
 	app, api := hostedWebAuthnServer(t)
 	limited := false
 	for i := 0; i < app.passkeyBeginLimiter.max+5; i++ {
@@ -317,6 +321,7 @@ func TestPasskeyLoginRateLimit(t *testing.T) {
 // TestPasskeyFinishRejectsOversizedBody proves the finish body cap is applied
 // before the WebAuthn library reads it.
 func TestPasskeyFinishRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
 	_, api := hostedWebAuthnServer(t)
 	huge := map[string]any{"id": strings.Repeat("A", webauthnFinishMaxBytes+1024)}
 	status, _, _ := api.requestWithHeaders("POST", "/api/auth/passkey/finish", huge, map[string]string{challengeHeader: "bogus"})
@@ -329,6 +334,7 @@ func TestPasskeyFinishRejectsOversizedBody(t *testing.T) {
 // lifecycle over HTTP: register, disable password, then change the password
 // again using only a passkey assertion for re-authentication.
 func TestPasskeyOnlyReauthAuthorisesPasswordChange(t *testing.T) {
+	t.Parallel()
 	app, api := hostedWebAuthnServer(t)
 	auth := newHTTPTestAuthenticator(t)
 	if status, payload := registerPasskeyForTest(t, api, auth, "Laptop"); status != 200 {
@@ -386,6 +392,7 @@ func TestPasskeyOnlyReauthAuthorisesPasswordChange(t *testing.T) {
 // TestEnablePasswordRefusedWhenGoogleLinked proves the server maps the identity
 // guard to a clear 409.
 func TestEnablePasswordRefusedWhenGoogleLinked(t *testing.T) {
+	t.Parallel()
 	app, api := hostedWebAuthnServer(t)
 	ctx := context.Background()
 	user, err := app.identity.UserByEmail(ctx, "owner@example.com")
@@ -421,6 +428,7 @@ func TestEnablePasswordRefusedWhenGoogleLinked(t *testing.T) {
 // TestPasskeyLoginSessionAndAudit proves a full successful login mints a usable
 // session and records the passkey method in the audit trail.
 func TestPasskeyLoginSessionAndAudit(t *testing.T) {
+	t.Parallel()
 	app, api := hostedWebAuthnServer(t)
 	auth := newHTTPTestAuthenticator(t)
 	auth.be = true
@@ -459,6 +467,7 @@ func TestPasskeyLoginSessionAndAudit(t *testing.T) {
 // TestPasskeyRenameAudited proves rename and password-signin changes are
 // recorded in the audit trail.
 func TestPasskeyRenameAudited(t *testing.T) {
+	t.Parallel()
 	app, api := hostedWebAuthnServer(t)
 	auth := newHTTPTestAuthenticator(t)
 	if status, payload := registerPasskeyForTest(t, api, auth, "Laptop"); status != 200 {

@@ -67,6 +67,7 @@ func insertClientKey(t *testing.T, db *sql.DB, id, name string, g GeneratedKey) 
 }
 
 func TestClientKeyCacheHitSkipsVerification(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	h := &countingHasher{}
 	gen, err := GenerateKeyWithHasher(h)
@@ -93,6 +94,7 @@ func TestClientKeyCacheHitSkipsVerification(t *testing.T) {
 }
 
 func TestClientKeyCacheSlidingRenewal(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	h := &countingHasher{}
 	gen, err := GenerateKeyWithHasher(h)
@@ -122,6 +124,7 @@ func TestClientKeyCacheSlidingRenewal(t *testing.T) {
 }
 
 func TestClientKeyCacheExpiryAndSweep(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	h := &countingHasher{}
 	gen, err := GenerateKeyWithHasher(h)
@@ -154,6 +157,7 @@ func TestClientKeyCacheExpiryAndSweep(t *testing.T) {
 }
 
 func TestClientKeyCacheCapEviction(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	h := &countingHasher{}
 	a, err := NewClientAuthenticatorWithHasher(db.SQL, h)
@@ -180,6 +184,7 @@ func TestClientKeyCacheCapEviction(t *testing.T) {
 }
 
 func TestSessionCacheSlidingRenewal(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	h := &countingHasher{}
 	s, err := NewSessionStoreTiered(db.SQL, "admin", "pw", time.Hour, h, h)
@@ -210,6 +215,7 @@ func TestSessionCacheSlidingRenewal(t *testing.T) {
 }
 
 func TestSessionCacheSweepAndCap(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	h := &countingHasher{}
 	s, err := NewSessionStoreTiered(db.SQL, "admin", "pw", time.Hour, h, h)

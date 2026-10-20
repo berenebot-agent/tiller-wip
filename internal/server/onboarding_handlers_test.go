@@ -87,6 +87,7 @@ func insertAccountActivityRow(t *testing.T, app *Server, accountID, id string, s
 }
 
 func TestOnboardingStateBeforeAfterActivityAndDismissal(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedServerHarness(t, false)
 
 	status, payload, _ := api.request("GET", "/api/auth/onboarding", nil)
@@ -127,6 +128,7 @@ func TestOnboardingStateBeforeAfterActivityAndDismissal(t *testing.T) {
 // one provider and at least one client key, independent of Activity. A single
 // provider or a single client alone must not complete onboarding.
 func TestOnboardingCompletesWithProviderAndClient(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedServerHarness(t, false)
 	ctx := context.Background()
 	sc := app.storeHandle().For(accountID)
@@ -164,6 +166,7 @@ func TestOnboardingCompletesWithProviderAndClient(t *testing.T) {
 }
 
 func TestOnboardingDismissedBeforeAnyRequest(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	status, _, _ := api.request("POST", "/api/auth/onboarding/dismiss", nil)
 	if status != http.StatusNoContent {
@@ -176,6 +179,7 @@ func TestOnboardingDismissedBeforeAnyRequest(t *testing.T) {
 }
 
 func TestAccountExportRequiresAuth(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
@@ -212,6 +216,7 @@ func getExport(t *testing.T, api *testAPI) (int, http.Header, []byte) {
 }
 
 func TestAccountExportZipContainsThreeEntriesWithoutSecrets(t *testing.T) {
+	t.Parallel()
 	app, api, accountID := hostedServerHarness(t, false)
 	ctx := context.Background()
 	sc := app.storeHandle().For(accountID)
@@ -304,6 +309,7 @@ func TestAccountExportZipContainsThreeEntriesWithoutSecrets(t *testing.T) {
 }
 
 func TestAccountExportRejectsWhenActivityUnavailable(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, true)
 	status, payload, _ := api.request("GET", "/api/auth/account/export", nil)
 	if status != http.StatusServiceUnavailable {
@@ -342,6 +348,7 @@ func signupAndReadVerificationToken(t *testing.T, app *Server, api *testAPI, ema
 }
 
 func TestSignupRequiresTermsAcceptance(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": "new@example.com", "password": "correct horse battery staple", "accept_terms": false})
 	if status != http.StatusBadRequest {
@@ -360,6 +367,7 @@ func TestSignupRequiresTermsAcceptance(t *testing.T) {
 }
 
 func TestSignupAttemptBudgetSurvivesSuccessfulSignup(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	for i := 0; i < 5; i++ {
 		status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{
@@ -378,6 +386,7 @@ func TestSignupAttemptBudgetSurvivesSuccessfulSignup(t *testing.T) {
 }
 
 func TestRecoveryBudgetCountsRequestsAcrossEndpoints(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedServerHarness(t, false)
 	for i := 0; i < 5; i++ {
 		status, payload, _ := api.request("POST", "/api/auth/password-reset/request", map[string]any{"email": fmt.Sprintf("unknown-%d@example.com", i)})
@@ -399,6 +408,7 @@ func TestRecoveryBudgetCountsRequestsAcrossEndpoints(t *testing.T) {
 }
 
 func TestRecoveryEmailBudgetIsHashedAndSharedAcrossEndpoints(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)
 	created, err := app.identity.CreateSignup(context.Background(), "unverified@example.com", "correct horse battery staple")
 	if err != nil {
@@ -441,6 +451,7 @@ func TestRecoveryEmailBudgetIsHashedAndSharedAcrossEndpoints(t *testing.T) {
 }
 
 func TestUserLoginSuccessDoesNotClearIPFailureBudget(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	for i := 0; i < 7; i++ {
 		status, _, _ := api.request("POST", "/api/auth/login", map[string]any{"email": fmt.Sprintf("victim-%d@example.com", i), "password": "wrong password"})
@@ -463,6 +474,7 @@ func TestUserLoginSuccessDoesNotClearIPFailureBudget(t *testing.T) {
 }
 
 func TestUserLoginSuccessClearsOnlyThatEmailFailureBudget(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 	for i := 0; i < 7; i++ {
 		status, _, _ := api.request("POST", "/api/auth/login", map[string]any{"email": "owner@example.com", "password": "wrong password"})
@@ -481,6 +493,7 @@ func TestUserLoginSuccessClearsOnlyThatEmailFailureBudget(t *testing.T) {
 }
 
 func TestAuthLoginRejectsOversizedPasswordAndBody(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedServerHarness(t, false)
 	status, payload, _ := api.request("POST", "/api/auth/login", map[string]any{
 		"email": "owner@example.com", "password": strings.Repeat("x", 1025),
@@ -500,6 +513,7 @@ func TestAuthLoginRejectsOversizedPasswordAndBody(t *testing.T) {
 }
 
 func TestVerifyEmailMintsSessionAndRecordsAcceptance(t *testing.T) {
+	t.Parallel()
 	app, api, _ := hostedServerHarness(t, false)
 	token := signupAndReadVerificationToken(t, app, api, "new@example.com")
 

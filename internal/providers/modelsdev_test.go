@@ -13,6 +13,7 @@ import (
 func boolPtr(v bool) *bool { return &v }
 
 func TestEnrichFillsUnknownFields(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"deepseek": {Models: map[string]modelsDevModel{
@@ -57,6 +58,7 @@ func TestEnrichFillsUnknownFields(t *testing.T) {
 }
 
 func TestEnrichDoesNotOverrideProviderReported(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"deepseek": {Models: map[string]modelsDevModel{
@@ -108,6 +110,7 @@ func TestEnrichDoesNotOverrideProviderReported(t *testing.T) {
 }
 
 func TestEnrichPreservesTriState(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"deepseek": {Models: map[string]modelsDevModel{
@@ -140,6 +143,7 @@ func TestEnrichPreservesTriState(t *testing.T) {
 }
 
 func TestEnrichDisabledIsNoOp(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDevEnabled = false
 	r.modelsDev = modelsDevDataset{
@@ -154,6 +158,7 @@ func TestEnrichDisabledIsNoOp(t *testing.T) {
 }
 
 func TestEnrichUnknownProviderOrModel(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"deepseek": {Models: map[string]modelsDevModel{
@@ -171,6 +176,7 @@ func TestEnrichUnknownProviderOrModel(t *testing.T) {
 }
 
 func TestModelsDevProviderKeyMapping(t *testing.T) {
+	t.Parallel()
 	for providerType, want := range map[string]string{
 		"openrouter": "openrouter", "deepseek": "deepseek", "nvidia-nim": "nvidia",
 		"zai": "zhipuai", "gemini": "google", "alibaba-qwen": "alibaba",
@@ -185,6 +191,7 @@ func TestModelsDevProviderKeyMapping(t *testing.T) {
 	}
 }
 
+// Serial (no t.Parallel): swaps the package-level modelsDevURL test seam.
 func TestRefreshModelsDevGracefulDegradation(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "models-dev.json")
@@ -257,6 +264,7 @@ func TestRefreshModelsDevGracefulDegradation(t *testing.T) {
 }
 
 func TestLoadModelsDevCacheMissingIsNotError(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.LoadModelsDevCache(filepath.Join(t.TempDir(), "does-not-exist.json"))
 	r.mu.Lock()
@@ -283,6 +291,7 @@ func glmDataset() modelsDevDataset {
 }
 
 func TestOllamaPlainName(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, want string }{
 		{"glm-5.3-flash", "glm-5.3-flash"},
 		{"glm-5.3-flash:latest", "glm-5.3-flash"},
@@ -298,6 +307,7 @@ func TestOllamaPlainName(t *testing.T) {
 }
 
 func TestOllamaLookupCanonicalLab(t *testing.T) {
+	t.Parallel()
 	data := glmDataset()
 	// Exact plain-name hit under the inferred canonical lab (zai for GLM).
 	got := ollamaLookup(data, "glm-5.3-flash:latest")
@@ -310,6 +320,7 @@ func TestOllamaLookupCanonicalLab(t *testing.T) {
 }
 
 func TestOllamaEnrichFillsUnknownFields(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = glmDataset()
 	// Plain name, with a tag: enrichment must land on the canonical zai entry.
@@ -336,6 +347,7 @@ func TestOllamaEnrichFillsUnknownFields(t *testing.T) {
 }
 
 func TestOllamaEnrichUnknownFamilyOrModel(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = glmDataset()
 	// Unknown family must not enrich.
@@ -349,6 +361,7 @@ func TestOllamaEnrichUnknownFamilyOrModel(t *testing.T) {
 }
 
 func TestOllamaEnrichDoesNotOverrideProviderReported(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = glmDataset()
 	got := r.enrich([]Model{{ID: "glm-5.3-flash", ContextLength: 1000000, MaxOutputTokens: 99999}}, "ollama-local")[0]
@@ -363,6 +376,7 @@ func TestOllamaEnrichDoesNotOverrideProviderReported(t *testing.T) {
 }
 
 func TestOllamaEnrichLeavesOtherProvidersUntouched(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = glmDataset()
 	// A non-Ollama provider whose type is not in the provider map stays
@@ -387,6 +401,7 @@ func TestOllamaEnrichLeavesOtherProvidersUntouched(t *testing.T) {
 }
 
 func TestOllamaEnrichBothProviderTypes(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = glmDataset()
 	for _, typ := range []string{"ollama-local", "ollama-cloud"} {
@@ -400,6 +415,7 @@ func TestOllamaEnrichBothProviderTypes(t *testing.T) {
 func int64Ptr(v int64) *int64 { return &v }
 
 func TestParseModelsDevReasoningOptions(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		raw  []map[string]any
@@ -506,6 +522,7 @@ func TestParseModelsDevReasoningOptions(t *testing.T) {
 }
 
 func TestModelsDevReasoningOptionsPresence(t *testing.T) {
+	t.Parallel()
 	for name, raw := range map[string]string{
 		"absent": `{}`,
 		"empty":  `{"reasoning_options":[]}`,
@@ -557,6 +574,7 @@ func int64PtrEqual(a, b *int64) bool {
 }
 
 func TestEnrichMergesReasoningCapabilities(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"deepseek": {Models: map[string]modelsDevModel{
@@ -588,6 +606,7 @@ func TestEnrichMergesReasoningCapabilities(t *testing.T) {
 }
 
 func TestEnrichDoesNotOverrideProviderReportedReasoning(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	r.modelsDev = modelsDevDataset{
 		"deepseek": {Models: map[string]modelsDevModel{
@@ -612,6 +631,7 @@ func TestEnrichDoesNotOverrideProviderReportedReasoning(t *testing.T) {
 }
 
 func TestEnrichReasoningFillsMissingDirectMechanisms(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	options := []map[string]any{{"type": "budget_tokens", "min": float64(1024), "max": float64(8192)}}
 	r.modelsDev = modelsDevDataset{"deepseek": {Models: map[string]modelsDevModel{
@@ -625,6 +645,7 @@ func TestEnrichReasoningFillsMissingDirectMechanisms(t *testing.T) {
 }
 
 func TestEnrichReasoningKeepsGatewayProviderMetadata(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	options := []map[string]any{{"type": "budget_tokens"}}
 	r.modelsDev = modelsDevDataset{"openrouter": {Models: map[string]modelsDevModel{
@@ -638,6 +659,7 @@ func TestEnrichReasoningKeepsGatewayProviderMetadata(t *testing.T) {
 }
 
 func TestEnrichReasoningPreservesExplicitEmptyFallback(t *testing.T) {
+	t.Parallel()
 	r := NewRegistry()
 	options := []map[string]any{}
 	r.modelsDev = modelsDevDataset{"deepseek": {Models: map[string]modelsDevModel{
@@ -651,6 +673,7 @@ func TestEnrichReasoningPreservesExplicitEmptyFallback(t *testing.T) {
 }
 
 func TestMergeReasoningCapabilitiesFallbackPreservesProviderAliases(t *testing.T) {
+	t.Parallel()
 	provider := &ReasoningCapabilities{
 		Options:       []ReasoningOption{{Type: ReasoningOptionEffort, Values: []string{"low", "high", "ultra"}}},
 		EffortAliases: map[string]string{"ultra": "high"},

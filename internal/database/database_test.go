@@ -11,6 +11,7 @@ import (
 )
 
 func TestOpenRestrictsFileAndDirPermissions(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Simulate a host bind-mount that pre-exists with loose perms.
 	if err := os.Chmod(dir, 0o755); err != nil {
@@ -42,6 +43,7 @@ func TestOpenRestrictsFileAndDirPermissions(t *testing.T) {
 }
 
 func TestFreshHostedOpenPersistsBootstrapState(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "router.db")
 	db, err := Open(context.Background(), path, WithHostedMode(true))
 	if err != nil {
@@ -81,6 +83,7 @@ func TestFreshHostedOpenPersistsBootstrapState(t *testing.T) {
 }
 
 func TestMigrationsAndSharedNamespace(t *testing.T) {
+	t.Parallel()
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +105,7 @@ func TestMigrationsAndSharedNamespace(t *testing.T) {
 }
 
 func TestBackupIsConsistentAndReadable(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
@@ -133,6 +137,7 @@ func TestBackupIsConsistentAndReadable(t *testing.T) {
 // deliberately carries no Activity: the central request_logs table is gone
 // from the snapshot and the separate activity.db is not part of it.
 func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	db, err := Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
@@ -192,6 +197,7 @@ func TestBackupExcludesActivityAndRestoresCore(t *testing.T) {
 }
 
 func TestPruneBackupsRemovesOnlyOldSnapshots(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	now := time.Now()
 	for _, name := range []string{"tiller-router-old.db", "tiller-router-new.db", "keepme.txt"} {
@@ -221,6 +227,7 @@ func TestPruneBackupsRemovesOnlyOldSnapshots(t *testing.T) {
 }
 
 func TestMapDataDirChmodErr(t *testing.T) {
+	t.Parallel()
 	// A chmod whose EPERM means the caller doesn't own the dir (the fresh
 	// root-owned bind-mount case) must surface the ErrDataDirUnwritable sentinel
 	// so main can print a first-run remediation instead of "operation not

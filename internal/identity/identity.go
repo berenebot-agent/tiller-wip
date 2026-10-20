@@ -143,13 +143,27 @@ type Store struct {
 	userCacheTTL       time.Duration
 	platformCacheTTL   time.Duration
 	mu                 sync.Mutex
-	userCache          map[string]userSessionCacheEntry
-	platformCache      map[string]platformSessionCacheEntry
-	rev                uint64
-	platformRev        uint64
-	maxEntries         int
-	renewHook          func()
-	mailQueue          MailQueue
+	// authMethodsMu serializes the mutators that change an account's set of
+	// sign-in methods (password flag, Google identity, passkeys). Each of
+	// those methods guards "don't remove the last sign-in method" inside its
+	// own transaction, but the pool keeps several SQLite connections alive
+	// and WAL snapshot isolation lets a stale in-transaction read see a
+	// pre-interleaving world: DeletePasskey could retire the last passkey
+	// while SetPasswordSignInEnabled commits the password off in its window,
+	// leaving the account with no way in. Holding this lock from the guard
+	// reads through commit closes that window; SQLite already serializes
+	// writers, so it is uncontended outside the race. Any future mutator
+	// that reads-or-writes password_auth_enabled, user_identities, or
+	// webauthn_credentials as part of the sign-in-method invariant must take
+	// it before its first read.
+	authMethodsMu sync.Mutex
+	userCache     map[string]userSessionCacheEntry
+	platformCache map[string]platformSessionCacheEntry
+	rev           uint64
+	platformRev   uint64
+	maxEntries    int
+	renewHook     func()
+	mailQueue     MailQueue
 	// webauthn and challenges implement passkeys. Both are nil until
 	// ConfigureWebAuthn installs relying-party configuration, so deployments
 	// without a public origin (and tests) simply have no passkey endpoints.
@@ -211,7 +225,7 @@ func (s *Store) SetCacheTTL(d time.Duration) {
 // SetPlatformSessionTTL overrides the platform-operator session lifetime. It is
 // called once at construction time; the platform console is the
 // highest-privilege session and gets a shorter window than customer sessions
-// (docs/pre_saas_release_review.md TR-010).
+// (../docs/pre_saas_release_review.md TR-010).
 func (s *Store) SetPlatformSessionTTL(d time.Duration) {
 	if d <= 0 {
 		return
@@ -255,6 +269,9 @@ func (s *Store) PlatformCounts(ctx context.Context) (PlatformCounts, error) {
 
 // PlatformAccountIDs returns hosted account identifiers for operator-level
 // aggregate jobs. Callers must use each ID only to obtain account-scoped data.
+// The eligibility predicate is deliberately the same one store's platform
+// aggregates apply, so the totals and the per-account breakdown cannot cover
+// different accounts.
 func (s *Store) PlatformAccountIDs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM accounts WHERE owner_user_id IS NOT NULL AND status <> 'deleting' ORDER BY id`)
 	if err != nil {
@@ -391,7 +408,7 @@ const (
 // install when the legacy credentials are omitted. The caller must run this
 // before syncing the hosted platform credential.
 //
-// ONE-TIME UPGRADE GUARD (see docs/back_compat.md): the
+// ONE-TIME UPGRADE GUARD (see ../docs/back_compat.md): the
 // 'hosted_bootstrap_complete' marker is a deliberate one-time migration gate,
 // not recurring compat. It stays permanently so an install started before
 // hosted identity existed can convert exactly once. It recognises two subjects:
@@ -1108,6 +1125,9 @@ func (s *Store) SyncPlatformCredential(username, password string) error {
 		return err
 	}
 	if s.credentialHasher.Verify(material, stored) {
+		// Lazy upgrade: keep the stored fingerprint on the current Argon2id
+		// parameters. Best-effort CAS, mirroring SessionStore.VerifyCredential.
+		s.rehashAdminCredential(material, stored)
 		return nil
 	}
 	if err := s.InvalidatePlatformAll(); err != nil {
@@ -1119,6 +1139,21 @@ func (s *Store) SyncPlatformCredential(username, password string) error {
 	}
 	_, err = s.db.Exec(`UPDATE platform_settings SET value=?,updated_at=? WHERE key='admin_credential_hash'`, hash, formatTime(time.Now()))
 	return err
+}
+
+// rehashAdminCredential upgrades the stored admin-credential fingerprint after
+// a successful verify, mirroring SessionStore.VerifyCredential's lazy upgrade:
+// inert while the hash carries the current Argon2id parameters, a no-op when a
+// concurrent rotation breaks the CAS (retried on a later verify).
+func (s *Store) rehashAdminCredential(material, stored string) {
+	if !s.credentialHasher.NeedsRehash(stored) {
+		return
+	}
+	upgraded, err := s.credentialHasher.Hash(material)
+	if err != nil {
+		return
+	}
+	_, _ = s.db.Exec(`UPDATE platform_settings SET value=?,updated_at=? WHERE key='admin_credential_hash' AND value=?`, upgraded, formatTime(time.Now()), stored)
 }
 
 // AuthenticatePlatform checks the configured platform username/password. The

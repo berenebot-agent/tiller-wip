@@ -14,10 +14,16 @@ import (
 const (
 	maxClientErrorMessageRunes = 2000
 	maxPlainErrorBodyBytes     = 4 << 10
+	// maxErrorDetailUnwrapDepth bounds how many nested error envelopes are
+	// peeled apart. Each unwrap strictly shrinks the message (the inner text is
+	// a substring of the level that held it), so this is a guard against a
+	// deceptive or accidentally self-similar chain, not a termination condition.
+	maxErrorDetailUnwrapDepth = 3
 )
 
-// upstreamErrorDetail is the sanitized, client-facing summary extracted from a
-// provider's error response.
+// upstreamErrorDetail is the summary extracted from a provider's error
+// response. Fields are raw until parseUpstreamErrorDetail's final sanitized
+// step; parseErrorEnvelope's output is not yet bounded.
 type upstreamErrorDetail struct {
 	Message string
 	Code    string
@@ -31,9 +37,24 @@ type upstreamErrorDetail struct {
 // ({"type":"error","error":{type,message}}), a string error ({"error":"..."}),
 // a top-level message, and short printable text/plain bodies. Anything else
 // yields the zero value so the caller falls back to the generic router-owned
-// message. The result is NOT credential-redacted; callers must run it through
-// redactProviderSecrets.
+// message.
+//
+// Relays that return an upstream error as a JSON *string* inside their own
+// error.message (Command Code does this) are unwrapped one level at a time, so
+// the client sees the provider's message instead of a nested blob and the
+// failure classifiers (isContextLimitError, isReasoningRoundtripError) can see
+// through the wrap. The result is NOT credential-redacted; callers must run it
+// through redactProviderSecrets.
 func parseUpstreamErrorDetail(body []byte, contentType string) upstreamErrorDetail {
+	return unwrapErrorDetail(parseErrorEnvelope(body, contentType), 0).sanitized()
+}
+
+// parseErrorEnvelope performs one level of extraction and returns RAW fields;
+// sanitized applies the bounds and control-character stripping once, at the
+// end. Sanitizing here would let the rune cap truncate valid JSON before
+// unwrapErrorDetail could parse it. Bodies are already bounded by
+// maxUpstreamErrorBytes.
+func parseErrorEnvelope(body []byte, contentType string) upstreamErrorDetail {
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
 		return upstreamErrorDetail{}
@@ -55,29 +76,75 @@ func parseUpstreamErrorDetail(body []byte, contentType string) upstreamErrorDeta
 			}
 			if err := json.Unmarshal(top.Error, &obj); err == nil {
 				detail := upstreamErrorDetail{
-					Message: sanitizeErrorText(obj.Message),
+					Message: obj.Message,
 					Code:    decodeErrorCode(obj.Code),
-					Param:   sanitizeErrorText(obj.Param),
-					Type:    sanitizeErrorText(obj.Type),
+					Param:   obj.Param,
+					Type:    obj.Type,
 				}
-				if detail.clientMessage() != "" {
+				if detail.usable() {
 					return detail
 				}
 			}
 			var str string
 			if err := json.Unmarshal(top.Error, &str); err == nil {
-				return upstreamErrorDetail{Message: sanitizeErrorText(str)}
+				return upstreamErrorDetail{Message: str}
 			}
 		}
 		if top.Message != "" {
-			return upstreamErrorDetail{Message: sanitizeErrorText(top.Message)}
+			return upstreamErrorDetail{Message: top.Message}
 		}
 		return upstreamErrorDetail{}
 	}
 	if strings.Contains(contentType, "text/plain") && len(body) <= maxPlainErrorBodyBytes && utf8.Valid(body) {
-		return upstreamErrorDetail{Message: sanitizeErrorText(trimmed)}
+		return upstreamErrorDetail{Message: trimmed}
 	}
 	return upstreamErrorDetail{}
+}
+
+// unwrapErrorDetail peels a relay that returned an upstream error as JSON text
+// inside its own error.message. Inner fields win; the outer level fills any gap
+// so a wrapper's code is not lost when the inner envelope omits one.
+func unwrapErrorDetail(detail upstreamErrorDetail, depth int) upstreamErrorDetail {
+	for depth < maxErrorDetailUnwrapDepth && strings.HasPrefix(strings.TrimSpace(detail.Message), "{") {
+		inner := parseErrorEnvelope([]byte(detail.Message), "application/json")
+		if !inner.usable() {
+			return detail
+		}
+		inner.Code = firstNonEmpty(inner.Code, detail.Code)
+		inner.Param = firstNonEmpty(inner.Param, detail.Param)
+		inner.Type = firstNonEmpty(inner.Type, detail.Type)
+		detail = inner
+		depth++
+	}
+	return detail
+}
+
+// usable reports whether the detail carries anything worth surfacing, ignoring
+// whitespace-only values. It mirrors clientMessage's emptiness check without
+// rendering the message.
+func (d upstreamErrorDetail) usable() bool {
+	return sanitizeErrorText(d.Message) != "" || sanitizeErrorText(d.Code) != "" || sanitizeErrorText(d.Param) != ""
+}
+
+// sanitized bounds every field and strips control characters. The parser keeps
+// fields raw until the very end so unwrapping never operates on truncated JSON.
+func (d upstreamErrorDetail) sanitized() upstreamErrorDetail {
+	return upstreamErrorDetail{
+		Message: sanitizeErrorText(d.Message),
+		Code:    sanitizeErrorText(d.Code),
+		Param:   sanitizeErrorText(d.Param),
+		Type:    sanitizeErrorText(d.Type),
+	}
+}
+
+// firstNonEmpty returns the first value carrying non-whitespace content.
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // isOpenCodeFreeTierRejection reports whether an upstream error body is

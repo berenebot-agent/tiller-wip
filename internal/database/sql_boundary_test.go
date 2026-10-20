@@ -18,11 +18,16 @@ import (
 // immediately following an SQL verb, which catches an unscoped query sneaking
 // back into a handler, provider or auth path.
 func TestTenantSQLStaysInStore(t *testing.T) {
+	t.Parallel()
 	root := filepath.Join("..", "..")
 	verbs := `(?:from|into|join|update)`
+	// An optional schema qualifier or opening quote is allowed between the verb
+	// and the table name, so `FROM main.providers` and `FROM "providers"` are
+	// caught as well as `FROM providers`.
+	prefix := "(?:[A-Za-z_][A-Za-z0-9_]*\\s*\\.\\s*|[\"'`])?"
 	patterns := make([]*regexp.Regexp, 0, len(TenantTables()))
 	for _, table := range TenantTables() {
-		patterns = append(patterns, regexp.MustCompile(`(?i)\b`+verbs+`\s+`+regexp.QuoteMeta(table)+`\b`))
+		patterns = append(patterns, regexp.MustCompile(`(?i)\b`+verbs+`\s+`+prefix+regexp.QuoteMeta(table)+`\b`))
 	}
 	sqlKeyword := regexp.MustCompile(`(?i)\b(select|insert|delete|values|where|set)\b`)
 	fset := token.NewFileSet()

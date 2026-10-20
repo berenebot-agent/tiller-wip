@@ -9,6 +9,7 @@ import "testing"
 // call could relay anonymous free-tier traffic under the operator's egress IP,
 // contradicting the recorded provider-terms decision.
 func TestHostedRejectsHostedDisabledProviderType(t *testing.T) {
+	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
 
 	status, payload, _ := api.request("POST", "/api/admin/providers", map[string]any{
@@ -28,6 +29,7 @@ func TestHostedRejectsHostedDisabledProviderType(t *testing.T) {
 // A future edit that raises a cap or widens a gate without re-checking the
 // other fails here rather than re-opening the OOM.
 func TestInferenceBufferBudgetBounded(t *testing.T) {
+	t.Parallel()
 	const budget = int64(1) << 30 // 1 GiB aggregate worst case per direction
 
 	if inbound := int64(maxConcurrentBodyReads) * maxInferenceBodyBytes; inbound > budget {
