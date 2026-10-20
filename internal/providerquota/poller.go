@@ -15,15 +15,13 @@ var (
 	// recently.
 	ActiveInterval = 60 * time.Second
 	// MinInterval is the shortest gap between two polls of one provider,
-	// including on-view refreshes. It prevents an admin reload from stampeding
-	// the provider endpoint.
-	MinInterval = 30 * time.Second
+	// including on-view refreshes. This is the minimum interval even after
+	// an unsuccessful quota check.
+	MinInterval = 60 * time.Second
 	// FailureRetry is how soon a provider whose last poll failed is retried,
 	// overriding the normal (background/active/forced) interval. A transient
-	// failure (cold DNS/TLS at boot, a provider rate-limit, a busy database)
-	// must not leave the card unavailable for a whole background interval; it is
-	// still a floor so repeated views cannot stampede a genuinely-down endpoint.
-	FailureRetry = 15 * time.Second
+	// failure uses the same 60-second floor as successful checks.
+	FailureRetry = 60 * time.Second
 	// ActiveWindow is how recently a provider must have served traffic to be
 	// considered active.
 	ActiveWindow = time.Minute
@@ -174,6 +172,49 @@ func (p *Poller) Reconcile(refs []ProviderRef) {
 	}
 }
 
+// ReconcileAccount changes only one account's registered quota providers.
+// A different tenant's browser cannot invalidate cached values or live checks.
+func (p *Poller) ReconcileAccount(accountID string, refs []ProviderRef) {
+	want := make(map[string]ProviderRef, len(refs))
+	for _, ref := range refs {
+		if ref.AccountID == accountID && Supports(ref.Type) {
+			want[key(accountID, ref.ProviderID)] = ref
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k, ref := range want {
+		if previous, ok := p.refs[k]; ok {
+			// OAuth hydration may attach an account header.
+			ref.AccountIDHeader = previous.AccountIDHeader
+			if previous == ref {
+				continue
+			}
+		}
+		p.refs[k] = ref
+		p.gen[k]++
+		delete(p.snap, k)
+		delete(p.last, k)
+		delete(p.failed, k)
+		delete(p.inflight, k)
+		delete(p.active, k)
+	}
+	prefix := accountID + "\x00"
+	for k := range p.refs {
+		if len(k) >= len(prefix) && k[:len(prefix)] == prefix {
+			if _, keep := want[k]; !keep {
+				delete(p.refs, k)
+				delete(p.snap, k)
+				delete(p.last, k)
+				delete(p.failed, k)
+				delete(p.inflight, k)
+				delete(p.active, k)
+				p.gen[k]++
+			}
+		}
+	}
+}
+
 // Unregister drops a provider's registration and cached snapshot.
 func (p *Poller) Unregister(accountID, providerID string) {
 	k := key(accountID, providerID)
@@ -210,67 +251,117 @@ func (p *Poller) SnapshotForAccount(accountID string) map[string]Snapshot {
 	return out
 }
 
-// RefreshIfDue polls a provider when it is due under the cadence, and returns
-// the (possibly cached) snapshot. force requests an immediate poll subject to
-// MinInterval (used by the on-view refresh).
-func (p *Poller) RefreshIfDue(ctx context.Context, accountID, providerID string, force bool, now time.Time) (Snapshot, bool) {
+// PollStatus keeps the last attempt separate from the last successful result.
+// A failed refresh must not make stale quota figures appear current.
+type PollStatus struct {
+	Refreshing    bool       `json:"refreshing"`
+	Failed        bool       `json:"failed"`
+	LastAttemptAt *time.Time `json:"last_attempt_at,omitempty"`
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
+}
+
+// PollStatesForAccount reports only the current account's quota status.
+func (p *Poller) PollStatesForAccount(accountID string) map[string]PollStatus {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	result := make(map[string]PollStatus)
+	prefix := accountID + "\x00"
+	for k := range p.refs {
+		if len(k) < len(prefix) || k[:len(prefix)] != prefix {
+			continue
+		}
+		status := PollStatus{Refreshing: p.inflight[k], Failed: p.failed[k]}
+		if last := p.last[k]; !last.IsZero() {
+			value := last.UTC()
+			status.LastAttemptAt = &value
+		}
+		if snap := p.snap[k]; snap.Available && !snap.FetchedAt.IsZero() {
+			value := snap.FetchedAt.UTC()
+			status.LastSuccessAt = &value
+		}
+		result[k[len(prefix):]] = status
+	}
+	return result
+}
+
+// Reserve before upstream I/O starts. A second attempt cannot begin while a
+// previous request is running or within the 60-second interval.
+func (p *Poller) beginRefresh(accountID, providerID string, force bool, now time.Time) (ProviderRef, uint64, bool) {
 	k := key(accountID, providerID)
 	p.mu.Lock()
+	defer p.mu.Unlock()
 	ref, ok := p.refs[k]
-	if !ok {
-		p.mu.Unlock()
-		return Snapshot{}, false
+	if !ok || p.inflight[k] {
+		return ProviderRef{}, 0, false
 	}
 	interval := BackgroundInterval
 	if p.activeWithin(k, now) {
 		interval = ActiveInterval
 	}
-	// A provider whose last poll failed is retried sooner so a transient blip
-	// (cold DNS/TLS at boot, a provider rate-limit) does not leave the card
-	// unavailable for a whole background interval.
 	if p.failed[k] {
 		interval = FailureRetry
 	}
-	last := p.last[k]
-	due := last.IsZero() || now.Sub(last) >= interval
 	if force {
-		floor := MinInterval
-		if p.failed[k] {
-			floor = FailureRetry
-		}
-		due = last.IsZero() || now.Sub(last) >= floor
+		interval = MinInterval
 	}
-	if !due || p.inflight[k] {
-		cached := p.snap[k]
-		p.mu.Unlock()
-		return cached, false
+	if last := p.last[k]; !last.IsZero() && now.Sub(last) < interval {
+		return ProviderRef{}, 0, false
 	}
 	p.inflight[k] = true
-	// Capture the registration generation. If the provider is unregistered or
-	// re-registered while this poll is in flight, the result must be discarded
-	// rather than republished into snap, which would resurrect a snapshot for a
-	// provider that no longer exists (or publish stale data over a new
-	// registration).
-	generation := p.gen[k]
-	p.mu.Unlock()
+	p.last[k] = now
+	return ref, p.gen[k], true
+}
 
+func (p *Poller) finishRefresh(ctx context.Context, ref ProviderRef, generation uint64, now time.Time) Snapshot {
 	snap := p.poll(ctx, ref, now)
-
+	k := key(ref.AccountID, ref.ProviderID)
 	p.mu.Lock()
-	p.inflight[k] = false
+	defer p.mu.Unlock()
 	if p.gen[k] == generation {
-		p.last[k] = now
-		p.snap[k] = snap
-		// Track whether this poll yielded a usable snapshot so a failed poll is
-		// retried on the short FailureRetry cadence.
+		p.inflight[k] = false
+		// Retain the last successful snapshot if a later check fails.
+		if snap.Available || !p.snap[k].Available {
+			p.snap[k] = snap
+		}
 		p.failed[k] = !snap.Available
-	} else {
-		// Registration changed mid-poll: drop the result and any cached state
-		// so a subsequent Snapshot call does not serve the obsolete value.
-		snap = p.snap[k]
 	}
-	p.mu.Unlock()
-	return snap, true
+	return p.snap[k]
+}
+
+// RefreshIfDue retains a synchronous API for callers and test harnesses.
+func (p *Poller) RefreshIfDue(ctx context.Context, accountID, providerID string, force bool, now time.Time) (Snapshot, bool) {
+	ref, generation, ok := p.beginRefresh(accountID, providerID, force, now)
+	if !ok {
+		cached, _ := p.Snapshot(accountID, providerID)
+		return cached, false
+	}
+	return p.finishRefresh(ctx, ref, generation, now), true
+}
+
+// Bound simultaneous quota checks across all users to eight. At saturation,
+// skip a request rather than queueing unbounded goroutines.
+var quotaRefreshGate = make(chan struct{}, 8)
+
+// TriggerIfDue starts an eligible check asynchronously so cached quota and a
+// per-provider spinner can be shown without waiting for the upstream.
+func (p *Poller) TriggerIfDue(accountID, providerID string, now time.Time) bool {
+	select {
+	case quotaRefreshGate <- struct{}{}:
+	default:
+		return false
+	}
+	ref, generation, ok := p.beginRefresh(accountID, providerID, true, now)
+	if !ok {
+		<-quotaRefreshGate
+		return false
+	}
+	go func() {
+		defer func() { <-quotaRefreshGate }()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		p.finishRefresh(ctx, ref, generation, now)
+	}()
+	return true
 }
 
 // poll performs one fetch with credential hydration, converting any failure

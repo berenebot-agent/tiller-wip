@@ -14,6 +14,7 @@ import (
 )
 
 func TestLoginLimiterLockoutAndReset(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(3, time.Minute, time.Minute)
 
 	// Two failures: not locked out.
@@ -43,6 +44,7 @@ func TestLoginLimiterLockoutAndReset(t *testing.T) {
 }
 
 func TestLoginLimiterWindowReset(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(3, 10*time.Millisecond, time.Minute)
 	l.recordFailure("1.2.3.4")
 	l.recordFailure("1.2.3.4")
@@ -54,6 +56,7 @@ func TestLoginLimiterWindowReset(t *testing.T) {
 }
 
 func TestLoginLimiterLockoutExpiry(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(2, time.Minute, 10*time.Millisecond)
 	l.recordFailure("1.2.3.4")
 	l.recordFailure("1.2.3.4") // locks out
@@ -67,6 +70,7 @@ func TestLoginLimiterLockoutExpiry(t *testing.T) {
 }
 
 func TestLoginLimiterSuccessfulRequestsDoNotCountAsFailures(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(10, time.Minute, time.Minute)
 	for i := 0; i < 100; i++ {
 		if l.locked("1.2.3.4") {
@@ -77,6 +81,7 @@ func TestLoginLimiterSuccessfulRequestsDoNotCountAsFailures(t *testing.T) {
 }
 
 func TestLoginLimiterSuccessClearsFailures(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(3, time.Minute, time.Minute)
 	l.recordFailure("1.2.3.4")
 	l.recordFailure("1.2.3.4")
@@ -87,6 +92,7 @@ func TestLoginLimiterSuccessClearsFailures(t *testing.T) {
 }
 
 func TestLoginLimiterAttemptBudgetIsNotClearedBySuccess(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(2, time.Hour, time.Hour)
 	if !l.allowAttempt("1.2.3.4") || !l.allowAttempt("1.2.3.4") {
 		t.Fatal("first two requests should be within budget")
@@ -105,6 +111,7 @@ func TestLoginLimiterAttemptBudgetIsNotClearedBySuccess(t *testing.T) {
 // safely evictable), a new IP is let through without growing the map, and
 // every existing lockout still holds.
 func TestLoginLimiterHardBoundRefusesEntryWhenFull(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(1, time.Hour, time.Hour)
 	for i := 0; i < maxLimiterEntries; i++ {
 		ip := fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
@@ -139,6 +146,7 @@ func TestLoginLimiterHardBoundRefusesEntryWhenFull(t *testing.T) {
 }
 
 func TestOAuthRateLimitCheckDoesNotRecordSuccess(t *testing.T) {
+	t.Parallel()
 	l := newLoginLimiter(2, time.Minute, time.Minute)
 	app := &Server{config: config.Config{}, oauthCallbackLimiter: l}
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -158,6 +166,7 @@ func TestOAuthRateLimitCheckDoesNotRecordSuccess(t *testing.T) {
 // TestAdminLoginRateLimit verifies that repeated failed logins lock the client
 // out and that a correct credential is then rejected with 429.
 func TestAdminLoginRateLimit(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

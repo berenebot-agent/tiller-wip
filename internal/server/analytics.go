@@ -79,6 +79,14 @@ func (s *Server) setPlatformAnalytics(settings store.PlatformAnalyticsSettings) 
 	s.platformAnalyticsMu.Unlock()
 }
 
+func (s *Server) setPlatformPreventSearchIndexing(enabled bool) {
+	s.platformNoIndex.Store(enabled)
+}
+
+func (s *Server) platformPreventSearchIndexing() bool {
+	return s.platformNoIndex.Load()
+}
+
 // analyticsScriptOrigin returns the cached analytics script origin for the
 // current hosted deployment, or ok=false when analytics is disabled or not
 // configured. It is called on every response, so it must stay allocation-free

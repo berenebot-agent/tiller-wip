@@ -23,6 +23,7 @@ func insertAccountActivity(t *testing.T, db *database.DB, accountID, id string, 
 // TestFirstRoutedRequestAtIgnoresNon2xxAndScopesAccount proves onboarding state
 // derives from a 2xx request only and never leaks across accounts.
 func TestFirstRoutedRequestAtIgnoresNon2xxAndScopesAccount(t *testing.T) {
+	t.Parallel()
 	db, st := openActivityStore(t)
 	ctx := context.Background()
 	local := st.For(database.LocalAccountID)
@@ -60,6 +61,7 @@ func TestFirstRoutedRequestAtIgnoresNon2xxAndScopesAccount(t *testing.T) {
 // provider credential, an API-key selector/hash/fingerprint, or a secret
 // setting, while still including the non-secret metadata.
 func TestBuildAccountExportConfigOmitsSecrets(t *testing.T) {
+	t.Parallel()
 	db, st := openActivityStore(t)
 	ctx := context.Background()
 	sc := st.For(database.LocalAccountID)
@@ -102,6 +104,7 @@ func TestBuildAccountExportConfigOmitsSecrets(t *testing.T) {
 // returns the explicit sentinel when the Activity handle is absent, so the
 // handler can reject with 503 before emitting bytes.
 func TestExportAccountActivityUnavailable(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), t.TempDir()+"/router.db")
 	if err != nil {
 		t.Fatal(err)

@@ -156,6 +156,7 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 // when an upstream returns 401, the router should force-refresh the OAuth token
 // once and retry the same target before falling through to normal fallback.
 func TestStaleAuthRecovery(t *testing.T) {
+	t.Parallel()
 	api, secret, _, cleanup := mockOAuthAndUpstream(t)
 	defer cleanup()
 
@@ -168,6 +169,7 @@ func TestStaleAuthRecovery(t *testing.T) {
 // TestStaleAuthRecoveryPreservesTokenAfterRestart verifies that a persisted
 // token survives a router restart and the status endpoint reports "connected".
 func TestStaleAuthRecoveryPreservesTokenAfterRestart(t *testing.T) {
+	t.Parallel()
 	api, _, providerID, cleanup := mockOAuthAndUpstream(t)
 	defer cleanup()
 
@@ -183,6 +185,7 @@ func TestStaleAuthRecoveryPreservesTokenAfterRestart(t *testing.T) {
 // TestForceRefreshTransitionsStateOnDeadToken verifies that when the refresh
 // token is dead, auth_state transitions to reconnect_required.
 func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

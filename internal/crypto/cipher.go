@@ -111,7 +111,7 @@ func (c *Cipher) Encrypt(aad []byte, plaintext string) (string, error) {
 // authenticate returns ErrLocked; a structurally invalid value returns
 // ErrMalformed.
 //
-// PERMANENT COMPAT (see docs/back_compat.md): a value without the encrypted
+// PERMANENT COMPAT (see ../docs/back_compat.md): a value without the encrypted
 // prefix is returned unchanged as legacy plaintext. This is retained because a
 // ciphertext-vs-plaintext decision made at this boundary cannot be safely
 // removed without first proving every stored secret was re-encrypted; the

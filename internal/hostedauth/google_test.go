@@ -70,6 +70,7 @@ func baseClaims(nonce string) map[string]any {
 }
 
 func TestValidateIDTokenNonce(t *testing.T) {
+	t.Parallel()
 	const kid = "test-kid"
 	cases := []struct {
 		name     string
@@ -100,6 +101,7 @@ func TestValidateIDTokenNonce(t *testing.T) {
 }
 
 func TestValidateIDTokenRejectsBadSignature(t *testing.T) {
+	t.Parallel()
 	const kid = "test-kid"
 	verifier, _ := testVerifier(t, kid)
 	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -113,6 +115,7 @@ func TestValidateIDTokenRejectsBadSignature(t *testing.T) {
 }
 
 func TestValidateIDTokenRejectsAudienceMismatch(t *testing.T) {
+	t.Parallel()
 	const kid = "test-kid"
 	verifier, key := testVerifier(t, kid)
 	token := signToken(t, key, kid, baseClaims("not_provided"))

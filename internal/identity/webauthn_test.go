@@ -57,6 +57,7 @@ func insertPasskey(t *testing.T, st *Store, userID string, marker byte, name str
 }
 
 func TestPasskeyLifecycleAndLastMethodGuard(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -88,6 +89,7 @@ func TestPasskeyLifecycleAndLastMethodGuard(t *testing.T) {
 }
 
 func TestSetPasswordSignInRefusesWithoutPasskey(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -117,6 +119,7 @@ func TestSetPasswordSignInRefusesWithoutPasskey(t *testing.T) {
 // TestSetPasswordSignInKeepsInitiatingSession verifies the session that made
 // the change survives while every other session is revoked.
 func TestSetPasswordSignInKeepsInitiatingSession(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -148,6 +151,7 @@ func TestSetPasswordSignInKeepsInitiatingSession(t *testing.T) {
 // path: a passkey-only account can still request and consume a password reset,
 // which restores password sign-in.
 func TestPasskeyOnlyResetRecoversAccount(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -178,6 +182,7 @@ func TestPasskeyOnlyResetRecoversAccount(t *testing.T) {
 }
 
 func TestPasskeysDisabledUntilConfigured(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -211,6 +216,7 @@ func TestPasskeysDisabledUntilConfigured(t *testing.T) {
 }
 
 func TestConfigureWebAuthnRequiresOrigin(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	if err := st.ConfigureWebAuthn(WebAuthnConfig{RPID: "example.com"}); err == nil {
 		t.Fatal("expected error when no origin supplied")
@@ -221,6 +227,7 @@ func TestConfigureWebAuthnRequiresOrigin(t *testing.T) {
 // deny ceremonies: when the store is at capacity the newest begin succeeds by
 // evicting the entry nearest expiry.
 func TestChallengeStoreEvictsOldestWhenFull(t *testing.T) {
+	t.Parallel()
 	st := newChallengeStore()
 	for i := 0; i < maxPendingChallenges; i++ {
 		if _, ok := st.put(challengeLogin, "", webauthn.SessionData{Challenge: "x"}); !ok {
@@ -244,6 +251,7 @@ func TestChallengeStoreEvictsOldestWhenFull(t *testing.T) {
 // stored BackupEligible flag differs from the authenticator's, so both backup
 // flags and transports must round-trip.
 func TestCredentialsForUserRestoresBackupFlags(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -276,6 +284,7 @@ func TestCredentialsForUserRestoresBackupFlags(t *testing.T) {
 // and does not regress the stored value, and a zero counter neither advances
 // nor warns.
 func TestRecordPasskeyUseCounterSemantics(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -308,6 +317,7 @@ func TestRecordPasskeyUseCounterSemantics(t *testing.T) {
 }
 
 func TestCredentialByCredentialIDNotFound(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	if _, err := st.credentialByCredentialID(context.Background(), []byte("missing")); !errors.Is(err, ErrPasskeyNotFound) {
 		t.Fatalf("err = %v, want ErrPasskeyNotFound", err)
@@ -472,6 +482,7 @@ func configureTestWebAuthn(t *testing.T, st *Store) {
 // succeeds for a synced passkey (BackupEligible=true), which the old
 // credentialsForUser regression made impossible.
 func TestFinishPasskeyRegistrationAndLoginE2E(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	configureTestWebAuthn(t, st)
@@ -524,6 +535,7 @@ func TestFinishPasskeyRegistrationAndLoginE2E(t *testing.T) {
 // TestFinishPasskeyLoginRejectsWrongUserHandle proves the user-handle binding:
 // an assertion whose handle does not match the credential owner is rejected.
 func TestFinishPasskeyLoginRejectsWrongUserHandle(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	configureTestWebAuthn(t, st)
@@ -551,6 +563,7 @@ func TestFinishPasskeyLoginRejectsWrongUserHandle(t *testing.T) {
 // TestFinishPasskeyRegistrationRejectsDuplicateCredential proves a duplicate
 // credential id is a conflict, never a silent overwrite.
 func TestFinishPasskeyRegistrationRejectsDuplicateCredential(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	configureTestWebAuthn(t, st)
@@ -579,6 +592,7 @@ func TestFinishPasskeyRegistrationRejectsDuplicateCredential(t *testing.T) {
 // TestReauthCeremonyE2E drives the re-auth assertion path used by sensitive
 // account operations.
 func TestReauthCeremonyE2E(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	configureTestWebAuthn(t, st)
@@ -615,6 +629,7 @@ func TestReauthCeremonyE2E(t *testing.T) {
 // TestBeginPasskeyReauthRequiresCredential proves re-auth is refused when the
 // user has no registered passkey, rather than returning an unusable ceremony.
 func TestBeginPasskeyReauthRequiresCredential(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	configureTestWebAuthn(t, st)
 	u := activeUser(t, st)
@@ -624,6 +639,7 @@ func TestBeginPasskeyReauthRequiresCredential(t *testing.T) {
 }
 
 func TestAddPasskeyRejectsOversizedName(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -636,6 +652,7 @@ func TestAddPasskeyRejectsOversizedName(t *testing.T) {
 // TestPasskeyNameRenameValidation proves rename enforces non-empty and bounded
 // names.
 func TestPasskeyNameRenameValidation(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -651,6 +668,7 @@ func TestPasskeyNameRenameValidation(t *testing.T) {
 // TestDeletePasskeyGoogleLinkedKeepsAccess proves a Google-linked user with one
 // passkey can remove it: Google remains a sign-in method.
 func TestDeletePasskeyGoogleLinkedKeepsAccess(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -669,6 +687,7 @@ func TestDeletePasskeyGoogleLinkedKeepsAccess(t *testing.T) {
 // TestEnablePasswordRefusedWhileGoogleLinked proves the Google invariant:
 // password auth cannot be switched back on for a Google-linked account.
 func TestEnablePasswordRefusedWhileGoogleLinked(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)
@@ -683,6 +702,7 @@ func TestEnablePasswordRefusedWhileGoogleLinked(t *testing.T) {
 // TestConcurrentDeletePasskeysCannotLockOut exercises the last-method guard
 // under concurrent deletes of the final two credentials.
 func TestConcurrentDeletePasskeysCannotLockOut(t *testing.T) {
+	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
 	u := activeUser(t, st)

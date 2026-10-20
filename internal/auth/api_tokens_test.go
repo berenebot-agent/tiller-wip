@@ -24,6 +24,7 @@ func insertManagementToken(t *testing.T, db *sql.DB, id string, g GeneratedKey, 
 }
 
 func TestManagementTokenPrefixSeparation(t *testing.T) {
+	t.Parallel()
 	hasher := &countingHasher{}
 	generated, err := GenerateManagementTokenWithHasher(hasher)
 	if err != nil {
@@ -55,6 +56,7 @@ func TestManagementTokenPrefixSeparation(t *testing.T) {
 }
 
 func TestValidateManagementScopes(t *testing.T) {
+	t.Parallel()
 	encoded, err := ValidateManagementScopes(map[string]int{"providers": ScopeWrite, "monitoring": ScopeRead})
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +78,7 @@ func TestValidateManagementScopes(t *testing.T) {
 }
 
 func TestParseManagementScopesFailsClosed(t *testing.T) {
+	t.Parallel()
 	if got := ParseManagementScopes(`not json`); len(got) != 0 {
 		t.Fatalf("malformed scopes did not fail closed: %v", got)
 	}
@@ -89,6 +92,7 @@ func TestParseManagementScopesFailsClosed(t *testing.T) {
 }
 
 func TestManagementTokenAuthenticatorLifecycle(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	hasher := &countingHasher{}
 	authenticator, err := NewManagementTokenAuthenticatorWithHasher(db.SQL, hasher)
@@ -159,6 +163,7 @@ func TestManagementTokenAuthenticatorLifecycle(t *testing.T) {
 }
 
 func TestManagementTokenAuthenticatorExpiry(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	hasher := &countingHasher{}
 	authenticator, err := NewManagementTokenAuthenticatorWithHasher(db.SQL, hasher)
@@ -191,6 +196,7 @@ func TestManagementTokenAuthenticatorExpiry(t *testing.T) {
 }
 
 func TestManagementTokenCacheEntryExpiresWhileCached(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	hasher := &countingHasher{}
 	authenticator, err := NewManagementTokenAuthenticatorWithHasher(db.SQL, hasher)
@@ -216,6 +222,7 @@ func TestManagementTokenCacheEntryExpiresWhileCached(t *testing.T) {
 }
 
 func TestManagementTokenInvalidateWithPublishesUnderLock(t *testing.T) {
+	t.Parallel()
 	db := openAuthTestDB(t)
 	hasher := &countingHasher{}
 	authenticator, err := NewManagementTokenAuthenticatorWithHasher(db.SQL, hasher)

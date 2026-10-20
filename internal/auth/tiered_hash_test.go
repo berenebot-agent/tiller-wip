@@ -11,6 +11,7 @@ import (
 )
 
 func TestBcryptHasherRoundTrip(t *testing.T) {
+	t.Parallel()
 	h := BcryptHasher{Cost: 4}
 	encoded, err := h.Hash("s3cret")
 	if err != nil {
@@ -37,6 +38,7 @@ func TestBcryptHasherRoundTrip(t *testing.T) {
 }
 
 func TestBcryptNeedsRehashOnCostChange(t *testing.T) {
+	t.Parallel()
 	encoded, err := (BcryptHasher{Cost: 4}).Hash("s")
 	if err != nil {
 		t.Fatal(err)
@@ -50,6 +52,7 @@ func TestBcryptNeedsRehashOnCostChange(t *testing.T) {
 }
 
 func TestVerifyEncodedAcceptsLegacyArgon2(t *testing.T) {
+	t.Parallel()
 	legacy, err := argon2idHash("legacy-secret")
 	if err != nil {
 		t.Fatal(err)
@@ -72,6 +75,7 @@ func TestVerifyEncodedAcceptsLegacyArgon2(t *testing.T) {
 // argon2id format, authenticates it, and asserts the row is transparently
 // upgraded to bcrypt.
 func TestClientAuthenticatorLazyRehash(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -108,6 +112,7 @@ func TestClientAuthenticatorLazyRehash(t *testing.T) {
 // argon2id token hasher and asserts a bcrypt-configured store validates it and
 // upgrades the stored hash.
 func TestSessionStoreLegacyTokenMigration(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

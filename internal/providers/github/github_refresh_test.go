@@ -27,6 +27,7 @@ func (t *routingTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 // Copilot-token failure (500) with a valid refresh token returns a transient
 // error and does NOT call the GitHub refresh endpoint.
 func TestRefreshCopilot500WithRefreshTokenStaysTransient(t *testing.T) {
+	t.Parallel()
 	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -61,6 +62,7 @@ func TestRefreshCopilot500WithRefreshTokenStaysTransient(t *testing.T) {
 // a 401 from the Copilot token endpoint with no GitHub refresh token is
 // classified as reconnect_required.
 func TestRefreshCopilot401WithNoRefreshTokenReturnsReconnectRequired(t *testing.T) {
+	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
@@ -84,6 +86,7 @@ func TestRefreshCopilot401WithNoRefreshTokenReturnsReconnectRequired(t *testing.
 // a 401 from the Copilot token endpoint with a valid GitHub refresh token
 // triggers a durable refresh and returns a fresh Copilot token.
 func TestRefreshCopilot401WithValidRefreshTokenRefreshesAndSucceeds(t *testing.T) {
+	t.Parallel()
 	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++
@@ -140,6 +143,7 @@ func TestRefreshCopilot401WithValidRefreshTokenRefreshesAndSucceeds(t *testing.T
 // invalid_grant from the GitHub refresh-token endpoint is classified as
 // reconnect_required.
 func TestRefreshGitHubInvalidGrantReturnsReconnectRequired(t *testing.T) {
+	t.Parallel()
 	requests := 0
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests++

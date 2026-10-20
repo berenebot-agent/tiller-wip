@@ -53,6 +53,7 @@ func clientNameFor(t *testing.T, db *database.DB, clientKeyID string) string {
 }
 
 func TestClientActivityCSVExport(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	client2ID, _ := createClientWithModel(t, api, "second client")
 	insertLogRow(t, db, "row-a", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
@@ -104,6 +105,7 @@ func TestClientActivityCSVExport(t *testing.T) {
 }
 
 func TestClientActivityCSVExportPeriodFilter(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := time.Now().UTC()
 	insertLogRow(t, db, "row-old", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-old", nil, now.Add(-40*24*time.Hour).Format(time.RFC3339Nano))
@@ -130,6 +132,7 @@ func TestClientActivityCSVExportPeriodFilter(t *testing.T) {
 }
 
 func TestClientActivityCSVExportCustomRange(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	insertLogRow(t, db, "row-old", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-old", nil, "2026-01-01T00:00:00Z")
 	insertLogRow(t, db, "row-mid", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-mid", nil, "2026-02-01T00:00:00Z")
@@ -150,6 +153,7 @@ func TestClientActivityCSVExportCustomRange(t *testing.T) {
 }
 
 func TestClientActivityCSVExportCustomRangeInvalid(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Reversed bounds.
 	if status, _ := getCSV(t, api, "/api/admin/client-keys/"+clientID+"/activity/export?from=2026-03-01T00:00:00Z&to=2026-02-01T00:00:00Z"); status != 400 {
@@ -162,6 +166,7 @@ func TestClientActivityCSVExportCustomRangeInvalid(t *testing.T) {
 }
 
 func TestGlobalActivityCSVExport(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	client2ID, _ := createClientWithModel(t, api, "global second client")
 	insertLogRow(t, db, "row-a", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
@@ -187,6 +192,7 @@ func TestGlobalActivityCSVExport(t *testing.T) {
 }
 
 func TestClientActivityCSVExportRequiresAdmin(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	req, _ := http.NewRequest("GET", api.base+"/api/admin/client-keys/"+clientID+"/activity/export", nil)
 	resp, err := http.DefaultClient.Do(req)
@@ -200,6 +206,7 @@ func TestClientActivityCSVExportRequiresAdmin(t *testing.T) {
 }
 
 func TestVirtualActivityCSVExportScopedToModel(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Create a virtual model "virtual/coding" targeting model-a.
 	status, payload, _ := api.request("GET", "/api/admin/providers", nil)
@@ -262,6 +269,7 @@ func TestVirtualActivityCSVExportScopedToModel(t *testing.T) {
 }
 
 func TestVirtualActivityListScopedToModel(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	status, payload, _ := api.request("GET", "/api/admin/providers", nil)
 	if status != 200 {
@@ -362,6 +370,7 @@ func insertRealLogRow(t *testing.T, db *database.DB, id, clientKeyID, realModelI
 }
 
 func TestRealModelActivityCSVExportScopedToModel(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	modelID := realModelID(t, api)
 	insertRealLogRow(t, db, "row-a", clientID, modelID, "provider-a/model-a", "provider-a", "model-a", "2026-01-01T00:00:01Z")
@@ -391,6 +400,7 @@ func TestRealModelActivityCSVExportScopedToModel(t *testing.T) {
 }
 
 func TestRealModelActivityListScopedToModel(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	modelID := realModelID(t, api)
 	insertRealLogRow(t, db, "row-a", clientID, modelID, "provider-a/model-a", "provider-a", "model-a", "2026-01-01T00:00:01Z")
@@ -422,6 +432,7 @@ func TestRealModelActivityListScopedToModel(t *testing.T) {
 // with NULL route_kind (legacy) or a virtual route that resolved to a real model
 // still appears in that real model's activity.
 func TestRealModelActivityIncludesVirtualRoutedRows(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	modelID := realModelID(t, api)
 	// Virtual-routed row: route_kind='virtual', resolved to model-a. Historical
@@ -448,6 +459,7 @@ func TestRealModelActivityIncludesVirtualRoutedRows(t *testing.T) {
 // A skipped (cooldown/unavailable) attempt must NOT attribute: the target was
 // never contacted.
 func TestRealModelActivityIncludesFailedAttempts(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	modelID := realModelID(t, api)
 	now := time.Now().UTC()
@@ -499,6 +511,7 @@ func TestRealModelActivityIncludesFailedAttempts(t *testing.T) {
 // under the virtual model. Historical route_kind-NULL rows are normalised to
 // route_status='unresolved' at boot and are not guess-attributed here.
 func TestVirtualModelActivityAttributesRoutedRows(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	status, payload, _ := api.request("GET", "/api/admin/providers", nil)
 	if status != 200 {
@@ -546,6 +559,7 @@ func TestVirtualModelActivityAttributesRoutedRows(t *testing.T) {
 }
 
 func TestActivityCSVExportNoSensitiveMaterial(t *testing.T) {
+	t.Parallel()
 	api, _, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{map[string]any{"role": "user", "content": "PROMPT-SECRET-MARKER"}}})
 	_, _ = io.Copy(io.Discard, resp.Body)
@@ -597,6 +611,7 @@ func providerAndModelIDs(t *testing.T, api *testAPI) (string, string) {
 // (best-effort, never fails the request) but triggers a warning so a future
 // code path that forgets to set the resolved target surfaces early.
 func TestWriteLogInvariant(t *testing.T) {
+	t.Parallel()
 	_, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
@@ -622,6 +637,7 @@ func TestWriteLogInvariant(t *testing.T) {
 // the default (Info) level and carries the origin of the failure that opened
 // the cooldown, while other skips stay at Debug.
 func TestLogAttemptCooldownSkipIsInfo(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	s := &Server{logger: logger, cooldown: newCooldownStore()}
@@ -645,6 +661,7 @@ func TestLogAttemptCooldownSkipIsInfo(t *testing.T) {
 }
 
 func TestLogAttemptCompatibilitySkipIsInfo(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	s := &Server{logger: logger}
@@ -661,6 +678,7 @@ func TestLogAttemptCompatibilitySkipIsInfo(t *testing.T) {
 // export, and usage: for a given virtual model they must all attribute the same
 // set of rows (new route_kind='virtual' rows plus legacy NULL-route rows).
 func TestAttributionHelperConsistency(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	providerID, modelID := providerAndModelIDs(t, api)
 	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "virtual"})
@@ -724,6 +742,7 @@ func TestAttributionHelperConsistency(t *testing.T) {
 // formula prefix must be escaped with a single quote so the cell is not treated
 // as a formula when opened in a spreadsheet.
 func TestNeutralizeCSVField(t *testing.T) {
+	t.Parallel()
 	for _, prefix := range []string{"=", "+", "-", "@", "\t", "\r"} {
 		got := neutralizeCSVField(prefix + "cmd|' /C calc'!A0")
 		if !strings.HasPrefix(got, "'") {
@@ -743,6 +762,7 @@ func TestNeutralizeCSVField(t *testing.T) {
 // client-chosen model beginning with a formula prefix is neutralized in the
 // admin CSV export.
 func TestActivityCSVExportNeutralizesFormulaModel(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// A client-chosen model string that would otherwise execute as a formula.
 	insertLogRow(t, db, "row-formula", clientID, "=1+1", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(1), int64Ptr(1), "upstream-a", "req-a", nil, "2026-01-01T00:00:01Z")
@@ -762,6 +782,7 @@ func TestActivityCSVExportNeutralizesFormulaModel(t *testing.T) {
 }
 
 func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	if _, err := db.SQL.Exec(`UPDATE client_keys SET name=? WHERE id=?`, "align-client", clientID); err != nil {
 		t.Fatal(err)
@@ -843,6 +864,7 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 }
 
 func TestActivityExposesCacheCreationTokensAndEmptyExport(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	insertLogRow(t, db, "row-cache-creation", clientID, "provider-a/model-a", strPtr("provider-a"), strPtr("model-a"), "chat", 0, 200, 10, int64Ptr(10), int64Ptr(2), "upstream-cache", "req-cache", nil, "2026-01-01T00:00:01Z")
 	if _, err := activityDB(t, db).Exec(`UPDATE request_logs SET cache_creation_input_tokens=42 WHERE id=?`, "row-cache-creation"); err != nil {

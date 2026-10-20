@@ -1236,7 +1236,7 @@ func (r *Registry) discoverOllama(ctx context.Context, provider Instance) ([]Mod
 	if err := r.doJSON(req, &payload); err != nil {
 		return nil, err
 	}
-	out := make([]Model, 0, len(payload.Models))
+	ids := make([]string, 0, len(payload.Models))
 	for _, item := range payload.Models {
 		modelID := item.Name
 		if modelID == "" {
@@ -1245,13 +1245,41 @@ func (r *Registry) discoverOllama(ctx context.Context, provider Instance) ([]Mod
 		if modelID == "" {
 			continue
 		}
-		show := r.ollamaShow(ctx, provider, modelID)
-		model := Model{ID: modelID, DisplayName: modelID, ContextLength: show.ContextLength}
-		applyOllamaShowCapabilities(&model, show)
+		ids = append(ids, modelID)
+	}
+	// /api/show is one call per model. Serially, a catalogue of a few hundred
+	// tags exceeds the discovery deadline and fails the whole refresh, so cap
+	// the concurrency instead. Results keep the /api/tags order.
+	shows := make([]ollamaShow, len(ids))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < ollamaShowConcurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				shows[i] = r.ollamaShow(ctx, provider, ids[i])
+			}
+		}()
+	}
+	for i := range ids {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+	out := make([]Model, 0, len(ids))
+	for i, modelID := range ids {
+		model := Model{ID: modelID, DisplayName: modelID, ContextLength: shows[i].ContextLength}
+		applyOllamaShowCapabilities(&model, shows[i])
 		out = append(out, model)
 	}
 	return out, nil
 }
+
+// ollamaShowConcurrency bounds the parallel /api/show calls one Ollama
+// discovery makes. High enough to keep a large catalogue inside the discovery
+// deadline, low enough not to flood a single local Ollama.
+const ollamaShowConcurrency = 8
 
 // ollamaShow is the subset of Ollama's /api/show response tiller-router uses.
 // Ollama reports its own capabilities (vision/tools/thinking/audio) here, so

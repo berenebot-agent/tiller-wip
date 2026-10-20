@@ -6,6 +6,8 @@ import (
 	"testing"
 )
 
+// TestDNSFallbackConfig is serial (no t.Parallel): it uses t.Setenv, which Go
+// forbids in a parallel test.
 func TestDNSFallbackConfig(t *testing.T) {
 	t.Setenv("TILLER_MODE", "local")
 	t.Setenv("TILLER_DATA_DIR", t.TempDir())

@@ -61,6 +61,7 @@ func signupAndVerify(t *testing.T, st *Store, email, password string) (User, Use
 }
 
 func TestSignupEnqueuesVerificationMail(t *testing.T) {
+	t.Parallel()
 	st, db, q := newAccountStore(t)
 	ctx := context.Background()
 	result, err := st.CreateSignup(ctx, "queue@example.com", "correct horse battery staple")
@@ -79,6 +80,7 @@ func TestSignupEnqueuesVerificationMail(t *testing.T) {
 }
 
 func TestChangePasswordKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, session := signupAndVerify(t, st, "pw@example.com", "correct horse battery staple")
@@ -101,6 +103,7 @@ func TestChangePasswordKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
 }
 
 func TestChangePasswordRejectsWrongCurrent(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	u, session := signupAndVerify(t, st, "wrong@example.com", "correct horse battery staple")
 	if _, err := st.ChangePassword(context.Background(), u.ID, session.Token, "not the password", "another correct horse battery"); err == nil {
@@ -109,6 +112,7 @@ func TestChangePasswordRejectsWrongCurrent(t *testing.T) {
 }
 
 func TestGoogleLinkDisablesPasswordAndUnlinkRestoresIt(t *testing.T) {
+	t.Parallel()
 	st, db, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, _ := signupAndVerify(t, st, "google-policy@example.com", "correct horse battery staple")
@@ -137,6 +141,7 @@ func TestGoogleLinkDisablesPasswordAndUnlinkRestoresIt(t *testing.T) {
 }
 
 func TestPasswordResetCannotEnablePasswordWhileGoogleLinked(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, _ := signupAndVerify(t, st, "google-reset@example.com", "correct horse battery staple")
@@ -152,6 +157,7 @@ func TestPasswordResetCannotEnablePasswordWhileGoogleLinked(t *testing.T) {
 }
 
 func TestRequestEmailChangeEnqueuesConfirmAndWarning(t *testing.T) {
+	t.Parallel()
 	st, _, q := newAccountStore(t)
 	ctx := context.Background()
 	u, session := signupAndVerify(t, st, "old@example.com", "correct horse battery staple")
@@ -184,6 +190,7 @@ func TestRequestEmailChangeEnqueuesConfirmAndWarning(t *testing.T) {
 }
 
 func TestRequestEmailChangeTakenIsSilent(t *testing.T) {
+	t.Parallel()
 	st, _, q := newAccountStore(t)
 	ctx := context.Background()
 	if _, err := st.CreateSignup(ctx, "taken@example.com", "correct horse battery staple"); err != nil {
@@ -200,6 +207,7 @@ func TestRequestEmailChangeTakenIsSilent(t *testing.T) {
 }
 
 func TestConfirmEmailChangeKeepsInitiatingSession(t *testing.T) {
+	t.Parallel()
 	st, db, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, session := signupAndVerify(t, st, "before@example.com", "correct horse battery staple")
@@ -234,6 +242,7 @@ func TestConfirmEmailChangeKeepsInitiatingSession(t *testing.T) {
 }
 
 func TestPasswordResetCancelsPendingEmailChange(t *testing.T) {
+	t.Parallel()
 	st, db, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, session := signupAndVerify(t, st, "cancel@example.com", "correct horse battery staple")
@@ -257,6 +266,7 @@ func TestPasswordResetCancelsPendingEmailChange(t *testing.T) {
 }
 
 func TestChangePasswordCancelsPendingEmailChange(t *testing.T) {
+	t.Parallel()
 	st, db, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, session := signupAndVerify(t, st, "cancelpw@example.com", "correct horse battery staple")
@@ -276,6 +286,7 @@ func TestChangePasswordCancelsPendingEmailChange(t *testing.T) {
 }
 
 func TestConfirmEmailChangeRaceIsRejected(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, session := signupAndVerify(t, st, "race@example.com", "correct horse battery staple")
@@ -293,6 +304,7 @@ func TestConfirmEmailChangeRaceIsRejected(t *testing.T) {
 }
 
 func TestAccountProfileReportsIdentity(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, _ := signupAndVerify(t, st, "profile@example.com", "correct horse battery staple")
@@ -306,6 +318,7 @@ func TestAccountProfileReportsIdentity(t *testing.T) {
 }
 
 func TestRevokeAllUserSessionsRevokesEverySession(t *testing.T) {
+	t.Parallel()
 	st, _, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, session := signupAndVerify(t, st, "revokeall@example.com", "correct horse battery staple")
@@ -325,6 +338,7 @@ func TestRevokeAllUserSessionsRevokesEverySession(t *testing.T) {
 }
 
 func TestPruneExpiredTokens(t *testing.T) {
+	t.Parallel()
 	st, db, _ := newAccountStore(t)
 	ctx := context.Background()
 	u, _ := signupAndVerify(t, st, "prune@example.com", "correct horse battery staple")

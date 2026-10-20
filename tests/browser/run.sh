@@ -10,10 +10,13 @@
 # Usage:  ./tests/browser/run.sh
 #
 # Env overrides:
-#   TILLER_BROWSER_WORKERS       admin shards (default 3); one activity lane is added
+#   TILLER_BROWSER_WORKERS       admin shards (default: host-sized — see
+#                               auto_workers below); one activity lane is added
 #   TILLER_BROWSER_BASE_URL  base URL for playwright (default http://127.0.0.1:18080)
 #   TILLER_BROWSER_MOCK_BASE_URL  mock upstream /v1 base (default http://127.0.0.1:18081/v1)
 #   TILLER_BROWSER_REBUILD=1  force-rebuild the browser + fixturectl images
+#   TILLER_BROWSER_SPECS     space-separated specs for a targeted run (one shard,
+#                           no additional Activity or first-run suite)
 #                               (set after changing the browser Dockerfile, package
 #                               deps, copied JS, fixturectl code, or router code if
 #                               reusing a previously built router image).
@@ -22,7 +25,31 @@ set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
 password=browser-test-password
-workers=${TILLER_BROWSER_WORKERS:-${PLAYWRIGHT_WORKERS:-3}}
+
+# Shard count is host-sized rather than hardcoded. Measured on a 6-core/23 GiB
+# box (warm images, one sample each): 3 shards 85s, 4 shards 71s, 5 shards 74s —
+# so more shards stop helping once the box is oversubscribed (each shard runs a
+# whole Chromium plus its own router). Formula: min(4, cores-1) floored at 2,
+# and 2 on hosts under 8 GiB where the extra containers do not fit. Override
+# with TILLER_BROWSER_WORKERS / PLAYWRIGHT_WORKERS.
+auto_workers() {
+    local cores mem_gb
+    cores=$(nproc 2>/dev/null || echo 2)
+    case "$cores" in ''|*[!0-9]*) cores=2 ;; esac
+    mem_gb=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0) / 1024 / 1024 ))
+    if [ "$mem_gb" -lt 8 ]; then echo 2; return; fi
+    local w=$((cores - 1))
+    [ "$w" -gt 4 ] && w=4
+    [ "$w" -lt 2 ] && w=2
+    echo "$w"
+}
+
+workers=${TILLER_BROWSER_WORKERS:-${PLAYWRIGHT_WORKERS:-$(auto_workers)}}
+specs=(admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js)
+if [ -n "${TILLER_BROWSER_SPECS:-}" ]; then
+    read -r -a specs <<< "$TILLER_BROWSER_SPECS"
+    workers=1
+fi
 run_id=tiller-browser-$$
 ports_file=$(mktemp)
 run_start=$(date +%s)
@@ -37,6 +64,9 @@ phase_name=""
 phase_epoch=$phase_start
 phase_timing() {
     # Announce the end of the previous phase and the start of the next.
+    # The `t+Ns` stamp on the start line is the run-relative offset, so a phase's
+    # span is unambiguous even when the interleaved stdout/stderr lines arrive
+    # out of order in the captured log.
     local now; now=$(date +%s)
     if [ -n "$phase_name" ]; then
         local elapsed=$((now - phase_epoch))
@@ -44,7 +74,7 @@ phase_timing() {
     fi
     phase_name="$1"
     phase_epoch=$now
-    echo "==> $1"
+    echo "==> $1 (t+$((now - phase_start))s)"
 }
 # Per-run scratch lives under tests/logs/ (gitignored). Holds the activity
 # router's host-mounted data dir, the extracted fixturectl binary, the run
@@ -206,21 +236,26 @@ phase_timing "containers started"
 
 # Wait for every mock/router to become ready CONCURRENTLY. All containers were
 # started above, so polling them one at a time only serializes a wait that can
-# run in parallel. wait_url polls a URL every 0.25s and records OK/FAIL to a
-# result file; the script then waits for all probes and reports any failure.
+# run in parallel. wait_url polls a URL every 0.25s and records
+# `status name elapsed_s attempts` to a result file (elapsed and attempts are
+# printed as a per-endpoint report below — without them a slow phase cannot be
+# attributed to the dependency that was slow).
 wait_url() {
     name=$1 url=$2 limit=$3 out=$4
     tries=0
+    start=$(date +%s.%N)
+    status=FAIL
     while [ "$tries" -lt "$((limit * 4))" ]; do
         if curl -fsS --max-time 2 "$url" >/dev/null 2>&1; then
-            echo "OK $name" > "$out"
-            return 0
+            status=OK
+            break
         fi
         tries=$((tries + 1))
         sleep 0.25
     done
-    echo "FAIL $name" > "$out"
-    return 1
+    elapsed=$(awk "BEGIN {printf \"%.2f\", $(date +%s.%N) - $start}")
+    echo "$status $name $elapsed $tries" > "$out"
+    [ "$status" = OK ]
 }
 
 ready_dir=$(mktemp -d)
@@ -243,9 +278,15 @@ for p in $ready_pids; do
     wait "$p" || true
 done
 failed=""
+echo "==> Readiness per endpoint (slowest first):"
 for f in "$ready_dir"/*; do
     [ -f "$f" ] || continue
-    read -r status name < "$f"
+    read -r status name elapsed attempts < "$f"
+    printf '%s %s %s %s\n' "$elapsed" "$name" "$status" "$attempts"
+done | sort -rn | awk '{printf "    %7.2fs  %-24s %-4s  %s polls\n", $1, $2, $3, $4}'
+for f in "$ready_dir"/*; do
+    [ -f "$f" ] || continue
+    read -r status name elapsed attempts < "$f"
     if [ "$status" != "OK" ]; then
         failed="$failed $name"
     fi
@@ -261,8 +302,13 @@ echo "==> Running Playwright browser suite"
 # Run one Playwright shard per isolated router. Each process has a normal,
 # fixed base URL, avoiding shared process environment or unsupported fixture
 # overrides while still allowing the shard count to match machine capacity.
+# Each lane gets its OWN host results dir: with PLAYWRIGHT_WORKERS=1 every
+# container uses the same ".playwright-artifacts-0" name and Playwright wipes
+# its output dir on startup, so sharing one dir let a starting container delete
+# traces a sibling was still writing (ENOENT on .trace/.zip, then a timeout).
 pids_file=$(mktemp)
 while read -r i router_port mock_port; do
+    mkdir -p "$run_dir/playwright-results/worker-$i"
     docker run --rm --network host \
         -e TILLER_BROWSER_BASE_URL="http://127.0.0.1:$router_port" \
         -e TILLER_BROWSER_MOCK_BASE_URL="http://127.0.0.1:$mock_port/v1" \
@@ -273,11 +319,22 @@ while read -r i router_port mock_port; do
         -e TILLER_FIXTURE_DB=/fixture-data/tiller-router.db \
         -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
         -v "$run_dir/worker-$i-data:/fixture-data:rw" \
-        -v "$run_dir/playwright-results:/tests/test-results" \
-        "$BROWSER_IMAGE" npx playwright test admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js --shard="$((i + 1))/$workers" &
+        -v "$run_dir/playwright-results/worker-$i:/tests/test-results" \
+        "$BROWSER_IMAGE" npx playwright test "${specs[@]}" --shard="$((i + 1))/$workers" &
     echo "$i $!" >> "$pids_file"
 done < "$ports_file"
 
+# Coverage guard: if the ports file came out empty or unreadable, no worker
+# shard is launched and the suite would otherwise report PASS having run only
+# the activity and first-run lanes (71 of 86 tests silently dropped). Fail loud.
+started_shards=$(wc -l < "$pids_file" | tr -d ' ')
+if [ "$started_shards" -ne "$workers" ]; then
+    echo "FAIL: launched $started_shards worker shards, want $workers (ports file '$ports_file' had $(wc -l < "$ports_file" | tr -d ' ') lines)" >&2
+    exit 1
+fi
+
+if [ -z "${TILLER_BROWSER_SPECS:-}" ]; then
+mkdir -p "$run_dir/playwright-results/activity"
 docker run --rm --network host \
     -e TILLER_BROWSER_BASE_URL="http://127.0.0.1:$activity_router_port" \
     -e TILLER_BROWSER_MOCK_BASE_URL="http://127.0.0.1:$activity_mock_port/v1" \
@@ -288,9 +345,10 @@ docker run --rm --network host \
     -e TILLER_FIXTURE_DB=/fixture-data/tiller-router.db \
     -v "$run_dir/fixturectl:/usr/local/bin/fixturectl:ro" \
     -v "$run_dir/activity-data:/fixture-data:rw" \
-    -v "$run_dir/playwright-results:/tests/test-results" \
-    "$BROWSER_IMAGE" npx playwright test activity.spec.js activity-graph.spec.js &
+    -v "$run_dir/playwright-results/activity:/tests/test-results" \
+    "$BROWSER_IMAGE" npx playwright test activity.spec.js activity-graph.spec.js live-requests.spec.js &
 activity_pid=$!
+fi
 
 # The first-run lane runs its spec against the credential-free router. The
 # spec performs the setup claim itself, so it starts from storageState: none
@@ -324,6 +382,7 @@ while read -r i pid; do
         failing_shards+=("$i")
     fi
 done < "$pids_file"
+if [ -n "${activity_pid:-}" ]; then
 if wait "$activity_pid"; then
     shard_rcs+=(0)
 else
@@ -331,13 +390,16 @@ else
     shard_rcs+=("$rc")
     failing_shards+=("activity")
 fi
+fi
 phase_timing "parallel shards done"
+if [ -z "${TILLER_BROWSER_SPECS:-}" ]; then
 if firstrun_lane; then
     shard_rcs+=(0)
 else
     rc=$?
     shard_rcs+=("$rc")
     failing_shards+=("firstrun")
+fi
 fi
 for rc in "${shard_rcs[@]}"; do
     [ "$rc" -gt "$playwright_status" ] && playwright_status=$rc

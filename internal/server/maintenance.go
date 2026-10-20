@@ -67,12 +67,28 @@ func (s *Server) startAuditMaintenance(ctx context.Context) {
 			if err := s.identity.PruneExpiredTokens(ctx, time.Now()); err != nil {
 				s.warnBackup("scheduled token prune failed", err)
 			}
-			// Reclaim abandoned hosted signups (docs/pre_saas_release_review.md
+			// Reclaim abandoned hosted signups (../docs/pre_saas_release_review.md
 			// TR-005): never-verified pending accounts older than 30 days.
 			if pruned, err := s.identity.PrunePendingAccounts(ctx, time.Now()); err != nil {
 				s.warnBackup("pending account prune failed", err)
 			} else if pruned > 0 {
 				slog.Info("pending account prune completed", "reclaimed", pruned)
+			}
+			// Expired customer/platform sessions can no longer authenticate;
+			// the prune bounds core-database growth as login history accrues.
+			if pruned, err := s.identity.PruneExpiredSessions(ctx, time.Now()); err != nil {
+				s.warnBackup("scheduled session prune failed", err)
+			} else if pruned > 0 {
+				slog.Info("session prune completed", "reclaimed", pruned)
+			}
+		}
+		// Local mode has no identity sessions to prune but does accrue expired
+		// admin_sessions rows; hosted mode leaves s.sessions nil.
+		if s.sessions != nil {
+			if pruned, err := s.sessions.PruneExpiredSessions(ctx, time.Now()); err != nil {
+				s.warnBackup("scheduled admin session prune failed", err)
+			} else if pruned > 0 {
+				slog.Info("admin session prune completed", "reclaimed", pruned)
 			}
 		}
 		if s.outbox != nil {

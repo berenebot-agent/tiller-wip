@@ -28,6 +28,7 @@ type reasoningPermutation struct {
 // The table is intentionally verbose — each row is one human-readable permutation
 // so a failure pinpoints which combination regressed.
 func TestReasoningPermutations(t *testing.T) {
+	t.Parallel()
 	// --- capability presets -------------------------------------------------
 	nilCaps := (*providers.ReasoningCapabilities)(nil)
 	nonReasoning := &providers.ReasoningCapabilities{
@@ -453,6 +454,7 @@ func TestReasoningPermutations(t *testing.T) {
 // incoming × target pair. This catches translation-layer mismatches like the
 // context % passthrough bug family where a field leaked across protocols.
 func TestReasoningPermutations_ExtractThenApply(t *testing.T) {
+	t.Parallel()
 	budgetMin := int64(1024)
 	cases := []struct {
 		name           string
@@ -529,6 +531,7 @@ func TestReasoningPermutations_ExtractThenApply(t *testing.T) {
 // when the target explicitly doesn't support reasoning. This is the
 // "requesting reasoning on non-reasoning model" regression guard.
 func TestReasoningPermutations_NonReasoningStripsExistingBodyFields(t *testing.T) {
+	t.Parallel()
 	nonReasoning := &providers.ReasoningCapabilities{Options: []providers.ReasoningOption{}}
 	cases := []struct {
 		name   string

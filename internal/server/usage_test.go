@@ -9,6 +9,7 @@ import (
 )
 
 func TestUsageEndpointPerWindowTotals(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	// Create a real virtual group + virtual model so the virtual request's
 	// requested_model matches a real canonical ID (virtual/coding).
@@ -100,6 +101,7 @@ func TestUsageEndpointPerWindowTotals(t *testing.T) {
 }
 
 func TestUsageEndpointEmpty(t *testing.T) {
+	t.Parallel()
 	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
 	status, payload, _ := api.request("GET", "/api/admin/usage", nil)
 	if status != 200 {
@@ -118,6 +120,7 @@ func TestUsageEndpointEmpty(t *testing.T) {
 // aggregates to display names: the client_key_id key space of the aggregate
 // maps is covered by client_key_names.
 func TestUsageClientKeyNames(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := activityDB(t, db).Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,route_kind,route_model,resolved_provider,resolved_model,protocol,streaming,http_status,latency_ms,input_tokens,output_tokens,client_request_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -147,6 +150,7 @@ func TestUsageClientKeyNames(t *testing.T) {
 // in the in-memory target_last_outcome map and that it is surfaced by the usage
 // endpoint keyed by provider model ID.
 func TestUsageTargetLastOutcome(t *testing.T) {
+	t.Parallel()
 	api, db, _, secret := loggingTestHarness(t, mockUpstream(t))
 
 	// No requests yet: usage should expose an empty (or absent) map.
@@ -193,6 +197,7 @@ func TestUsageTargetLastOutcome(t *testing.T) {
 // targets (e.g. model-not-found, translation error, client cancellation) does
 // not touch the in-memory outcome map.
 func TestRecordLastOutcomeNoAttempts(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	row := &logRow{httpStatus: 404, errorText: strPtr("model_not_found")}
 	s.recordLastOutcome(row)
@@ -208,6 +213,7 @@ func TestRecordLastOutcomeNoAttempts(t *testing.T) {
 // the row. This is the case where the original implementation silently dropped
 // the failure and left the dot grey.
 func TestRecordLastOutcomeFailedAttempt(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	row := &logRow{
 		httpStatus: 502,
@@ -238,6 +244,7 @@ func TestRecordLastOutcomeFailedAttempt(t *testing.T) {
 // (never actually called — unavailable or protocol mismatch) does not force a
 // red dot.
 func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	row := &logRow{
 		httpStatus: 503,
@@ -260,6 +267,7 @@ func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
 // backup. Request health is a separate concept. The graph receives both
 // outcomes.
 func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	row := &logRow{
 		httpStatus: 200,
@@ -283,6 +291,7 @@ func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
 }
 
 func TestRecordLastOutcomeRunsWhenLoggingDisabled(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, secret := loggingTestHarness(t, mockUpstream(t))
 	status, _, _ := api.request("PATCH", "/api/admin/client-keys/"+clientID, map[string]any{"logging_enabled": false})
 	if status != 204 {
@@ -309,6 +318,7 @@ func TestRecordLastOutcomeRunsWhenLoggingDisabled(t *testing.T) {
 }
 
 func TestRecordLastOutcomeDoesNotCollideForSameUpstreamNames(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	s.recordLastOutcome(&logRow{attempts: []requestAttempt{
 		{providerModelID: "pm-one", provider: "same", model: "same", result: "failed", httpStatus: 500},
@@ -323,6 +333,7 @@ func TestRecordLastOutcomeDoesNotCollideForSameUpstreamNames(t *testing.T) {
 }
 
 func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	row := &logRow{httpStatus: 200, createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{
 		{providerModelID: "pm-primary", provider: "primary", model: "model-a", result: "failed", httpStatus: 0, failureClass: "upstream_unreachable"},
@@ -344,6 +355,7 @@ func TestRecordLastOutcomeNetworkFailureFollowedByFallbackSuccess(t *testing.T) 
 }
 
 func TestRecordLastOutcomeUsesLaterRecordingTime(t *testing.T) {
+	t.Parallel()
 	s := &Server{}
 	first := &logRow{createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{{providerModelID: "pm-model", provider: "provider", model: "model", result: "failed"}}}
 	s.recordLastOutcome(first)
@@ -375,6 +387,7 @@ func TestRecordLastOutcomeUsesLaterRecordingTime(t *testing.T) {
 }
 
 func TestUsageCacheHitWindows(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := time.Now().UTC()
 	type row struct {
@@ -435,6 +448,7 @@ func TestUsageCacheHitWindows(t *testing.T) {
 // silently disappear and the admin UI would show them as untried neutral
 // instead of broken red.
 func TestUsageTargetHealthIncludesFailedAttempts(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := time.Now().UTC()
 
@@ -504,6 +518,7 @@ func TestUsageTargetHealthIncludesFailedAttempts(t *testing.T) {
 // not mask a broken primary. Regression for the semantic where logical
 // request success suppressed the failed target's red state.
 func TestUsageTargetHealthCountsFailedTargetOnResolvedRequest(t *testing.T) {
+	t.Parallel()
 	api, db, clientID, _ := loggingTestHarness(t, mockUpstream(t))
 	now := time.Now().UTC()
 

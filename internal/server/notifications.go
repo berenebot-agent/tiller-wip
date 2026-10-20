@@ -310,23 +310,19 @@ func (s *Server) releaseNotification(accountID string) {
 	s.notifyCooldownMu.Unlock()
 }
 
-// pruneNotificationCooldownsLocked drops cooldown entries that can no longer
-// suppress anything (their window has elapsed for every configured cooldown).
-// The map is keyed by account+event+model and would otherwise grow for the
-// process lifetime as accounts and models churn. Caller holds notifyCooldownMu.
+// notificationCooldownEntry retains the last successful delivery time so
+// shortening an open cooldown is measured from delivery, not from the next
+// event. The deadline is mutable only when a configured cooldown is reduced.
+type notificationCooldownEntry struct {
+	sentAt time.Time
+	until  time.Time
+}
+
+// pruneNotificationCooldownsLocked drops closed windows to bound memory as
+// accounts and models churn. Caller holds notifyCooldownMu.
 func (s *Server) pruneNotificationCooldownsLocked(now time.Time) {
-	if len(s.notifyLastSent) == 0 {
-		return
-	}
-	// The longest cooldown a tenant can configure is not known here, so use the
-	// hosted floor as the retention window: any entry older than that can no
-	// longer be within a sane cooldown.
-	retention := time.Duration(hostedNotificationCooldownSeconds) * time.Second
-	if retention < time.Minute {
-		retention = time.Minute
-	}
-	for key, last := range s.notifyLastSent {
-		if now.Sub(last) > retention {
+	for key, entry := range s.notifyLastSent {
+		if !now.Before(entry.until) {
 			delete(s.notifyLastSent, key)
 		}
 	}
@@ -360,14 +356,23 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 			s.notifyInFlight = map[string]bool{}
 		}
 		if s.notifyLastSent == nil {
-			s.notifyLastSent = map[string]time.Time{}
+			s.notifyLastSent = map[string]notificationCooldownEntry{}
 		}
 		now := time.Now()
 		s.pruneNotificationCooldownsLocked(now)
 		if cfg.CooldownSeconds > 0 {
-			if last, ok := s.notifyLastSent[key]; ok && now.Sub(last) < time.Duration(cfg.CooldownSeconds)*time.Second {
-				s.notifyCooldownMu.Unlock()
-				return
+			if entry, ok := s.notifyLastSent[key]; ok {
+				// Apply a shorter setting relative to the actual successful
+				// delivery. Increasing the setting does not extend a window
+				// already open under the previous configuration.
+				if capped := entry.sentAt.Add(time.Duration(cfg.CooldownSeconds) * time.Second); capped.Before(entry.until) {
+					entry.until = capped
+					s.notifyLastSent[key] = entry
+				}
+				if now.Before(entry.until) {
+					s.notifyCooldownMu.Unlock()
+					return
+				}
 			}
 		}
 		if s.notifyInFlight[key] {
@@ -416,7 +421,12 @@ func (s *Server) deliverNotification(accountID, event string, payload notificati
 	}
 	if reserved {
 		s.notifyCooldownMu.Lock()
-		s.notifyLastSent[key] = time.Now()
+		// Only successful deliveries open a cooldown window.
+		sentAt := time.Now()
+		s.notifyLastSent[key] = notificationCooldownEntry{
+			sentAt: sentAt,
+			until:  sentAt.Add(time.Duration(cfg.CooldownSeconds) * time.Second),
+		}
 		s.notifyCooldownMu.Unlock()
 	}
 }

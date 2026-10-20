@@ -6,6 +6,32 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+### Added
+
+- **Live request rows on Activity.** A scrolling table beneath the graph shows
+  one row per logging-enabled request, filling in its target, outcome, latency,
+  and token metadata. Running requests stay above completed requests; completed
+  rows leave the live view after 30 seconds without deleting Activity history.
+  A clickable Fallback badge expands the ordered attempt chain, including skips,
+  and holds the row until collapsed. Mobile uses the same request-level cards.
+  The view starts fresh on navigation, reconciles missed updates after connection
+  loss, and caps unexpanded completed rows at 200 with an omission notice.
+  Live updates contain metadata only; detailed error bodies remain in the
+  existing authenticated Activity history, never in the live feed.
+
+### Changed
+
+- **Activity graph readability.** Increase lane headings and node labels to
+  17px, secondary labels to 14px, and adjust text bounds and row spacing to
+  keep graph lines clear of the larger labels. Inline Fallback buttons match
+  the height and corner radius of their adjacent resolved-model boxes.
+- **Activity widescreen layout.** At viewport widths of 1900px and above,
+  Activity uses the available page width to show the graph beside the live
+  request table, including on 1920×1080 displays. Smaller desktop layouts stay
+  stacked and mobile keeps its cards. Resolved models use the same green/red
+  outcome boxes as Activity history, with the Fallback button inline on the
+  right of the model box.
+
 ## [0.1.0-beta.5] - 2026-10-12
 
 Fifth public beta. Adds headless administration over the management API,

@@ -6,6 +6,7 @@ import (
 )
 
 func TestRenderBodiesCarryMatchingTextAndHTML(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		msgType   string
 		params    map[string]string
@@ -43,12 +44,14 @@ func TestRenderBodiesCarryMatchingTextAndHTML(t *testing.T) {
 }
 
 func TestRenderUnknownType(t *testing.T) {
+	t.Parallel()
 	if _, ok := render("nope", "https://router.example", "tok", nil); ok {
 		t.Fatal("unknown type reported as rendered")
 	}
 }
 
 func TestRenderEscapesHTML(t *testing.T) {
+	t.Parallel()
 	rendered, ok := render(TypeEmailChangeWarning, "https://router.example", "", map[string]string{
 		"new_email": `evil"<script>alert(1)</script>@example.com`,
 	})
@@ -64,6 +67,7 @@ func TestRenderEscapesHTML(t *testing.T) {
 }
 
 func TestRenderEncodesTokenInLink(t *testing.T) {
+	t.Parallel()
 	rendered, _ := render(TypePasswordReset, "https://router.example/", "a b/c+d", nil)
 	if !strings.Contains(rendered.HTML, "token=a+b%2Fc%2Bd") {
 		t.Fatalf("token was not URL-encoded in link:\n%s", rendered.HTML)

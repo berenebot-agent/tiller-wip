@@ -133,10 +133,19 @@ func (t *inflightTracker) clientEnd(accountID, id, routeID string, streamed bool
 	t.mu.Lock()
 	key := inflightClientKey(accountID, id, routeID)
 	state := t.clientStates[key]
-	if state.Active > 0 {
+	if state.Active == 0 && state.Streaming == 0 {
+		// No ticket was ever reserved for this client+route. A duplicate or
+		// mismatched end must not emit a -1 delta, which would drive a live
+		// consumer's counter below zero.
+		t.mu.Unlock()
+		return
+	}
+	released := state.Active > 0
+	if released {
 		state.Active--
 	}
-	if streamed && state.Streaming > 0 {
+	streamReleased := streamed && state.Streaming > 0
+	if streamReleased {
 		state.Streaming--
 	}
 	if state.Active == 0 && state.Streaming == 0 {
@@ -145,8 +154,11 @@ func (t *inflightTracker) clientEnd(accountID, id, routeID string, streamed bool
 		t.clientStates[key] = state
 	}
 	t.mu.Unlock()
-	delta := inflightDelta{ID: routeID, ClientID: id, Active: -1}
-	if streamed {
+	delta := inflightDelta{ID: routeID, ClientID: id}
+	if released {
+		delta.Active = -1
+	}
+	if streamReleased {
 		delta.Streaming = -1
 	}
 	t.emit(accountID, delta)
@@ -219,9 +231,13 @@ func (t *inflightTracker) targetEnd(accountID, routeID, targetID string) {
 	key := inflightTargetKey(accountID, routeID, targetID)
 	t.mu.Lock()
 	state := t.targetStates[key]
-	if state.Active > 0 {
-		state.Active--
+	if state.Active == 0 {
+		// The target leg was never started (or was already ended): emitting a
+		// -1 delta here would over-release the leg on live consumers.
+		t.mu.Unlock()
+		return
 	}
+	state.Active--
 	if state.Active == 0 {
 		delete(t.targetStates, key)
 	} else {

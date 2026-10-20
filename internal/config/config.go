@@ -56,7 +56,7 @@ type Config struct {
 	// PlatformSessionTTL is the sliding lifetime of a hosted platform-operator
 	// session. It is deliberately shorter than the customer default: the
 	// operator console is the highest-privilege surface, so a stolen session
-	// cookie has a bounded window (docs/pre_saas_release_review.md TR-010).
+	// cookie has a bounded window (../docs/pre_saas_release_review.md TR-010).
 	PlatformSessionTTL time.Duration
 	// Mail is the optional bootstrap seed for mail delivery.
 	Mail MailBootstrap

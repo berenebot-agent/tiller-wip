@@ -13,6 +13,7 @@ import (
 // third-party address merely because email_verified is true. The distinction is
 // what allows one-click linking of an existing account to be safe.
 func TestAuthoritativeEmail(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		gi   GoogleIdentity
@@ -42,6 +43,7 @@ func TestAuthoritativeEmail(t *testing.T) {
 // validation, which is what makes the Workspace arm of the authority rule
 // reachable in production.
 func TestValidateIDTokenCarriesHostedDomain(t *testing.T) {
+	t.Parallel()
 	const kid = "test-kid"
 	verifier, key := testVerifier(t, kid)
 	claims := baseClaims("not_provided")
@@ -65,6 +67,7 @@ func TestValidateIDTokenCarriesHostedDomain(t *testing.T) {
 // a real signed token for a third-party address must validate but report
 // non-authoritative, so the link gate refuses it.
 func TestValidateIDTokenThirdPartyNotAuthoritative(t *testing.T) {
+	t.Parallel()
 	const kid = "test-kid"
 	verifier, key := testVerifier(t, kid)
 	claims := baseClaims("not_provided")
@@ -81,6 +84,7 @@ func TestValidateIDTokenThirdPartyNotAuthoritative(t *testing.T) {
 }
 
 func TestPendingSignupPeekDoesNotConsume(t *testing.T) {
+	t.Parallel()
 	store := NewPendingSignupStore()
 	token, ok := store.Put(SignupClaims{Subject: "s1", Email: "user@example.com", Authoritative: false})
 	if !ok {
@@ -111,6 +115,7 @@ func TestPendingSignupPeekDoesNotConsume(t *testing.T) {
 }
 
 func TestPendingSignupPeekRejectsUnknownAndExpired(t *testing.T) {
+	t.Parallel()
 	store := NewPendingSignupStore()
 	if _, ok := store.Peek("no-such-token"); ok {
 		t.Fatal("Peek accepted an unknown token")

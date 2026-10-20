@@ -14,6 +14,12 @@
 #   ./tests/run.sh --prune [--keep N]   # prune old runs (default: keep all, no-op)
 #   ./tests/run.sh --list               # list tiers and exit
 #
+# Env overrides:
+#   TILLER_TEST_JOBS   tier lanes. Default 1 (serial). >1 runs the browser tier
+#                      in a parallel lane while the remaining tiers run serially
+#                      in the foreground; see the note by JOBS below for why the
+#                      overlap is off by default.
+#
 # Tiers:
 #   unit     Go unit/integration tests (./tiller-go.sh test)
 #   vet      Go static analysis (./tiller-go.sh vet)
@@ -152,6 +158,19 @@ for t in "${SELECTED[@]}"; do
     mkdir -p "$RUN_DIR/$t"
 done
 
+# --- tier lanes ------------------------------------------------------------
+# TILLER_TEST_JOBS>1 runs the browser tier in a parallel lane while the other
+# tiers run serially in the foreground. OFF by default (1): measured on a
+# 6-core/23 GiB box it cut wall-clock 112s -> 71s when the box was otherwise
+# idle, but when an image rebuild ran alongside it the host was starved and a
+# timing-sensitive unit test failed (TestSessionCacheSlidingRenewal,
+# cache_test.go:213 "session sliding renewal failed: verifies = 2, want 1").
+# Every source change forces a router-image rebuild, so that contention is the
+# common case, not a corner case. Enable deliberately on a large, quiet
+# machine: TILLER_TEST_JOBS=2.
+JOBS="${TILLER_TEST_JOBS:-1}"
+case "$JOBS" in ''|*[!0-9]*|0) JOBS=1 ;; esac
+
 # --- run metadata ---------------------------------------------------------
 git_sha="unknown"
 git_branch="unknown"
@@ -184,12 +203,11 @@ declare -A TIER_RC=()
 declare -A TIER_ELAPSED=()
 declare -A TIER_FIRST_ERROR=()
 
-run_start=$(date +%s.%N)
-
-for t in "${SELECTED[@]}"; do
+# Run one tier and record its rc + elapsed in TIER_RC / TIER_ELAPSED.
+run_one_tier() {
+    local t=$1 tier_start tier_end rc=0
     echo "  running $t ..." >&2
     tier_start=$(date +%s.%N)
-    rc=0
     case "$t" in
         unit)
             # -v so per-test timing is available in the output for L2
@@ -214,18 +232,57 @@ for t in "${SELECTED[@]}"; do
             ;;
     esac
     tier_end=$(date +%s.%N)
-    elapsed=$(awk "BEGIN {printf \"%.1f\", $tier_end - $tier_start}")
     TIER_RC[$t]=$rc
-    TIER_ELAPSED[$t]=$elapsed
+    TIER_ELAPSED[$t]=$(awk "BEGIN {printf \"%.1f\", $tier_end - $tier_start}")
+}
 
-    # let any tee'd process substitution flush before we read the file
-    wait 2>/dev/null || true
+# Record the first failure line for a finished tier (full detail stays on disk).
+capture_first_error() {
+    local t=$1 first_err
+    [ "${TIER_RC[$t]}" -eq 0 ] && return 0
+    first_err=$(grep -m1 -E '^(--- FAIL|FAIL\b|Error:|FAIL:)' "$RUN_DIR/$t/out.log" 2>/dev/null | head -c 300 || true)
+    [ -n "$first_err" ] && TIER_FIRST_ERROR[$t]="$first_err"
+    return 0
+}
 
-    if [ "$rc" -ne 0 ]; then
-        first_err=$(grep -m1 -E '^(--- FAIL|FAIL\b|Error:|FAIL:)' "$RUN_DIR/$t/out.log" 2>/dev/null | head -c 300 || true)
-        [ -n "$first_err" ] && TIER_FIRST_ERROR[$t]="$first_err"
-    fi
+run_start=$(date +%s.%N)
+
+lane_pid=""
+if [ "$JOBS" -gt 1 ] && [ -n "${TIER_SELECTED[browser]:-}" ]; then
+    echo "  overlapping: browser runs in a parallel lane (TILLER_TEST_JOBS=$JOBS)" >&2
+    (
+        run_one_tier browser
+        # The lane subshell's own rc/elapsed must travel back to the parent, so
+        # it is written out rather than exported (array writes don't survive a
+        # subshell).
+        echo "${TIER_RC[browser]:-1} ${TIER_ELAPSED[browser]:-0}" > "$RUN_DIR/browser/lane"
+    ) &
+    lane_pid=$!
+fi
+
+for t in "${SELECTED[@]}"; do
+    if [ -n "$lane_pid" ] && [ "$t" = "browser" ]; then continue; fi
+    run_one_tier "$t"
+    # Let any tee'd process substitution flush before we read the file. Only a
+    # bare `wait` does that, and it is safe only with no live lane — otherwise it
+    # would block until the browser lane finished.
+    [ -n "$lane_pid" ] || wait 2>/dev/null || true
+    capture_first_error "$t"
 done
+
+if [ -n "$lane_pid" ]; then
+    wait "$lane_pid" || true
+    if [ -s "$RUN_DIR/browser/lane" ]; then
+        read -r lane_rc lane_el < "$RUN_DIR/browser/lane"
+    else
+        lane_rc=1
+        lane_el=0
+    fi
+    rm -f "$RUN_DIR/browser/lane"
+    TIER_RC[browser]=$lane_rc
+    TIER_ELAPSED[browser]=$lane_el
+    capture_first_error browser
+fi
 
 run_end=$(date +%s.%N)
 total_elapsed=$(awk "BEGIN {printf \"%.1f\", $run_end - $run_start}")

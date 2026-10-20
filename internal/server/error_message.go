@@ -19,6 +19,10 @@ func fixedUpstreamErrorMessage(class string) string {
 		return "The upstream provider returned no content"
 	case "upstream_stream_error":
 		return "The upstream provider reported a stream error"
+	case "upstream_stream_incomplete":
+		return "The upstream provider reported an incomplete response"
+	case "upstream_stream_eof":
+		return "The upstream stream ended before completion"
 	case "upstream_response_too_large":
 		return "Upstream provider response exceeded Tiller's size limit"
 	case "context_limit_exceeded":

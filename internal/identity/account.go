@@ -390,7 +390,7 @@ func (s *Store) invalidateOtherUserSessions(userID, keepSelector string) {
 
 // pendingAccountMaxAge is how long a never-verified signup is retained before
 // the scheduled sweep reclaims it. Verification tokens expire after 24 h
-// anyway, so 30 days (docs/pre_saas_release_review.md TR-005) is a generous
+// anyway, so 30 days (../docs/pre_saas_release_review.md TR-005) is a generous
 // grace period; without a sweep, abandoned signups would accumulate
 // indefinitely on a public service, holding their unique email and acceptance
 // record forever.
@@ -470,4 +470,28 @@ func (s *Store) PruneExpiredTokens(ctx context.Context, now time.Time) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// PruneExpiredSessions removes expired customer and platform-operator session
+// rows. They can no longer authenticate — every load path re-checks the row's
+// expiry — so this is a size-control measure for the core database and its
+// snapshots, not a security one. It is run by the scheduled maintenance pass.
+func (s *Store) PruneExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	cutoff := formatTime(now.UTC())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var total int64
+	for _, table := range []string{"user_sessions", "platform_admin_sessions"} {
+		res, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE expires_at < ?`, cutoff)
+		if err != nil {
+			return total, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	return total, tx.Commit()
 }

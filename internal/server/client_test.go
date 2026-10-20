@@ -8,6 +8,7 @@ import (
 )
 
 func TestUpstreamHTTPFailuresAreFallbackEligible(t *testing.T) {
+	t.Parallel()
 	for _, status := range []int{0, 199, 400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504, 599} {
 		if !fallbackStatus(status) {
 			t.Errorf("fallbackStatus(%d) = false, want true", status)
@@ -21,6 +22,7 @@ func TestUpstreamHTTPFailuresAreFallbackEligible(t *testing.T) {
 }
 
 func TestAllAttemptsFailureClass(t *testing.T) {
+	t.Parallel()
 	base := []requestAttempt{
 		{result: "failed", failureClass: "context_limit_exceeded"},
 		{result: "failed", failureClass: "context_limit_exceeded"},
@@ -35,6 +37,7 @@ func TestAllAttemptsFailureClass(t *testing.T) {
 }
 
 func TestStreamingMetadataUsesActualSSEResponse(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		name   string
 		status int
@@ -72,6 +75,7 @@ func TestStreamingMetadataUsesActualSSEResponse(t *testing.T) {
 }
 
 func TestSniffAndClassifyPreservesResponseBytes(t *testing.T) {
+	t.Parallel()
 	for _, body := range []string{
 		"event: response.created\ndata: {}\n\n",
 		"data: {\"choices\":[]}\n\n",
@@ -121,6 +125,7 @@ func (d *dribbleReader) Read(p []byte) (int, error) {
 // it as non-streaming, which buffered the whole stream as JSON and dropped the
 // SSE content type.
 func TestSniffAndClassifyHandlesFragmentedSSE(t *testing.T) {
+	t.Parallel()
 	const body = "event: response.created\ndata: {}\n\n"
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
@@ -145,6 +150,7 @@ func TestSniffAndClassifyHandlesFragmentedSSE(t *testing.T) {
 // TestSniffAndClassifyFragmentedJSONStaysNonStreaming is the counterpart: a
 // fragmented JSON body must not be mistaken for a stream.
 func TestSniffAndClassifyFragmentedJSONStaysNonStreaming(t *testing.T) {
+	t.Parallel()
 	resp := &http.Response{
 		StatusCode:    http.StatusOK,
 		ContentLength: -1,
@@ -161,6 +167,7 @@ func TestSniffAndClassifyFragmentedJSONStaysNonStreaming(t *testing.T) {
 // TestSniffAndClassifyStopsAtBudget proves the sniffer cannot buffer without
 // bound when a headerless body never yields a complete line.
 func TestSniffAndClassifyStopsAtBudget(t *testing.T) {
+	t.Parallel()
 	// A single 4 KiB line with no newline: the sniffer must stop at the sniff
 	// budget rather than consuming the whole body.
 	body := bytes.Repeat([]byte("x"), 4096)

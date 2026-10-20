@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"sync"
+	"strings"
 )
 
 // Sentinel errors returned by client/permission operations so the transport
@@ -43,7 +43,6 @@ type ClientKeyRow struct {
 	SingleTargetType      string
 	SingleTargetID        string
 	SingleTargetCanonical string
-	SingleTargetAvailable bool
 }
 
 // ClientKeyFilter narrows ListClientKeys.
@@ -61,10 +60,7 @@ func (s *Scope) ListClientKeys(ctx context.Context, filter ClientKeyFilter) ([]C
 coalesce(b.exposed_model_name,''),
 CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
 coalesce(b.real_model_id,b.virtual_model_id,''),
-CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END,
-CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.enabled=1 AND rm.available=1,0)
-WHEN b.virtual_model_id IS NOT NULL THEN EXISTS(SELECT 1 FROM virtual_model_targets vt JOIN provider_models pm ON pm.id=vt.provider_model_id JOIN providers p ON p.id=pm.provider_id WHERE vt.virtual_model_id=b.virtual_model_id AND vt.enabled=1 AND pm.available=1 AND p.enabled=1)
-ELSE 0 END
+CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END
 FROM client_keys c LEFT JOIN client_single_bindings b ON b.client_key_id=c.id
 LEFT JOIN provider_models rm ON rm.id=b.real_model_id LEFT JOIN providers rp ON rp.id=rm.provider_id
 LEFT JOIN virtual_models vm ON vm.id=b.virtual_model_id LEFT JOIN virtual_provider_groups vg ON vg.id=vm.virtual_group_id
@@ -84,13 +80,12 @@ WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.accoun
 	out := []ClientKeyRow{}
 	for rows.Next() {
 		var v ClientKeyRow
-		var enabled, loggingEnabled, targetAvailable int
-		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &targetAvailable); err != nil {
+		var enabled, loggingEnabled int
+		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical); err != nil {
 			return nil, err
 		}
 		v.Enabled = enabled != 0
 		v.LoggingEnabled = loggingEnabled != 0
-		v.SingleTargetAvailable = targetAvailable != 0
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -432,9 +427,6 @@ func (s *Scope) RotateClientKey(ctx context.Context, id, selector, hash, fingerp
 // attempting the separate-file delete. The record also makes retries safe when
 // the core key has already gone.
 func (s *Scope) DeleteClientKey(ctx context.Context, id string) (bool, error) {
-	if s.cleanupMu == nil {
-		s.cleanupMu = &sync.Mutex{}
-	}
 	s.cleanupMu.Lock()
 	defer s.cleanupMu.Unlock()
 	var exists int
@@ -496,16 +488,18 @@ func (s *Scope) ListPermissions(ctx context.Context, clientID string) ([]Permiss
 	if err != nil {
 		return nil, err
 	}
-	realGroups, err := scanPermissionGroups(ctx, s, realRows, "real")
+	realGroups, err := scanPermissionGroups(realRows, "real")
 	if err != nil {
 		return nil, err
 	}
-	for i := range realGroups {
-		rows, err := s.q.QueryContext(ctx, `SELECT m.id,p.name||'/'||m.upstream_model_id,coalesce(x.enabled,0),m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='real' AND x.model_id=m.id AND x.account_id=? WHERE m.provider_id=? AND m.account_id=? AND p.account_id=? ORDER BY m.upstream_model_id`, clientID, s.accountID, realGroups[i].ID, s.accountID, s.accountID)
+	if len(realGroups) > 0 {
+		// One query for every group on the page, not one query per group.
+		placeholders, args := permissionGroupArgs(clientID, s.accountID, realGroups)
+		modelRows, err := s.q.QueryContext(ctx, `SELECT m.provider_id,m.id,p.name||'/'||m.upstream_model_id,coalesce(x.enabled,0),m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='real' AND x.model_id=m.id AND x.account_id=? WHERE m.provider_id IN (`+placeholders+`) AND m.account_id=? AND p.account_id=? ORDER BY m.upstream_model_id`, args...)
 		if err != nil {
 			return nil, err
 		}
-		if err := scanPermissionModels(rows, "real", &realGroups[i]); err != nil {
+		if err := scanPermissionModels(modelRows, "real", realGroups); err != nil {
 			return nil, err
 		}
 	}
@@ -515,16 +509,17 @@ func (s *Scope) ListPermissions(ctx context.Context, clientID string) ([]Permiss
 	if err != nil {
 		return nil, err
 	}
-	virtualGroups, err := scanPermissionGroups(ctx, s, virtualRows, "virtual")
+	virtualGroups, err := scanPermissionGroups(virtualRows, "virtual")
 	if err != nil {
 		return nil, err
 	}
-	for i := range virtualGroups {
-		rows, err := s.q.QueryContext(ctx, `SELECT v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id AND x.account_id=? WHERE v.virtual_group_id=? AND v.account_id=? AND g.account_id=? ORDER BY v.name`, clientID, s.accountID, virtualGroups[i].ID, s.accountID, s.accountID)
+	if len(virtualGroups) > 0 {
+		placeholders, args := permissionGroupArgs(clientID, s.accountID, virtualGroups)
+		modelRows, err := s.q.QueryContext(ctx, `SELECT v.virtual_group_id,v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id AND x.account_id=? WHERE v.virtual_group_id IN (`+placeholders+`) AND v.account_id=? AND g.account_id=? ORDER BY v.name`, args...)
 		if err != nil {
 			return nil, err
 		}
-		if err := scanPermissionModels(rows, "virtual", &virtualGroups[i]); err != nil {
+		if err := scanPermissionModels(modelRows, "virtual", virtualGroups); err != nil {
 			return nil, err
 		}
 	}
@@ -532,7 +527,22 @@ func (s *Scope) ListPermissions(ctx context.Context, clientID string) ([]Permiss
 	return groups, nil
 }
 
-func scanPermissionGroups(ctx context.Context, s *Scope, rows *sql.Rows, kind string) ([]PermissionGroupRow, error) {
+// permissionGroupArgs builds the IN-list placeholders and the shared argument
+// prefix for the batched permission-model queries: the client/account join
+// keys, then the group ids, then the trailing account guards.
+func permissionGroupArgs(clientID, accountID string, groups []PermissionGroupRow) (string, []any) {
+	placeholders := make([]string, 0, len(groups))
+	args := make([]any, 0, len(groups)+4)
+	args = append(args, clientID, accountID)
+	for i := range groups {
+		placeholders = append(placeholders, "?")
+		args = append(args, groups[i].ID)
+	}
+	args = append(args, accountID, accountID)
+	return strings.Join(placeholders, ","), args
+}
+
+func scanPermissionGroups(rows *sql.Rows, kind string) ([]PermissionGroupRow, error) {
 	defer rows.Close()
 	out := []PermissionGroupRow{}
 	for rows.Next() {
@@ -547,17 +557,26 @@ func scanPermissionGroups(ctx context.Context, s *Scope, rows *sql.Rows, kind st
 	return out, rows.Err()
 }
 
-func scanPermissionModels(rows *sql.Rows, kind string, g *PermissionGroupRow) error {
+// scanPermissionModels appends each model row to its group. The first column of
+// every row is the owning group id.
+func scanPermissionModels(rows *sql.Rows, kind string, groups []PermissionGroupRow) error {
 	defer rows.Close()
+	byGroup := make(map[string]*PermissionGroupRow, len(groups))
+	for i := range groups {
+		byGroup[groups[i].ID] = &groups[i]
+	}
 	for rows.Next() {
+		var groupID string
 		m := PermissionModelRow{Kind: kind}
 		var enabled, available int
-		if err := rows.Scan(&m.ID, &m.CanonicalModelID, &enabled, &available); err != nil {
+		if err := rows.Scan(&groupID, &m.ID, &m.CanonicalModelID, &enabled, &available); err != nil {
 			return err
 		}
 		m.Enabled = enabled != 0
 		m.Available = available != 0
-		g.Models = append(g.Models, m)
+		if g := byGroup[groupID]; g != nil {
+			g.Models = append(g.Models, m)
+		}
 	}
 	return rows.Err()
 }

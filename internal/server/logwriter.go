@@ -21,6 +21,9 @@ const (
 	logWriteQueueSize     = 1024
 	logWriteBatchSize     = 64
 	logWriteFlushInterval = 25 * time.Millisecond
+	// activityWriteTimeout bounds one account's batch insert so a held SQLite
+	// write lock cannot park the writer indefinitely.
+	activityWriteTimeout = 30 * time.Second
 	// maxActivityErrorLogLen bounds the sqlite error text in the batch-write
 	// warning. The message is driver text (code/constraint detail), never a
 	// request or response body.
@@ -154,14 +157,22 @@ func (w *logWriter) run(ctx context.Context) {
 	total := 0
 	flush := func() {
 		for account, rows := range pending {
-			if err := w.scopeFor(account).InsertRequestLogs(context.Background(), rows); err != nil && w.logger != nil {
+			// Bounded, not Background: a held SQLite write lock (a scheduled
+			// backup) must not park the single writer for ever, or the queue
+			// fills and every subsequent Activity row is dropped.
+			writeErr := func() error {
+				writeCtx, cancel := context.WithTimeout(context.Background(), activityWriteTimeout)
+				defer cancel()
+				return w.scopeFor(account).InsertRequestLogs(writeCtx, rows)
+			}()
+			if writeErr != nil && w.logger != nil {
 				args := []any{
-					"error_class", fmt.Sprintf("%T", err),
-					"error", truncateActivityError(err.Error()),
+					"error_class", fmt.Sprintf("%T", writeErr),
+					"error", truncateActivityError(writeErr.Error()),
 					"account_id", account,
 					"batch_size", len(rows),
 				}
-				if code, ok := sqliteCode(err); ok {
+				if code, ok := sqliteCode(writeErr); ok {
 					args = append(args, "sqlite_code", code)
 				}
 				w.logger.Warn("activity batch write failed", args...)

@@ -54,17 +54,21 @@ func ParseCallback(raw string) (oauth.Callback, error) {
 	query := u.Query()
 	code := strings.TrimSpace(query.Get("code"))
 	state := strings.TrimSpace(query.Get("state"))
-	if code == "" && u.Fragment != "" {
-		code = strings.TrimSpace(query.Get("code"))
-	}
-	if code == "" || state == "" {
-		return oauth.Callback{}, oauth.ErrCallback
-	}
+	// The code itself may carry the state as a fragment-style suffix when the
+	// paste kept the two glued together.
 	if hash := strings.IndexByte(code, '#'); hash >= 0 {
 		if state == "" {
 			state = strings.TrimSpace(code[hash+1:])
 		}
 		code = code[:hash]
+	}
+	// Claude's code=true flow returns <redirect>?code=<code>#<state>, where
+	// url.Parse puts the state in the fragment rather than the query.
+	if state == "" {
+		state = strings.TrimSpace(u.Fragment)
+	}
+	if code == "" || state == "" {
+		return oauth.Callback{}, oauth.ErrCallback
 	}
 	return oauth.Callback{Code: code, State: state}, nil
 }

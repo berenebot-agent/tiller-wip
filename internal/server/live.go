@@ -74,6 +74,7 @@ type liveHub struct {
 	activityCh chan activityEvent
 	cancel     context.CancelFunc
 	timings    liveTimings
+	requests   map[string]map[string]liveRequestView
 	// snapshot recomputes the full usage/health envelope for one account. It is
 	// bound to the owning Server so the dispatcher and the /api/admin/usage
 	// endpoint share one source of truth.
@@ -274,7 +275,7 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	}
 	// Claim a subscriber slot BEFORE committing SSE headers: a capped account
 	// must get a normal 429 JSON error, not a 200 stream that immediately
-	// closes (docs/pre_saas_release_review.md TR-007).
+	// closes (../docs/pre_saas_release_review.md TR-007).
 	accountID := s.scope(r).AccountID()
 	ch, admitted := s.liveHub.subscribe(accountID)
 	if !admitted {

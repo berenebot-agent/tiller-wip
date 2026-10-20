@@ -13,6 +13,7 @@ import (
 )
 
 func TestErrorBodyTimeoutAndCancellation(t *testing.T) {
+	t.Parallel()
 	for _, cancelEarly := range []bool{true, false} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -39,6 +40,7 @@ func TestErrorBodyTimeoutAndCancellation(t *testing.T) {
 }
 
 func TestMalformedStreamChoiceCannotComplete(t *testing.T) {
+	t.Parallel()
 	for _, choice := range []string{"null", "{}", `{"delta":null}`, `{"delta":{},"index":-1}`} {
 		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/event-stream")

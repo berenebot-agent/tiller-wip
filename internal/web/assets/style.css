@@ -68,7 +68,6 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .route-confirm-tick:hover{background:#cdeeda;color:#1d6b49}
 .route-confirm-cancel{background:var(--red-bg);border-color:#e1aaa7;color:var(--red)}
 .route-confirm-cancel:hover{background:#f6d3d0;color:#96332f}
-.route-picker-error .combobox input[type="text"]{border-color:#d9a19e;background:var(--red-bg)}
 #catalogue-config{display:flex;flex:1;min-height:0;flex-direction:column}
 #catalogue-config[hidden]{display:none}
 .permissions-dialog #permissions-error{padding:0 22px}
@@ -135,8 +134,6 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .client-card-field:last-of-type{border-bottom:0}
 .client-card-label{color:var(--muted);font:700 10px var(--mono);letter-spacing:.07em;text-transform:uppercase}
 .client-card-route{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.client-route-broken{display:inline-flex;align-items:center;border-radius:999px;padding:2px 8px;background:var(--red-bg);color:var(--red);font:700 10px var(--mono);letter-spacing:.04em;text-transform:uppercase}
-.client-route-unavailable{color:var(--red)}
 .client-card-usage{display:flex;gap:16px;flex-wrap:wrap}
 .client-card-usage>span{display:grid;gap:3px;min-width:0;flex:1;text-align:center}
 .client-card-usage>span small{color:var(--muted);font:700 9px var(--mono);letter-spacing:.06em;text-transform:uppercase}
@@ -276,12 +273,12 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .mobile-actionbar-split .btn{min-width:0}
 .live-activity-card{padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow)}
 .live-activity-card+.live-activity-card{margin-top:10px}
-.live-activity-top{display:flex;align-items:center;gap:8px;color:var(--navy)}
-.live-activity-top strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.live-activity-top{display:flex;align-items:baseline;gap:8px;color:var(--navy)}
+.live-activity-top strong{flex:none;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:44%}
+.live-activity-top .live-request-mobile-route{margin:0}
 .live-pulse{display:inline-block;width:18px;height:18px;flex:none;border-radius:50%;position:relative;background:transparent;box-shadow:none}
 .live-pulse:before{content:"";position:absolute;inset:1px;border-radius:50%;border:2px solid transparent;border-top-color:var(--blue);border-right-color:var(--blue);animation:status-roundel-spin 1.05s linear infinite}
 .live-pulse:after{content:"";position:absolute;inset:4px;border-radius:50%;background:var(--blue)}
-.live-activity-state{margin-left:auto;color:var(--blue);font:700 9px var(--mono);letter-spacing:.06em;text-transform:uppercase}
 .live-activity-chain{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:6px;margin:14px 0;color:var(--navy);font:11px var(--mono)}
 .live-activity-chain span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .live-activity-chain b{color:var(--blue);font:18px Georgia,serif}
@@ -577,9 +574,9 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .auth-captcha{margin:12px 0;display:grid;justify-items:center;gap:4px}
 .auth-captcha .meta-line{text-align:center}
 #auth-captcha{min-height:0}
-.platform-login-banner{display:grid;gap:3px;margin:-38px -38px 2px;padding:16px 38px;background:var(--red);color:#fff;border-bottom:3px solid #8f2f2c}
-.platform-login-banner strong{font:700 23px Georgia,serif;letter-spacing:.02em}
-.platform-login-banner span{color:#ffe0dd;font-size:12px;line-height:1.4}
+.platform-login-banner{display:grid;gap:2px;margin:0;padding:12px 14px;background:var(--red);color:#fff;border-radius:3px}
+.platform-login-banner strong{font:700 15px/1.2 Georgia,serif;letter-spacing:.02em;color:#fff}
+.platform-login-banner span{display:block;color:#ffe0dd;font-size:11.5px;line-height:1.4}
 .login-card.is-platform{border-top-color:var(--red);background:#fdf4f3}
 .login-card.is-platform .login-brand b{color:var(--red)}
 .login-card.is-platform .eyebrow{color:var(--red)}
@@ -621,3 +618,9 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .api-guide-table td{padding:9px 12px;border-top:1px solid #e2e8ed;vertical-align:top;font-size:13px}
 .api-guide ul{margin:10px 0 10px 18px;padding:0}
 .api-guide li{margin:4px 0}
+
+/* Quiet quota check age and in-flight indicator on provider cards. */
+.provider-quota-age{display:flex;align-items:center;gap:5px;min-height:14px;color:var(--muted);font-size:10px;line-height:1.4}
+.provider-quota-spinner{display:inline-block;width:10px;height:10px;flex:0 0 10px;border:1.5px solid var(--line-dark);border-top-color:var(--blue);border-radius:50%;animation:provider-quota-spin .8s linear infinite}
+@keyframes provider-quota-spin{to{transform:rotate(360deg)}}
+@media(prefers-reduced-motion:reduce){.provider-quota-spinner{animation:none;border-top-color:var(--blue)}}

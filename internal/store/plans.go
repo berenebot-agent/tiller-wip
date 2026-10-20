@@ -370,3 +370,32 @@ func (s *Scope) ResourceCounts(ctx context.Context) (AccountResourceCounts, erro
 		Scan(&c.Providers, &c.ClientKeys, &c.VirtualModels)
 	return c, err
 }
+
+// ResourceCountsForAccounts returns the same counts for several accounts in one
+// statement, so a platform page does not run a query per account. Accounts with
+// no row are absent from the map.
+func (s *Store) ResourceCountsForAccounts(ctx context.Context, accountIDs []string) (map[string]AccountResourceCounts, error) {
+	out := make(map[string]AccountResourceCounts, len(accountIDs))
+	if len(accountIDs) == 0 {
+		return out, nil
+	}
+	placeholders, args := inPlaceholders(accountIDs)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,
+		(SELECT count(*) FROM providers WHERE account_id=a.id),
+		(SELECT count(*) FROM client_keys WHERE account_id=a.id),
+		(SELECT count(*) FROM virtual_models WHERE account_id=a.id)
+		FROM accounts a WHERE a.id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var accountID string
+		var c AccountResourceCounts
+		if err := rows.Scan(&accountID, &c.Providers, &c.ClientKeys, &c.VirtualModels); err != nil {
+			return nil, err
+		}
+		out[accountID] = c
+	}
+	return out, rows.Err()
+}

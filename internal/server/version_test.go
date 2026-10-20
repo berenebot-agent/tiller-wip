@@ -10,6 +10,7 @@ import (
 )
 
 func TestVersionHealthEndpoint(t *testing.T) {
+	t.Parallel()
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/health/version", nil)
 	(&Server{}).versionHealth(recorder, request)

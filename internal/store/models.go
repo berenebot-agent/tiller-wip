@@ -42,6 +42,10 @@ const providerModelInsertPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,
 
 const providerModelInsertArgs = 20
 
+// permissionBatchRows bounds the per-statement VALUES list when seeding
+// client_model_permissions for newly discovered models.
+const permissionBatchRows = 50
+
 func providerModelArgs(modelID, accountID, providerID string, model CatalogueModel, origin, now string) []any {
 	return []any{
 		modelID, accountID, providerID, model.ID, model.DisplayName,
@@ -141,9 +145,29 @@ origin=excluded.origin`
 			}
 		}
 
-		for _, newID := range newIDs {
-			if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at,account_id)
-SELECT c.id,'real',?,coalesce(d.new_models_enabled,0),?,?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=? AND d.account_id=? WHERE c.account_id=?`, newID, now, now, tx.accountID, providerID, tx.accountID, tx.accountID); err != nil {
+		// One statement per batch, not per model: a first discovery of a large
+		// catalogue would otherwise run one INSERT per model inside the same
+		// transaction. Argument order follows the SQL text: created_at,
+		// updated_at, the account guard in the select list, the feeder-join
+		// group id, the feeder-join account, the batched model ids, then the
+		// client_keys account guard. (VALUES ... AS v(col) is not portable to
+		// SQLite, which has no alias column list, hence SELECT ... UNION ALL.)
+		for start := 0; start < len(newIDs); start += permissionBatchRows {
+			end := start + permissionBatchRows
+			if end > len(newIDs) {
+				end = len(newIDs)
+			}
+			selects := make([]string, 0, end-start)
+			args := make([]any, 0, (end-start)+5)
+			args = append(args, now, now, tx.accountID, providerID, tx.accountID)
+			for i := start; i < end; i++ {
+				selects = append(selects, "SELECT ? AS model_id")
+				args = append(args, newIDs[i])
+			}
+			args = append(args, tx.accountID)
+			stmt := `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at,account_id)
+SELECT c.id,'real',v.model_id,coalesce(d.new_models_enabled,0),?,?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=? AND d.account_id=? CROSS JOIN (` + strings.Join(selects, " UNION ALL ") + `) AS v WHERE c.account_id=?`
+			if _, err := tx.q.ExecContext(ctx, stmt, args...); err != nil {
 				return err
 			}
 		}

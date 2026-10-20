@@ -1105,12 +1105,12 @@ func translateResponseObserved(w http.ResponseWriter, keepalive *sseKeepaliveWri
 	reader := bufio.NewReader(r)
 	prefix, err := reader.Peek(1)
 	if err != nil {
-		return err
+		return translatedStreamReadError(err)
 	}
 	if prefix[0] == '{' || prefix[0] == '[' {
 		body, err := io.ReadAll(io.LimitReader(reader, 64<<20))
 		if err != nil {
-			return err
+			return translatedStreamReadError(err)
 		}
 		extractUsage(body, usage)
 		translated, err := translateNonstreamResponse(body, incoming, target, route.RequestedModel)
@@ -1202,7 +1202,10 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 			finish = "tool_calls"
 		}
 		if u, ok := usage.(map[string]any); ok {
-			usage = map[string]any{"prompt_tokens": u["input_tokens"], "completion_tokens": u["output_tokens"], "total_tokens": number(u["input_tokens"]) + number(u["output_tokens"])}
+			// Anthropic's total_tokens is the canonical sum when present;
+			// otherwise it must include cached input tokens (input_tokens
+			// excludes cache_read), not just input+output.
+			usage = map[string]any{"prompt_tokens": u["input_tokens"], "completion_tokens": u["output_tokens"], "total_tokens": anthropicTotalTokens(u)}
 		}
 	} else {
 		content := []any{}
@@ -1335,7 +1338,10 @@ func translateSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, 
 				deltas, done := canonicalDeltas(event.Name, payload, target, state)
 				for _, delta := range deltas {
 					if delta.Kind == "error" {
-						return errors.New("upstream stream reported failure")
+						if target == providers.ProtocolResponses && event.Name == "response.incomplete" {
+							return errUpstreamStreamIncomplete
+						}
+						return errUpstreamStreamError
 					}
 					if err := writeTranslatedEvent(keepalive, incoming, state, delta); err != nil {
 						return err
@@ -1359,9 +1365,9 @@ func translateSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, 
 				return nil
 			}
 			if err == io.EOF {
-				return errors.New("upstream stream ended before completion")
+				return errUpstreamStreamEOF
 			}
-			return err
+			return translatedStreamReadError(err)
 		}
 	}
 }
@@ -1381,6 +1387,35 @@ func writeStreamFailure(w io.Writer, protocol providers.Protocol, code, id, mode
 // errUpstreamStreamError marks an SSE stream that carried an explicit upstream
 // failure, so callers can classify it separately from a read error.
 var errUpstreamStreamError = errors.New("upstream stream reported failure")
+
+// These fixed markers retain only the failure category, never provider payloads.
+var (
+	errUpstreamStreamIncomplete = errors.New("upstream stream reported an incomplete response")
+	errUpstreamStreamEOF        = errors.New("upstream stream ended before completion")
+	errUpstreamStreamRead       = errors.New("could not read upstream stream")
+)
+
+func translatedStreamReadError(err error) error {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return errUpstreamStreamEOF
+	}
+	return fmt.Errorf("%w: %w", errUpstreamStreamRead, err)
+}
+
+func translatedStreamFailureClass(err error) string {
+	switch {
+	case errors.Is(err, errUpstreamStreamError):
+		return "upstream_stream_error"
+	case errors.Is(err, errUpstreamStreamIncomplete):
+		return "upstream_stream_incomplete"
+	case errors.Is(err, errUpstreamStreamEOF):
+		return "upstream_stream_eof"
+	case errors.Is(err, errUpstreamStreamRead):
+		return "upstream_read_error"
+	default:
+		return "translation_error"
+	}
+}
 
 // relayNonstreamFromSSE reads an upstream SSE stream and aggregates it into a
 // single non-streaming JSON response for the client. It exists because a target
@@ -1789,7 +1824,12 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 				out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"output_tokens": u["output_tokens"]}})
 			}
 			if delta, ok := payload["delta"].(map[string]any); ok {
-				out = append(out, canonicalDelta{Kind: "finish", Finish: fmt.Sprint(delta["stop_reason"])})
+				// Guard: a malformed message_delta without stop_reason would
+				// otherwise become the literal string "<nil>", producing a
+				// client-visible bogus finish reason.
+				if stop, ok := delta["stop_reason"].(string); ok && stop != "" {
+					out = append(out, canonicalDelta{Kind: "finish", Finish: stop})
+				}
 			}
 		case "message_stop":
 			state.completed = true
@@ -1808,9 +1848,13 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			}
 		}
 	case "response.output_text.delta":
-		out = append(out, canonicalDelta{Kind: "text", Text: fmt.Sprint(payload["delta"])})
+		if text, ok := payload["delta"].(string); ok {
+			out = append(out, canonicalDelta{Kind: "text", Text: text})
+		}
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-		out = append(out, canonicalDelta{Kind: "reasoning", Text: fmt.Sprint(payload["delta"])})
+		if text, ok := payload["delta"].(string); ok {
+			out = append(out, canonicalDelta{Kind: "reasoning", Text: text})
+		}
 	case "response.function_call_arguments.delta":
 		index, hasIndex := coerceInt64(payload["output_index"])
 		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"])})
@@ -2490,6 +2534,20 @@ func number(value any) float64 {
 		return n
 	}
 	return 0
+}
+
+// anthropicTotalTokens produces the OpenAI-style total for an Anthropic usage
+// map. Anthropic's input_tokens excludes cached input (cache_read), so the
+// bare input+output sum undercounts cache-assisted traffic; the canonical
+// total is input + cache_read + output. A total_tokens already present in the
+// upstream map is trusted as authored when positive.
+func anthropicTotalTokens(u map[string]any) float64 {
+	if t, present := u["total_tokens"]; present {
+		if n := number(t); n > 0 {
+			return n
+		}
+	}
+	return number(u["input_tokens"]) + number(u["cache_read_input_tokens"]) + number(u["output_tokens"])
 }
 func first(values ...any) any {
 	for _, v := range values {

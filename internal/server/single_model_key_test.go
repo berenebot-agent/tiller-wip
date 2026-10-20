@@ -26,6 +26,7 @@ func singleKeyClientModels(t *testing.T, base, secret string) (int, map[string]a
 }
 
 func TestSingleModelKeyEndToEnd(t *testing.T) {
+	t.Parallel()
 	var reached []string
 	upstream := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -241,6 +242,7 @@ func TestSingleModelKeyEndToEnd(t *testing.T) {
 // model is not pulled into the old virtual model's Activity view merely because
 // the client still sends the old model identifier.
 func TestRepointedSingleKeyDoesNotAttributeRealTrafficToOldVirtualModel(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	var providerID, modelID string
@@ -325,6 +327,7 @@ func TestRepointedSingleKeyDoesNotAttributeRealTrafficToOldVirtualModel(t *testi
 // the bound virtual model or the underlying provider, because the key is
 // no longer a Single key. Only client_keys.key_type='single' rows count.
 func TestCatalogueKeyWithStaleBindingDoesNotBlockVirtualOrProviderDelete(t *testing.T) {
+	t.Parallel()
 	api, db, _, _ := loggingTestHarness(t, mockUpstream(t))
 
 	var providerID, modelA string

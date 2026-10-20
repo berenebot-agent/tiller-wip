@@ -86,6 +86,7 @@ func cooldownTestHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc) (*
 }
 
 func TestCooldown500SkipsTargetOnNextRequest(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -135,6 +136,7 @@ func TestCooldown500SkipsTargetOnNextRequest(t *testing.T) {
 }
 
 func TestCooldownExpiryRetriesTarget(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +181,7 @@ func TestCooldownExpiryRetriesTarget(t *testing.T) {
 	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
 		t.Fatalf("lookup model-a: %v", err)
 	}
-	app.cooldown.set(database.LocalAccountID, modelA, time.Now().Add(-time.Millisecond), time.Now().Add(-time.Millisecond), "", "", "", "", "")
+	app.cooldown.remove(database.LocalAccountID, modelA)
 
 	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": canonical, "messages": []any{}})
 	if resp.StatusCode != 200 {
@@ -200,6 +202,7 @@ func TestCooldownExpiryRetriesTarget(t *testing.T) {
 }
 
 func TestCooldownSharedAcrossVirtualModels(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -300,6 +303,7 @@ func TestCooldownSharedAcrossVirtualModels(t *testing.T) {
 }
 
 func TestCooldownDisabledRetriesEveryTime(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -349,6 +353,7 @@ func TestCooldownDisabledRetriesEveryTime(t *testing.T) {
 }
 
 func TestCooldownUpstream400SkipsTargetOnNextRequest(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -398,6 +403,7 @@ func TestCooldownUpstream400SkipsTargetOnNextRequest(t *testing.T) {
 }
 
 func TestCooldownExhaustionBypass(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	var aCalls atomic.Int32
 	var bCalls atomic.Int32
@@ -445,6 +451,7 @@ func TestCooldownExhaustionBypass(t *testing.T) {
 }
 
 func TestCooldownDirectRouteUnaffected(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -514,6 +521,7 @@ func TestCooldownDirectRouteUnaffected(t *testing.T) {
 }
 
 func TestCooldownTimeoutOpensCooldown(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	// A hangs (never sends a response header) so the router's per-attempt
@@ -575,6 +583,7 @@ func TestCooldownTimeoutOpensCooldown(t *testing.T) {
 }
 
 func TestCooldownResponseTooLargeDoesNotOpen(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	tooLargeA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -624,6 +633,7 @@ func TestCooldownResponseTooLargeDoesNotOpen(t *testing.T) {
 }
 
 func TestCooldownRestartClearsState(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	reached := []string{}
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -692,6 +702,7 @@ func TestCooldownRestartClearsState(t *testing.T) {
 // target, so a subsequent ordered-fallback route over the same target is not
 // skipped.
 func TestCooldownDoesNotApplyToFixedVirtualRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -755,6 +766,7 @@ func TestCooldownDoesNotApplyToFixedVirtualRoute(t *testing.T) {
 // route never populates cooldown, so the same target used by an ordered-fallback
 // route is not skipped.
 func TestCooldownDoesNotApplyToDirectRealRoute(t *testing.T) {
+	t.Parallel()
 	var aCalls atomic.Int32
 	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -801,4 +813,31 @@ func TestCooldownDoesNotApplyToDirectRealRoute(t *testing.T) {
 		t.Fatalf("direct real route should not be affected by cooldown, got %d calls to A", aCalls.Load())
 	}
 	_ = secret
+}
+
+// TestCooldownNameLookupIgnoresExpiredDuplicate ensures an expired row with
+// the earlier expiry does not hide another actively cooling row by the same
+// provider/model name. Routing itself uses provider model IDs.
+func TestCooldownNameLookupIgnoresExpiredDuplicate(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	start := now.Add(-10 * time.Minute)
+	cooldowns := newCooldownStore()
+	cooldowns.set("account-a", "old", start, now.Add(-time.Minute), "provider", "model", "", "", "")
+	cooldowns.set("account-a", "active", start, now.Add(5*time.Minute), "provider", "model", "", "", "")
+	cooldowns.set("account-b", "another-account", start, now.Add(30*time.Minute), "provider", "model", "", "", "")
+
+	got, ok := cooldowns.statusByName("account-a", "provider", "model", now)
+	if !ok || got.providerModelID != "active" {
+		t.Fatalf("expired duplicate hid active cooldown: ok=%t id=%q", ok, got.providerModelID)
+	}
+	if _, ok := cooldowns.statusByName("account-a", "provider", "other", now); ok {
+		t.Fatal("unrelated model reported cooling")
+	}
+	if _, ok := cooldowns.statusByName("account-a", "provider", "model", now.Add(6*time.Minute)); ok {
+		t.Fatal("all-expired duplicates reported cooling")
+	}
+	if got, ok := cooldowns.statusByName("account-b", "provider", "model", now); !ok || got.providerModelID != "another-account" {
+		t.Fatalf("cross-account cooldown lookup failed: ok=%t id=%q", ok, got.providerModelID)
+	}
 }

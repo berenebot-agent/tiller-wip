@@ -13,6 +13,7 @@ import (
 )
 
 func TestPlatformAnalyticsSettingsValidationAndOptions(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 
@@ -82,10 +83,52 @@ func TestPlatformAnalyticsSettingsValidationAndOptions(t *testing.T) {
 	}
 }
 
+func TestPlatformPreventSearchIndexing(t *testing.T) {
+	t.Parallel()
+	app, _, _ := hostedServerHarness(t, false)
+	papi := hostedPlatformAPI(t, app)
+
+	status, payload, header := papi.request(http.MethodGet, "/api/runtime", nil)
+	if status != http.StatusOK || payload == nil {
+		t.Fatalf("default runtime response = %d %v", status, payload)
+	}
+	if got := header.Get("X-Robots-Tag"); got != "" {
+		t.Fatalf("default X-Robots-Tag = %q, want unset", got)
+	}
+
+	status, payload, _ = papi.request(http.MethodPut, "/api/platform/settings", map[string]any{"prevent_search_indexing": true})
+	if status != http.StatusNoContent {
+		t.Fatalf("enable search indexing prevention = %d %v", status, payload)
+	}
+	status, payload, header = papi.request(http.MethodGet, "/api/runtime", nil)
+	if status != http.StatusOK || header.Get("X-Robots-Tag") != "noindex, nofollow" {
+		t.Fatalf("enabled runtime response = %d, X-Robots-Tag %q", status, header.Get("X-Robots-Tag"))
+	}
+
+	enabled, err := app.storeHandle().GetPlatformPreventSearchIndexing(context.Background())
+	if err != nil || !enabled {
+		t.Fatalf("persisted search indexing setting = %v, %v", enabled, err)
+	}
+	status, payload, _ = papi.request(http.MethodGet, "/api/platform/settings", nil)
+	if status != http.StatusOK || payload["prevent_search_indexing"] != true {
+		t.Fatalf("platform setting response = %d %v", status, payload)
+	}
+
+	status, payload, _ = papi.request(http.MethodPut, "/api/platform/settings", map[string]any{"prevent_search_indexing": false})
+	if status != http.StatusNoContent {
+		t.Fatalf("disable search indexing prevention = %d %v", status, payload)
+	}
+	_, _, header = papi.request(http.MethodGet, "/api/runtime", nil)
+	if got := header.Get("X-Robots-Tag"); got != "" {
+		t.Fatalf("disabled X-Robots-Tag = %q, want unset", got)
+	}
+}
+
 // TestAnalyticsOriginWidensHostedCSP proves the hosted policy only gains the
 // operator's script origin while analytics is enabled, and that it is added to
 // the directives a browser needs for script load and event beacons.
 func TestAnalyticsOriginWidensHostedCSP(t *testing.T) {
+	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
 
@@ -121,6 +164,7 @@ func TestAnalyticsOriginWidensHostedCSP(t *testing.T) {
 // TestAnalyticsOptionsHostedOnly proves the public analytics endpoint is not
 // registered outside hosted mode.
 func TestAnalyticsOptionsHostedOnly(t *testing.T) {
+	t.Parallel()
 	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)

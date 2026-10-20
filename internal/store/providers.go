@@ -235,9 +235,7 @@ func (s *Scope) LoadProvider(ctx context.Context, id string) (ProviderLoad, erro
 
 // QuotaProviderRef identifies an enabled provider whose type has a
 // subscription/quota endpoint. It carries the base URL needed to build the
-// endpoint. It is platform-level (spans accounts) because quota polling is
-// scheduled globally; each poll then runs with the provider's own account
-// scope.
+// endpoint. It is loaded through a tenant-scoped store handle.
 type QuotaProviderRef struct {
 	AccountID  string
 	ProviderID string
@@ -246,20 +244,19 @@ type QuotaProviderRef struct {
 	BaseURL    string
 }
 
-// QuotaProviders lists enabled providers of the given types across every
-// account. The caller supplies the quota-capable type list so the store does
-// not embed provider knowledge.
-func (s *Store) QuotaProviders(ctx context.Context, types []string) ([]QuotaProviderRef, error) {
+// QuotaProviders lists quota-capable providers only for this account.
+func (s *Scope) QuotaProviders(ctx context.Context, types []string) ([]QuotaProviderRef, error) {
 	if len(types) == 0 {
 		return nil, nil
 	}
 	placeholders := make([]string, len(types))
-	args := make([]any, 0, len(types))
+	args := make([]any, 0, len(types)+1)
+	args = append(args, s.accountID)
 	for i, t := range types {
 		placeholders[i] = "?"
 		args = append(args, t)
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT account_id,id,name,type,coalesce(base_url,'') FROM providers WHERE enabled=1 AND type IN (`+strings.Join(placeholders, ",")+`)`, args...)
+	rows, err := s.q.QueryContext(ctx, `SELECT account_id,id,name,type,coalesce(base_url,'') FROM providers WHERE account_id=? AND enabled=1 AND type IN (`+strings.Join(placeholders, ",")+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -432,6 +429,36 @@ func (s *Scope) DeleteAccountResources(ctx context.Context) error {
 		}
 		return nil
 	})
+}
+
+// AdminHealthForAccounts returns the same catalogue health counts for several
+// accounts in one statement, so a platform page does not run four queries per
+// account. Accounts with no row are absent from the map.
+func (s *Store) AdminHealthForAccounts(ctx context.Context, accountIDs []string) (map[string]AdminHealthCounts, error) {
+	out := make(map[string]AdminHealthCounts, len(accountIDs))
+	if len(accountIDs) == 0 {
+		return out, nil
+	}
+	placeholders, args := inPlaceholders(accountIDs)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id,
+		(SELECT count(*) FROM providers WHERE account_id=a.id),
+		(SELECT count(*) FROM provider_models WHERE available=1 AND account_id=a.id),
+		(SELECT count(*) FROM provider_models WHERE available=0 AND account_id=a.id),
+		(SELECT count(*) FROM virtual_models v WHERE v.account_id=a.id AND NOT EXISTS (SELECT 1 FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m.available=1 AND p.enabled=1 AND t.account_id=a.id AND m.account_id=a.id AND p.account_id=a.id))
+		FROM accounts a WHERE a.id IN (`+placeholders+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var accountID string
+		var c AdminHealthCounts
+		if err := rows.Scan(&accountID, &c.Providers, &c.AvailableModels, &c.RetiredModels, &c.BrokenVirtualModels); err != nil {
+			return nil, err
+		}
+		out[accountID] = c
+	}
+	return out, rows.Err()
 }
 
 // AdminHealthCounts summarizes catalogue health for the account.

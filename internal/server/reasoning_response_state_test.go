@@ -8,6 +8,7 @@ import (
 )
 
 func TestValidateResponseReasoningState_AllProtocolDirections(t *testing.T) {
+	t.Parallel()
 	claudeDetails := []any{map[string]any{"type": "reasoning.text", "text": "plan", "signature": "sig", "format": "anthropic-claude-v1"}}
 	openAIDetails := []any{map[string]any{"type": "reasoning.encrypted", "data": "opaque", "format": "openai-responses-v1"}}
 	tests := []struct {
@@ -46,6 +47,7 @@ func TestValidateResponseReasoningState_AllProtocolDirections(t *testing.T) {
 }
 
 func TestValidateResponseReasoningState_PlainTextAndSummaryArePortable(t *testing.T) {
+	t.Parallel()
 	plainMessages := map[string]any{"content": []any{map[string]any{"type": "thinking", "thinking": "plain"}}}
 	if err := validateResponseReasoningState(plainMessages, providers.ProtocolMessages, providers.ProtocolResponses); err != nil {
 		t.Fatalf("plain Messages thinking rejected: %v", err)

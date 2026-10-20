@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
@@ -111,11 +112,11 @@ type Server struct {
 	// notifications. It has a short timeout so a slow webhook can never
 	// materially delay an inference request.
 	notifyClient *http.Client
-	// notifyCooldownMu guards notifyLastSent, the in-memory last-sent timestamps
-	// used to throttle repeat notifications for the same event + model and the
-	// in-flight reservations used to prevent concurrent fanout.
+	// notifyCooldownMu guards notifyLastSent, the in-memory successful-delivery
+	// times and suppression deadlines used to throttle events, plus in-flight
+	// reservations that prevent concurrent duplicate delivery.
 	notifyCooldownMu sync.Mutex
-	notifyLastSent   map[string]time.Time
+	notifyLastSent   map[string]notificationCooldownEntry
 	notifyInFlight   map[string]bool
 	// notifyAdmitted counts webhook deliveries currently in flight across all
 	// accounts, and notifyAdmittedByAccount counts them per account. They bound
@@ -186,14 +187,17 @@ type Server struct {
 	// account + provider_model_id. It lives in RAM only and is cleared on
 	// restart.
 	cooldown *cooldownStore
-	// usageAggMu guards the cached DB-derived usage aggregates. The live
-	// in-memory state (last outcomes, cooldowns, in-flight) is never cached, so
-	// it stays fresh even while the expensive request_logs scans are reused.
+	// usageAggMu guards the map of per-account cached DB-derived usage
+	// aggregates; each entry carries its own mutex so accounts do not block
+	// each other. The live in-memory state (last outcomes, cooldowns,
+	// in-flight) is never cached, so it stays fresh even while the expensive
+	// request_logs scans are reused.
 	usageAggMu sync.Mutex
-	usageAgg   map[string]*usageAggregates
-	usageAggAt map[string]time.Time
-	// usageCacheTTL bounds how long a computed usage aggregate is reused. Zero
-	// disables caching (tests use this for determinism).
+	usageAgg   map[string]*usageAggEntry
+	// usageCacheTTL is the minimum reuse window for a computed usage aggregate.
+	// Zero disables caching (tests use this for determinism). The effective
+	// window is derived from the cost of the recompute and is never shorter
+	// than this; see usageAggregateTTLFor.
 	usageCacheTTL time.Duration
 	// sseKeepalive overrides the streaming keepalive interval. Zero uses the
 	// production default (sseKeepaliveInterval); tests set it short so the
@@ -210,6 +214,7 @@ type Server struct {
 	// platformAnalyticsMu and refreshed at boot and whenever settings are saved.
 	platformAnalyticsMu sync.RWMutex
 	platformAnalytics   store.PlatformAnalyticsSettings
+	platformNoIndex     atomic.Bool
 }
 
 // secretsLocked reports whether the recoverable-secret cipher is in the locked
@@ -477,7 +482,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			}
 		}
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, tokens: tokens, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]time.Time{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementTokenSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), managementTokenAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggregates{}, usageAggAt: map[string]time.Time{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, tokens: tokens, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]notificationCooldownEntry{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementTokenSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), managementTokenAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), usageAgg: map[string]*usageAggEntry{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
@@ -492,6 +497,11 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			s.setPlatformAnalytics(analytics)
 		} else if logger != nil {
 			logger.Warn("analytics settings load failed", "error_class", fmt.Sprintf("%T", loadErr))
+		}
+		if preventSearchIndexing, loadErr := st.GetPlatformPreventSearchIndexing(context.Background()); loadErr == nil {
+			s.setPlatformPreventSearchIndexing(preventSearchIndexing)
+		} else if logger != nil {
+			logger.Warn("search indexing setting load failed", "error_class", fmt.Sprintf("%T", loadErr))
 		}
 	} else if cfg.AdminAPIKey != "" {
 		if err := s.seedManagementToken(cfg.AdminAPIKey); err != nil {
@@ -515,7 +525,6 @@ func (s *Server) StartBackground(ctx context.Context) {
 		s.logger.Warn("activity cleanup reconciliation failed", "error_class", fmt.Sprintf("%T", err))
 	}
 	s.providers.StartScheduler(ctx)
-	s.startQuotaPoller(ctx)
 	if s.config.ModelsDevEnabled {
 		s.providers.Registry().StartModelsDevRefresh(ctx, filepath.Join(s.config.DataDir, providers.ModelsDevCacheFile()))
 	}
@@ -765,6 +774,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/admin/usage", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.usage)))
 	mux.Handle("GET /api/admin/quota", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.quotaEndpoint)))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
+	mux.Handle("GET /api/admin/live/requests", s.requireAdmin(http.HandlerFunc(s.liveRequests)))
+	mux.Handle("POST /api/admin/live/requests/reconcile", s.requireAdmin(http.HandlerFunc(s.reconcileLiveRequests)))
 	mux.Handle("GET /api/admin/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listGlobalActivity)))
 	mux.Handle("GET /api/admin/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportGlobalActivityCSV)))
 	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listRequestAttempts)))
@@ -1278,8 +1289,11 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 			// LAN by design, so it must never advertise an HTTPS-only policy.
 			// No includeSubDomains — an operator may run unrelated services on
 			// sibling subdomains and this app cannot vouch for them.
-			// (docs/pre_saas_release_review.md TR-008.)
+			// (../docs/pre_saas_release_review.md TR-008.)
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+			if s.platformPreventSearchIndexing() {
+				w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+			}
 			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://challenges.cloudflare.com https://accounts.google.com; frame-src https://challenges.cloudflare.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 			// The analytics origin is operator-configured and only extends the
 			// hosted policy. Its presence in the header does not load a script;
@@ -1301,7 +1315,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 // middleware sets; a pointer stashed in the context closes that gap (the
 // middleware mutates, the tail reads). The account id is the pseudonymous
 // account UUID — never an email, client key name, or credential.
-// (docs/pre_saas_release_review.md TR-014.)
+// (../docs/pre_saas_release_review.md TR-014.)
 type requestInfo struct {
 	// AccountID is the verified principal's account, set by the auth
 	// middleware. Empty for unauthenticated paths.
