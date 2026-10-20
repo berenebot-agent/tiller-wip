@@ -67,7 +67,7 @@ func (s *Server) startAuditMaintenance(ctx context.Context) {
 			if err := s.identity.PruneExpiredTokens(ctx, time.Now()); err != nil {
 				s.warnBackup("scheduled token prune failed", err)
 			}
-			// Reclaim abandoned hosted signups (docs/pre_saas_release_review.md
+			// Reclaim abandoned hosted signups (../docs/pre_saas_release_review.md
 			// TR-005): never-verified pending accounts older than 30 days.
 			if pruned, err := s.identity.PrunePendingAccounts(ctx, time.Now()); err != nil {
 				s.warnBackup("pending account prune failed", err)

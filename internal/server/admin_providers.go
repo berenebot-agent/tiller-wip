@@ -348,7 +348,7 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// The credential value is never recorded — only that it was replaced
-	// (docs/pre_saas_release_review.md TR-014; SECURITY.md secret guardrail).
+	// (../docs/pre_saas_release_review.md TR-014; SECURITY.md secret guardrail).
 	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
 		Event:      "provider.credential_replaced",
 		TargetType: "provider",

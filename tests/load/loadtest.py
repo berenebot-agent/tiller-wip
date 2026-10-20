@@ -16,7 +16,7 @@ Usage:
 
 The mock upstream is tests/compatibility/mock_upstream.py. Point a Tiller
 provider at it and create a client key whose model routes to it, then run this
-against that client key. See docs/load_test.md for the full recipe.
+against that client key. See ../docs/load_test.md for the full recipe.
 """
 
 import argparse

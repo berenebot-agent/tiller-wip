@@ -390,7 +390,7 @@ func (s *Store) invalidateOtherUserSessions(userID, keepSelector string) {
 
 // pendingAccountMaxAge is how long a never-verified signup is retained before
 // the scheduled sweep reclaims it. Verification tokens expire after 24 h
-// anyway, so 30 days (docs/pre_saas_release_review.md TR-005) is a generous
+// anyway, so 30 days (../docs/pre_saas_release_review.md TR-005) is a generous
 // grace period; without a sweep, abandoned signups would accumulate
 // indefinitely on a public service, holding their unique email and acceptance
 // record forever.

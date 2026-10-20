@@ -52,7 +52,7 @@ func (Argon2Hasher) Verify(secret, encoded string) bool {
 // parameters than the current constants. Rows encoded with weaker parameters
 // still verify (bounded-drift acceptance in argon2idVerify) and are re-hashed
 // on their next successful use, so a future parameter change is adopted lazily
-// instead of locking stored fingerprints out (docs/back_compat.md). Rows the
+// instead of locking stored fingerprints out (../docs/back_compat.md). Rows the
 // parser cannot read never verify either, so their rehash verdict is moot but
 // is reported true for fail-closed symmetry.
 func (Argon2Hasher) NeedsRehash(encoded string) bool {
@@ -109,7 +109,7 @@ func (h BcryptHasher) NeedsRehash(encoded string) bool {
 // VerifyEncoded verifies secret against an encoded secret hash, dispatching on
 // the encoding's algorithm prefix.
 //
-// PERMANENT COMPAT (see docs/back_compat.md): the $argon2id$ branch is retained
+// PERMANENT COMPAT (see ../docs/back_compat.md): the $argon2id$ branch is retained
 // deliberately. Legacy argon2id client keys cannot be pre-migrated to bcrypt —
 // they are stored hash-only, so the plaintext needed to re-hash is gone. They
 // keep verifying here and lazily upgrade to bcrypt on next successful use.

@@ -32,7 +32,7 @@ const maxUpstreamNonStreamBytes int64 = 16 << 20
 // legitimate request is lost, while the product of the body-read gate
 // (maxConcurrentBodyReads) and this constant is the process's worst-case
 // inbound buffer budget: 64 x 8 MiB = 512 MiB
-// (docs/pre_saas_release_review.md TR-002).
+// (../docs/pre_saas_release_review.md TR-002).
 const maxInferenceBodyBytes int64 = 8 << 20
 
 // maxUpstreamErrorBytes bounds how much of an upstream error response body we
@@ -621,7 +621,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// million tokens of text — beyond every model's context window — so no
 	// legitimate request is lost, while the process-wide product of the
 	// body-read gate and this cap stays inside a small container's memory
-	// (docs/pre_saas_release_review.md TR-002).
+	// (../docs/pre_saas_release_review.md TR-002).
 	r.Body = http.MaxBytesReader(w, r.Body, maxInferenceBodyBytes)
 	// Bound the body phase before it can hold a connection indefinitely, and
 	// admit it through the process-wide gate so a slow-upload flood cannot park
@@ -1942,7 +1942,7 @@ func (r bufferedReadCloser) Close() error { return r.closer.Close() }
 // nonStreamBufferGate bounds how many non-streaming upstream responses may be
 // buffered at once, process-wide. The product of this gate and
 // maxUpstreamNonStreamBytes is the worst-case outbound buffer budget:
-// 32 x 16 MiB = 512 MiB (docs/pre_saas_release_review.md TR-002). Plan
+// 32 x 16 MiB = 512 MiB (../docs/pre_saas_release_review.md TR-002). Plan
 // concurrency bounds each account, but plans are per-account data, so a global
 // gate is the only aggregate bound. Streaming responses take the 1-byte-peek
 // path and are never gated. The slot is held until the buffered body is closed
