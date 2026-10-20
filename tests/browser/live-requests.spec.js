@@ -78,7 +78,12 @@ async function harness(page) {
   await page.goto('/__live-request-test');
   const time = new Date('2026-10-14T12:00:00Z');
   await page.clock.install({ time });
-  await page.clock.pauseAt(time);
+  // The fake clock keeps ticking in real time until it is paused, so pausing at
+  // `time` itself races the install (and throws "Cannot fast-forward to the
+  // past" once a single millisecond has passed). Pause ahead of it instead, then
+  // park the wall clock exactly at `time`.
+  await page.clock.pauseAt(new Date(time.getTime() + 60000));
+  await page.clock.setSystemTime(time);
   await page.evaluate(async () => {
     const { LiveRequests } = await import('/live-requests.js');
     const h = v => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
