@@ -1909,7 +1909,11 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const selectedType = client?.type || defaultType;
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
-  const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label><label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
+  // Detailed error bodies are opt-in per client. Hosted mode never captures
+  // them, so the control is hidden there.
+  const bodyLog = client?.log_error_bodies || 'inherit';
+  const bodyLogField = runtimeMode === 'hosted' ? '' : `<label>Detailed error bodies <select name="log_error_bodies"><option value="inherit" ${bodyLog === 'inherit' ? 'selected' : ''}>Inherit account setting</option><option value="always" ${bodyLog === 'always' ? 'selected' : ''}>Always capture</option><option value="never" ${bodyLog === 'never' ? 'selected' : ''}>Never capture</option></select><small>Failed request and provider error bodies are stored only when account-wide detailed error logging is on — unless this client is set to Always.</small></label>`;
+  const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label>${bodyLogField}<label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
     title: client ? `Settings · ${client.name}` : 'Create client',
@@ -1933,6 +1937,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
       if (client) {
         payload.enabled = values.get('enabled') === 'on';
         payload.logging_enabled = values.get('logging_enabled') === 'on';
+        if (runtimeMode !== 'hosted') payload.log_error_bodies = values.get('log_error_bodies') || 'inherit';
         payload.retention_days = Number(values.get('retention_days'));
         payload.type = values.get('type');
         if (payload.type === 'single') {
