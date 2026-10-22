@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -38,6 +39,7 @@ type clientKeyView struct {
 	Fingerprint           string  `json:"fingerprint"`
 	Enabled               bool    `json:"enabled"`
 	LoggingEnabled        bool    `json:"logging_enabled"`
+	LogErrorBodies        string  `json:"log_error_bodies"`
 	RetentionDays         int     `json:"retention_days"`
 	CreatedAt             string  `json:"created_at"`
 	RotatedAt             *string `json:"rotated_at"`
@@ -74,6 +76,7 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 			Fingerprint:           row.Fingerprint,
 			Enabled:               row.Enabled,
 			LoggingEnabled:        row.LoggingEnabled,
+			LogErrorBodies:        row.LogErrorBodies,
 			RetentionDays:         row.RetentionDays,
 			CreatedAt:             row.CreatedAt,
 			UpdatedAt:             row.UpdatedAt,
@@ -195,6 +198,7 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		Group                  *string `json:"group"`
 		Enabled                *bool   `json:"enabled"`
 		LoggingEnabled         *bool   `json:"logging_enabled"`
+		LogErrorBodies         *string `json:"log_error_bodies"`
 		RetentionDays          *int    `json:"retention_days"`
 		Type                   *string `json:"type"`
 		SingleModelName        *string `json:"single_model_name"`
@@ -209,6 +213,21 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	if input.RetentionDays != nil && *input.RetentionDays < 1 {
 		adminError(w, 400, "invalid_retention", "Retention must be at least 1 day.")
 		return
+	}
+	// The detailed-error-body mode is a per-client opt-in layered on the
+	// account setting: "always" captures bodies even when the account setting
+	// is off, "never" never does, and "inherit" follows the account setting.
+	bodyLogMode := ""
+	if input.LogErrorBodies != nil {
+		bodyLogMode = strings.TrimSpace(*input.LogErrorBodies)
+		if !store.ValidBodyLogMode(bodyLogMode) {
+			adminError(w, 400, "invalid_body_log_mode", "Detailed error body logging must be inherit, always or never.")
+			return
+		}
+		if s.config.Mode == config.ModeHosted && bodyLogMode == store.BodyLogAlways {
+			adminError(w, http.StatusForbidden, "hosted_body_logging_disabled", "Detailed error logging is unavailable in hosted mode.")
+			return
+		}
 	}
 	clientID := r.PathValue("id")
 	sc := s.scope(r)
@@ -297,26 +316,27 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	err = sc.UpdateClientKey(r.Context(), store.UpdateClientKeyInput{
-		ID:            clientID,
-		Name:          name,
-		NameSet:       input.Name != nil,
-		Description:   description,
-		DescSet:       input.Description != nil,
-		Group:         keyGroup,
-		GroupSet:      input.Group != nil,
-		Type:          keyType,
-		TypeSet:       input.Type != nil,
-		Enabled:       enabled,
-		EnabledSet:    input.Enabled != nil,
-		Logging:       loggingEnabled,
-		LoggingSet:    input.LoggingEnabled != nil,
-		Retention:     retentionDays,
-		RetentionSet:  input.RetentionDays != nil,
-		BindingSet:    writeBinding,
-		BindingExists: bindFound,
-		ModelName:     modelName,
-		TargetType:    targetType,
-		TargetID:      targetID,
+		ID:             clientID,
+		Name:           name,
+		NameSet:        input.Name != nil,
+		Description:    description,
+		DescSet:        input.Description != nil,
+		Group:          keyGroup,
+		GroupSet:       input.Group != nil,
+		Type:           keyType,
+		TypeSet:        input.Type != nil,
+		Enabled:        enabled,
+		EnabledSet:     input.Enabled != nil,
+		Logging:        loggingEnabled,
+		LoggingSet:     input.LoggingEnabled != nil,
+		LogErrorBodies: bodyLogMode,
+		Retention:      retentionDays,
+		RetentionSet:   input.RetentionDays != nil,
+		BindingSet:     writeBinding,
+		BindingExists:  bindFound,
+		ModelName:      modelName,
+		TargetType:     targetType,
+		TargetID:       targetID,
 	})
 	if err != nil {
 		switch {
@@ -347,6 +367,9 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.LoggingEnabled != nil {
 		changed = append(changed, "logging_enabled")
+	}
+	if input.LogErrorBodies != nil {
+		changed = append(changed, "log_error_bodies")
 	}
 	if input.RetentionDays != nil {
 		changed = append(changed, "retention_days")

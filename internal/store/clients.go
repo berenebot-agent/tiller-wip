@@ -24,6 +24,48 @@ func boolInt(v bool) int {
 	return 0
 }
 
+// Detailed error body logging modes for a client key. "inherit" follows the
+// account-level log_error_bodies setting, "always" captures failed request and
+// provider error bodies regardless of that setting, and "never" never captures
+// them.
+const (
+	BodyLogInherit = "inherit"
+	BodyLogAlways  = "always"
+	BodyLogNever   = "never"
+)
+
+// bodyLogMode maps the nullable column to its API value.
+func bodyLogMode(v sql.NullBool) string {
+	if !v.Valid {
+		return BodyLogInherit
+	}
+	if v.Bool {
+		return BodyLogAlways
+	}
+	return BodyLogNever
+}
+
+// bodyLogValue maps an API value to the nullable column value.
+func bodyLogValue(mode string) any {
+	switch mode {
+	case BodyLogAlways:
+		return 1
+	case BodyLogNever:
+		return 0
+	default:
+		return nil
+	}
+}
+
+// ValidBodyLogMode reports whether mode is a known body-logging mode.
+func ValidBodyLogMode(mode string) bool {
+	switch mode {
+	case BodyLogInherit, BodyLogAlways, BodyLogNever:
+		return true
+	}
+	return false
+}
+
 // ClientKeyRow is one row of the client-key admin list, including the joined
 // single-binding target summary.
 type ClientKeyRow struct {
@@ -34,6 +76,7 @@ type ClientKeyRow struct {
 	Fingerprint           string
 	Enabled               bool
 	LoggingEnabled        bool
+	LogErrorBodies        string
 	RetentionDays         int
 	CreatedAt             string
 	RotatedAt             sql.NullString
@@ -56,7 +99,7 @@ type ClientKeyFilter struct {
 // ListClientKeys returns the account's client keys matching the filter.
 func (s *Scope) ListClientKeys(ctx context.Context, filter ClientKeyFilter) ([]ClientKeyRow, error) {
 	pattern := "%" + filter.Search + "%"
-	query := `SELECT c.id,c.name,c.description,c.key_group,c.secret_fingerprint,c.enabled,c.logging_enabled,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
+	query := `SELECT c.id,c.name,c.description,c.key_group,c.secret_fingerprint,c.enabled,c.logging_enabled,c.log_error_bodies,c.retention_days,c.created_at,c.rotated_at,c.updated_at,c.key_type,
 coalesce(b.exposed_model_name,''),
 CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
 coalesce(b.real_model_id,b.virtual_model_id,''),
@@ -81,11 +124,13 @@ WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.accoun
 	for rows.Next() {
 		var v ClientKeyRow
 		var enabled, loggingEnabled int
-		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical); err != nil {
+		var bodyLog sql.NullBool
+		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical); err != nil {
 			return nil, err
 		}
 		v.Enabled = enabled != 0
 		v.LoggingEnabled = loggingEnabled != 0
+		v.LogErrorBodies = bodyLogMode(bodyLog)
 		out = append(out, v)
 	}
 	return out, rows.Err()
@@ -132,14 +177,16 @@ type ClientKeyEditable struct {
 	Type           string
 	Enabled        bool
 	LoggingEnabled bool
+	LogErrorBodies string
 	RetentionDays  int
 }
 
 func (s *Scope) GetClientKeyEditable(ctx context.Context, id string) (ClientKeyEditable, error) {
 	var v ClientKeyEditable
 	var enabled, loggingEnabled int
-	err := s.q.QueryRowContext(ctx, `SELECT name,description,key_group,enabled,logging_enabled,retention_days,key_type FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).
-		Scan(&v.Name, &v.Description, &v.Group, &enabled, &loggingEnabled, &v.RetentionDays, &v.Type)
+	var bodyLog sql.NullBool
+	err := s.q.QueryRowContext(ctx, `SELECT name,description,key_group,enabled,logging_enabled,log_error_bodies,retention_days,key_type FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).
+		Scan(&v.Name, &v.Description, &v.Group, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.Type)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClientKeyEditable{}, ErrClientKeyNotFound
 	}
@@ -148,6 +195,7 @@ func (s *Scope) GetClientKeyEditable(ctx context.Context, id string) (ClientKeyE
 	}
 	v.Enabled = enabled != 0
 	v.LoggingEnabled = loggingEnabled != 0
+	v.LogErrorBodies = bodyLogMode(bodyLog)
 	return v, nil
 }
 
@@ -170,6 +218,22 @@ func (s *Scope) ClientKeyLoggingEnabled(ctx context.Context, id string) (bool, e
 		return false, ErrClientKeyNotFound
 	}
 	return enabled != 0, err
+}
+
+// ClientKeyLoggingFlags returns the client key's request-logging switch and
+// its detailed-error-body mode in one read. The body mode falls back to
+// "never" on error, so a failed read can never widen what is captured.
+func (s *Scope) ClientKeyLoggingFlags(ctx context.Context, id string) (bool, string, error) {
+	var enabled int
+	var bodyLog sql.NullBool
+	err := s.q.QueryRowContext(ctx, `SELECT logging_enabled,log_error_bodies FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).Scan(&enabled, &bodyLog)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, BodyLogNever, ErrClientKeyNotFound
+	}
+	if err != nil {
+		return false, BodyLogNever, err
+	}
+	return enabled != 0, bodyLogMode(bodyLog), nil
 }
 
 // ClientKeyName returns a client key's name, used for delete notifications.
@@ -321,21 +385,24 @@ VALUES(?,?,?,?,?,?,?) ON CONFLICT(client_key_id) DO UPDATE SET exposed_model_nam
 // true are written, so a request that omitted a field cannot overwrite a
 // concurrent change to it with a value merged from an earlier read.
 type UpdateClientKeyInput struct {
-	ID           string
-	Name         string
-	NameSet      bool
-	Description  string
-	DescSet      bool
-	Group        string
-	GroupSet     bool
-	Type         string
-	TypeSet      bool
-	Enabled      bool
-	EnabledSet   bool
-	Logging      bool
-	LoggingSet   bool
-	Retention    int
-	RetentionSet bool
+	ID          string
+	Name        string
+	NameSet     bool
+	Description string
+	DescSet     bool
+	Group       string
+	GroupSet    bool
+	Type        string
+	TypeSet     bool
+	Enabled     bool
+	EnabledSet  bool
+	Logging     bool
+	LoggingSet  bool
+	// LogErrorBodies is the client key's detailed-error-body mode
+	// (inherit/always/never). An empty string leaves the mode untouched.
+	LogErrorBodies string
+	Retention      int
+	RetentionSet   bool
 	// BindingSet reports whether the request supplied Single-binding fields. The
 	// binding is only written when it is set (or when a Single key needs a
 	// binding that does not exist yet), so a metadata-only PATCH cannot revert a
@@ -375,6 +442,10 @@ func (s *Scope) UpdateClientKey(ctx context.Context, in UpdateClientKeyInput) er
 		if in.LoggingSet {
 			set += ",logging_enabled=?"
 			args = append(args, boolInt(in.Logging))
+		}
+		if in.LogErrorBodies != "" {
+			set += ",log_error_bodies=?"
+			args = append(args, bodyLogValue(in.LogErrorBodies))
 		}
 		if in.RetentionSet {
 			set += ",retention_days=?"

@@ -191,6 +191,14 @@ disabled and is presented with a warning in the admin UI. This is the documented
 exception to the AGENTS.md no-content guardrail, which is scoped to default
 logging.
 
+Each client key carries its own mode for that content: **inherit** (the
+default — follow the account setting), **always** (capture bodies even when the
+account setting is off) or **never** (never capture them, even when the account
+setting is on). Both switches are off by default, so bodies are stored only
+where an administrator explicitly asked for them. A client set to *always* keeps
+capturing bodies after the account setting is turned off; hosted mode rejects
+*always* outright and captures no bodies at all.
+
 **Hosted quota and onboarding controls.** Hosted accounts are subject to plan
 entitlements (provider/client-key/virtual-model creation, concurrent streams,
 monthly routed requests, and Activity retention). Quota rejections are `429`
