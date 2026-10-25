@@ -9,9 +9,9 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers"
 )
 
-// responsesStreamToChatChat replays a captured Responses SSE body through the
-// translator and returns the concatenated Chat chunks a Chat client would see.
-func responsesStreamToChatChat(t *testing.T, s string) string {
+// responsesStreamToClient replays a captured Responses SSE body through the
+// translator and returns the events the client would see.
+func responsesStreamToClient(t *testing.T, s string, incoming providers.Protocol) string {
 	t.Helper()
 	state := &streamState{id: "c1", model: "client-model", reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
 	reader := bufio.NewReader(strings.NewReader(s))
@@ -30,7 +30,7 @@ func responsesStreamToChatChat(t *testing.T, s string) string {
 					if delta.Kind == "error" {
 						t.Fatalf("unexpected stream error for event %s", event.Name)
 					}
-					if err := writeTranslatedEvent(&out, providers.ProtocolChat, state, delta); err != nil {
+					if err := writeTranslatedEvent(&out, incoming, state, delta); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -44,6 +44,54 @@ func responsesStreamToChatChat(t *testing.T, s string) string {
 		}
 	}
 	return out.String()
+}
+
+func assertResponsesCompletionReasons(t *testing.T, s, chatFinish, messagesFinish string) {
+	t.Helper()
+	for _, tc := range []struct {
+		protocol providers.Protocol
+		field    string
+		want     string
+	}{
+		{providers.ProtocolChat, "finish_reason", chatFinish},
+		{providers.ProtocolMessages, "stop_reason", messagesFinish},
+	} {
+		t.Run(string(tc.protocol), func(t *testing.T) {
+			out := responsesStreamToClient(t, s, tc.protocol)
+			var reasons []string
+			for _, line := range strings.Split(out, "\n") {
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				var payload map[string]any
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &payload); err != nil {
+					t.Fatal(err)
+				}
+				if tc.protocol == providers.ProtocolChat {
+					for _, raw := range asSlice(payload["choices"]) {
+						choice, _ := raw.(map[string]any)
+						if reason, ok := choice[tc.field].(string); ok {
+							reasons = append(reasons, reason)
+						}
+					}
+				} else if delta, ok := payload["delta"].(map[string]any); ok {
+					if reason, ok := delta[tc.field].(string); ok {
+						reasons = append(reasons, reason)
+					}
+				}
+			}
+			if len(reasons) != 1 || reasons[0] != tc.want {
+				t.Fatalf("%s = %v, want exactly [%s]", tc.field, reasons, tc.want)
+			}
+		})
+	}
+}
+
+func TestResponsesTextCompletionReasons(t *testing.T) {
+	t.Parallel()
+	s := `data: {"type":"response.output_text.delta","delta":"Hello"}` + "\n\n" +
+		`data: {"type":"response.completed","response":{}}` + "\n\n"
+	assertResponsesCompletionReasons(t, s, "stop", "end_turn")
 }
 
 // argumentsOf collects every tool_call argument fragment the client received,
@@ -99,7 +147,8 @@ func TestResponsesParallelToolCallsCarryArguments(t *testing.T) {
 		`data: {"type":"response.output_item.done","output_index":1,"item":{"type":"function_call","id":"fc_2","call_id":"call_2","name":"read","arguments":"{\"path\": \"/etc/hosts\"}","status":"completed"}}` + "\n\n" +
 		`data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}` + "\n\n"
 
-	args := argumentsOf(t, responsesStreamToChatChat(t, s))
+	assertResponsesCompletionReasons(t, s, "tool_calls", "tool_use")
+	args := argumentsOf(t, responsesStreamToClient(t, s, providers.ProtocolChat))
 	if len(args) != 2 {
 		t.Fatalf("expected 2 tool calls, got %d: %v", len(args), args)
 	}
@@ -126,7 +175,8 @@ func TestResponsesStreamedArgumentsAreNotDuplicated(t *testing.T) {
 		`data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":"{\"path\": \"/etc/hostname\"}","status":"completed"}}` + "\n\n" +
 		`data: {"type":"response.completed","response":{"usage":{"input_tokens":10,"output_tokens":5}}}` + "\n\n"
 
-	args := argumentsOf(t, responsesStreamToChatChat(t, s))
+	assertResponsesCompletionReasons(t, s, "tool_calls", "tool_use")
+	args := argumentsOf(t, responsesStreamToClient(t, s, providers.ProtocolChat))
 	if len(args) != 1 {
 		t.Fatalf("expected 1 tool call, got %d: %v", len(args), args)
 	}
