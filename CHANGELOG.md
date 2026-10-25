@@ -8,6 +8,13 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Per-client detailed error body logging.** Each client key now carries its
+  own mode for detailed error content: *inherit* (the default, follow the
+  account-wide Detailed Error Logging setting), *always* (capture failed request
+  and provider error bodies even when the account setting is off) or *never*
+  (never capture them, even when the account setting is on). A client set to
+  *never* keeps its request metadata but stores no body content. Hosted mode
+  rejects *always*, as it does account-wide.
 - **Live request rows on Activity.** A scrolling table beneath the graph shows
   one row per logging-enabled request, filling in its target, outcome, latency,
   and token metadata. Running requests stay above completed requests; completed

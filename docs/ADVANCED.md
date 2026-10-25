@@ -63,6 +63,9 @@ Notes for embedders:
   let the host application own all external access.
 - Activity still records by default; turn it off per client key (`logging_enabled`)
   or account-wide (`default_logging_enabled`) if the host wants no history.
+- Failed request and provider error bodies are stored only when detailed error
+  logging is enabled. Per client key, `log_error_bodies` is `inherit` (follow
+  the account setting), `always` or `never`; hosted mode refuses `always`.
 
 ```bash
 # Create a token in Settings → Management API, then:
