@@ -1913,7 +1913,11 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 		}
 		// Responses has no separate finish event. Emit one so translated
 		// Chat and Messages streams can close their assistant message cleanly.
-		out = append(out, canonicalDelta{Kind: "finish", Finish: "stop"})
+		finish := "stop"
+		if len(state.toolCalls) > 0 {
+			finish = "tool_calls"
+		}
+		out = append(out, canonicalDelta{Kind: "finish", Finish: finish})
 		return out, true
 	}
 	return out, false
