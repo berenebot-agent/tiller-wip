@@ -1688,6 +1688,15 @@ type toolCallState struct {
 	itemID    string
 	index     int
 	ordinal   int
+	// finalArguments records that a complete argument payload (from
+	// function_call_arguments.done or output_item.done) has been emitted for
+	// this call, so a second terminal event for the same call is not written
+	// again. See the "tool" case in writeTranslatedEvent.
+	finalArguments bool
+	// deltaArguments records that fragment deltas were already written to the
+	// client for this call, which decides whether a terminal payload is still
+	// needed. See the "tool" case in writeTranslatedEvent.
+	deltaArguments bool
 }
 
 type streamOutput struct {
@@ -1695,8 +1704,15 @@ type streamOutput struct {
 	tool *toolCallState
 }
 
+// canonicalDelta is one protocol-neutral piece of a streamed response. The two
+// argument flags disambiguate the three ways a Responses upstream can deliver a
+// tool call's arguments, so the encoder can emit each payload exactly once:
+// ArgumentDelta marks a function_call_arguments.delta fragment (accumulate only);
+// ArgumentFinal marks a complete payload on function_call_arguments.done or
+// output_item.done (used only when that call streamed no deltas).
 type canonicalDelta struct {
 	Kind, Text, CallID, Name, Arguments, Finish string
+	ArgumentDelta, ArgumentFinal                bool
 	UpstreamIndex                               int
 	HasUpstreamIndex                            bool
 	ItemID                                      string
@@ -1857,12 +1873,24 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 		}
 	case "response.function_call_arguments.delta":
 		index, hasIndex := coerceInt64(payload["output_index"])
-		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"])})
+		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["delta"]), ArgumentDelta: true})
+	case "response.function_call_arguments.done":
+		// The terminal event for a call whose arguments were NOT streamed. A
+		// response carrying parallel tool calls emits only these, so dropping
+		// it left every parallel call with empty arguments in the translated
+		// stream. Emitted as a candidate: the encoder writes it only when the
+		// deltas did not already carry the payload.
+		index, hasIndex := coerceInt64(payload["output_index"])
+		out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(payload["call_id"]), ItemID: strField(payload["item_id"]), Arguments: strField(payload["arguments"]), ArgumentFinal: true})
 	case "response.output_item.added", "response.output_item.done":
 		if item, ok := payload["item"].(map[string]any); ok {
 			if item["type"] == "function_call" {
 				index, hasIndex := coerceInt64(payload["output_index"])
-				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(item["call_id"]), ItemID: strField(item["id"]), Name: strField(item["name"])})
+				arguments, final := "", false
+				if event == "response.output_item.done" {
+					arguments, final = strField(item["arguments"]), true
+				}
+				out = append(out, canonicalDelta{Kind: "tool", UpstreamIndex: int(index), HasUpstreamIndex: hasIndex, CallID: strField(item["call_id"]), ItemID: strField(item["id"]), Name: strField(item["name"]), Arguments: arguments, ArgumentFinal: final})
 			}
 			// A reasoning item carrying encrypted content is opaque state the
 			// client needs to replay the turn. Capture it whether it arrives on
@@ -1922,9 +1950,25 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 				d["reasoning_details"] = details
 			}
 		case "tool":
+			// A terminal payload carries the call's COMPLETE argument string
+			// (function_call_arguments.done, output_item.done). It is the only
+			// source of arguments for a call whose deltas were never streamed —
+			// which is what a parallel-call response does.
 			call, err := state.applyToolDelta(delta)
 			if err != nil {
 				return err
+			}
+			if delta.ArgumentFinal {
+				// The terminal event repeats arguments the client already holds
+				// as fragments. Emitting it appends a second copy (`{...}{...}`),
+				// so it is written only when this call streamed no deltas at all
+				// — the parallel-call shape, where it is the only carrier.
+				if call.finalArguments || call.deltaArguments {
+					return nil
+				}
+				call.finalArguments = true
+			} else if delta.Arguments != "" {
+				call.deltaArguments = true
 			}
 			d["tool_calls"] = []any{map[string]any{"index": call.ordinal, "id": emptyNil(delta.CallID), "type": "function", "function": map[string]any{"name": emptyNil(delta.Name), "arguments": delta.Arguments}}}
 		case "finish":
@@ -2147,6 +2191,13 @@ func (state *streamState) applyToolDelta(delta canonicalDelta) (*toolCallState, 
 	}
 	if delta.Name != "" {
 		call.name = delta.Name
+	}
+	// A final payload supersedes fragments already accumulated for this call:
+	// upstreams normally send deltas OR the terminal payload, but one that sends
+	// both must not yield `{...}{...}`.
+	if delta.ArgumentFinal && call.arguments.Len() > 0 {
+		state.toolArgumentBytes -= call.arguments.Len()
+		call.arguments.Reset()
 	}
 	if len(delta.Arguments) > maxAccumulatedToolArgumentBytes-state.toolArgumentBytes {
 		return nil, errors.New("translated stream tool arguments exceed limit")
