@@ -52,16 +52,6 @@ Capability metadata is informational: `/v1/models` includes `context_length` and
 
 ---
 
-## Advanced
-
-Headless and hosted-operation topics live in
-[docs/ADVANCED.md](docs/ADVANCED.md): management API tokens and scopes,
-embedding Tiller as another application's LLM gateway, hosted Compose
-networking, hosted Google sign-in and Turnstile, and DNS recovery after
-restarts.
-
----
-
 ## Virtual models
 
 A virtual model gives a stable client-facing identity to one or more upstream targets. For example, `main/coding` might resolve to:
@@ -170,15 +160,19 @@ Notes:
 
     Then open `http://localhost:8080`. The first visitor gets a one-time setup page to create the administrator credential (8+ characters) and is signed straight in to a guided onboarding wizard. Once configured, the setup page is gone permanently — sign in from the login screen.
 
-    To rotate or recover a wizard-created credential, set `TILLER_USERNAME` / `TILLER_PASSWORD` and restart: the environment values become the new credential and existing sessions are revoked.
+### First steps
 
-   For remote access, put Tiller behind an HTTPS reverse proxy and add environment variable TILLER_TRUSTED_PROXY=IP-OF-YOUR-PROXY. Hosted mode is opt-in with `TILLER_MODE=hosted`, `TILLER_PUBLIC_URL=https://app.example.com`, and separate `TILLER_PLATFORM_ADMIN_USERNAME` / `TILLER_PLATFORM_ADMIN_PASSWORD` credentials. Existing local installs may additionally provide their `TILLER_USERNAME` / `TILLER_PASSWORD` (or the deprecated `TILLER_ADMIN_*` aliases) once to migrate the local account into a verified hosted customer; hosted startup hard-fails instead of abandoning an existing local account when those migration credentials are missing or invalid. Fresh hosted installs do not create a customer automatically. The platform console is at `/platform` and customer login is at `/login`.
+1. **Add a provider** — in **Providers**, `+ Add provider`. Choose the type, name the instance, add its API credential. Tiller discovers the model catalogue where supported.
 
-> **Custom hosted landing page:** set `TILLER_CUSTOM_SITE_ENABLED=true` and place your site at `./data/site/index.html` (with optional CSS, JavaScript, and media files alongside it). The custom site replaces only the hosted landing page and its own assets; `/app`, authentication, API, health, and platform routes remain application-owned, and so do the embedded application asset filenames the SPA loads at fixed paths (`app.js`, `live.js`, `activity-graph.js`, `d3.min.js`, `style.css`, `virtual-dialog.css`, `activity-graph.css`, `typography.css`, and the `media/` directory). A custom file at one of those paths is ignored (the embedded asset wins) and logged as a warning, so name your landing-page files distinctly. When disabled or unset, the embedded landing page is used. Enabling it requires `data/site/index.html` to exist at startup.
+2. **Create a client key** — for the simplest setup: `Type: Single`, `Client model: main`, `Route: main/coding`. Tiller shows the client secret once.
 
-> **Renamed credential vars:** `TILLER_ADMIN_USERNAME` / `TILLER_ADMIN_PASSWORD` are now `TILLER_USERNAME` / `TILLER_PASSWORD`, to deconflict with the hosted platform console's `TILLER_PLATFORM_ADMIN_*`. The old names still work and log a startup deprecation warning; the new names win if both are set.
+3. **OPTIONAL*** - Create a virtual model - if you want to map different model names or have a fallback chain in case of failure.
 
-> **Reverse proxy + live UI:** the admin UI keeps its status icons and usage counters live over a Server-Sent Events stream at `/api/admin/live`. If you front Tiller with a reverse proxy, disable response buffering for that path (e.g. nginx `proxy_buffering off;` or Caddy's equivalent) and keep the proxy's read timeout above the stream's 5s heartbeat, or the stream will stall.
+4. **Point your tool at Tiller** — for an OpenAI-compatible client: `Base URL: http://localhost:8080/v1`, `API key: <your Tiller client key>`, `Model: main`.
+
+Now steer the real route from Tiller instead of changing the client.
+
+---
 
 ### Option 2 — Build from source
 
@@ -192,10 +186,6 @@ docker compose up -d --build
 The repository's `docker-compose.yml` builds locally instead of pulling an image; everything else (healthcheck, adoption-first posture, volumes) is identical to the prebuilt option above.
 
 The service starts as root to self-fix `./data` ownership, then drops to a non-root user before serving.
-
-> **Hosted deployment and recovery:** hosted Compose networking, hosted Google
-> sign-in with Turnstile, and DNS recovery after restarts are documented in
-> [docs/ADVANCED.md](docs/ADVANCED.md).
 
 ### Other compose / env options
 
@@ -226,17 +216,13 @@ TILLER_INGRESS_NETWORK=proxy_network                 # optional external proxy n
 TILLER_INGRESS_NETWORK_EXTERNAL=true                 # set only for a pre-existing network
 ```
 
-### First steps
+## Advanced
 
-1. **Add a provider** — in **Providers**, `+ Add provider`. Choose the type, name the instance, add its API credential. Tiller discovers the model catalogue where supported.
-
-2. **Create a client key** — for the simplest setup: `Type: Single`, `Client model: main`, `Route: main/coding`. Tiller shows the client secret once.
-
-3. **OPTIONAL*** - Create a virtual model - if you want to map different model names or have a fallback chain in case of failure.
-
-4. **Point your tool at Tiller** — for an OpenAI-compatible client: `Base URL: http://localhost:8080/v1`, `API key: <your Tiller client key>`, `Model: main`.
-
-Now steer the real route from Tiller instead of changing the client.
+Headless and hosted-operation topics live in
+[docs/ADVANCED.md](docs/ADVANCED.md): management API tokens and scopes,
+embedding Tiller as another application's LLM gateway, hosted Compose
+networking, hosted Google sign-in and Turnstile, and DNS recovery after
+restarts.
 
 ---
 
