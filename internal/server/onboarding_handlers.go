@@ -89,6 +89,7 @@ type accountExportConfig struct {
 	VirtualModels  []store.AccountExportVirtualModel  `json:"virtual_models"`
 	VirtualTargets []store.AccountExportVirtualTarget `json:"virtual_targets"`
 	ClientKeys     []store.AccountExportClientKey     `json:"client_keys"`
+	Templates      []store.AccountExportTemplate      `json:"catalogue_templates"`
 }
 
 // writeAccountExport streams the account-scoped ZIP export. All reads used to
@@ -151,7 +152,7 @@ func (s *Server) writeAccountExport(w http.ResponseWriter, r *http.Request) {
 		Profile: profile, Plan: plan, Settings: config.Settings,
 		Providers: config.Providers, ProviderModels: config.Models,
 		VirtualGroups: config.VirtualGroups, VirtualModels: config.VirtualModels,
-		VirtualTargets: config.VirtualTargets, ClientKeys: config.ClientKeys,
+		VirtualTargets: config.VirtualTargets, ClientKeys: config.ClientKeys, Templates: config.Templates,
 	}
 	configWriter, err := zw.CreateHeader(&zip.FileHeader{Name: "config.json", Method: zip.Deflate, Modified: time.Now().UTC()})
 	if err != nil {
