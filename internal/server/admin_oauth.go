@@ -6,7 +6,6 @@ import (
 	"html"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -20,8 +19,10 @@ import (
 )
 
 const (
-	oauthRedirectPath = "/auth/callback"
-	oauthPendingTTL   = 10 * time.Minute
+	oauthPendingTTL = 10 * time.Minute
+	// oauthDiscoveryWait bounds how long an OAuth completion response waits for
+	// the post-connect catalogue discovery.
+	oauthDiscoveryWait = 10 * time.Second
 )
 
 // markOAuthPending records that a hosted redirect-callback flow has started, so
@@ -54,19 +55,6 @@ func (s *Server) oauthPendingActive(accountID, providerID string) bool {
 		return false
 	}
 	return true
-}
-
-func (s *Server) oauthRedirectURI(r *http.Request) string {
-	// Hosted deployments have a fixed, validated public HTTPS origin, so the
-	// redirect URI is canonical and cannot be influenced by the request Host.
-	if s.config.Mode == config.ModeHosted && s.config.PublicURL != "" {
-		return strings.TrimRight(s.config.PublicURL, "/") + oauthRedirectPath
-	}
-	scheme := "http"
-	if s.secureRequest(r) {
-		scheme = "https"
-	}
-	return (&url.URL{Scheme: scheme, Host: r.Host, Path: oauthRedirectPath}).String()
 }
 
 // oauthRedirectCallback reports whether hosted deployments can complete this
@@ -159,7 +147,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "oauth_not_supported", "OAuth is not supported for this provider.")
 		return
 	}
-	redirectURI := s.oauthRedirectURI(r)
+	redirectURI := claude.ManualRedirectURI
 	scope := s.scope(r)
 	generation, err := scope.OAuthGeneration(r.Context(), id)
 	if err != nil {
@@ -208,9 +196,9 @@ func (s *Server) persistOAuthToken(ctx context.Context, accountID string, flow o
 		return err
 	}
 	// The pre-OAuth discovery at provider creation ran without a credential.
-	// Re-discover now that the OAuth token exists (in the background so the
-	// callback/paste response is not blocked by upstream discovery).
-	s.refreshProviderCatalogueAsync(accountID, flow.ProviderID)
+	// Re-discover now that the OAuth token exists. The response waits a bounded
+	// time so the UI's follow-up provider reload sees the catalogue.
+	s.refreshProviderCatalogueWait(ctx, accountID, flow.ProviderID, oauthDiscoveryWait)
 	return nil
 }
 
@@ -469,15 +457,26 @@ func (s *Server) refreshProviderCatalogue(ctx context.Context, accountID, provid
 	}
 }
 
-// refreshProviderCatalogueAsync re-discovers in the background for completions
-// that run on an HTTP request path, so upstream discovery never blocks or fails
-// the OAuth response.
-func (s *Server) refreshProviderCatalogueAsync(accountID, providerID string) {
+// refreshProviderCatalogueWait re-discovers for completions that run on an HTTP
+// request path. Discovery runs detached from the request, so a client that
+// disconnects or a slow upstream never cancels it; the caller waits at most
+// wait for it, then responds regardless and discovery finishes in the
+// background (any failure stays in last_refresh_error).
+func (s *Server) refreshProviderCatalogueWait(ctx context.Context, accountID, providerID string, wait time.Duration) {
+	done := make(chan struct{})
 	go func() {
-		ctx, cancel := context.WithTimeout(s.backgroundCtx, 3*time.Minute)
+		defer close(done)
+		bg, cancel := context.WithTimeout(s.backgroundCtx, 3*time.Minute)
 		defer cancel()
-		s.refreshProviderCatalogue(ctx, accountID, providerID)
+		s.refreshProviderCatalogue(bg, accountID, providerID)
 	}()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	case <-ctx.Done():
+	}
 }
 
 func (s *Server) startGitHubDeviceFlow(ctx context.Context, accountID, id string, actor auditActor) (devicePrompt, error) {
