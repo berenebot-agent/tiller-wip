@@ -106,6 +106,9 @@ func (s *Scope) CreateProvider(ctx context.Context, in CreateProviderInput) erro
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'real',?,0,?,? FROM client_keys WHERE account_id=?`, in.ID, now, tx.accountID, tx.accountID); err != nil {
 			return err
 		}
+		if _, err := tx.q.ExecContext(ctx, `INSERT INTO catalogue_template_group_defaults(template_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'real',?,0,?,? FROM catalogue_templates WHERE account_id=?`, in.ID, now, tx.accountID, tx.accountID); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -382,6 +385,12 @@ func (s *Scope) DeleteProvider(ctx context.Context, providerID string) error {
 		if _, err := tx.q.ExecContext(ctx, `DELETE FROM client_group_defaults WHERE group_kind='real' AND group_id=? AND account_id=?`, providerID, tx.accountID); err != nil {
 			return err
 		}
+		if _, err := tx.q.ExecContext(ctx, `DELETE FROM catalogue_template_model_permissions WHERE model_kind='real' AND model_id IN (SELECT id FROM provider_models WHERE provider_id=? AND account_id=?) AND account_id=?`, providerID, tx.accountID, tx.accountID); err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `DELETE FROM catalogue_template_group_defaults WHERE group_kind='real' AND group_id=? AND account_id=?`, providerID, tx.accountID); err != nil {
+			return err
+		}
 		if _, err := tx.q.ExecContext(ctx, `DELETE FROM provider_models WHERE provider_id=? AND account_id=?`, providerID, tx.accountID); err != nil {
 			return err
 		}
@@ -412,6 +421,9 @@ func (s *Scope) DeleteAccountResources(ctx context.Context) error {
 			`DELETE FROM client_model_permissions WHERE account_id=?`,
 			`DELETE FROM client_group_defaults WHERE account_id=?`,
 			`DELETE FROM client_keys WHERE account_id=?`,
+			`DELETE FROM catalogue_template_model_permissions WHERE account_id=?`,
+			`DELETE FROM catalogue_template_group_defaults WHERE account_id=?`,
+			`DELETE FROM catalogue_templates WHERE account_id=?`,
 			`DELETE FROM api_tokens WHERE account_id=?`,
 			`DELETE FROM provider_oauth_tokens WHERE account_id=?`,
 			`DELETE FROM virtual_model_targets WHERE account_id=?`,

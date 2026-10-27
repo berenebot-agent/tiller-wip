@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/hostednet"
+	"github.com/tiller-router/tiller-router/internal/providers/claude"
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
 )
 
@@ -1528,7 +1529,7 @@ func ApplyRequestAuth(req *http.Request, provider Instance) {
 		req.Header.Set("anthropic-version", "2023-06-01")
 		req.Header.Set("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14")
 		req.Header.Set("Anthropic-Dangerous-Direct-Browser-Access", "true")
-		req.Header.Set("User-Agent", "claude-cli/2.1.251 (external, sdk-cli)")
+		req.Header.Set("User-Agent", claude.UserAgent)
 		req.Header.Set("X-App", "cli")
 	} else if provider.Type == "github-copilot" {
 		token := provider.Credential

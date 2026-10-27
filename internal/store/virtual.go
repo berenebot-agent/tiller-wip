@@ -59,7 +59,10 @@ func (s *Scope) CreateVirtualGroup(ctx context.Context, id, name string) error {
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO virtual_provider_groups(id,account_id,name,created_at,updated_at) VALUES(?,?,?,?,?)`, id, tx.accountID, name, now, now); err != nil {
 			return err
 		}
-		_, err := tx.q.ExecContext(ctx, `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'virtual',?,0,?,? FROM client_keys WHERE account_id=?`, id, now, tx.accountID, tx.accountID)
+		if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'virtual',?,0,?,? FROM client_keys WHERE account_id=?`, id, now, tx.accountID, tx.accountID); err != nil {
+			return err
+		}
+		_, err := tx.q.ExecContext(ctx, `INSERT INTO catalogue_template_group_defaults(template_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'virtual',?,0,?,? FROM catalogue_templates WHERE account_id=?`, id, now, tx.accountID, tx.accountID)
 		return err
 	})
 }
@@ -102,6 +105,9 @@ func (s *Scope) DeleteVirtualGroup(ctx context.Context, id string) error {
 			return ErrVirtualGroupNotEmpty
 		}
 		if _, err := tx.q.ExecContext(ctx, `DELETE FROM client_group_defaults WHERE group_kind='virtual' AND group_id=? AND account_id=?`, id, tx.accountID); err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `DELETE FROM catalogue_template_group_defaults WHERE group_kind='virtual' AND group_id=? AND account_id=?`, id, tx.accountID); err != nil {
 			return err
 		}
 		res, err := tx.q.ExecContext(ctx, `DELETE FROM virtual_provider_groups WHERE id=? AND account_id=?`, id, tx.accountID)
@@ -255,6 +261,9 @@ func (s *Scope) CreateVirtualModel(ctx context.Context, in CreateVirtualModelInp
 			if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'virtual',?,0,?,? FROM client_keys WHERE account_id=?`, groupID, now, tx.accountID, tx.accountID); err != nil {
 				return err
 			}
+			if _, err := tx.q.ExecContext(ctx, `INSERT INTO catalogue_template_group_defaults(template_id,group_kind,group_id,new_models_enabled,updated_at,account_id) SELECT id,'virtual',?,0,?,? FROM catalogue_templates WHERE account_id=?`, groupID, now, tx.accountID, tx.accountID); err != nil {
+				return err
+			}
 		}
 		primary := in.Targets[0].ProviderModelID
 		var primaryProvider string
@@ -271,6 +280,9 @@ func (s *Scope) CreateVirtualModel(ctx context.Context, in CreateVirtualModelInp
 			return err
 		}
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at,account_id) SELECT c.id,'virtual',?,coalesce(d.new_models_enabled,0),?,?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='virtual' AND d.group_id=? AND d.account_id=? WHERE c.account_id=?`, in.ID, now, now, tx.accountID, groupID, tx.accountID, tx.accountID); err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `INSERT INTO catalogue_template_model_permissions(template_id,model_kind,model_id,enabled,created_at,updated_at,account_id) SELECT t.id,'virtual',?,coalesce(d.new_models_enabled,0),?,?,? FROM catalogue_templates t LEFT JOIN catalogue_template_group_defaults d ON d.template_id=t.id AND d.group_kind='virtual' AND d.group_id=? AND d.account_id=? WHERE t.account_id=?`, in.ID, now, now, tx.accountID, groupID, tx.accountID, tx.accountID); err != nil {
 			return err
 		}
 		return nil
@@ -375,6 +387,9 @@ func (s *Scope) DeleteVirtualModel(ctx context.Context, modelID string) error {
 			return err
 		}
 		if _, err := tx.q.ExecContext(ctx, `DELETE FROM client_model_permissions WHERE model_kind='virtual' AND model_id=? AND account_id=?`, modelID, tx.accountID); err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `DELETE FROM catalogue_template_model_permissions WHERE model_kind='virtual' AND model_id=? AND account_id=?`, modelID, tx.accountID); err != nil {
 			return err
 		}
 		res, err := tx.q.ExecContext(ctx, `DELETE FROM virtual_models WHERE id=? AND account_id=?`, modelID, tx.accountID)

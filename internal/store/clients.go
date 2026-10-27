@@ -86,6 +86,10 @@ type ClientKeyRow struct {
 	SingleTargetType      string
 	SingleTargetID        string
 	SingleTargetCanonical string
+	// TemplateID and TemplateName name the linked catalogue template; both are
+	// empty for a Custom (or Single) key.
+	TemplateID   string
+	TemplateName string
 }
 
 // ClientKeyFilter narrows ListClientKeys.
@@ -103,8 +107,10 @@ func (s *Scope) ListClientKeys(ctx context.Context, filter ClientKeyFilter) ([]C
 coalesce(b.exposed_model_name,''),
 CASE WHEN b.real_model_id IS NOT NULL THEN 'real' WHEN b.virtual_model_id IS NOT NULL THEN 'virtual' ELSE '' END,
 coalesce(b.real_model_id,b.virtual_model_id,''),
-CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END
+CASE WHEN b.real_model_id IS NOT NULL THEN coalesce(rp.name||'/'||rm.upstream_model_id,'') WHEN b.virtual_model_id IS NOT NULL THEN coalesce(vg.name||'/'||vm.name,'') ELSE '' END,
+coalesce(t.id,''),coalesce(t.name,'')
 FROM client_keys c LEFT JOIN client_single_bindings b ON b.client_key_id=c.id
+LEFT JOIN catalogue_templates t ON t.id=c.template_id AND t.account_id=c.account_id
 LEFT JOIN provider_models rm ON rm.id=b.real_model_id LEFT JOIN providers rp ON rp.id=rm.provider_id
 LEFT JOIN virtual_models vm ON vm.id=b.virtual_model_id LEFT JOIN virtual_provider_groups vg ON vg.id=vm.virtual_group_id
 WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.account_id=?`
@@ -125,7 +131,7 @@ WHERE (c.name LIKE ? OR c.description LIKE ? OR c.key_group LIKE ?) AND c.accoun
 		var v ClientKeyRow
 		var enabled, loggingEnabled int
 		var bodyLog sql.NullBool
-		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Fingerprint, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.UpdatedAt, &v.Type, &v.SingleModelName, &v.SingleTargetType, &v.SingleTargetID, &v.SingleTargetCanonical, &v.TemplateID, &v.TemplateName); err != nil {
 			return nil, err
 		}
 		v.Enabled = enabled != 0
@@ -179,14 +185,15 @@ type ClientKeyEditable struct {
 	LoggingEnabled bool
 	LogErrorBodies string
 	RetentionDays  int
+	TemplateID     string
 }
 
 func (s *Scope) GetClientKeyEditable(ctx context.Context, id string) (ClientKeyEditable, error) {
 	var v ClientKeyEditable
 	var enabled, loggingEnabled int
 	var bodyLog sql.NullBool
-	err := s.q.QueryRowContext(ctx, `SELECT name,description,key_group,enabled,logging_enabled,log_error_bodies,retention_days,key_type FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).
-		Scan(&v.Name, &v.Description, &v.Group, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.Type)
+	err := s.q.QueryRowContext(ctx, `SELECT name,description,key_group,enabled,logging_enabled,log_error_bodies,retention_days,key_type,coalesce(template_id,'') FROM client_keys WHERE id=? AND account_id=?`, id, s.accountID).
+		Scan(&v.Name, &v.Description, &v.Group, &enabled, &loggingEnabled, &bodyLog, &v.RetentionDays, &v.Type, &v.TemplateID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ClientKeyEditable{}, ErrClientKeyNotFound
 	}
@@ -323,6 +330,8 @@ type CreateClientKeyInput struct {
 	SingleModelName  string
 	SingleTargetType string
 	SingleTargetID   string
+	// TemplateID links a catalogue key to a catalogue template; empty is Custom.
+	TemplateID string
 }
 
 // CreateClientKey persists a client key and seeds its group/model permissions
@@ -363,6 +372,9 @@ func (s *Scope) CreateClientKey(ctx context.Context, in CreateClientKeyInput) er
 		}
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at,account_id) SELECT ?,'virtual',id,0,?,?,? FROM virtual_models WHERE account_id=?`, in.ID, now, now, tx.accountID, tx.accountID); err != nil {
 			return err
+		}
+		if in.TemplateID != "" {
+			return tx.linkClientTemplate(ctx, in.ID, in.TemplateID)
 		}
 		return nil
 	})
@@ -415,6 +427,11 @@ type UpdateClientKeyInput struct {
 	ModelName     string
 	TargetType    string
 	TargetID      string
+	// TemplateSet reports whether the request changed the template link.
+	// TemplateID links the key to that template (overwriting its matrix); an
+	// empty TemplateID detaches it to Custom, keeping its current matrix.
+	TemplateID  string
+	TemplateSet bool
 }
 
 // UpdateClientKey writes only the supplied client-key fields, and the Single
@@ -466,6 +483,11 @@ func (s *Scope) UpdateClientKey(ctx context.Context, in UpdateClientKeyInput) er
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrClientKeyNotFound
+		}
+		if in.TemplateSet {
+			if err := tx.linkClientTemplate(ctx, in.ID, in.TemplateID); err != nil {
+				return err
+			}
 		}
 		writeBinding := in.BindingSet || (in.TypeSet && in.Type == "single" && !in.BindingExists)
 		if writeBinding {
@@ -546,56 +568,7 @@ type PermissionGroupRow struct {
 
 // ListPermissions returns the account's permission matrix for a client key.
 func (s *Scope) ListPermissions(ctx context.Context, clientID string) ([]PermissionGroupRow, error) {
-	var exists int
-	if err := s.q.QueryRowContext(ctx, `SELECT count(*) FROM client_keys WHERE id=? AND account_id=?`, clientID, s.accountID).Scan(&exists); err != nil {
-		return nil, err
-	}
-	if exists == 0 {
-		return nil, ErrClientKeyNotFound
-	}
-	groups := []PermissionGroupRow{}
-
-	realRows, err := s.q.QueryContext(ctx, `SELECT p.id,p.name,coalesce(d.new_models_enabled,0) FROM providers p LEFT JOIN client_group_defaults d ON d.client_key_id=? AND d.group_kind='real' AND d.group_id=p.id AND d.account_id=? WHERE p.account_id=? ORDER BY p.name`, clientID, s.accountID, s.accountID)
-	if err != nil {
-		return nil, err
-	}
-	realGroups, err := scanPermissionGroups(realRows, "real")
-	if err != nil {
-		return nil, err
-	}
-	if len(realGroups) > 0 {
-		// One query for every group on the page, not one query per group.
-		placeholders, args := permissionGroupArgs(clientID, s.accountID, realGroups)
-		modelRows, err := s.q.QueryContext(ctx, `SELECT m.provider_id,m.id,p.name||'/'||m.upstream_model_id,coalesce(x.enabled,0),m.available FROM provider_models m JOIN providers p ON p.id=m.provider_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='real' AND x.model_id=m.id AND x.account_id=? WHERE m.provider_id IN (`+placeholders+`) AND m.account_id=? AND p.account_id=? ORDER BY m.upstream_model_id`, args...)
-		if err != nil {
-			return nil, err
-		}
-		if err := scanPermissionModels(modelRows, "real", realGroups); err != nil {
-			return nil, err
-		}
-	}
-	groups = append(groups, realGroups...)
-
-	virtualRows, err := s.q.QueryContext(ctx, `SELECT g.id,g.name,coalesce(d.new_models_enabled,0) FROM virtual_provider_groups g LEFT JOIN client_group_defaults d ON d.client_key_id=? AND d.group_kind='virtual' AND d.group_id=g.id AND d.account_id=? WHERE g.account_id=? ORDER BY g.name`, clientID, s.accountID, s.accountID)
-	if err != nil {
-		return nil, err
-	}
-	virtualGroups, err := scanPermissionGroups(virtualRows, "virtual")
-	if err != nil {
-		return nil, err
-	}
-	if len(virtualGroups) > 0 {
-		placeholders, args := permissionGroupArgs(clientID, s.accountID, virtualGroups)
-		modelRows, err := s.q.QueryContext(ctx, `SELECT v.virtual_group_id,v.id,g.name||'/'||v.name,coalesce(x.enabled,0),EXISTS(SELECT 1 FROM virtual_model_targets t JOIN provider_models m2 ON m2.id=t.provider_model_id JOIN providers p2 ON p2.id=m2.provider_id WHERE t.virtual_model_id=v.id AND t.enabled=1 AND m2.available=1 AND p2.enabled=1) FROM virtual_models v JOIN virtual_provider_groups g ON g.id=v.virtual_group_id LEFT JOIN client_model_permissions x ON x.client_key_id=? AND x.model_kind='virtual' AND x.model_id=v.id AND x.account_id=? WHERE v.virtual_group_id IN (`+placeholders+`) AND v.account_id=? AND g.account_id=? ORDER BY v.name`, args...)
-		if err != nil {
-			return nil, err
-		}
-		if err := scanPermissionModels(modelRows, "virtual", virtualGroups); err != nil {
-			return nil, err
-		}
-	}
-	groups = append(groups, virtualGroups...)
-	return groups, nil
+	return s.listMatrix(ctx, clientMatrix, clientID)
 }
 
 // permissionGroupArgs builds the IN-list placeholders and the shared argument
@@ -667,59 +640,22 @@ type PermissionModelUpdate struct {
 }
 
 // UpdatePermissions applies a batch of feeder-default and model-permission
-// upserts for the account's client key.
+// upserts for the account's client key. A client linked to a catalogue
+// template mirrors the template, so its matrix is only changed through the
+// template; a direct update returns ErrClientLinkedToTemplate.
 func (s *Scope) UpdatePermissions(ctx context.Context, clientID string, defaults []PermissionDefaultUpdate, permissions []PermissionModelUpdate) error {
 	return s.RunTx(ctx, nil, func(tx *Scope) error {
-		var exists int
-		if err := tx.q.QueryRowContext(ctx, `SELECT count(*) FROM client_keys WHERE id=? AND account_id=?`, clientID, tx.accountID).Scan(&exists); err != nil {
-			return err
-		}
-		if exists == 0 {
+		var templateID sql.NullString
+		err := tx.q.QueryRowContext(ctx, `SELECT template_id FROM client_keys WHERE id=? AND account_id=?`, clientID, tx.accountID).Scan(&templateID)
+		if errors.Is(err, sql.ErrNoRows) {
 			return ErrClientKeyNotFound
 		}
-		now := now()
-		for _, d := range defaults {
-			table := ""
-			switch d.Kind {
-			case "real":
-				table = "providers"
-			case "virtual":
-				table = "virtual_provider_groups"
-			default:
-				return ErrPermissionGroupNotFound
-			}
-			var valid int
-			if err := tx.q.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE id=? AND account_id=?`, d.GroupID, tx.accountID).Scan(&valid); err != nil {
-				return err
-			}
-			if valid == 0 {
-				return ErrPermissionGroupNotFound
-			}
-			if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_group_defaults(client_key_id,group_kind,group_id,new_models_enabled,updated_at,account_id) VALUES(?,?,?,?,?,?) ON CONFLICT(client_key_id,group_kind,group_id) DO UPDATE SET new_models_enabled=excluded.new_models_enabled,updated_at=excluded.updated_at`, clientID, d.Kind, d.GroupID, boolInt(d.Enabled), now, tx.accountID); err != nil {
-				return err
-			}
+		if err != nil {
+			return err
 		}
-		for _, p := range permissions {
-			table := ""
-			switch p.Kind {
-			case "real":
-				table = "provider_models"
-			case "virtual":
-				table = "virtual_models"
-			default:
-				return ErrPermissionModelNotFound
-			}
-			var valid int
-			if err := tx.q.QueryRowContext(ctx, `SELECT count(*) FROM `+table+` WHERE id=? AND account_id=?`, p.ModelID, tx.accountID).Scan(&valid); err != nil {
-				return err
-			}
-			if valid == 0 {
-				return ErrPermissionModelNotFound
-			}
-			if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at,account_id) VALUES(?,?,?,?,?,?,?) ON CONFLICT(client_key_id,model_kind,model_id) DO UPDATE SET enabled=excluded.enabled,updated_at=excluded.updated_at`, clientID, p.Kind, p.ModelID, boolInt(p.Enabled), now, now, tx.accountID); err != nil {
-				return err
-			}
+		if templateID.Valid {
+			return ErrClientLinkedToTemplate
 		}
-		return nil
+		return tx.applyMatrixUpdates(ctx, clientMatrix, clientID, defaults, permissions)
 	})
 }

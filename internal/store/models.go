@@ -170,6 +170,12 @@ SELECT c.id,'real',v.model_id,coalesce(d.new_models_enabled,0),?,?,? FROM client
 			if _, err := tx.q.ExecContext(ctx, stmt, args...); err != nil {
 				return err
 			}
+			// Catalogue templates seed the same way, with the same argument order.
+			stmt = `INSERT INTO catalogue_template_model_permissions(template_id,model_kind,model_id,enabled,created_at,updated_at,account_id)
+SELECT t.id,'real',v.model_id,coalesce(d.new_models_enabled,0),?,?,? FROM catalogue_templates t LEFT JOIN catalogue_template_group_defaults d ON d.template_id=t.id AND d.group_kind='real' AND d.group_id=? AND d.account_id=? CROSS JOIN (` + strings.Join(selects, " UNION ALL ") + `) AS v WHERE t.account_id=?`
+			if _, err := tx.q.ExecContext(ctx, stmt, args...); err != nil {
+				return err
+			}
 		}
 
 		if len(seen) > 0 {
@@ -237,6 +243,10 @@ func (s *Scope) InsertManualModel(ctx context.Context, providerID, modelID strin
 		}
 		if _, err := tx.q.ExecContext(ctx, `INSERT INTO client_model_permissions(client_key_id,model_kind,model_id,enabled,created_at,updated_at,account_id)
 SELECT c.id,'real',?,coalesce(d.new_models_enabled,0),?,?,? FROM client_keys c LEFT JOIN client_group_defaults d ON d.client_key_id=c.id AND d.group_kind='real' AND d.group_id=? AND d.account_id=? WHERE c.account_id=?`, modelID, now, now, tx.accountID, providerID, tx.accountID, tx.accountID); err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `INSERT INTO catalogue_template_model_permissions(template_id,model_kind,model_id,enabled,created_at,updated_at,account_id)
+SELECT t.id,'real',?,coalesce(d.new_models_enabled,0),?,?,? FROM catalogue_templates t LEFT JOIN catalogue_template_group_defaults d ON d.template_id=t.id AND d.group_kind='real' AND d.group_id=? AND d.account_id=? WHERE t.account_id=?`, modelID, now, now, tx.accountID, providerID, tx.accountID, tx.accountID); err != nil {
 			return err
 		}
 		return nil
@@ -334,6 +344,9 @@ func (s *Scope) DeleteManualModel(ctx context.Context, modelID string) error {
 			return ErrModelInUse
 		}
 		if _, err := tx.q.ExecContext(ctx, `DELETE FROM client_model_permissions WHERE model_kind='real' AND model_id=? AND account_id=?`, modelID, tx.accountID); err != nil {
+			return err
+		}
+		if _, err := tx.q.ExecContext(ctx, `DELETE FROM catalogue_template_model_permissions WHERE model_kind='real' AND model_id=? AND account_id=?`, modelID, tx.accountID); err != nil {
 			return err
 		}
 		res, err := tx.q.ExecContext(ctx, `DELETE FROM provider_models WHERE id=? AND origin='manual' AND account_id=?`, modelID, tx.accountID)
