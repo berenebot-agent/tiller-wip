@@ -841,7 +841,24 @@ func chatToMessagesRequest(chat map[string]any) (map[string]any, error) {
 		message, _ := raw.(map[string]any)
 		role, _ := message["role"].(string)
 		if role == "system" || role == "developer" {
-			systems = append(systems, message["content"])
+			switch content := message["content"].(type) {
+			case string:
+				systems = append(systems, map[string]any{"type": "text", "text": content})
+			case []any:
+				for _, rawBlock := range content {
+					block, ok := rawBlock.(map[string]any)
+					if !ok || block["type"] != "text" {
+						return nil, errors.New("system instructions must contain only text blocks")
+					}
+					text, ok := block["text"].(string)
+					if !ok {
+						return nil, errors.New("system instructions must contain only text blocks")
+					}
+					systems = append(systems, map[string]any{"type": "text", "text": text})
+				}
+			default:
+				return nil, errors.New("system instructions must contain only text blocks")
+			}
 			continue
 		}
 		if role == "tool" {
