@@ -66,13 +66,16 @@ test('catalogue template links a client, shows it read-only, and detaches to Cus
   const catalogueLink = page.locator('#form-dialog [data-open-catalogue]');
   await expect(catalogueLink).toContainText(`Template · ${templateName}`);
   await catalogueLink.click();
-  await expect(page.locator('#form-dialog')).toBeHidden();
+  await expect(page.locator('#permissions-dialog')).toBeVisible();
   await page.locator('#permission-template').selectOption('');
   await expect(modelSwitch()).toBeChecked();
   await expect(modelSwitch()).toBeEnabled();
   await page.locator('#save-permissions').click();
   await expect(page.locator('#permissions-dialog')).toBeHidden();
   await expect(routeButton).toContainText('Custom');
+  await expect(catalogueLink).toContainText('Custom');
+  await page.locator('#form-dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
+  await expect(page.locator('#form-dialog')).toBeHidden();
 
   // Delete the template.
   await page.locator('#open-templates').click();
