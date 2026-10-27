@@ -480,6 +480,7 @@ dialog{width:min(580px,calc(100vw - 30px));border:0;padding:0;box-shadow:0 25px 
 .settings-panel{display:none}
 .settings-panel.active{display:grid}
 .setting-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+#settings-panel-api .setting-actions+.activity-table-shell{margin-top:14px}
 .account-details{display:grid;grid-template-columns:150px 1fr;gap:8px 16px;margin:14px 0;font-size:13px}
 .account-details dt{color:var(--muted);font-weight:700}
 .account-details dd{margin:0;color:var(--navy);font-family:var(--mono);overflow-wrap:anywhere}
