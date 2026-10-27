@@ -74,6 +74,15 @@ type AccountExportClientKey struct {
 	RetentionDays int    `json:"retention_days"`
 	CreatedAt     string `json:"created_at"`
 	RotatedAt     string `json:"rotated_at,omitempty"`
+	TemplateID    string `json:"template_id,omitempty"`
+}
+
+// AccountExportTemplate is one catalogue template in config.json.
+type AccountExportTemplate struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	CreatedAt   string `json:"created_at"`
 }
 
 // AccountExportConfig is the tenant-owned portion of config.json.
@@ -85,6 +94,7 @@ type AccountExportConfig struct {
 	VirtualModels  []AccountExportVirtualModel  `json:"virtual_models"`
 	VirtualTargets []AccountExportVirtualTarget `json:"virtual_targets"`
 	ClientKeys     []AccountExportClientKey     `json:"client_keys"`
+	Templates      []AccountExportTemplate      `json:"catalogue_templates"`
 }
 
 // BuildAccountExportConfig reads the account's providers, catalogue, virtual
@@ -99,6 +109,7 @@ func (s *Scope) BuildAccountExportConfig(ctx context.Context) (AccountExportConf
 		VirtualModels:  []AccountExportVirtualModel{},
 		VirtualTargets: []AccountExportVirtualTarget{},
 		ClientKeys:     []AccountExportClientKey{},
+		Templates:      []AccountExportTemplate{},
 	}
 
 	settingRows, err := s.q.QueryContext(ctx, `SELECT key,value FROM settings WHERE account_id=?`, s.accountID)
@@ -224,14 +235,14 @@ func (s *Scope) BuildAccountExportConfig(ctx context.Context) (AccountExportConf
 		return cfg, err
 	}
 
-	clientRows, err := s.q.QueryContext(ctx, `SELECT id,name,description,key_group,key_type,enabled,retention_days,created_at,coalesce(rotated_at,'') FROM client_keys WHERE account_id=? ORDER BY name`, s.accountID)
+	clientRows, err := s.q.QueryContext(ctx, `SELECT id,name,description,key_group,key_type,enabled,retention_days,created_at,coalesce(rotated_at,''),coalesce(template_id,'') FROM client_keys WHERE account_id=? ORDER BY name`, s.accountID)
 	if err != nil {
 		return cfg, err
 	}
 	for clientRows.Next() {
 		var v AccountExportClientKey
 		var enabled int
-		if err := clientRows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Type, &enabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt); err != nil {
+		if err := clientRows.Scan(&v.ID, &v.Name, &v.Description, &v.Group, &v.Type, &enabled, &v.RetentionDays, &v.CreatedAt, &v.RotatedAt, &v.TemplateID); err != nil {
 			clientRows.Close()
 			return cfg, err
 		}
@@ -241,7 +252,26 @@ func (s *Scope) BuildAccountExportConfig(ctx context.Context) (AccountExportConf
 	if err := clientRows.Close(); err != nil {
 		return cfg, err
 	}
-	return cfg, clientRows.Err()
+	if err := clientRows.Err(); err != nil {
+		return cfg, err
+	}
+
+	templateRows, err := s.q.QueryContext(ctx, `SELECT id,name,description,created_at FROM catalogue_templates WHERE account_id=? ORDER BY name`, s.accountID)
+	if err != nil {
+		return cfg, err
+	}
+	for templateRows.Next() {
+		var v AccountExportTemplate
+		if err := templateRows.Scan(&v.ID, &v.Name, &v.Description, &v.CreatedAt); err != nil {
+			templateRows.Close()
+			return cfg, err
+		}
+		cfg.Templates = append(cfg.Templates, v)
+	}
+	if err := templateRows.Close(); err != nil {
+		return cfg, err
+	}
+	return cfg, templateRows.Err()
 }
 
 // FirstRoutedRequestAt returns the created_at timestamp of the account's

@@ -57,8 +57,12 @@ var TableClassification = map[string]TableClass{
 	"client_group_defaults":        ClassTenant,
 	"client_model_permissions":     ClassTenant,
 	"client_single_bindings":       ClassTenant,
-	"settings":                     ClassTenant,
-	"api_tokens":                   ClassTenant,
+	// Catalogue templates and their permission matrix (migration 053).
+	"catalogue_templates":                  ClassTenant,
+	"catalogue_template_group_defaults":    ClassTenant,
+	"catalogue_template_model_permissions": ClassTenant,
+	"settings":                             ClassTenant,
+	"api_tokens":                           ClassTenant,
 	// Audit events are tenant-owned in the core database. account_id is
 	// historical attribution and deliberately has no FK to accounts, so
 	// retained audit history survives account deletion.

@@ -112,6 +112,71 @@ func TestChatMessagesRoundTripPreservesToolIDsAndArguments(t *testing.T) {
 	}
 }
 
+func TestTranslateSystemInstructions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		from    providers.Protocol
+		body    string
+		want    string
+		wantErr bool
+	}{
+		{name: "string", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":"one"},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"}]`},
+		{name: "blocks", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"},{"type":"text","text":"two"}]`},
+		{name: "mixed", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":"one"},{"role":"developer","content":[{"type":"text","text":"two"},{"type":"text","text":"three"}]},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"},{"type":"text","text":"two"},{"type":"text","text":"three"}]`},
+		{name: "responses", from: providers.ProtocolResponses, body: `{"instructions":"one","input":"hello"}`, want: `[{"type":"text","text":"one"}]`},
+		{name: "absent", from: providers.ProtocolChat, body: `{"messages":[{"role":"user","content":"hello"}]}`},
+		{name: "empty blocks", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[]},{"role":"user","content":"hello"}]}`},
+		{name: "non-text", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[{"type":"image_url","text":"secret"}]}]}`, wantErr: true},
+		{name: "malformed", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[{"type":"text","text":42}]}]}`, wantErr: true},
+		{name: "invalid shape", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":null}]}`, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			translated, err := translateRequest([]byte(tc.body), tc.from, providers.ProtocolMessages, "target")
+			if tc.wantErr {
+				if err == nil || strings.Contains(err.Error(), "secret") {
+					t.Fatalf("expected safe translation error, got %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got map[string]any
+			if err := json.Unmarshal(translated, &got); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if _, ok := got["system"]; ok {
+					t.Fatalf("unexpected system: %#v", got["system"])
+				}
+			} else {
+				var want any
+				if err := json.Unmarshal([]byte(tc.want), &want); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got["system"], want) {
+					t.Fatalf("system = %#v, want %#v", got["system"], want)
+				}
+			}
+			messages, ok := got["messages"].([]any)
+			if !ok || len(messages) != 1 || messages[0].(map[string]any)["role"] != "user" {
+				t.Fatalf("messages = %#v, want one user message", got["messages"])
+			}
+			if !strings.Contains(string(translated), "hello") {
+				t.Fatal("user content lost")
+			}
+		})
+	}
+	t.Run("native passthrough", func(t *testing.T) {
+		body := []byte(`{"system":[{"type":"text","text":"one"}],"messages":[{"role":"user","content":"hello"}]}`)
+		got, err := translateRequest(body, providers.ProtocolMessages, providers.ProtocolMessages, "target")
+		if err != nil || !bytes.Equal(got, body) {
+			t.Fatalf("native request changed: %s, %v", got, err)
+		}
+	})
+}
+
 func TestChatToResponsesFoldsSystemAndDeveloperIntoInstructions(t *testing.T) {
 	t.Parallel()
 	body := []byte(`{"model":"virtual/coding","messages":[{"role":"user","content":"hello"},{"role":"system","content":[{"type":"text","text":"system rule"}]},{"role":"developer","content":[{"type":"text","text":"developer rule"}]}]}`)

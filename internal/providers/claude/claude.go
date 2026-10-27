@@ -16,7 +16,8 @@ const (
 	AuthorizeURL   = "https://claude.ai/oauth/authorize"
 	TokenURL       = "https://api.anthropic.com/v1/oauth/token"
 	DefaultBaseURL = "https://api.anthropic.com/v1"
-	UserAgent      = "claude-cli/2.1.251 (external, sdk-cli)"
+	CLIVersion     = "2.1.311"
+	UserAgent      = "claude-cli/" + CLIVersion + " (external, sdk-cli)"
 	BetaHeader     = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
 )
 
@@ -27,6 +28,12 @@ const (
 // hosted deployments keep paste-back for claude-subscription. This is a
 // provider-scoped compatibility fact, not a model-ID guess.
 const RedirectCallbackSupported = false
+
+// ManualRedirectURI is the redirect URI registered for the Claude Code OAuth
+// client that displays the authorization code (as code#state) for the user to
+// paste back. The client rejects any other host, including the router's own
+// /auth/callback, with "Redirect URI ... is not supported by client".
+const ManualRedirectURI = "https://platform.claude.com/oauth/code/callback"
 
 var Scopes = []string{"org:create_api_key", "user:profile", "user:inference"}
 
@@ -47,7 +54,17 @@ func AuthorizationURL(redirectURI, state, challenge string) (string, error) {
 }
 
 func ParseCallback(raw string) (oauth.Callback, error) {
-	u, err := url.Parse(strings.TrimSpace(raw))
+	raw = strings.TrimSpace(raw)
+	// The manual redirect page shows a bare "<code>#<state>" string, not a URL.
+	if !strings.Contains(raw, "://") {
+		code, state, ok := strings.Cut(raw, "#")
+		code, state = strings.TrimSpace(code), strings.TrimSpace(state)
+		if !ok || code == "" || state == "" || strings.ContainsAny(raw, " \t\r\n?&") {
+			return oauth.Callback{}, oauth.ErrCallback
+		}
+		return oauth.Callback{Code: code, State: state}, nil
+	}
+	u, err := url.Parse(raw)
 	if err != nil || !u.IsAbs() || u.Host == "" || u.Scheme != "http" && u.Scheme != "https" {
 		return oauth.Callback{}, oauth.ErrCallback
 	}
@@ -77,7 +94,7 @@ func Exchange(ctx context.Context, client *http.Client, code, redirectURI, verif
 	if hash := strings.IndexByte(code, '#'); hash >= 0 {
 		code, state = code[:hash], code[hash+1:]
 	}
-	body := map[string]string{"code": code, "grant_type": "authorization_code", "client_id": ClientID, "redirect_uri": redirectURI, "code_verifier": verifier}
+	body := map[string]string{"code": code, "grant_type": "authorization_code", "client_id": ClientID, "redirect_uri": redirectURI, "code_verifier": verifier, "state": state}
 	return tokenRequest(ctx, client, http.MethodPost, TokenURL, "application/json", body)
 }
 

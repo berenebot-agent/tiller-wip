@@ -49,6 +49,8 @@ type clientKeyView struct {
 	SingleTargetType      string  `json:"single_target_type,omitempty"`
 	SingleTargetID        string  `json:"single_target_id,omitempty"`
 	SingleTargetCanonical string  `json:"single_target_canonical,omitempty"`
+	TemplateID            string  `json:"template_id,omitempty"`
+	TemplateName          string  `json:"template_name,omitempty"`
 }
 
 var clientModelNamePattern = regexp.MustCompile(`^[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?$`)
@@ -85,6 +87,8 @@ func (s *Server) listClientKeys(w http.ResponseWriter, r *http.Request) {
 			SingleTargetType:      row.SingleTargetType,
 			SingleTargetID:        row.SingleTargetID,
 			SingleTargetCanonical: row.SingleTargetCanonical,
+			TemplateID:            row.TemplateID,
+			TemplateName:          row.TemplateName,
 		}
 		if row.RotatedAt.Valid {
 			rotated := row.RotatedAt.String
@@ -104,6 +108,7 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		SingleModelName  string `json:"single_model_name"`
 		SingleTargetType string `json:"single_target_type"`
 		SingleTargetID   string `json:"single_target_id"`
+		TemplateID       string `json:"template_id"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -132,6 +137,10 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		}
 		if input.SingleTargetID == "" {
 			adminError(w, 400, "target_required", "A Single client key requires a target.")
+			return
+		}
+		if input.TemplateID != "" {
+			adminError(w, 400, "invalid_template", "Only Catalogue client keys can use a catalogue template.")
 			return
 		}
 	}
@@ -164,11 +173,14 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		SingleModelName:  input.SingleModelName,
 		SingleTargetType: input.SingleTargetType,
 		SingleTargetID:   input.SingleTargetID,
+		TemplateID:       input.TemplateID,
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrSingleTargetNotFound):
 			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
+		case errors.Is(err, store.ErrTemplateNotFound):
+			adminError(w, 400, "invalid_template", "The selected catalogue template does not exist.")
 		case database.IsConstraint(err):
 			adminError(w, 409, "name_conflict", "A client key with that name already exists.")
 		case writeLimitExceeded(w, err):
@@ -205,6 +217,9 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		SingleTargetType       *string `json:"single_target_type"`
 		SingleTargetID         *string `json:"single_target_id"`
 		ConfirmModelNameChange bool    `json:"confirm_model_name_change"`
+		// TemplateID links a Catalogue key to a catalogue template; "" detaches
+		// it to Custom. Absent leaves the link unchanged.
+		TemplateID *string `json:"template_id"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -270,6 +285,20 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	if keyType != "catalogue" && keyType != "single" {
 		adminError(w, 400, "invalid_client_type", "Client key type must be catalogue or single.")
 		return
+	}
+	// A Single key never carries a template; changing to Single clears it.
+	templateSet, templateID := false, ""
+	if input.TemplateID != nil {
+		templateSet, templateID = true, strings.TrimSpace(*input.TemplateID)
+	}
+	if keyType == "single" {
+		if templateID != "" {
+			adminError(w, 400, "invalid_template", "Only Catalogue client keys can use a catalogue template.")
+			return
+		}
+		if current.TemplateID != "" {
+			templateSet = true
+		}
 	}
 	binding, bindFound, err := sc.GetSingleBinding(r.Context(), clientID)
 	if err != nil {
@@ -337,11 +366,15 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		ModelName:      modelName,
 		TargetType:     targetType,
 		TargetID:       targetID,
+		TemplateID:     templateID,
+		TemplateSet:    templateSet,
 	})
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrSingleTargetNotFound):
 			adminError(w, 400, "invalid_target", "The selected Single-key target does not exist.")
+		case errors.Is(err, store.ErrTemplateNotFound):
+			adminError(w, 400, "invalid_template", "The selected catalogue template does not exist.")
 		case errors.Is(err, store.ErrClientKeyNotFound):
 			adminError(w, 404, "not_found", "Client key not found.")
 		case database.IsConstraint(err):
@@ -382,6 +415,9 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.SingleTargetType != nil {
 		changed = append(changed, "single_target")
+	}
+	if templateSet {
+		changed = append(changed, "template")
 	}
 	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
 		Event:      "client_key.updated",
@@ -472,6 +508,21 @@ type permissionModel struct {
 	Available        bool   `json:"available"`
 }
 
+// permissionGroupsView converts a store permission matrix to its JSON view.
+func permissionGroupsView(groups []store.PermissionGroupRow) []permissionGroup {
+	view := make([]permissionGroup, 0, len(groups))
+	for _, g := range groups {
+		pg := permissionGroup{Kind: g.Kind, ID: g.ID, Name: g.Name, NewModelsEnabled: g.NewModelsEnabled, Models: make([]permissionModel, 0, len(g.Models))}
+		for _, m := range g.Models {
+			pg.Models = append(pg.Models, permissionModel{Kind: m.Kind, ID: m.ID, CanonicalModelID: m.CanonicalModelID, Enabled: m.Enabled, Available: m.Available})
+		}
+		view = append(view, pg)
+	}
+	return view
+}
+
+const feederExplanation = "Controls whether models discovered or created in future are enabled for this client. Changing it never alters existing model permissions."
+
 func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 	clientID := r.PathValue("id")
 	groups, err := s.scope(r).ListPermissions(r.Context(), clientID)
@@ -482,18 +533,12 @@ func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load permissions.")
 		return
 	}
-	view := make([]permissionGroup, 0, len(groups))
-	for _, g := range groups {
-		pg := permissionGroup{Kind: g.Kind, ID: g.ID, Name: g.Name, NewModelsEnabled: g.NewModelsEnabled, Models: make([]permissionModel, 0, len(g.Models))}
-		for _, m := range g.Models {
-			pg.Models = append(pg.Models, permissionModel{Kind: m.Kind, ID: m.ID, CanonicalModelID: m.CanonicalModelID, Enabled: m.Enabled, Available: m.Available})
-		}
-		view = append(view, pg)
-	}
-	writeJSON(w, 200, map[string]any{"client_key_id": clientID, "groups": view, "feeder_explanation": "Controls whether models discovered or created in future are enabled for this client. Changing it never alters existing model permissions."})
+	writeJSON(w, 200, map[string]any{"client_key_id": clientID, "groups": permissionGroupsView(groups), "feeder_explanation": feederExplanation})
 }
 
-func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
+// decodePermissionUpdates reads a permission-matrix PUT body. It writes the
+// error response and returns ok=false when the body is invalid.
+func decodePermissionUpdates(w http.ResponseWriter, r *http.Request) (defaults []store.PermissionDefaultUpdate, permissions []store.PermissionModelUpdate, ok bool) {
 	var input struct {
 		Defaults []struct {
 			Kind    string `json:"kind"`
@@ -508,34 +553,44 @@ func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
-		return
+		return nil, nil, false
 	}
-	clientID := r.PathValue("id")
 	for _, d := range input.Defaults {
 		if d.Kind != "real" && d.Kind != "virtual" {
 			adminError(w, 400, "invalid_permission", "Invalid group kind.")
-			return
+			return nil, nil, false
 		}
 	}
 	for _, p := range input.Permissions {
 		if p.Kind != "real" && p.Kind != "virtual" {
 			adminError(w, 400, "invalid_permission", "Invalid model kind.")
-			return
+			return nil, nil, false
 		}
 	}
-	defaults := make([]store.PermissionDefaultUpdate, 0, len(input.Defaults))
+	defaults = make([]store.PermissionDefaultUpdate, 0, len(input.Defaults))
 	for _, d := range input.Defaults {
 		defaults = append(defaults, store.PermissionDefaultUpdate{Kind: d.Kind, GroupID: d.GroupID, Enabled: d.Enabled})
 	}
-	permissions := make([]store.PermissionModelUpdate, 0, len(input.Permissions))
+	permissions = make([]store.PermissionModelUpdate, 0, len(input.Permissions))
 	for _, p := range input.Permissions {
 		permissions = append(permissions, store.PermissionModelUpdate{Kind: p.Kind, ModelID: p.ModelID, Enabled: p.Enabled})
 	}
+	return defaults, permissions, true
+}
+
+func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
+	defaults, permissions, ok := decodePermissionUpdates(w, r)
+	if !ok {
+		return
+	}
+	clientID := r.PathValue("id")
 	err := s.scope(r).UpdatePermissions(r.Context(), clientID, defaults, permissions)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrClientKeyNotFound):
 			adminError(w, 404, "not_found", "Client key not found.")
+		case errors.Is(err, store.ErrClientLinkedToTemplate):
+			adminError(w, 409, "client_linked_to_template", "This client uses a catalogue template. Edit the template, or switch the client to Custom first.")
 		case errors.Is(err, store.ErrPermissionGroupNotFound):
 			adminError(w, 400, "invalid_permission", "Unknown permission group.")
 		case errors.Is(err, store.ErrPermissionModelNotFound):
