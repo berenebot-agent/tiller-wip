@@ -505,6 +505,17 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   // Switch catalogue -> single via Settings and pick a target.
   await row.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(page.locator('#form-dialog')).toBeVisible();
+  const settings = page.locator('#form-dialog');
+  await settings.locator('[name="description"]').fill('Unsaved settings');
+  await settings.getByRole('radio', { name: 'On', exact: true }).check();
+  await settings.locator('[data-open-catalogue]').click();
+  await page.locator('#cancel-permissions').click();
+  await expect(settings.locator('[name="description"]')).toHaveValue('Unsaved settings');
+  await expect(settings.getByRole('radio', { name: 'On', exact: true })).toBeChecked();
+  await settings.locator('[data-open-catalogue]').click();
+  await page.locator('#save-permissions').click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
+  await expect(settings.locator('[name="description"]')).toHaveValue('Unsaved settings');
   await page.locator('#form-dialog select[name="type"]').selectOption('single');
   await page.locator('[data-single-target] input[type="text"]').click();
   await page.getByRole('option', { name: `Real · ${providerName}/mock-model` }).click();
