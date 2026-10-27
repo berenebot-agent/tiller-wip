@@ -1911,19 +1911,19 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
   const selectedType = client?.type || defaultType;
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
-  const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
+  const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select></label>`;
   // The template-or-Custom choice lives on the catalogue screen; Settings only
   // links to it for an existing Catalogue client.
   const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><span>Catalogue</span><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} — manage ›</button></div>` : '';
   // Detailed error bodies are opt-in per client. Hosted mode never captures
   // them, so the control is hidden there.
   const bodyLog = client?.log_error_bodies || 'inherit';
-  const bodyLogField = runtimeMode === 'hosted' ? '' : `<label>Detailed error bodies <select name="log_error_bodies"><option value="inherit" ${bodyLog === 'inherit' ? 'selected' : ''}>Inherit account setting</option><option value="always" ${bodyLog === 'always' ? 'selected' : ''}>Always capture</option><option value="never" ${bodyLog === 'never' ? 'selected' : ''}>Never capture</option></select><small>Failed request and provider error bodies are stored only when account-wide detailed error logging is on — unless this client is set to Always.</small></label>`;
-  const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Client key enabled</label><label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label>${bodyLogField}<label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
+  const bodyLogField = runtimeMode === 'hosted' ? '' : `<fieldset class="client-body-log"><legend>Log error bodies</legend><div class="client-body-log-options">${[['inherit', 'Account default'], ['always', 'On'], ['never', 'Off']].map(([value, label]) => `<label><input type="radio" name="log_error_bodies" value="${value}" ${bodyLog === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>`;
+  const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label>${bodyLogField}<label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
     title: client ? `Settings · ${client.name}` : 'Create client',
-    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueField}${singleFields}${operationalFields}<label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label>`,
+    fields: `<div class="client-name-settings"><label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Enabled</label>` : ''}</div><label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueField}${singleFields}${operationalFields}`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
       const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
@@ -1931,7 +1931,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
       const catalogueFields = $('[data-catalogue-fields]', form);
       const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; if (catalogueFields) catalogueFields.hidden = typeSelect.value !== 'catalogue'; };
       const catalogueLink = $('[data-open-catalogue]', form);
-      if (catalogueLink) catalogueLink.onclick = () => { $('#form-dialog').close(); openPermissions(client); };
+      if (catalogueLink) catalogueLink.onclick = () => openPermissions(client);
       typeSelect.onchange = syncType;
       syncType();
       if (client?.type === 'single') {
@@ -2245,6 +2245,11 @@ $('#save-permissions').onclick = async () => {
     const hook = permissionsSavedHook; permissionsSavedHook = null;
     $('#permissions-dialog').close();
     await loadClients();
+    if (target.kind === 'client' && $('#form-dialog').open) {
+      const client = state.clients.find(item => item.id === target.id);
+      const link = $('[data-open-catalogue]', $('#form-dialog'));
+      if (client && link) link.textContent = `${catalogueLabel(client)} — manage ›`;
+    }
     if ($('#templates-dialog').open) renderTemplates();
     if (hook) await hook();
   } catch (error) { $('#permissions-error').textContent = errorMessage(error); }
