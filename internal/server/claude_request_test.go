@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/providers"
@@ -33,26 +34,37 @@ func TestNormalizeClaudeRequest(t *testing.T) {
 			_ = json.Unmarshal(body, &before)
 			_ = json.Unmarshal(got, &after)
 			var system []map[string]json.RawMessage
-			if err := json.Unmarshal(after["system"], &system); err != nil || len(system) != tc.want {
+			if err := json.Unmarshal(after["system"], &system); err != nil || len(system) != tc.want+1 {
 				t.Fatal("wrong system block count")
 			}
+			var billing string
+			_ = json.Unmarshal(system[0]["text"], &billing)
+			if !strings.HasPrefix(billing, "x-anthropic-billing-header: cc_version=") {
+				t.Fatal("missing billing identity")
+			}
 			var identity string
-			_ = json.Unmarshal(system[0]["text"], &identity)
+			_ = json.Unmarshal(system[1]["text"], &identity)
 			if identity != claudeSubscriptionSystem {
 				t.Fatal("missing subscription envelope")
 			}
 			if tc.want == 2 {
 				var text string
-				_ = json.Unmarshal(system[1]["text"], &text)
+				_ = json.Unmarshal(system[2]["text"], &text)
 				if text != "caller instructions" {
 					t.Fatal("caller instructions changed")
 				}
-				if tc.name == "blocks" && !bytes.Equal(system[1]["cache_control"], []byte(`{"type":"ephemeral"}`)) {
+				if tc.name == "blocks" && !bytes.Equal(system[2]["cache_control"], []byte(`{"type":"ephemeral"}`)) {
 					t.Fatal("cache control changed")
 				}
 			}
 			delete(before, "system")
 			delete(after, "system")
+			var metadata map[string]json.RawMessage
+			if err := json.Unmarshal(after["metadata"], &metadata); err != nil || len(metadata["user_id"]) == 0 || string(metadata["sequence"]) != "9007199254740993" {
+				t.Fatal("metadata was not preserved and extended")
+			}
+			delete(metadata, "user_id")
+			after["metadata"], _ = json.Marshal(metadata)
 			if !reflect.DeepEqual(before, after) {
 				t.Fatal("unrelated request fields changed")
 			}
@@ -77,6 +89,20 @@ func TestNormalizeClaudeRequestRejectsMalformedSystem(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeRequestPreservesUserID(t *testing.T) {
+	body := []byte(`{"metadata":{"user_id":"existing","other":true}}`)
+	got, err := normalizeClaudeRequest(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result struct {
+		Metadata map[string]json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(got, &result); err != nil || string(result.Metadata["user_id"]) != `"existing"` || string(result.Metadata["other"]) != "true" {
+		t.Fatal("existing metadata changed")
+	}
+}
+
 func TestClaudeSubscriptionTranslation(t *testing.T) {
 	for _, tc := range []struct {
 		protocol providers.Protocol
@@ -97,7 +123,7 @@ func TestClaudeSubscriptionTranslation(t *testing.T) {
 		var body map[string]json.RawMessage
 		_ = json.Unmarshal(got, &body)
 		var system []map[string]string
-		if err := json.Unmarshal(body["system"], &system); err != nil || len(system) != 2 || system[0]["text"] != claudeSubscriptionSystem || system[1]["text"] != "caller instructions" {
+		if err := json.Unmarshal(body["system"], &system); err != nil || len(system) != 3 || system[1]["text"] != claudeSubscriptionSystem || system[2]["text"] != "caller instructions" {
 			t.Fatal("translated caller instructions were not preserved after envelope")
 		}
 	}

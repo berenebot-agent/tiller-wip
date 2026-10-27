@@ -16,7 +16,8 @@ const (
 	AuthorizeURL   = "https://claude.ai/oauth/authorize"
 	TokenURL       = "https://api.anthropic.com/v1/oauth/token"
 	DefaultBaseURL = "https://api.anthropic.com/v1"
-	UserAgent      = "claude-cli/2.1.251 (external, sdk-cli)"
+	CLIVersion     = "2.1.251"
+	UserAgent      = "claude-cli/" + CLIVersion + " (external, sdk-cli)"
 	BetaHeader     = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14"
 )
 
