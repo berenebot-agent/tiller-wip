@@ -45,7 +45,7 @@ auto_workers() {
 }
 
 workers=${TILLER_BROWSER_WORKERS:-${PLAYWRIGHT_WORKERS:-$(auto_workers)}}
-specs=(admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js)
+specs=(admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js templates.spec.js)
 if [ -n "${TILLER_BROWSER_SPECS:-}" ]; then
     read -r -a specs <<< "$TILLER_BROWSER_SPECS"
     workers=1

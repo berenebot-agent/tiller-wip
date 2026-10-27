@@ -1678,9 +1678,9 @@ async function deleteVirtualModel(id) { const model = state.virtualModels.find(i
 async function loadClients() {
   const token = ++state.loadToken;
   const search = $('#client-search').value, group = $('#client-group-filter').value;
-  const [result, models, virtual, providers] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200')]);
+  const [result, models, virtual, providers, templates] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200'), api('/api/admin/catalogue-templates')]);
   if (token !== state.loadToken) return;
-  state.clients = result.data; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data;
+  state.clients = result.data; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data; state.templates = templates.data;
   renderClientGroupFilter();
   renderClients();
   deferUsage();
@@ -1821,14 +1821,17 @@ if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', repositionOpenLists);
   window.visualViewport.addEventListener('scroll', repositionOpenLists);
 }
+// catalogueLabel names a Catalogue client's model set: its linked template, or
+// Custom for a client with its own permissions.
+function catalogueLabel(client) { return client.template_id ? `Template · ${client.template_name}` : 'Custom'; }
 function clientCard(client) {
   const statusDot = `<span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span>`;
   const routeSummary = client.type === 'single'
     ? `<code class="model-id">${h(client.single_target_canonical || 'Unavailable target')}</code>`
-    : `<span class="meta-line">Catalogue — model permissions</span>`;
+    : `<span class="meta-line">Catalogue — ${client.template_id ? `template ${h(client.template_name)}` : 'custom model permissions'}</span>`;
   const quickAction = client.type === 'single'
     ? `<button class="client-route-button" data-client-route="${h(client.id)}" aria-label="Change route for ${h(client.name)}"><span>Current model</span><strong>${h(client.single_target_canonical || 'Unavailable target')}</strong><i aria-hidden="true">›</i></button>`
-    : `<button class="client-permission-button" data-client-models="${h(client.id)}" aria-label="Manage permissions for ${h(client.name)}"><span>Catalogue</span><strong>Manage permissions</strong><i aria-hidden="true">›</i></button>`;
+    : `<button class="client-permission-button" data-client-models="${h(client.id)}" aria-label="Manage permissions for ${h(client.name)}"><span>Catalogue</span><strong>${h(catalogueLabel(client))}</strong><i aria-hidden="true">›</i></button>`;
   return `<article class="client-card" data-client-id="${h(client.id)}">
     <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
       ${statusDot}
@@ -1859,7 +1862,7 @@ function clientCard(client) {
 function clientRow(client) {
   const routeCell = client.type === 'single'
     ? `<div class="client-route-picker" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
-    : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>Catalogue permissions</strong><i aria-hidden="true">›</i></button>`;
+    : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>${h(catalogueLabel(client))}</strong><i aria-hidden="true">›</i></button>`;
   return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong>${estimatedMark(client.id)}</div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h', state.usage?.client_cost?.[client.id]?.['1h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h', state.usage?.client_cost?.[client.id]?.['24h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d', state.usage?.client_cost?.[client.id]?.['7d'], state.usage?.client_tokens?.[client.id])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
@@ -1909,6 +1912,10 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const selectedType = client?.type || defaultType;
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select><small>Single — Expose one model to the client and route all requests to that single model.</small><small>Catalogue — Choose which real and virtual models the client can access.</small></label>`;
+  // A Catalogue client either links to a catalogue template or keeps its own
+  // Custom selection. The first-run wizard (onSaved) always creates Custom.
+  const templateOptions = (state.templates || []).map(t => `<option value="${h(t.id)}" ${client?.template_id === t.id ? 'selected' : ''}>${h(t.name)}</option>`).join('');
+  const catalogueField = onSaved ? '' : `<label data-catalogue-fields>Catalogue <select name="template_id"><option value="">Custom — choose this client's models yourself</option>${templateOptions}</select><small>A template keeps this client's models in step with every change to the template. Switching to Custom keeps the current models as a starting point.</small></label>`;
   // Detailed error bodies are opt-in per client. Hosted mode never captures
   // them, so the control is hidden there.
   const bodyLog = client?.log_error_bodies || 'inherit';
@@ -1917,12 +1924,13 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
     title: client ? `Settings · ${client.name}` : 'Create client',
-    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${singleFields}${operationalFields}<label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label>`,
+    fields: `<label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueField}${singleFields}${operationalFields}<label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label>`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
       const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
       mountSingleTargetPicker($('[data-single-target]', form), client);
-      const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; };
+      const catalogueFields = $('[data-catalogue-fields]', form);
+      const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; if (catalogueFields) catalogueFields.hidden = typeSelect.value !== 'catalogue'; };
       typeSelect.onchange = syncType;
       syncType();
       if (client?.type === 'single') {
@@ -1947,6 +1955,9 @@ function openClient(client = null, onSaved = null, defaultType = null) {
           payload.single_target_type = selected.slice(0, split);
           payload.single_target_id = selected.slice(split + 1);
           payload.confirm_model_name_change = values.get('confirm_model_name_change') === 'on';
+        } else {
+          const templateID = String(values.get('template_id') || '');
+          if (templateID !== (client.template_id || '')) payload.template_id = templateID;
         }
         await api(`/api/admin/client-keys/${client.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
         flash('Client settings updated.');
@@ -1958,6 +1969,8 @@ function openClient(client = null, onSaved = null, defaultType = null) {
           payload.single_model_name = values.get('single_model_name');
           payload.single_target_type = selected.slice(0, split);
           payload.single_target_id = selected.slice(split + 1);
+        } else if (values.get('template_id')) {
+          payload.template_id = values.get('template_id');
         }
         const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify(payload) });
         loadPlanSnapshot(true);
@@ -1973,18 +1986,103 @@ async function rotateClient(id) { const client = state.clients.find(item => item
 async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); loadPlanSnapshot(true); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 let permissionsSavedHook = null;
-async function openPermissions(client, onSaved = null) {
+// permissionTarget is whose matrix the permissions dialog shows: a client key
+// or a catalogue template. A client linked to a template mirrors it, so its
+// matrix is shown read-only with a link to edit the template instead.
+let permissionTarget = null;
+function permissionURL(target) { return target.kind === 'template' ? `/api/admin/catalogue-templates/${target.id}/permissions` : `/api/admin/client-keys/${target.id}/permissions`; }
+function openPermissions(client, onSaved = null) {
+  return openPermissionMatrix({ kind: 'client', id: client.id, name: client.name, templateID: client.template_id || '', templateName: client.template_name || '' }, onSaved);
+}
+function openTemplatePermissions(template) {
+  return openPermissionMatrix({ kind: 'template', id: template.id, name: template.name, clientCount: template.client_count || 0 });
+}
+async function openPermissionMatrix(target, onSaved = null) {
   permissionsSavedHook = onSaved;
   try {
-    state.permissionData = await api(`/api/admin/client-keys/${client.id}/permissions`);
-    state.modelClient = client;
-    $('#permissions-title').textContent = `Manage models · ${client.name}`;
+    state.permissionData = await api(permissionURL(target));
+    permissionTarget = target;
+    $('#permissions-error').textContent = '';
+    const readOnly = target.kind === 'client' && !!target.templateID;
+    const dialog = $('#permissions-dialog');
+    dialog.classList.toggle('permissions-readonly', readOnly);
+    $('#permissions-eyebrow').textContent = target.kind === 'template' ? 'CATALOGUE TEMPLATE' : 'CLIENT MODEL ACCESS';
+    $('#permissions-title').textContent = `Manage models · ${target.name}`;
+    const linked = $('#permission-linked');
+    linked.hidden = !readOnly && !(target.kind === 'template' && target.clientCount);
+    $('#permission-edit-template').hidden = !readOnly;
+    $('#permission-linked-copy').textContent = readOnly
+      ? `Linked to template ${target.templateName}. Edit the template, or switch this client to Custom in Settings.`
+      : `Used by ${target.clientCount} client${target.clientCount === 1 ? '' : 's'} — saving applies to all of them.`;
+    ['#enable-all-permissions', '#disable-all-permissions'].forEach(sel => { $(sel).disabled = readOnly; });
+    $('#save-permissions').hidden = readOnly;
+    $('#cancel-permissions').textContent = readOnly ? 'Close' : 'Cancel';
     $('#permission-search').value = '';
     renderPermissions();
-    $('#permissions-dialog').showModal();
+    if (readOnly) $$('input.switch, [data-group-enable], [data-group-disable]', $('#permission-groups')).forEach(el => { el.disabled = true; });
+    if (!dialog.open) dialog.showModal();
   }
   catch (error) { flash(errorMessage(error), 'error'); }
 }
+$('#permission-edit-template').onclick = () => {
+  const template = (state.templates || []).find(item => item.id === permissionTarget?.templateID);
+  if (template) openTemplatePermissions(template);
+};
+
+// Catalogue templates are saved model selections that Catalogue clients link
+// to. state.templates is refreshed with the clients list.
+function openTemplates() { renderTemplates(); $('#templates-dialog').showModal(); }
+function renderTemplates() {
+  const templates = state.templates || [];
+  $('#templates-empty').hidden = templates.length > 0;
+  $('#template-list').innerHTML = templates.map(t => `<div class="template-row"><div class="template-row-copy"><strong>${h(t.name)}</strong>${t.description ? `<small>${h(t.description)}</small>` : ''}<small>Used by ${t.client_count} client${t.client_count === 1 ? '' : 's'}</small></div><div class="template-row-actions"><button class="btn btn-small btn-secondary" type="button" data-template-models="${h(t.id)}">Edit models</button><button class="btn btn-small btn-secondary" type="button" data-template-rename="${h(t.id)}">Rename</button><button class="btn btn-small btn-danger" type="button" data-template-delete="${h(t.id)}">Delete</button></div></div>`).join('');
+  const find = id => templates.find(t => t.id === id);
+  $$('[data-template-models]', $('#template-list')).forEach(button => button.onclick = () => openTemplatePermissions(find(button.dataset.templateModels)));
+  $$('[data-template-rename]', $('#template-list')).forEach(button => button.onclick = () => openTemplateForm(find(button.dataset.templateRename)));
+  $$('[data-template-delete]', $('#template-list')).forEach(button => button.onclick = () => deleteTemplate(find(button.dataset.templateDelete)));
+}
+async function refreshTemplates() { await loadClients(); if ($('#templates-dialog').open) renderTemplates(); }
+function openTemplateForm(template = null) {
+  const sources = (state.clients || []).filter(c => c.type === 'catalogue');
+  const startField = template ? '' : `<label>Start from <select name="start_from"><option value="empty">Empty — no models enabled</option><option value="all">All models — every model, and new models as they appear</option>${sources.map(c => `<option value="client:${h(c.id)}">Copy of client ${h(c.name)}</option>`).join('')}</select><small>Only the starting selection — you can edit the models next.</small></label>`;
+  openEntity({
+    eyebrow: 'CATALOGUE TEMPLATE',
+    title: template ? `Rename · ${template.name}` : 'Create catalogue template',
+    fields: `<label>Template name <input name="name" value="${h(template?.name || '')}" maxlength="100" placeholder="Coding agents" required></label><label>Description <textarea name="description" rows="2" placeholder="Who uses it, or what it is for">${h(template?.description || '')}</textarea></label>${startField}`,
+    submit: template ? 'Save template' : 'Create template',
+    onSubmit: async form => {
+      const values = new FormData(form);
+      const payload = { name: values.get('name'), description: values.get('description') };
+      if (template) {
+        await api(`/api/admin/catalogue-templates/${template.id}`, { method: 'PATCH', body: JSON.stringify(payload) });
+        flash('Catalogue template updated.');
+        await refreshTemplates();
+        return;
+      }
+      const start = String(values.get('start_from') || 'empty');
+      if (start.startsWith('client:')) { payload.start_from = 'client'; payload.source_client_id = start.slice('client:'.length); }
+      else payload.start_from = start;
+      const result = await api('/api/admin/catalogue-templates', { method: 'POST', body: JSON.stringify(payload) });
+      flash('Catalogue template created.');
+      await refreshTemplates();
+      const created = (state.templates || []).find(t => t.id === result.id);
+      // Open the model list once the form dialog has closed.
+      if (created) setTimeout(() => openTemplatePermissions(created), 0);
+    }
+  });
+}
+async function deleteTemplate(template) {
+  const count = template.client_count || 0;
+  const names = (state.clients || []).filter(c => c.template_id === template.id).map(c => c.name);
+  const who = names.length === count && count ? ` (${names.join(', ')})` : '';
+  const copy = count ? `${count} client${count === 1 ? ' uses' : 's use'} this template${who}. ${count === 1 ? 'It' : 'They'} will switch to Custom and keep ${count === 1 ? 'its' : 'their'} current models.` : 'No clients use this template.';
+  if (!await confirmAction({ title: `Delete ${template.name}?`, copy, action: 'Delete template' })) return;
+  try { await api(`/api/admin/catalogue-templates/${template.id}`, { method: 'DELETE' }); flash('Catalogue template deleted.'); await refreshTemplates(); }
+  catch (error) { flash(errorMessage(error), 'error'); }
+}
+$('#open-templates').onclick = $('#open-templates-mobile').onclick = () => openTemplates();
+$('#close-templates').onclick = $('#done-templates').onclick = () => $('#templates-dialog').close();
+$('#add-template').onclick = () => openTemplateForm();
 // enableAllClientModels gives a freshly-created catalogue key access to every
 // currently-available model and turns on the per-group "new models default" so
 // future models in those groups are enabled too. Retired models keep whatever
@@ -2106,17 +2204,18 @@ $('#enable-all-permissions').onclick = () => bulkSetAllPermissions(true);
 $('#disable-all-permissions').onclick = () => bulkSetAllPermissions(false);
 $('#close-permissions').onclick = $('#cancel-permissions').onclick = () => { permissionsSavedHook = null; $('#permissions-dialog').close(); };
 $('#save-permissions').onclick = async () => {
-  const button = $('#save-permissions'), client = state.modelClient;
+  const button = $('#save-permissions'), target = permissionTarget;
   button.disabled = true;
   $('#permissions-error').textContent = '';
   try {
     const defaults = state.permissionData.groups.map(group => ({ kind: group.kind, group_id: group.id, enabled: group.new_models_enabled }));
     const permissions = state.permissionData.groups.flatMap(group => group.models.map(model => ({ kind: model.kind, model_id: model.id, enabled: model.enabled })));
-    await api(`/api/admin/client-keys/${client.id}/permissions`, { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
-    flash('Client catalogue permissions saved.');
+    await api(permissionURL(target), { method: 'PUT', body: JSON.stringify({ defaults, permissions }) });
+    flash(target.kind === 'template' ? 'Catalogue template saved.' : 'Client catalogue permissions saved.');
     const hook = permissionsSavedHook; permissionsSavedHook = null;
     $('#permissions-dialog').close();
     await loadClients();
+    if ($('#templates-dialog').open) renderTemplates();
     if (hook) await hook();
   } catch (error) { $('#permissions-error').textContent = errorMessage(error); }
   finally { button.disabled = false; }
