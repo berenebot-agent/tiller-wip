@@ -941,6 +941,16 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					}
 				}
 			}
+			if candidate.Provider.Type == "claude-subscription" && target == providers.ProtocolMessages {
+				attemptBody, err = normalizeClaudeRequest(attemptBody)
+				if err != nil {
+					row.httpStatus = 400
+					row.errorText = strPtr("invalid_request")
+					row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage("invalid_request"))
+					inferenceError(w, 400, "invalid_request_error", "invalid_request", "The Claude request could not be normalized.", incoming == providers.ProtocolMessages)
+					return
+				}
+			}
 			if candidate.Provider.Type == "codex-subscription" {
 				attemptBody, err = normalizeCodexRequest(attemptBody, candidate.ReasoningCapabilities)
 				if err != nil {
