@@ -504,10 +504,14 @@ func scanCache(rows *sql.Rows, keyCols int) (map[string]CacheWindows, error) {
 }
 
 func cachePct(read, input sql.NullFloat64) *float64 {
-	if !read.Valid || !input.Valid || input.Float64 <= 0 {
+	if !read.Valid || !input.Valid {
 		return nil
 	}
-	p := read.Float64 / input.Float64 * 100
+	total := input.Float64 + read.Float64
+	if total <= 0 {
+		return nil
+	}
+	p := read.Float64 / total * 100
 	return &p
 }
 

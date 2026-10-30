@@ -1312,8 +1312,9 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 		if u, ok := usage.(map[string]any); ok {
 			// Anthropic's total_tokens is the canonical sum when present;
 			// otherwise it must include cached input tokens (input_tokens
-			// excludes cache_read), not just input+output.
-			usage = map[string]any{"prompt_tokens": u["input_tokens"], "completion_tokens": u["output_tokens"], "total_tokens": anthropicTotalTokens(u)}
+			// excludes cache_read), not just input+output. prompt_tokens
+			// includes cached input for the same reason.
+			usage = map[string]any{"prompt_tokens": openAIPromptTokens(u), "completion_tokens": u["output_tokens"], "total_tokens": anthropicTotalTokens(u)}
 		}
 	} else {
 		content := []any{}
@@ -1655,8 +1656,17 @@ func (state *streamState) aggregatedNonstreamChat(incoming providers.Protocol, m
 	}
 	outUsage := map[string]any{}
 	if usage != nil {
+		// Anthropic's input_tokens excludes cached input while OpenAI's
+		// prompt_tokens includes it, so both carry the whole prompt here.
+		var cached int64
+		if usage.cacheReadInputTokens != nil {
+			cached += *usage.cacheReadInputTokens
+		}
+		if usage.cacheCreationInputTokens != nil {
+			cached += *usage.cacheCreationInputTokens
+		}
 		if usage.inputTokens != nil {
-			outUsage["prompt_tokens"] = *usage.inputTokens
+			outUsage["prompt_tokens"] = *usage.inputTokens + cached
 			outUsage["input_tokens"] = *usage.inputTokens
 		}
 		if usage.outputTokens != nil {
@@ -1664,7 +1674,7 @@ func (state *streamState) aggregatedNonstreamChat(incoming providers.Protocol, m
 			outUsage["output_tokens"] = *usage.outputTokens
 		}
 		if usage.inputTokens != nil && usage.outputTokens != nil {
-			outUsage["total_tokens"] = *usage.inputTokens + *usage.outputTokens
+			outUsage["total_tokens"] = *usage.inputTokens + cached + *usage.outputTokens
 		}
 		if usage.cacheReadInputTokens != nil {
 			outUsage["cache_read_input_tokens"] = *usage.cacheReadInputTokens
@@ -1775,11 +1785,15 @@ type streamState struct {
 	toolCalls                                                  []*toolCallState
 	toolAliases                                                map[string]*toolCallState
 	toolArgumentBytes                                          int
-	messagesToolsWritten                                       bool
-	inputTokens                                                int64
-	outputTokens                                               int64
-	hasInputTokens                                             bool
-	hasOutputTokens                                            bool
+	// Anthropic cache counts for a Chat/Responses client, which fold them into
+	// prompt_tokens because prompt_tokens includes cached input.
+	hasCacheReadTokens, hasCacheCreationTokens bool
+	cacheReadTokens, cacheCreationTokens       int64
+	messagesToolsWritten                       bool
+	inputTokens                                int64
+	outputTokens                               int64
+	hasInputTokens                             bool
+	hasOutputTokens                            bool
 	// reasoningDetails accumulates opaque reasoning state carried by Chat
 	// upstreams in `delta.reasoning_details` (Claude signatures, OpenAI
 	// encrypted reasoning). It is converted at block close into the client's
@@ -1907,7 +1921,11 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 					state.id = id
 				}
 				if u, ok := message["usage"].(map[string]any); ok {
-					out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"input_tokens": u["input_tokens"]}})
+					out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{
+						"input_tokens":                u["input_tokens"],
+						"cache_read_input_tokens":     u["cache_read_input_tokens"],
+						"cache_creation_input_tokens": u["cache_creation_input_tokens"],
+					}})
 				}
 			}
 		case "content_block_start":
@@ -1945,7 +1963,10 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			}
 		case "message_delta":
 			if u, ok := payload["usage"].(map[string]any); ok {
-				out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"output_tokens": u["output_tokens"]}})
+				out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{
+					"output_tokens":           u["output_tokens"],
+					"cache_read_input_tokens": u["cache_read_input_tokens"],
+				}})
 			}
 			if delta, ok := payload["delta"].(map[string]any); ok {
 				// Guard: a malformed message_delta without stop_reason would
@@ -2087,11 +2108,16 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			choice["finish_reason"] = normalizeFinish(delta.Finish)
 		case "error":
 			return errors.New("upstream stream reported failure")
+		case "usage":
+			state.accumulateUsage(delta.Usage)
 		}
 		payload["choices"] = []any{choice}
 		if delta.Kind == "usage" {
 			payload["choices"] = []any{}
-			payload["usage"] = chatUsage(delta.Usage)
+			// Anthropic splits usage across message_start (prompt) and
+			// message_delta (completion); a client replaces usage on each frame,
+			// so every frame carries the running totals.
+			payload["usage"] = chatUsage(state.chatUsageDelta())
 		}
 		writeSSE(w, "", payload)
 		return nil
@@ -2102,6 +2128,10 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			state.started = true
 		}
 		switch delta.Kind {
+		case "usage":
+			// The finish case writes the whole usage block.
+			state.accumulateUsage(delta.Usage)
+			return nil
 		case "text":
 			if state.activeKind != "text" {
 				closeMessagesBlock(w, state)
@@ -2153,17 +2183,6 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			if _, err := state.applyToolDelta(delta); err != nil {
 				return err
 			}
-		case "usage":
-			if u, ok := delta.Usage.(map[string]any); ok {
-				if value, ok := coerceInt64(u["input_tokens"]); ok && !state.hasInputTokens {
-					state.inputTokens = value
-					state.hasInputTokens = true
-				}
-				if value, ok := coerceInt64(u["output_tokens"]); ok && !state.hasOutputTokens {
-					state.outputTokens = value
-					state.hasOutputTokens = true
-				}
-			}
 		case "finish":
 			closeMessagesBlock(w, state)
 			if !state.messagesToolsWritten {
@@ -2184,6 +2203,12 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			}
 			if state.hasOutputTokens {
 				usage["output_tokens"] = state.outputTokens
+			}
+			if state.hasCacheReadTokens {
+				usage["cache_read_input_tokens"] = state.cacheReadTokens
+			}
+			if state.hasCacheCreationTokens {
+				usage["cache_creation_input_tokens"] = state.cacheCreationTokens
 			}
 			writeSSE(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": normalizeAnthropicFinish(delta.Finish), "stop_sequence": nil}, "usage": usage})
 		case "error":
@@ -2338,15 +2363,59 @@ func chatUsage(value any) any {
 	for key, value := range u {
 		converted[key] = value
 	}
-	if input, ok := converted["input_tokens"]; ok {
-		converted["prompt_tokens"] = input
+	if _, ok := converted["input_tokens"]; ok {
+		// Anthropic's input_tokens excludes cached input; prompt_tokens does not.
+		converted["prompt_tokens"] = openAIPromptTokens(converted)
 		delete(converted, "input_tokens")
+		delete(converted, "cache_read_input_tokens")
+		delete(converted, "cache_creation_input_tokens")
 	}
 	if output, ok := converted["output_tokens"]; ok {
 		converted["completion_tokens"] = output
 		delete(converted, "output_tokens")
 	}
 	return converted
+}
+
+// accumulateUsage folds one usage delta into the stream's running counts.
+// First non-empty value wins, so a later event that omits a field (Anthropic's
+// message_delta carries output_tokens only) never clears an earlier one.
+func (state *streamState) accumulateUsage(value any) {
+	u, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	set := func(key string, target *int64, seen *bool) {
+		if v, ok := coerceInt64(u[key]); ok && !*seen {
+			*target = v
+			*seen = true
+		}
+	}
+	set("input_tokens", &state.inputTokens, &state.hasInputTokens)
+	set("prompt_tokens", &state.inputTokens, &state.hasInputTokens)
+	set("output_tokens", &state.outputTokens, &state.hasOutputTokens)
+	set("completion_tokens", &state.outputTokens, &state.hasOutputTokens)
+	set("cache_read_input_tokens", &state.cacheReadTokens, &state.hasCacheReadTokens)
+	set("cache_creation_input_tokens", &state.cacheCreationTokens, &state.hasCacheCreationTokens)
+}
+
+// chatUsageDelta is the running Chat usage for a translated stream. Upstreams
+// may spread the counts over several events (Anthropic sends input on
+// message_start and output on message_delta), while a Chat client replaces the
+// usage object on every frame, so each frame carries everything seen so far.
+func (state *streamState) chatUsageDelta() map[string]any {
+	usage := map[string]any{}
+	if state.hasInputTokens {
+		prompt := state.inputTokens + state.cacheReadTokens + state.cacheCreationTokens
+		usage["prompt_tokens"] = prompt
+		if state.hasOutputTokens {
+			usage["total_tokens"] = prompt + state.outputTokens
+		}
+	}
+	if state.hasOutputTokens {
+		usage["completion_tokens"] = state.outputTokens
+	}
+	return usage
 }
 
 func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamState) {
@@ -2446,6 +2515,20 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		}
 	}
 	response := map[string]any{"id": state.id, "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": state.model, "output": output}
+	// The completed event is where SDKs read usage, and OpenAI's input_tokens
+	// includes cached input, so the whole prompt is reported here.
+	if usage := state.chatUsageDelta(); len(usage) > 0 {
+		if prompt, ok := usage["prompt_tokens"]; ok {
+			complete := map[string]any{"input_tokens": prompt, "input_tokens_details": map[string]any{"cached_tokens": state.cacheReadTokens}}
+			if output, ok := usage["completion_tokens"]; ok {
+				complete["output_tokens"] = output
+			}
+			if total, ok := usage["total_tokens"]; ok {
+				complete["total_tokens"] = total
+			}
+			response["usage"] = complete
+		}
+	}
 	writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "response": response})
 }
 
@@ -2709,17 +2792,36 @@ func number(value any) float64 {
 }
 
 // anthropicTotalTokens produces the OpenAI-style total for an Anthropic usage
-// map. Anthropic's input_tokens excludes cached input (cache_read), so the
-// bare input+output sum undercounts cache-assisted traffic; the canonical
-// total is input + cache_read + output. A total_tokens already present in the
-// upstream map is trusted as authored when positive.
+// map. Anthropic's input_tokens excludes cached input (cache_read and
+// cache_creation), so the bare input+output sum undercounts cache-assisted
+// traffic; the canonical total is input + both cache counts + output. A
+// total_tokens already present in the upstream map is trusted as authored when
+// positive.
 func anthropicTotalTokens(u map[string]any) float64 {
 	if t, present := u["total_tokens"]; present {
 		if n := number(t); n > 0 {
 			return n
 		}
 	}
-	return number(u["input_tokens"]) + number(u["cache_read_input_tokens"]) + number(u["output_tokens"])
+	return number(u["input_tokens"]) + anthropicCacheTokens(u) + number(u["output_tokens"])
+}
+
+// anthropicCacheTokens is the cached input volume in an Anthropic usage map:
+// cache reads plus cache-creation writes. Anthropic bills both instead of
+// input_tokens, so any OpenAI-shaped total must include them.
+func anthropicCacheTokens(u map[string]any) float64 {
+	return number(u["cache_read_input_tokens"]) + number(u["cache_creation_input_tokens"])
+}
+
+// openAIPromptTokens is the OpenAI-shaped prompt count for an Anthropic usage
+// map: uncached input_tokens plus cached input, since OpenAI's prompt_tokens
+// includes cached tokens. It returns nil when the map carries no input count.
+func openAIPromptTokens(u map[string]any) any {
+	raw, present := u["input_tokens"]
+	if !present {
+		return nil
+	}
+	return number(raw) + anthropicCacheTokens(u)
 }
 func first(values ...any) any {
 	for _, v := range values {
