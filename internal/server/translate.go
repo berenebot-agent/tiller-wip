@@ -15,7 +15,18 @@ import (
 
 type unsupportedFeature struct{ feature string }
 
+// Error names the actual limit. Several features exist on the Responses relay
+// only; the rest are request shapes the target protocol cannot carry at all.
+// A single blanket "only supported through a native Responses provider" told a
+// Messages target something that was never true.
 func (u unsupportedFeature) Error() string {
+	switch u.feature {
+	case "reasoning state", "tool messages", "tool calls", "provider-hosted tools":
+		return fmt.Sprintf("%s cannot be represented in this target's protocol", u.feature)
+	}
+	if strings.HasPrefix(u.feature, "message role ") {
+		return u.feature + " cannot be represented in this target's protocol"
+	}
 	return fmt.Sprintf("%s is only supported through a native Responses provider", u.feature)
 }
 
@@ -32,58 +43,71 @@ type reasoningSelector struct {
 // translateRequest translates a request body from one protocol to another.
 // When the target protocol differs, reasoning controls are extracted before
 // conversion and must be re-applied by the caller via applyReasoningSelector.
+// A Messages target receives cross-protocol history without any reasoning
+// state it cannot verify; reasoningStripped reports when that happened.
 func translateRequest(body []byte, from, to providers.Protocol, model string, modelMaxOutputTokens ...int64) ([]byte, error) {
+	translated, _, err := translateRequestObserved(body, from, to, model, modelMaxOutputTokens...)
+	return translated, err
+}
+
+// translateRequestObserved is translateRequest plus the reasoning-stripped
+// signal, for callers that record the degradation.
+func translateRequestObserved(body []byte, from, to providers.Protocol, model string, modelMaxOutputTokens ...int64) ([]byte, bool, error) {
 	if from == to {
-		return body, nil
+		return body, false, nil
 	}
 	var source map[string]any
 	if err := json.Unmarshal(body, &source); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := validateReasoningRepresentability(source, from, to); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if from == providers.ProtocolResponses {
 		for _, key := range []string{"conversation", "previous_response_id", "store", "background", "files"} {
 			if value, ok := source[key]; ok && value != nil && value != false && value != "" {
-				return nil, unsupportedFeature{key}
+				return nil, false, unsupportedFeature{key}
 			}
 		}
 		if tools, ok := source["tools"].([]any); ok {
 			for _, raw := range tools {
 				tool, _ := raw.(map[string]any)
 				if tool["type"] != "function" {
-					return nil, unsupportedFeature{"provider-hosted tools"}
+					return nil, false, unsupportedFeature{"provider-hosted tools"}
 				}
 			}
 		}
 	}
 	chat, err := requestToChat(source, from)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	chat["model"] = model
 	if to == providers.ProtocolChat {
-		return json.Marshal(chat)
+		encoded, err := json.Marshal(chat)
+		return encoded, false, err
 	}
 	if to == providers.ProtocolMessages {
 		if len(modelMaxOutputTokens) > 0 && modelMaxOutputTokens[0] > 0 {
 			chat["max_output_tokens"] = modelMaxOutputTokens[0]
 		}
-		messages, err := chatToMessagesRequest(chat)
+		stripped := false
+		messages, err := chatToMessagesRequest(chat, &stripped)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return json.Marshal(messages)
+		encoded, err := json.Marshal(messages)
+		return encoded, stripped, err
 	}
 	if to == providers.ProtocolResponses {
 		translated, err := chatToResponsesRequest(chat)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return json.Marshal(translated)
+		encoded, err := json.Marshal(translated)
+		return encoded, false, err
 	}
-	return nil, errors.New("unsupported protocol translation")
+	return nil, false, errors.New("unsupported protocol translation")
 }
 
 // clientExplicitlyNonStreaming reports whether the client explicitly sent
@@ -818,7 +842,7 @@ func requestToChat(source map[string]any, from providers.Protocol) (map[string]a
 	return chat, nil
 }
 
-func chatToMessagesRequest(chat map[string]any) (map[string]any, error) {
+func chatToMessagesRequest(chat map[string]any, stripped *bool) (map[string]any, error) {
 	maxTokens := any(4096)
 	if max, ok := chat["max_output_tokens"]; ok {
 		maxTokens = max
@@ -866,17 +890,21 @@ func chatToMessagesRequest(chat map[string]any) (map[string]any, error) {
 			continue
 		}
 		content := chatContentToAnthropic(message["content"])
-		if details, ok := message["reasoning_details"]; ok {
-			blocks, err := chatReasoningDetailsToAnthropic(details)
-			if err != nil {
-				return nil, err
+		// A history assembled by a Chat provider carries its reasoning as
+		// reasoning_content, or as reasoning_details this target cannot verify.
+		// Anthropic cannot use either as assistant thinking, so the turn is sent
+		// without it rather than refused: switching a chat from a Chat model to
+		// Claude must not be blocked by turns that model wrote. The turn is
+		// marked once so the degradation is visible in Activity, never silent.
+		if details, ok := message["reasoning_details"]; ok && len(asSlice(details)) > 0 {
+			if blocks, err := chatReasoningDetailsToAnthropic(details); err == nil {
+				content = append(blocks, content...)
+			} else {
+				*stripped = true
 			}
-			content = append(blocks, content...)
-		} else if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" {
-			// Plain reasoning_content has no Claude signature and cannot be
-			// used as assistant thinking on a Messages target.
+		} else if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" && role == "assistant" {
 			if len(asSlice(message["tool_calls"])) > 0 {
-				return nil, reasoningStateError{"unsigned tool-call reasoning"}
+				*stripped = true
 			}
 		}
 		if calls := asSlice(message["tool_calls"]); calls != nil {
