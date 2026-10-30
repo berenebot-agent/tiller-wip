@@ -2537,8 +2537,13 @@ func convertToolChoice(value any) (any, error) {
 	}
 }
 
+// Blank text blocks are dropped: Anthropic rejects empty or whitespace-only
+// text content, and tool-only assistant turns arrive as content "".
 func chatContentToAnthropic(value any) []any {
 	if text, ok := value.(string); ok {
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
 		return []any{map[string]any{"type": "text", "text": text}}
 	}
 	out := []any{}
@@ -2546,7 +2551,11 @@ func chatContentToAnthropic(value any) []any {
 		block, _ := raw.(map[string]any)
 		switch block["type"] {
 		case "text", "input_text":
-			out = append(out, map[string]any{"type": "text", "text": first(block["text"], block["input_text"])})
+			text := first(block["text"], block["input_text"])
+			if s, ok := text.(string); ok && strings.TrimSpace(s) == "" {
+				continue
+			}
+			out = append(out, map[string]any{"type": "text", "text": text})
 		case "image_url", "input_image":
 			out = append(out, openAIImageToAnthropic(block))
 		}
