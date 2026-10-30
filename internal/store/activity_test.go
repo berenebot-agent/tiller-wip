@@ -217,9 +217,11 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 	ctx := context.Background()
 	sc := st.For(database.LocalAccountID)
 	now := database.Now()
-	in, out := int64(100), int64(50)
+	// Anthropic-shaped: 10 uncached input plus 90 cache-read is a 100-token
+	// prompt, so the cache share is 90% — not cache_read/input = 900%.
+	in, out := int64(10), int64(50)
 	est, prov := int64(2_000_000), int64(5_000_000)
-	cr := int64(10)
+	cr := int64(90)
 	insert := func(id string, input, output *int64, estCost, provCost *int64, estimated bool, providerType string) {
 		t.Helper()
 		var pt *string
@@ -254,7 +256,7 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := types["ck"]
-	if got.Input.D7 != 200 || got.Output.D7 != 100 || got.CacheRead.D7 != 20 {
+	if got.Input.D7 != 20 || got.Output.D7 != 100 || got.CacheRead.D7 != 180 {
 		t.Fatalf("token types = %+v", got)
 	}
 
@@ -275,8 +277,18 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 		t.Fatal(err)
 	}
 	src := sources["ck"]
-	if src.Reported.D7 != 100 || src.Estimated.D7 != 100 {
-		t.Fatalf("token sources = %+v, want reported=100 estimated=100", src)
+	if src.Reported.D7 != 10 || src.Estimated.D7 != 10 {
+		t.Fatalf("token sources = %+v, want reported=10 estimated=10", src)
+	}
+
+	// Cache hit share is over the whole prompt: two rows of 90 cached of a
+	// 100-token prompt blend to 180/200 = 90%, not cache_read/input = 180%.
+	cache, err := sc.CacheByClient(ctx, c1, c1, c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cache["ck"].D7; p == nil || *p != 90 {
+		t.Fatalf("cache %%=%v, want 90", p)
 	}
 }
 

@@ -424,14 +424,15 @@ func TestUsageCacheHitWindows(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("usage: %d %v", status, payload)
 	}
-	// Mixed window: cache-valid rows (90%, 50%, 0%) blend to
-	// (900+500+0)/(1000+1000+1000) = 1400/3000 ≈ 46.67%. n.a. rows are dropped.
+	// Mixed window: each cache-valid row is a share of its whole prompt
+	// (900/1900, 500/1500, 0/1000), blended to 1400/4400 ≈ 31.8%. n.a. rows are
+	// dropped, and no row can exceed 100%.
 	if v, ok := payload["real_cache"].(map[string]any)["provider-a/model-a"].(map[string]any); !ok {
 		t.Fatalf("expected real_cache for provider-a/model-a, got %v", payload["real_cache"])
 	} else if v["1h"] == nil {
 		t.Fatalf("expected non-nil cache %% for blended window, got %v", v)
-	} else if p := v["1h"].(float64); p < 46.4 || p > 47.0 {
-		t.Fatalf("blended cache %% wrong: %.3f (want ~46.67)", p)
+	} else if p := v["1h"].(float64); p < 31.6 || p > 32.0 {
+		t.Fatalf("blended cache %% wrong: %.3f (want ~31.82)", p)
 	}
 	// n.a. window: only non-reporting rows -> null.
 	if v, ok := payload["real_cache"].(map[string]any)["provider-a/model-b"].(map[string]any); !ok {
