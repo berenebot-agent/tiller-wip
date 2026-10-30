@@ -172,10 +172,10 @@ func TestPromptCacheBreakpointsRespectProviderCap(t *testing.T) {
 // relays the body untouched.
 func TestNativeMessagesRequestIsNotRewritten(t *testing.T) {
 	body, err := json.Marshal(map[string]any{
-		"model":    "claude-sonnet-5-5",
+		"model":      "claude-sonnet-5-5",
 		"max_tokens": 64,
-		"system":   "plain string system",
-		"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		"system":     "plain string system",
+		"messages":   []any{map[string]any{"role": "user", "content": "hi"}},
 	})
 	if err != nil {
 		t.Fatal(err)
