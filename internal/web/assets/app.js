@@ -1914,7 +1914,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select></label>`;
   // The template-or-Custom choice lives on the catalogue screen; Settings only
   // links to it for an existing Catalogue client.
-  const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><span>Catalogue</span><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} — manage ›</button></div>` : '';
+  const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} — manage ›</button></div>` : '';
   // Detailed error bodies are opt-in per client. Hosted mode never captures
   // them, so the control is hidden there.
   const bodyLog = client?.log_error_bodies || 'inherit';
@@ -1982,6 +1982,14 @@ async function rotateClient(id) { const client = state.clients.find(item => item
 async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); loadPlanSnapshot(true); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 let permissionsSavedHook = null;
+document.addEventListener('click', event => {
+  const input = event.target.closest('.client-form-dialog input.switch, .permissions-dialog input.switch, .settings-card input.switch');
+  if (!input || !event.detail) return;
+  const bounds = input.getBoundingClientRect();
+  const position = event.clientX - bounds.left - bounds.width / 2;
+  if (Math.abs(position) < 1) return;
+  if (input.checked !== (position < 0)) event.preventDefault();
+});
 // permissionTarget is whose matrix the permissions dialog shows: a client key
 // or a catalogue template. A client picks its source at the top of the
 // dialog: Custom (its own editable models) or a template, whose models are
@@ -2025,7 +2033,7 @@ function syncPermissionSource() {
   const unchangedLink = linked && sel === target.templateID;
   const template = (state.templates || []).find(t => t.id === sel);
   $('#permissions-dialog').classList.toggle('permissions-readonly', linked);
-  $('#permission-linked').hidden = !(target.kind === 'client' && !target.wizard) && !(target.kind === 'template' && target.clientCount);
+  $('#permission-linked').hidden = !(target.kind === 'client' && !target.wizard && (linked || target.templateID)) && !(target.kind === 'template' && target.clientCount);
   $('#permission-edit-template').hidden = !linked;
   $('#permission-linked-copy').textContent = target.kind === 'template'
     ? `Used by ${target.clientCount} client${target.clientCount === 1 ? '' : 's'} — saving applies to all of them.`
@@ -2789,11 +2797,14 @@ function openCreateApiToken() {
 }
 
 function openEditApiToken(token) {
+  const dialog = $('#form-dialog');
+  dialog.classList.add('client-form-dialog');
+  dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
   openEntity({
     eyebrow: 'EDIT API TOKEN',
     title: `Edit ${token.name}`,
     submit: 'Save token',
-    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="check-label"><input type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
+    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="toggle-label"><input class="switch" type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
     onMount: form => { managementScopeReader = wireManagementScopeGrid(form, token.scopes); wireManagementExpiry(form); },
     onSubmit: async form => {
       const name = String(form.elements.token_name.value || '').trim();
