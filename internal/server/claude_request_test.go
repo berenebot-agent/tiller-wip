@@ -122,9 +122,16 @@ func TestClaudeSubscriptionTranslation(t *testing.T) {
 		}
 		var body map[string]json.RawMessage
 		_ = json.Unmarshal(got, &body)
-		var system []map[string]string
+		var system []map[string]any
 		if err := json.Unmarshal(body["system"], &system); err != nil || len(system) != 3 || system[1]["text"] != claudeSubscriptionSystem || system[2]["text"] != "caller instructions" {
 			t.Fatal("translated caller instructions were not preserved after envelope")
+		}
+		if tc.protocol != providers.ProtocolMessages {
+			// The cache breakpoint the translation adds must survive the
+			// subscription envelope, or every turn re-bills at full input price.
+			if system[2]["cache_control"] == nil {
+				t.Fatal("prompt cache breakpoint was stripped by the claude envelope")
+			}
 		}
 	}
 }

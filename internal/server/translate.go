@@ -914,7 +914,98 @@ func chatToMessagesRequest(chat map[string]any) (map[string]any, error) {
 			out["tool_choice"] = map[string]any{"type": "tool", "name": fn["name"]}
 		}
 	}
+	applyPromptCacheBreakpoints(systems, messages)
 	return out, nil
+}
+
+// anthropicMaxCacheBreakpoints is Anthropic's provider-side cap on how many
+// cache_control markers one request may carry. The router spends at most two.
+const anthropicMaxCacheBreakpoints = 4
+
+// cacheableBlockTypes are the Anthropic content-block types that accept a
+// cache_control marker. Thinking and redacted-thinking blocks do not, so a
+// marker is never placed on one.
+var cacheableBlockTypes = map[string]bool{
+	"text":        true,
+	"image":       true,
+	"tool_use":    true,
+	"tool_result": true,
+	"document":    true,
+}
+
+// applyPromptCacheBreakpoints marks the end of the request's stable prefix so a
+// Messages target can serve repeated agent turns from its prompt cache.
+//
+// Cross-protocol translation is the only place this is needed: a Chat or
+// Responses client has no way to express an Anthropic cache breakpoint, so
+// without this every turn of an agent loop re-bills the whole transcript at
+// full input price. A native Messages caller already controls its own caching
+// and is never touched.
+//
+// Anthropic caches tools → system → messages in that order, so a marker on the
+// last system block also covers the tool definitions ahead of it. The second
+// marker closes the transcript at the deepest cacheable block already sent,
+// which is exactly the prefix the next turn extends.
+func applyPromptCacheBreakpoints(systems, messages []any) {
+	used := countCacheBreakpoints(systems) + countCacheBreakpoints(messages)
+	if used >= anthropicMaxCacheBreakpoints {
+		return
+	}
+	if len(systems) > 0 {
+		if block, ok := systems[len(systems)-1].(map[string]any); ok && block["cache_control"] == nil {
+			block["cache_control"] = ephemeralCacheControl()
+			used++
+		}
+	}
+	// A single-message conversation has no earlier prefix to hit, so marking it
+	// would only pay the cache-write surcharge for nothing.
+	if len(messages) < 2 || used >= anthropicMaxCacheBreakpoints {
+		return
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		message, ok := messages[i].(map[string]any)
+		if !ok {
+			continue
+		}
+		content := asSlice(message["content"])
+		for j := len(content) - 1; j >= 0; j-- {
+			block, ok := content[j].(map[string]any)
+			if !ok || block["cache_control"] != nil {
+				continue
+			}
+			kind, _ := block["type"].(string)
+			if !cacheableBlockTypes[kind] {
+				continue
+			}
+			block["cache_control"] = ephemeralCacheControl()
+			return
+		}
+	}
+}
+
+func ephemeralCacheControl() map[string]any {
+	return map[string]any{"type": "ephemeral"}
+}
+
+// countCacheBreakpoints counts markers already present in a block list, so a
+// caller-supplied strategy is never pushed past Anthropic's cap.
+func countCacheBreakpoints(blocks []any) int {
+	count := 0
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if block["cache_control"] != nil {
+			count++
+		}
+		for _, rawBlock := range asSlice(block["content"]) {
+			if inner, ok := rawBlock.(map[string]any); ok && inner["cache_control"] != nil {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func chatToResponsesRequest(chat map[string]any) (map[string]any, error) {
@@ -2537,8 +2628,13 @@ func convertToolChoice(value any) (any, error) {
 	}
 }
 
+// Blank text blocks are dropped: Anthropic rejects empty or whitespace-only
+// text content, and tool-only assistant turns arrive as content "".
 func chatContentToAnthropic(value any) []any {
 	if text, ok := value.(string); ok {
+		if strings.TrimSpace(text) == "" {
+			return nil
+		}
 		return []any{map[string]any{"type": "text", "text": text}}
 	}
 	out := []any{}
@@ -2546,7 +2642,11 @@ func chatContentToAnthropic(value any) []any {
 		block, _ := raw.(map[string]any)
 		switch block["type"] {
 		case "text", "input_text":
-			out = append(out, map[string]any{"type": "text", "text": first(block["text"], block["input_text"])})
+			text := first(block["text"], block["input_text"])
+			if s, ok := text.(string); ok && strings.TrimSpace(s) == "" {
+				continue
+			}
+			out = append(out, map[string]any{"type": "text", "text": text})
 		case "image_url", "input_image":
 			out = append(out, openAIImageToAnthropic(block))
 		}
