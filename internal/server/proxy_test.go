@@ -121,10 +121,10 @@ func TestTranslateSystemInstructions(t *testing.T) {
 		want    string
 		wantErr bool
 	}{
-		{name: "string", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":"one"},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"}]`},
-		{name: "blocks", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"},{"type":"text","text":"two"}]`},
-		{name: "mixed", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":"one"},{"role":"developer","content":[{"type":"text","text":"two"},{"type":"text","text":"three"}]},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"},{"type":"text","text":"two"},{"type":"text","text":"three"}]`},
-		{name: "responses", from: providers.ProtocolResponses, body: `{"instructions":"one","input":"hello"}`, want: `[{"type":"text","text":"one"}]`},
+		{name: "string", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":"one"},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one","cache_control":{"type":"ephemeral"}}]`},
+		{name: "blocks", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[{"type":"text","text":"one"},{"type":"text","text":"two"}]},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"},{"type":"text","text":"two","cache_control":{"type":"ephemeral"}}]`},
+		{name: "mixed", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":"one"},{"role":"developer","content":[{"type":"text","text":"two"},{"type":"text","text":"three"}]},{"role":"user","content":"hello"}]}`, want: `[{"type":"text","text":"one"},{"type":"text","text":"two"},{"type":"text","text":"three","cache_control":{"type":"ephemeral"}}]`},
+		{name: "responses", from: providers.ProtocolResponses, body: `{"instructions":"one","input":"hello"}`, want: `[{"type":"text","text":"one","cache_control":{"type":"ephemeral"}}]`},
 		{name: "absent", from: providers.ProtocolChat, body: `{"messages":[{"role":"user","content":"hello"}]}`},
 		{name: "empty blocks", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[]},{"role":"user","content":"hello"}]}`},
 		{name: "non-text", from: providers.ProtocolChat, body: `{"messages":[{"role":"system","content":[{"type":"image_url","text":"secret"}]}]}`, wantErr: true},
