@@ -29,6 +29,11 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.locator('#copy-secret')).toBeVisible();
   await page.locator('#copy-secret').click();
   await expect(page.locator('#copy-state')).toHaveText('Copied to clipboard.');
+  // Regression: the API Base URL label and its status line must share the
+  // dialog content column with the key block (they once hung ~22px left).
+  const keyBox = await page.locator('#secret-dialog .secret-box').first().boundingBox();
+  const labelBox = await page.locator('#secret-base-url-label').boundingBox();
+  expect(Math.abs(labelBox.x - keyBox.x)).toBeLessThan(1);
   await expect.poll(
     () => page.evaluate(() => navigator.clipboard.readText()),
     { timeout: 3000 }
