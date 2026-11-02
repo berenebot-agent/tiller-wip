@@ -29,13 +29,18 @@ test('catalogue template links a client, shows it read-only, and detaches to Cus
   await expect(templateRow).toContainText('Used by 0 clients');
   await page.locator('#done-templates').click();
 
-  // Create a Catalogue client; it starts Custom.
+  // Create a Catalogue client; its default Custom access opens the model
+  // screen as soon as the one-time secret is dismissed.
   await page.locator('#add-client').click();
   await page.locator('#form-dialog [name="name"]').fill(clientName);
   await page.locator('#form-dialog [name="type"]').selectOption('catalogue');
   await page.locator('#dialog-submit').click();
   await expect(page.locator('#secret-value')).toBeVisible();
   await page.locator('#close-secret').click();
+  await expect(page.locator('#permissions-dialog')).toBeVisible();
+  await expect(page.locator('#permissions-title')).toHaveText(`Manage models · ${clientName}`);
+  await page.locator('#cancel-permissions').click();
+  await expect(page.locator('#permissions-dialog')).toBeHidden();
   const clientRow = page.locator('#clients-body tr').filter({ hasText: clientName });
   const routeButton = clientRow.locator('[data-client-models]');
   await expect(routeButton).toContainText('Custom');

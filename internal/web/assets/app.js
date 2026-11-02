@@ -1915,8 +1915,16 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const selectedType = client?.type || defaultType;
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select></label>`;
-  // The template-or-Custom choice lives on the catalogue screen; Settings only
-  // links to it for an existing Catalogue client.
+  // A new Catalogue client picks its model access here: a saved template links
+  // immediately, All models grants everything, and Custom opens the model
+  // screen after the one-time secret closes. Existing clients keep the
+  // template-or-Custom choice on the catalogue screen — switching a live
+  // client to a template overwrites its custom matrix, which must be seen
+  // before it is saved. The onboarding wizard passes onSaved and keeps its own
+  // all/subset step, so the control is create-only and non-wizard.
+  const templates = state.templates || [];
+  const catalogueAccessField = !client && !onSaved ? `<label data-catalogue-access-field hidden>Catalogue access <select name="catalogue_access"><option value="custom">Custom — choose models after creating</option><option value="all">All models — every model in the current catalogue</option>${templates.map(t => `<option value="template:${h(t.id)}">Template · ${h(t.name)}</option>`).join('')}</select><small>${templates.length ? 'Saved catalogues are managed from Catalogue templates.' : 'No saved catalogues yet — choose Custom or All models.'}</small></label>` : '';
+  // Settings only links to the catalogue screen for an existing Catalogue client.
   const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} — manage ›</button></div>` : '';
   // Detailed error bodies are opt-in per client. Hosted mode never captures
   // them, so the control is hidden there.
@@ -1926,13 +1934,13 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
     title: client ? `Settings · ${client.name}` : 'Create client',
-    fields: `<div class="client-name-settings"><label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Enabled</label>` : ''}</div><label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueField}${singleFields}${operationalFields}`,
+    fields: `<div class="client-name-settings"><label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Enabled</label>` : ''}</div><label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueAccessField}${catalogueField}${singleFields}${operationalFields}`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
       const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
       mountSingleTargetPicker($('[data-single-target]', form), client);
-      const catalogueFields = $('[data-catalogue-fields]', form);
-      const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; if (catalogueFields) catalogueFields.hidden = typeSelect.value !== 'catalogue'; };
+      const catalogueFields = $('[data-catalogue-fields]', form), catalogueAccess = $('[data-catalogue-access-field]', form);
+      const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; if (catalogueFields) catalogueFields.hidden = typeSelect.value !== 'catalogue'; if (catalogueAccess) catalogueAccess.hidden = typeSelect.value !== 'catalogue'; };
       const catalogueLink = $('[data-open-catalogue]', form);
       if (catalogueLink) catalogueLink.onclick = () => openPermissions(client);
       typeSelect.onchange = syncType;
@@ -1946,6 +1954,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
     onSubmit: async form => {
       const values = new FormData(form);
       const payload = { name: values.get('name'), description: values.get('description'), group: values.get('group') };
+      const catalogueAccess = !client && !onSaved ? String(values.get('catalogue_access') || 'custom') : '';
       if (client) {
         payload.enabled = values.get('enabled') === 'on';
         payload.logging_enabled = values.get('logging_enabled') === 'on';
@@ -1970,11 +1979,27 @@ function openClient(client = null, onSaved = null, defaultType = null) {
           payload.single_model_name = values.get('single_model_name');
           payload.single_target_type = selected.slice(0, split);
           payload.single_target_id = selected.slice(split + 1);
+        } else if (catalogueAccess.startsWith('template:')) {
+          payload.template_id = catalogueAccess.slice('template:'.length);
         }
         const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify(payload) });
         loadPlanSnapshot(true);
         showSecret(result.secret);
         if (onSaved) await onSaved(result, payload);
+        else if (payload.type === 'catalogue') {
+          if (catalogueAccess === 'all') {
+            // A brand-new key can only be granted All models after it exists.
+            try { await enableAllClientModels(result); }
+            catch (error) { flash(errorMessage(error, 'The key was created, but All models access could not be granted. Open its catalogue to retry.'), 'error'); }
+          } else if (catalogueAccess === 'custom') {
+            // Open the model screen once the one-time secret closes, so choosing
+            // models is part of creation instead of a trip back to the list.
+            const secret = $('#secret-dialog');
+            const openCatalogue = () => openPermissions(result);
+            if (secret?.open) secret.addEventListener('close', openCatalogue, { once: true });
+            else openCatalogue();
+          }
+        }
         refreshWizardButton(false);
       }
       await loadClients();
