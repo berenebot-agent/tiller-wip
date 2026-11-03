@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	streaming INTEGER NOT NULL CHECK (streaming IN (0,1)),
 	http_status INTEGER NOT NULL,
 	latency_ms INTEGER NOT NULL,
+	-- input_tokens is the whole prompt for every provider. Anthropic's Messages
+	-- usage reports the uncached remainder only, so ingestion folds
+	-- cache_read_input_tokens and cache_creation_input_tokens in
+	-- (usageCapture.promptTokens); OpenAI-shaped usage already includes cached
+	-- input. Historical rows are normalised by 007_cache_inclusive_input where
+	-- provenance is certain.
 	input_tokens INTEGER,
 	output_tokens INTEGER,
 	cache_read_input_tokens INTEGER,
@@ -289,6 +295,35 @@ var activityDataUpgrades = []struct {
 				WHEN output_tokens IS NOT NULL THEN 'provider'
 				ELSE NULL END
 			WHERE input_tokens_source IS NULL OR output_tokens_source IS NULL`,
+	},
+	{
+		// 007_cache_inclusive_input normalises historical rows to the current
+		// definition of request_logs.input_tokens: the whole prompt, including
+		// cached input. Anthropic's Messages usage reports input_tokens as the
+		// uncached remainder (cache_read_input_tokens and
+		// cache_creation_input_tokens are excluded), while OpenAI-shaped usage
+		// already includes cached tokens in prompt/input tokens. New rows are
+		// normalised at ingestion (internal/server usageCapture.promptTokens).
+		//
+		// Only rows whose provenance is certain are rewritten.
+		// cache_creation_input_tokens is populated solely from an
+		// Anthropic-shaped usage block, so its presence (even as 0) proves the
+		// row's input count excluded cache. Everything else is left alone: a row
+		// with input_tokens=100 and cache_read_input_tokens=40 is 140 under
+		// Anthropic accounting and 100 under OpenAI accounting, and the stored
+		// protocol column describes the client request, not the upstream usage
+		// shape. Rewriting ambiguous rows would corrupt real history, so their
+		// cache share may stay inexact rather than be guessed.
+		//
+		// Idempotence comes from the version marker below, not from the WHERE
+		// clause: the rewrite must not run twice and add the cache counts again.
+		version: "007_cache_inclusive_input",
+		apply: `UPDATE request_logs
+			SET input_tokens = input_tokens
+				+ coalesce(cache_read_input_tokens, 0)
+				+ coalesce(cache_creation_input_tokens, 0)
+			WHERE input_tokens IS NOT NULL
+				AND cache_creation_input_tokens IS NOT NULL`,
 	},
 }
 
