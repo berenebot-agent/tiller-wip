@@ -39,6 +39,26 @@ behavior may still change before a stable `1.0`.
   outcome boxes as Activity history, with the Fallback button inline on the
   right of the model box.
 
+### Fixed
+
+- **Prompt-cache percentage across provider accounting conventions.** Stored
+  `input_tokens` now always means the whole prompt: Anthropic's uncached
+  Messages count has its cache read/write tokens folded in at ingestion, while
+  OpenAI- and DeepSeek-style totals were already inclusive. The cache share is
+  `cache_read / input_tokens` everywhere (Activity rows and the usage
+  aggregates), preventing provider-convention double counting. Estimated costs
+  subtract the cache counts uniformly. Historical rows retain their original
+  values because upstream accounting provenance was not recorded; cache-creation
+  metrics alone do not prove exclusive input accounting.
+- **Translated Chat stream cache details.** Usage frames now include
+  `prompt_tokens_details.cached_tokens` when the Messages upstream reports
+  cache reads, including an explicit zero.
+- **Observable reasoning-history degradation.** Responses encrypted history
+  routed to Messages is omitted instead of rejecting the request. Discarded
+  assistant reasoning is flagged even without tool calls, persisted as the
+  metadata-only `reasoning_stripped` Activity field, shown in history, and
+  included in Activity/account CSV exports. Signed Claude details remain intact.
+
 ## [0.1.0-beta.5] - 2026-10-12
 
 Fifth public beta. Adds headless administration over the management API,

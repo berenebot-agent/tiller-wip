@@ -889,7 +889,8 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			codexSessionSource := ""
 			codexEffort := ""
 			if translated {
-				attemptBody, err = translateRequest(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
+				var reasoningStripped bool
+				attemptBody, reasoningStripped, err = translateRequestObserved(attemptBody, incoming, target, candidate.UpstreamModelID, candidate.MaxOutputTokens.Int64)
 				if err != nil {
 					code := "translation_error"
 					var unsupported unsupportedFeature
@@ -906,6 +907,13 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					translationFailureClass = code
 					s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 					continue
+				}
+				row.reasoningStripped = row.reasoningStripped || reasoningStripped
+				if reasoningStripped && s.logger != nil {
+					// The turn is sent without reasoning state the target cannot
+					// verify. Recorded so a chat switched between provider
+					// families is diagnosable instead of silently losing it.
+					s.logger.Info("translated request sent without reasoning state", "client_request_id", row.clientRequestID, "requested_model", row.requestedModel, "provider", candidate.Provider.Name, "model", candidate.UpstreamModelID, "target_protocol", string(target))
 				}
 				// After translation, re-apply the canonical selector for the target.
 				attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
@@ -1542,7 +1550,10 @@ routeDone:
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	defer idle.Stop()
 	reader := resp.Body
-	usage := &usageCapture{}
+	// protocol is the upstream wire format: it is what the usage block's shape
+	// (and therefore its token-accounting convention) is parsed against, not the
+	// client's incoming protocol.
+	usage := &usageCapture{protocol: target}
 	// ensureStreamKeepalive commits the streaming status and starts the
 	// keepalive writer if the ordered-fallback probe did not already commit
 	// it. Reusing the same writer keeps a single goroutine writing to w.

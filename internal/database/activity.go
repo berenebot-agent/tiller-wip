@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	streaming INTEGER NOT NULL CHECK (streaming IN (0,1)),
 	http_status INTEGER NOT NULL,
 	latency_ms INTEGER NOT NULL,
+	-- input_tokens is the whole prompt for every provider. Anthropic's Messages
+	-- usage reports the uncached remainder only, so ingestion folds
+	-- cache_read_input_tokens and cache_creation_input_tokens in
+	-- (usageCapture.promptTokens); OpenAI-shaped usage already includes cached
+	-- input. Historical rows retain their original counts because upstream
+	-- accounting provenance was not recorded.
 	input_tokens INTEGER,
 	output_tokens INTEGER,
 	cache_read_input_tokens INTEGER,
@@ -76,6 +82,7 @@ CREATE TABLE IF NOT EXISTS request_logs (
 	attempt_count INTEGER NOT NULL DEFAULT 1,
 	fallback_used INTEGER NOT NULL DEFAULT 0 CHECK (fallback_used IN (0,1)),
 	fallback_reason TEXT,
+	reasoning_stripped INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_stripped IN (0,1)),
 	created_at TEXT NOT NULL
 ) STRICT;
 
@@ -245,6 +252,15 @@ var activityUpgrades = []struct {
 			{"request_logs", "output_tokens_source", `ALTER TABLE request_logs ADD COLUMN output_tokens_source TEXT CHECK (output_tokens_source IN ('provider','estimated'))`, ""},
 		},
 	},
+	{
+		version: "008_reasoning_stripped",
+		columns: []struct {
+			table, column, ddl string
+			skipIfVersion      string
+		}{
+			{"request_logs", "reasoning_stripped", `ALTER TABLE request_logs ADD COLUMN reasoning_stripped INTEGER NOT NULL DEFAULT 0 CHECK (reasoning_stripped IN (0,1))`, ""},
+		},
+	},
 }
 
 // activityDataUpgrades are one-time data rewrites applied to a pre-existing
@@ -289,6 +305,18 @@ var activityDataUpgrades = []struct {
 				WHEN output_tokens IS NOT NULL THEN 'provider'
 				ELSE NULL END
 			WHERE input_tokens_source IS NULL OR output_tokens_source IS NULL`,
+	},
+	{
+		// ONE-TIME UPGRADE GUARD: reserve the pre-merge 007 marker without
+		// rewriting history. Cache-creation fields were accepted from every
+		// upstream protocol, and the stored protocol describes the client.
+		// Neither proves exclusive input accounting. New rows are normalised
+		// by usageCapture.promptTokens; ambiguous historical counts stay intact.
+		// Do not attempt an inverse rewrite on databases that already ran the
+		// unsafe development version: affected rows cannot be identified safely.
+		// See ../docs/back_compat.md.
+		version: "007_cache_inclusive_input",
+		apply:   `SELECT 1`,
 	},
 }
 

@@ -50,6 +50,7 @@ type logRow struct {
 	errorText            *string
 	errorMessage         *string
 	fallbackUsed         bool
+	reasoningStripped    bool
 	fallbackReason       *string
 	attempts             []requestAttempt
 	routeStatus          string
@@ -67,15 +68,40 @@ type logRow struct {
 // copyUsage moves the captured token counts and any provider-reported cost from
 // the in-memory usage capture onto the log row. It is the single copy point so
 // every response shape (translated stream, native SSE, non-streaming) records
-// the same fields.
+// the same fields, and the single place the prompt-normalisation convention is
+// applied to stored data.
 func (row *logRow) copyUsage(usage *usageCapture) {
 	if usage == nil {
 		return
 	}
-	row.inputTokens, row.outputTokens = usage.inputTokens, usage.outputTokens
+	row.inputTokens, row.outputTokens = usage.promptTokens(), usage.outputTokens
 	row.cacheReadInputTokens, row.cacheCreationInputTokens = usage.cacheReadInputTokens, usage.cacheCreationInputTokens
 	row.providerCostMicros = usage.providerCostMicros
 	row.inputTokensSource, row.outputTokensSource = usage.inputTokensSource, usage.outputTokensSource
+}
+
+// promptTokens returns the whole prompt for this capture: the value stored in
+// request_logs.input_tokens and the denominator for the cache-hit share.
+//
+// Anthropic's Messages usage reports input_tokens as the uncached remainder, so
+// cache_read_input_tokens and cache_creation_input_tokens are folded in exactly
+// once. Chat and Responses usage already include cached input in prompt/input
+// tokens and are returned unchanged. The raw fields on the capture stay
+// provider-native because the translation layer needs the Anthropic split.
+func (u *usageCapture) promptTokens() *int64 {
+	if u == nil || u.inputTokens == nil {
+		return nil
+	}
+	v := *u.inputTokens
+	if u.protocol == providers.ProtocolMessages {
+		if u.cacheReadInputTokens != nil {
+			v += *u.cacheReadInputTokens
+		}
+		if u.cacheCreationInputTokens != nil {
+			v += *u.cacheCreationInputTokens
+		}
+	}
+	return &v
 }
 
 type requestAttempt struct {
@@ -249,6 +275,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		RequestBodyTruncated:     row.requestBodyTruncated,
 		ErrorBody:                row.errorBody,
 		ErrorBodyTruncated:       row.errorBodyTruncated,
+		ReasoningStripped:        row.reasoningStripped,
 		FallbackUsed:             row.fallbackUsed,
 		FallbackReason:           row.fallbackReason,
 		CreatedAt:                row.createdAt,
@@ -401,7 +428,17 @@ func (s *Server) newOutputObserver(start time.Time, row *logRow, candidate resol
 
 // usageCapture accumulates token counts extracted from a response body in
 // memory. Only the numbers are ever retained; the body is discarded.
+//
+// The counts are kept exactly as the upstream reported them. protocol is the
+// upstream (selected target) protocol the usage block was parsed from, and it
+// decides the token-accounting convention: Messages reports input_tokens as the
+// uncached remainder, while Chat and Responses report prompt/input tokens that
+// already include cached input. It is deliberately not the client's incoming
+// protocol and not the provider name — translation between protocols means only
+// the upstream's wire format describes the numbers. promptTokens is the single
+// place the convention is resolved.
 type usageCapture struct {
+	protocol                 providers.Protocol
 	inputTokens              *int64
 	outputTokens             *int64
 	cacheReadInputTokens     *int64 // OpenAI cached_tokens / Anthropic cache_read_input_tokens

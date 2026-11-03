@@ -424,8 +424,10 @@ func TestUsageCacheHitWindows(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("usage: %d %v", status, payload)
 	}
-	// Mixed window: cache-valid rows (90%, 50%, 0%) blend to
-	// (900+500+0)/(1000+1000+1000) = 1400/3000 ≈ 46.67%. n.a. rows are dropped.
+	// Mixed window: each row's cached share is cache_read / whole prompt
+	// (900/1000, 500/1000, 0/1000), blended to 1400/3000 ≈ 46.67%. Rows are
+	// stored in the normalised shape (input_tokens includes cached input), so
+	// the share cannot exceed 100% and n.a. rows are dropped.
 	if v, ok := payload["real_cache"].(map[string]any)["provider-a/model-a"].(map[string]any); !ok {
 		t.Fatalf("expected real_cache for provider-a/model-a, got %v", payload["real_cache"])
 	} else if v["1h"] == nil {
