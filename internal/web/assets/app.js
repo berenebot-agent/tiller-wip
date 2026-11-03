@@ -184,6 +184,10 @@ const rowCache = (row) => {
   const inp = row.input_tokens;
   const output = row.output_tokens;
   const cache = row.cache_read_input_tokens;
+  // input_tokens is the whole prompt for every provider: Anthropic's uncached
+  // input has its cache read/creation counts folded in at ingestion, and
+  // OpenAI-style prompts already include cached tokens. The cache share is
+  // therefore cached / prompt, with no provider-specific adjustment here.
   const line = (cache != null && inp > 0)
     ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
@@ -1912,9 +1916,17 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const selectedType = client?.type || defaultType;
   const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select></label>`;
-  // The template-or-Custom choice lives on the catalogue screen; Settings only
-  // links to it for an existing Catalogue client.
-  const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><span>Catalogue</span><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} — manage ›</button></div>` : '';
+  // A new Catalogue client picks its model access here: a saved template links
+  // immediately, All models grants everything, and Custom opens the model
+  // screen after the one-time secret closes. Existing clients keep the
+  // template-or-Custom choice on the catalogue screen — switching a live
+  // client to a template overwrites its custom matrix, which must be seen
+  // before it is saved. The onboarding wizard passes onSaved and keeps its own
+  // all/subset step, so the control is create-only and non-wizard.
+  const templates = state.templates || [];
+  const catalogueAccessField = !client && !onSaved ? `<label data-catalogue-access-field hidden>Catalogue access <select name="catalogue_access"><option value="custom">Custom — choose models after creating</option><option value="all">All models — every model in the current catalogue</option>${templates.map(t => `<option value="template:${h(t.id)}">Template · ${h(t.name)}</option>`).join('')}</select><small>${templates.length ? 'Saved catalogues are managed from Catalogue templates.' : 'No saved catalogues yet — choose Custom or All models.'}</small></label>` : '';
+  // Settings only links to the catalogue screen for an existing Catalogue client.
+  const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} — manage ›</button></div>` : '';
   // Detailed error bodies are opt-in per client. Hosted mode never captures
   // them, so the control is hidden there.
   const bodyLog = client?.log_error_bodies || 'inherit';
@@ -1923,13 +1935,13 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
     title: client ? `Settings · ${client.name}` : 'Create client',
-    fields: `<div class="client-name-settings"><label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Enabled</label>` : ''}</div><label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueField}${singleFields}${operationalFields}`,
+    fields: `<div class="client-name-settings"><label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Enabled</label>` : ''}</div><label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueAccessField}${catalogueField}${singleFields}${operationalFields}`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
       const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
       mountSingleTargetPicker($('[data-single-target]', form), client);
-      const catalogueFields = $('[data-catalogue-fields]', form);
-      const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; if (catalogueFields) catalogueFields.hidden = typeSelect.value !== 'catalogue'; };
+      const catalogueFields = $('[data-catalogue-fields]', form), catalogueAccess = $('[data-catalogue-access-field]', form);
+      const syncType = () => { fields.hidden = typeSelect.value !== 'single'; name.required = !fields.hidden; if (catalogueFields) catalogueFields.hidden = typeSelect.value !== 'catalogue'; if (catalogueAccess) catalogueAccess.hidden = typeSelect.value !== 'catalogue'; };
       const catalogueLink = $('[data-open-catalogue]', form);
       if (catalogueLink) catalogueLink.onclick = () => openPermissions(client);
       typeSelect.onchange = syncType;
@@ -1943,6 +1955,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
     onSubmit: async form => {
       const values = new FormData(form);
       const payload = { name: values.get('name'), description: values.get('description'), group: values.get('group') };
+      const catalogueAccess = !client && !onSaved ? String(values.get('catalogue_access') || 'custom') : '';
       if (client) {
         payload.enabled = values.get('enabled') === 'on';
         payload.logging_enabled = values.get('logging_enabled') === 'on';
@@ -1967,11 +1980,27 @@ function openClient(client = null, onSaved = null, defaultType = null) {
           payload.single_model_name = values.get('single_model_name');
           payload.single_target_type = selected.slice(0, split);
           payload.single_target_id = selected.slice(split + 1);
+        } else if (catalogueAccess.startsWith('template:')) {
+          payload.template_id = catalogueAccess.slice('template:'.length);
         }
         const result = await api('/api/admin/client-keys', { method: 'POST', body: JSON.stringify(payload) });
         loadPlanSnapshot(true);
         showSecret(result.secret);
         if (onSaved) await onSaved(result, payload);
+        else if (payload.type === 'catalogue') {
+          if (catalogueAccess === 'all') {
+            // A brand-new key can only be granted All models after it exists.
+            try { await enableAllClientModels(result); }
+            catch (error) { flash(errorMessage(error, 'The key was created, but All models access could not be granted. Open its catalogue to retry.'), 'error'); }
+          } else if (catalogueAccess === 'custom') {
+            // Open the model screen once the one-time secret closes, so choosing
+            // models is part of creation instead of a trip back to the list.
+            const secret = $('#secret-dialog');
+            const openCatalogue = () => openPermissions(result);
+            if (secret?.open) secret.addEventListener('close', openCatalogue, { once: true });
+            else openCatalogue();
+          }
+        }
         refreshWizardButton(false);
       }
       await loadClients();
@@ -1982,6 +2011,14 @@ async function rotateClient(id) { const client = state.clients.find(item => item
 async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); loadPlanSnapshot(true); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 let permissionsSavedHook = null;
+document.addEventListener('click', event => {
+  const input = event.target.closest('.client-form-dialog input.switch, .permissions-dialog input.switch, .settings-card input.switch');
+  if (!input || !event.detail) return;
+  const bounds = input.getBoundingClientRect();
+  const position = event.clientX - bounds.left - bounds.width / 2;
+  if (Math.abs(position) < 1) return;
+  if (input.checked !== (position < 0)) event.preventDefault();
+});
 // permissionTarget is whose matrix the permissions dialog shows: a client key
 // or a catalogue template. A client picks its source at the top of the
 // dialog: Custom (its own editable models) or a template, whose models are
@@ -2025,7 +2062,7 @@ function syncPermissionSource() {
   const unchangedLink = linked && sel === target.templateID;
   const template = (state.templates || []).find(t => t.id === sel);
   $('#permissions-dialog').classList.toggle('permissions-readonly', linked);
-  $('#permission-linked').hidden = !(target.kind === 'client' && !target.wizard) && !(target.kind === 'template' && target.clientCount);
+  $('#permission-linked').hidden = !(target.kind === 'client' && !target.wizard && (linked || target.templateID)) && !(target.kind === 'template' && target.clientCount);
   $('#permission-edit-template').hidden = !linked;
   $('#permission-linked-copy').textContent = target.kind === 'template'
     ? `Used by ${target.clientCount} client${target.clientCount === 1 ? '' : 's'} — saving applies to all of them.`
@@ -2275,7 +2312,8 @@ function activityDetailHTML(row, kind) {
   // The mobile card already shows error_text in its footer, so its detail body
   // only carries the hydrated attempt sequence (plus load errors / retry).
   const parts = kind === 'card' ? [sequence] : [resolved, sequence, error];
-  return `${parts.join('')}${loadError}${pending}`;
+  const reasoning = row.reasoning_stripped ? '<span class="activity-reasoning-warning" title="Unverifiable reasoning history was omitted during protocol translation.">Reasoning history omitted</span>' : '';
+  return `${parts.join('')}${reasoning}${loadError}${pending}`;
 }
 function resolvedActivity(row) { return activityDetailHTML(row, 'table'); }
 function activityCardDetail(row) { return activityDetailHTML(row, 'card') + `<div class="history-meta">${rowCache(row)}</div>`; }
@@ -2789,11 +2827,14 @@ function openCreateApiToken() {
 }
 
 function openEditApiToken(token) {
+  const dialog = $('#form-dialog');
+  dialog.classList.add('client-form-dialog');
+  dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
   openEntity({
     eyebrow: 'EDIT API TOKEN',
     title: `Edit ${token.name}`,
     submit: 'Save token',
-    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="check-label"><input type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
+    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="toggle-label"><input class="switch" type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
     onMount: form => { managementScopeReader = wireManagementScopeGrid(form, token.scopes); wireManagementExpiry(form); },
     onSubmit: async form => {
       const name = String(form.elements.token_name.value || '').trim();

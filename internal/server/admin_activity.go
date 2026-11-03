@@ -89,6 +89,7 @@ type activityView struct {
 	ErrorBodyTruncated       bool    `json:"error_body_truncated"`
 	AttemptCount             int     `json:"attempt_count"`
 	AttemptRows              int     `json:"attempt_rows"`
+	ReasoningStripped        bool    `json:"reasoning_stripped"`
 	FallbackUsed             bool    `json:"fallback_used"`
 	FallbackReason           *string `json:"fallback_reason"`
 	CreatedAt                string  `json:"created_at"`
@@ -126,6 +127,7 @@ func activityViewFromStore(row store.ActivityRow) activityView {
 		ErrorBodyTruncated:       row.ErrorBodyTruncated,
 		AttemptCount:             row.AttemptCount,
 		AttemptRows:              row.AttemptRows,
+		ReasoningStripped:        row.ReasoningStripped,
 		FallbackUsed:             row.FallbackUsed,
 		FallbackReason:           row.FallbackReason,
 		CreatedAt:                row.CreatedAt,
@@ -333,7 +335,7 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 		"streaming", "http_status", "latency_ms", "input_tokens", "output_tokens",
 		"cached_input_tokens", "cache_creation_input_tokens", "attempt_count", "fallback_used", "fallback_reason", "error_message", "request_body", "request_body_truncated", "error_body", "error_body_truncated",
 		"provider_request_id", "client_request_id", "route_kind",
-		"estimated_cost_micros", "provider_cost_micros", "input_tokens_source", "output_tokens_source",
+		"estimated_cost_micros", "provider_cost_micros", "input_tokens_source", "output_tokens_source", "reasoning_stripped",
 	}); err != nil {
 		return err
 	}
@@ -355,7 +357,7 @@ func (s *Server) writeActivityCSV(w http.ResponseWriter, r *http.Request, filena
 			neutralizeCSVField(strPtrOrEmpty(row.RequestBody)), strconv.FormatBool(row.RequestBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ErrorBody)), strconv.FormatBool(row.ErrorBodyTruncated),
 			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID, strPtrOrEmpty(row.RouteKind),
-			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), strPtrOrEmpty(row.InputTokensSource), strPtrOrEmpty(row.OutputTokensSource),
+			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), strPtrOrEmpty(row.InputTokensSource), strPtrOrEmpty(row.OutputTokensSource), strconv.FormatBool(row.ReasoningStripped),
 		}); err != nil {
 			return err
 		}

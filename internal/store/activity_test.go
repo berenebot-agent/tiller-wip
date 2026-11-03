@@ -41,15 +41,16 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	insert := func(sc *store.Scope, id, clientID string) {
 		t.Helper()
 		err := sc.InsertRequestLog(ctx, store.RequestLogInsert{
-			ID:              id,
-			ClientKeyID:     clientID,
-			ClientName:      clientID,
-			RequestedModel:  "provider-a/model-a",
-			Protocol:        "chat",
-			HTTPStatus:      200,
-			LatencyMs:       1,
-			ClientRequestID: id,
-			CreatedAt:       database.Now(),
+			ID:                id,
+			ReasoningStripped: sc == local,
+			ClientKeyID:       clientID,
+			ClientName:        clientID,
+			RequestedModel:    "provider-a/model-a",
+			Protocol:          "chat",
+			HTTPStatus:        200,
+			LatencyMs:         1,
+			ClientRequestID:   id,
+			CreatedAt:         database.Now(),
 			Attempts: []store.RequestAttemptInsert{{
 				Provider:  "provider-a",
 				Model:     "model-a",
@@ -72,14 +73,14 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" {
+	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" || !globalLocal[0].ReasoningStripped {
 		t.Fatalf("local account sees %d rows (%v), want only row-local", len(globalLocal), ids(globalLocal))
 	}
 	globalOther, err := other.ListGlobalActivity(ctx, "", 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(globalOther) != 1 || globalOther[0].ID != "row-other" {
+	if len(globalOther) != 1 || globalOther[0].ID != "row-other" || globalOther[0].ReasoningStripped {
 		t.Fatalf("other account sees %d rows (%v), want only row-other", len(globalOther), ids(globalOther))
 	}
 
@@ -217,9 +218,12 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 	ctx := context.Background()
 	sc := st.For(database.LocalAccountID)
 	now := database.Now()
+	// Rows are stored in the normalised shape: input_tokens is the whole prompt
+	// (ingestion folds Anthropic's cache counts in), so a 100-token prompt with
+	// 90 cached tokens is a 90% cache share.
 	in, out := int64(100), int64(50)
 	est, prov := int64(2_000_000), int64(5_000_000)
-	cr := int64(10)
+	cr := int64(90)
 	insert := func(id string, input, output *int64, estCost, provCost *int64, estimated bool, providerType string) {
 		t.Helper()
 		var pt *string
@@ -254,7 +258,7 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := types["ck"]
-	if got.Input.D7 != 200 || got.Output.D7 != 100 || got.CacheRead.D7 != 20 {
+	if got.Input.D7 != 200 || got.Output.D7 != 100 || got.CacheRead.D7 != 180 {
 		t.Fatalf("token types = %+v", got)
 	}
 
@@ -277,6 +281,16 @@ func TestUsageCostAndTokenTypeAggregates(t *testing.T) {
 	src := sources["ck"]
 	if src.Reported.D7 != 100 || src.Estimated.D7 != 100 {
 		t.Fatalf("token sources = %+v, want reported=100 estimated=100", src)
+	}
+
+	// Cache hit share is over the whole prompt: two rows of 90 cached of a
+	// 100-token prompt blend to 180/200 = 90%.
+	cache, err := sc.CacheByClient(ctx, c1, c1, c1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := cache["ck"].D7; p == nil || *p != 90 {
+		t.Fatalf("cache %%=%v, want 90", p)
 	}
 }
 

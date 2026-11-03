@@ -15,7 +15,18 @@ import (
 
 type unsupportedFeature struct{ feature string }
 
+// Error names the actual limit. Several features exist on the Responses relay
+// only; the rest are request shapes the target protocol cannot carry at all.
+// A single blanket "only supported through a native Responses provider" told a
+// Messages target something that was never true.
 func (u unsupportedFeature) Error() string {
+	switch u.feature {
+	case "reasoning state", "tool messages", "tool calls", "provider-hosted tools":
+		return fmt.Sprintf("%s cannot be represented in this target's protocol", u.feature)
+	}
+	if strings.HasPrefix(u.feature, "message role ") {
+		return u.feature + " cannot be represented in this target's protocol"
+	}
 	return fmt.Sprintf("%s is only supported through a native Responses provider", u.feature)
 }
 
@@ -32,58 +43,71 @@ type reasoningSelector struct {
 // translateRequest translates a request body from one protocol to another.
 // When the target protocol differs, reasoning controls are extracted before
 // conversion and must be re-applied by the caller via applyReasoningSelector.
+// A Messages target receives cross-protocol history without any reasoning
+// state it cannot verify; reasoningStripped reports when that happened.
 func translateRequest(body []byte, from, to providers.Protocol, model string, modelMaxOutputTokens ...int64) ([]byte, error) {
+	translated, _, err := translateRequestObserved(body, from, to, model, modelMaxOutputTokens...)
+	return translated, err
+}
+
+// translateRequestObserved is translateRequest plus the reasoning-stripped
+// signal, for callers that record the degradation.
+func translateRequestObserved(body []byte, from, to providers.Protocol, model string, modelMaxOutputTokens ...int64) ([]byte, bool, error) {
 	if from == to {
-		return body, nil
+		return body, false, nil
 	}
 	var source map[string]any
 	if err := json.Unmarshal(body, &source); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if err := validateReasoningRepresentability(source, from, to); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if from == providers.ProtocolResponses {
 		for _, key := range []string{"conversation", "previous_response_id", "store", "background", "files"} {
 			if value, ok := source[key]; ok && value != nil && value != false && value != "" {
-				return nil, unsupportedFeature{key}
+				return nil, false, unsupportedFeature{key}
 			}
 		}
 		if tools, ok := source["tools"].([]any); ok {
 			for _, raw := range tools {
 				tool, _ := raw.(map[string]any)
 				if tool["type"] != "function" {
-					return nil, unsupportedFeature{"provider-hosted tools"}
+					return nil, false, unsupportedFeature{"provider-hosted tools"}
 				}
 			}
 		}
 	}
 	chat, err := requestToChat(source, from)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	chat["model"] = model
 	if to == providers.ProtocolChat {
-		return json.Marshal(chat)
+		encoded, err := json.Marshal(chat)
+		return encoded, false, err
 	}
 	if to == providers.ProtocolMessages {
 		if len(modelMaxOutputTokens) > 0 && modelMaxOutputTokens[0] > 0 {
 			chat["max_output_tokens"] = modelMaxOutputTokens[0]
 		}
-		messages, err := chatToMessagesRequest(chat)
+		stripped := false
+		messages, err := chatToMessagesRequest(chat, &stripped)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return json.Marshal(messages)
+		encoded, err := json.Marshal(messages)
+		return encoded, stripped, err
 	}
 	if to == providers.ProtocolResponses {
 		translated, err := chatToResponsesRequest(chat)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
-		return json.Marshal(translated)
+		encoded, err := json.Marshal(translated)
+		return encoded, false, err
 	}
-	return nil, errors.New("unsupported protocol translation")
+	return nil, false, errors.New("unsupported protocol translation")
 }
 
 // clientExplicitlyNonStreaming reports whether the client explicitly sent
@@ -818,7 +842,7 @@ func requestToChat(source map[string]any, from providers.Protocol) (map[string]a
 	return chat, nil
 }
 
-func chatToMessagesRequest(chat map[string]any) (map[string]any, error) {
+func chatToMessagesRequest(chat map[string]any, stripped *bool) (map[string]any, error) {
 	maxTokens := any(4096)
 	if max, ok := chat["max_output_tokens"]; ok {
 		maxTokens = max
@@ -866,25 +890,37 @@ func chatToMessagesRequest(chat map[string]any) (map[string]any, error) {
 			continue
 		}
 		content := chatContentToAnthropic(message["content"])
-		if details, ok := message["reasoning_details"]; ok {
-			blocks, err := chatReasoningDetailsToAnthropic(details)
-			if err != nil {
-				return nil, err
+		turnStripped := false
+		// A history assembled by a Chat provider carries its reasoning as
+		// reasoning_content, or as reasoning_details this target cannot verify.
+		// Anthropic cannot use either as assistant thinking, so the turn is sent
+		// without it rather than refused: switching a chat from a Chat model to
+		// Claude must not be blocked by turns that model wrote. The turn is
+		// marked once so the degradation is visible in Activity, never silent.
+		if details, ok := message["reasoning_details"]; ok && details != nil {
+			if blocks, err := chatReasoningDetailsToAnthropic(details); err == nil {
+				content = append(blocks, content...)
+				if reasoning, _ := message["reasoning_content"].(string); len(blocks) == 0 && reasoning != "" && role == "assistant" {
+					turnStripped = true
+				}
+			} else {
+				turnStripped = true
 			}
-			content = append(blocks, content...)
-		} else if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" {
-			// Plain reasoning_content has no Claude signature and cannot be
-			// used as assistant thinking on a Messages target.
-			if len(asSlice(message["tool_calls"])) > 0 {
-				return nil, reasoningStateError{"unsigned tool-call reasoning"}
-			}
+		} else if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" && role == "assistant" {
+			turnStripped = true
 		}
+		*stripped = *stripped || turnStripped
 		if calls := asSlice(message["tool_calls"]); calls != nil {
 			for _, rawCall := range calls {
 				call, _ := rawCall.(map[string]any)
 				fn, _ := call["function"].(map[string]any)
 				content = append(content, map[string]any{"type": "tool_use", "id": call["id"], "name": fn["name"], "input": jsonValue(fn["arguments"])})
 			}
+		}
+		// A Responses reasoning item is a standalone assistant turn. Once its
+		// state is stripped, do not send an empty Messages content array.
+		if len(content) == 0 && len(asSlice(message["tool_calls"])) == 0 && role == "assistant" && turnStripped {
+			continue
 		}
 		messages = append(messages, map[string]any{"role": role, "content": content})
 	}
@@ -1312,8 +1348,9 @@ func responseToChat(source map[string]any, target providers.Protocol, model stri
 		if u, ok := usage.(map[string]any); ok {
 			// Anthropic's total_tokens is the canonical sum when present;
 			// otherwise it must include cached input tokens (input_tokens
-			// excludes cache_read), not just input+output.
-			usage = map[string]any{"prompt_tokens": u["input_tokens"], "completion_tokens": u["output_tokens"], "total_tokens": anthropicTotalTokens(u)}
+			// excludes cache_read), not just input+output. prompt_tokens
+			// includes cached input for the same reason.
+			usage = map[string]any{"prompt_tokens": openAIPromptTokens(u), "completion_tokens": u["output_tokens"], "total_tokens": anthropicTotalTokens(u)}
 		}
 	} else {
 		content := []any{}
@@ -1383,6 +1420,25 @@ func chatResponseToMessages(chat map[string]any, model string) map[string]any {
 	usage := map[string]any{}
 	if u, ok := chat["usage"].(map[string]any); ok {
 		usage = map[string]any{"input_tokens": u["prompt_tokens"], "output_tokens": u["completion_tokens"]}
+		// The Chat intermediate carries the whole prompt. Anthropic's
+		// input_tokens excludes cached input, so subtract the cache counts that
+		// came over from a Messages target and pass them through: a Messages
+		// client must not be told the whole prompt was uncached input.
+		if prompt, ok := coerceInt64(u["prompt_tokens"]); ok {
+			read, _ := coerceInt64(u["cache_read_input_tokens"])
+			creation, _ := coerceInt64(u["cache_creation_input_tokens"])
+			uncached := prompt - read - creation
+			if uncached < 0 {
+				uncached = 0
+			}
+			usage["input_tokens"] = uncached
+			if v := u["cache_read_input_tokens"]; v != nil {
+				usage["cache_read_input_tokens"] = v
+			}
+			if v := u["cache_creation_input_tokens"]; v != nil {
+				usage["cache_creation_input_tokens"] = v
+			}
+		}
 	}
 	return map[string]any{"id": chat["id"], "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
 }
@@ -1655,16 +1711,21 @@ func (state *streamState) aggregatedNonstreamChat(incoming providers.Protocol, m
 	}
 	outUsage := map[string]any{}
 	if usage != nil {
-		if usage.inputTokens != nil {
-			outUsage["prompt_tokens"] = *usage.inputTokens
-			outUsage["input_tokens"] = *usage.inputTokens
+		// promptTokens is the whole prompt for whichever upstream protocol
+		// reported it: a Messages target's uncached input has its cache counts
+		// folded in there, while Chat/Responses are already inclusive. Adding
+		// the cached counts unconditionally here would double-count those.
+		prompt := usage.promptTokens()
+		if prompt != nil {
+			outUsage["prompt_tokens"] = *prompt
+			outUsage["input_tokens"] = *prompt
 		}
 		if usage.outputTokens != nil {
 			outUsage["completion_tokens"] = *usage.outputTokens
 			outUsage["output_tokens"] = *usage.outputTokens
 		}
-		if usage.inputTokens != nil && usage.outputTokens != nil {
-			outUsage["total_tokens"] = *usage.inputTokens + *usage.outputTokens
+		if prompt != nil && usage.outputTokens != nil {
+			outUsage["total_tokens"] = *prompt + *usage.outputTokens
 		}
 		if usage.cacheReadInputTokens != nil {
 			outUsage["cache_read_input_tokens"] = *usage.cacheReadInputTokens
@@ -1775,11 +1836,15 @@ type streamState struct {
 	toolCalls                                                  []*toolCallState
 	toolAliases                                                map[string]*toolCallState
 	toolArgumentBytes                                          int
-	messagesToolsWritten                                       bool
-	inputTokens                                                int64
-	outputTokens                                               int64
-	hasInputTokens                                             bool
-	hasOutputTokens                                            bool
+	// Anthropic cache counts for a Chat/Responses client, which fold them into
+	// prompt_tokens because prompt_tokens includes cached input.
+	hasCacheReadTokens, hasCacheCreationTokens bool
+	cacheReadTokens, cacheCreationTokens       int64
+	messagesToolsWritten                       bool
+	inputTokens                                int64
+	outputTokens                               int64
+	hasInputTokens                             bool
+	hasOutputTokens                            bool
 	// reasoningDetails accumulates opaque reasoning state carried by Chat
 	// upstreams in `delta.reasoning_details` (Claude signatures, OpenAI
 	// encrypted reasoning). It is converted at block close into the client's
@@ -1907,7 +1972,11 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 					state.id = id
 				}
 				if u, ok := message["usage"].(map[string]any); ok {
-					out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"input_tokens": u["input_tokens"]}})
+					out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{
+						"input_tokens":                u["input_tokens"],
+						"cache_read_input_tokens":     u["cache_read_input_tokens"],
+						"cache_creation_input_tokens": u["cache_creation_input_tokens"],
+					}})
 				}
 			}
 		case "content_block_start":
@@ -1945,7 +2014,10 @@ func canonicalDeltas(event string, payload map[string]any, target providers.Prot
 			}
 		case "message_delta":
 			if u, ok := payload["usage"].(map[string]any); ok {
-				out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{"output_tokens": u["output_tokens"]}})
+				out = append(out, canonicalDelta{Kind: "usage", Usage: map[string]any{
+					"output_tokens":           u["output_tokens"],
+					"cache_read_input_tokens": u["cache_read_input_tokens"],
+				}})
 			}
 			if delta, ok := payload["delta"].(map[string]any); ok {
 				// Guard: a malformed message_delta without stop_reason would
@@ -2087,11 +2159,16 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			choice["finish_reason"] = normalizeFinish(delta.Finish)
 		case "error":
 			return errors.New("upstream stream reported failure")
+		case "usage":
+			state.accumulateUsage(delta.Usage)
 		}
 		payload["choices"] = []any{choice}
 		if delta.Kind == "usage" {
 			payload["choices"] = []any{}
-			payload["usage"] = chatUsage(delta.Usage)
+			// Anthropic splits usage across message_start (prompt) and
+			// message_delta (completion); a client replaces usage on each frame,
+			// so every frame carries the running totals.
+			payload["usage"] = chatUsage(state.chatUsageDelta())
 		}
 		writeSSE(w, "", payload)
 		return nil
@@ -2102,6 +2179,10 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			state.started = true
 		}
 		switch delta.Kind {
+		case "usage":
+			// The finish case writes the whole usage block.
+			state.accumulateUsage(delta.Usage)
+			return nil
 		case "text":
 			if state.activeKind != "text" {
 				closeMessagesBlock(w, state)
@@ -2153,17 +2234,6 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			if _, err := state.applyToolDelta(delta); err != nil {
 				return err
 			}
-		case "usage":
-			if u, ok := delta.Usage.(map[string]any); ok {
-				if value, ok := coerceInt64(u["input_tokens"]); ok && !state.hasInputTokens {
-					state.inputTokens = value
-					state.hasInputTokens = true
-				}
-				if value, ok := coerceInt64(u["output_tokens"]); ok && !state.hasOutputTokens {
-					state.outputTokens = value
-					state.hasOutputTokens = true
-				}
-			}
 		case "finish":
 			closeMessagesBlock(w, state)
 			if !state.messagesToolsWritten {
@@ -2184,6 +2254,12 @@ func writeTranslatedEvent(w io.Writer, incoming providers.Protocol, state *strea
 			}
 			if state.hasOutputTokens {
 				usage["output_tokens"] = state.outputTokens
+			}
+			if state.hasCacheReadTokens {
+				usage["cache_read_input_tokens"] = state.cacheReadTokens
+			}
+			if state.hasCacheCreationTokens {
+				usage["cache_creation_input_tokens"] = state.cacheCreationTokens
 			}
 			writeSSE(w, "message_delta", map[string]any{"type": "message_delta", "delta": map[string]any{"stop_reason": normalizeAnthropicFinish(delta.Finish), "stop_sequence": nil}, "usage": usage})
 		case "error":
@@ -2338,15 +2414,62 @@ func chatUsage(value any) any {
 	for key, value := range u {
 		converted[key] = value
 	}
-	if input, ok := converted["input_tokens"]; ok {
-		converted["prompt_tokens"] = input
+	if _, ok := converted["input_tokens"]; ok {
+		// Anthropic's input_tokens excludes cached input; prompt_tokens does not.
+		converted["prompt_tokens"] = openAIPromptTokens(converted)
 		delete(converted, "input_tokens")
+		delete(converted, "cache_read_input_tokens")
+		delete(converted, "cache_creation_input_tokens")
 	}
 	if output, ok := converted["output_tokens"]; ok {
 		converted["completion_tokens"] = output
 		delete(converted, "output_tokens")
 	}
 	return converted
+}
+
+// accumulateUsage folds one usage delta into the stream's running counts.
+// First non-empty value wins, so a later event that omits a field (Anthropic's
+// message_delta carries output_tokens only) never clears an earlier one.
+func (state *streamState) accumulateUsage(value any) {
+	u, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	set := func(key string, target *int64, seen *bool) {
+		if v, ok := coerceInt64(u[key]); ok && !*seen {
+			*target = v
+			*seen = true
+		}
+	}
+	set("input_tokens", &state.inputTokens, &state.hasInputTokens)
+	set("prompt_tokens", &state.inputTokens, &state.hasInputTokens)
+	set("output_tokens", &state.outputTokens, &state.hasOutputTokens)
+	set("completion_tokens", &state.outputTokens, &state.hasOutputTokens)
+	set("cache_read_input_tokens", &state.cacheReadTokens, &state.hasCacheReadTokens)
+	set("cache_creation_input_tokens", &state.cacheCreationTokens, &state.hasCacheCreationTokens)
+}
+
+// chatUsageDelta is the running Chat usage for a translated stream. Upstreams
+// may spread the counts over several events (Anthropic sends input on
+// message_start and output on message_delta), while a Chat client replaces the
+// usage object on every frame, so each frame carries everything seen so far.
+func (state *streamState) chatUsageDelta() map[string]any {
+	usage := map[string]any{}
+	if state.hasInputTokens {
+		prompt := state.inputTokens + state.cacheReadTokens + state.cacheCreationTokens
+		usage["prompt_tokens"] = prompt
+		if state.hasOutputTokens {
+			usage["total_tokens"] = prompt + state.outputTokens
+		}
+	}
+	if state.hasCacheReadTokens {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": state.cacheReadTokens}
+	}
+	if state.hasOutputTokens {
+		usage["completion_tokens"] = state.outputTokens
+	}
+	return usage
 }
 
 func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamState) {
@@ -2446,6 +2569,20 @@ func writeStreamDone(w io.Writer, incoming providers.Protocol, state *streamStat
 		}
 	}
 	response := map[string]any{"id": state.id, "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": state.model, "output": output}
+	// The completed event is where SDKs read usage, and OpenAI's input_tokens
+	// includes cached input, so the whole prompt is reported here.
+	if usage := state.chatUsageDelta(); len(usage) > 0 {
+		if prompt, ok := usage["prompt_tokens"]; ok {
+			complete := map[string]any{"input_tokens": prompt, "input_tokens_details": map[string]any{"cached_tokens": state.cacheReadTokens}}
+			if output, ok := usage["completion_tokens"]; ok {
+				complete["output_tokens"] = output
+			}
+			if total, ok := usage["total_tokens"]; ok {
+				complete["total_tokens"] = total
+			}
+			response["usage"] = complete
+		}
+	}
 	writeSSE(w, "response.completed", map[string]any{"type": "response.completed", "response": response})
 }
 
@@ -2709,17 +2846,36 @@ func number(value any) float64 {
 }
 
 // anthropicTotalTokens produces the OpenAI-style total for an Anthropic usage
-// map. Anthropic's input_tokens excludes cached input (cache_read), so the
-// bare input+output sum undercounts cache-assisted traffic; the canonical
-// total is input + cache_read + output. A total_tokens already present in the
-// upstream map is trusted as authored when positive.
+// map. Anthropic's input_tokens excludes cached input (cache_read and
+// cache_creation), so the bare input+output sum undercounts cache-assisted
+// traffic; the canonical total is input + both cache counts + output. A
+// total_tokens already present in the upstream map is trusted as authored when
+// positive.
 func anthropicTotalTokens(u map[string]any) float64 {
 	if t, present := u["total_tokens"]; present {
 		if n := number(t); n > 0 {
 			return n
 		}
 	}
-	return number(u["input_tokens"]) + number(u["cache_read_input_tokens"]) + number(u["output_tokens"])
+	return number(u["input_tokens"]) + anthropicCacheTokens(u) + number(u["output_tokens"])
+}
+
+// anthropicCacheTokens is the cached input volume in an Anthropic usage map:
+// cache reads plus cache-creation writes. Anthropic bills both instead of
+// input_tokens, so any OpenAI-shaped total must include them.
+func anthropicCacheTokens(u map[string]any) float64 {
+	return number(u["cache_read_input_tokens"]) + number(u["cache_creation_input_tokens"])
+}
+
+// openAIPromptTokens is the OpenAI-shaped prompt count for an Anthropic usage
+// map: uncached input_tokens plus cached input, since OpenAI's prompt_tokens
+// includes cached tokens. It returns nil when the map carries no input count.
+func openAIPromptTokens(u map[string]any) any {
+	raw, present := u["input_tokens"]
+	if !present {
+		return nil
+	}
+	return number(raw) + anthropicCacheTokens(u)
 }
 func first(values ...any) any {
 	for _, v := range values {
