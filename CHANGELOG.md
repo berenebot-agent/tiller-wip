@@ -39,6 +39,19 @@ behavior may still change before a stable `1.0`.
   outcome boxes as Activity history, with the Fallback button inline on the
   right of the model box.
 
+### Fixed
+
+- **Prompt-cache percentage across provider accounting conventions.** Stored
+  `input_tokens` now always means the whole prompt: Anthropic's uncached
+  Messages count has its cache read/write tokens folded in at ingestion, while
+  OpenAI- and DeepSeek-style totals were already inclusive. The cache share is
+  `cache_read / input_tokens` everywhere (Activity rows and the usage
+  aggregates), so it can no longer exceed 100% or be halved for
+  OpenAI-compatible providers, and estimated costs subtract the cache counts
+  uniformly. Historical rows whose provenance is unambiguous are normalised
+  once at boot; ambiguous rows keep their stored values rather than being
+  guessed at.
+
 ## [0.1.0-beta.5] - 2026-10-12
 
 Fifth public beta. Adds headless administration over the management API,

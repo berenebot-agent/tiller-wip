@@ -1412,6 +1412,25 @@ func chatResponseToMessages(chat map[string]any, model string) map[string]any {
 	usage := map[string]any{}
 	if u, ok := chat["usage"].(map[string]any); ok {
 		usage = map[string]any{"input_tokens": u["prompt_tokens"], "output_tokens": u["completion_tokens"]}
+		// The Chat intermediate carries the whole prompt. Anthropic's
+		// input_tokens excludes cached input, so subtract the cache counts that
+		// came over from a Messages target and pass them through: a Messages
+		// client must not be told the whole prompt was uncached input.
+		if prompt, ok := coerceInt64(u["prompt_tokens"]); ok {
+			read, _ := coerceInt64(u["cache_read_input_tokens"])
+			creation, _ := coerceInt64(u["cache_creation_input_tokens"])
+			uncached := prompt - read - creation
+			if uncached < 0 {
+				uncached = 0
+			}
+			usage["input_tokens"] = uncached
+			if v := u["cache_read_input_tokens"]; v != nil {
+				usage["cache_read_input_tokens"] = v
+			}
+			if v := u["cache_creation_input_tokens"]; v != nil {
+				usage["cache_creation_input_tokens"] = v
+			}
+		}
 	}
 	return map[string]any{"id": chat["id"], "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stop, "stop_sequence": nil, "usage": usage}
 }
@@ -1684,25 +1703,21 @@ func (state *streamState) aggregatedNonstreamChat(incoming providers.Protocol, m
 	}
 	outUsage := map[string]any{}
 	if usage != nil {
-		// Anthropic's input_tokens excludes cached input while OpenAI's
-		// prompt_tokens includes it, so both carry the whole prompt here.
-		var cached int64
-		if usage.cacheReadInputTokens != nil {
-			cached += *usage.cacheReadInputTokens
-		}
-		if usage.cacheCreationInputTokens != nil {
-			cached += *usage.cacheCreationInputTokens
-		}
-		if usage.inputTokens != nil {
-			outUsage["prompt_tokens"] = *usage.inputTokens + cached
-			outUsage["input_tokens"] = *usage.inputTokens
+		// promptTokens is the whole prompt for whichever upstream protocol
+		// reported it: a Messages target's uncached input has its cache counts
+		// folded in there, while Chat/Responses are already inclusive. Adding
+		// the cached counts unconditionally here would double-count those.
+		prompt := usage.promptTokens()
+		if prompt != nil {
+			outUsage["prompt_tokens"] = *prompt
+			outUsage["input_tokens"] = *prompt
 		}
 		if usage.outputTokens != nil {
 			outUsage["completion_tokens"] = *usage.outputTokens
 			outUsage["output_tokens"] = *usage.outputTokens
 		}
-		if usage.inputTokens != nil && usage.outputTokens != nil {
-			outUsage["total_tokens"] = *usage.inputTokens + cached + *usage.outputTokens
+		if prompt != nil && usage.outputTokens != nil {
+			outUsage["total_tokens"] = *prompt + *usage.outputTokens
 		}
 		if usage.cacheReadInputTokens != nil {
 			outUsage["cache_read_input_tokens"] = *usage.cacheReadInputTokens

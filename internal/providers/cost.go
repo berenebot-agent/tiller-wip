@@ -124,9 +124,13 @@ func copilotCostLookup(data modelsDevDataset, id string) modelsDevModel {
 // at least one rate applies; the caller decides whether to store it. Cache
 // tokens are billed at the cache-read rate when known and fall back to the
 // input rate otherwise; cache-write tokens are billed at the cache-write rate
-// when known. Cache token counts are treated as a subset of input tokens only
-// Anthropic reports uncached input separately. OpenAI-compatible totals already
-// include cache tokens, so those subsets are subtracted before pricing input.
+// when known.
+//
+// inputTokens is the whole prompt for every provider: ingestion normalises
+// Anthropic's uncached input_tokens by folding cache read/creation in
+// (see internal/server usageCapture.promptTokens), and OpenAI-compatible totals
+// already include them. The cache subsets are therefore always subtracted
+// before pricing uncached input, with no provider-specific branch.
 func (r *Registry) EstimatedCostMicros(providerType, modelID string, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens int64) (int64, bool) {
 	// These OAuth-backed providers are billed through subscriptions or request
 	// quotas, not by the published per-token model prices in models.dev.
@@ -139,9 +143,8 @@ func (r *Registry) EstimatedCostMicros(providerType, modelID string, inputTokens
 		return 0, false
 	}
 	var usd float64
-	if providerType != "anthropic" && providerType != "claude-subscription" {
-		inputTokens = max(0, inputTokens-cacheReadTokens-cacheCreationTokens)
-	}
+	// max(0, …) floors malformed upstream counts; it is not a display clamp.
+	inputTokens = max(0, inputTokens-cacheReadTokens-cacheCreationTokens)
 	if rates.Input != nil {
 		usd += float64(inputTokens) * *rates.Input
 	}

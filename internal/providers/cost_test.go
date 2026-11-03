@@ -19,14 +19,36 @@ func TestEstimatedCostMicrosBasic(t *testing.T) {
 			},
 		}},
 	}
-	// 1M input = $3, 1M output = $15, 1M cache-read = $0.30, 1M cache-write = $3.75.
-	got, ok := r.EstimatedCostMicros("anthropic", "claude-x", 1_000_000, 1_000_000, 1_000_000, 1_000_000)
+	// inputTokens is the whole prompt: 1M uncached + 1M cache-read + 1M
+	// cache-write = 3M prompt tokens. Only the uncached 1M bills at the input
+	// rate, whatever the provider type.
+	got, ok := r.EstimatedCostMicros("anthropic", "claude-x", 3_000_000, 1_000_000, 1_000_000, 1_000_000)
 	if !ok {
 		t.Fatal("expected a cost estimate")
 	}
 	want := int64(3_000_000 + 15_000_000 + 300_000 + 3_750_000)
 	if got != want {
 		t.Fatalf("cost micros = %d, want %d", got, want)
+	}
+}
+
+// TestEstimatedCostMicrosUncachedInputFloor proves a malformed upstream count
+// (cache tokens exceeding the prompt) cannot produce negative input tokens.
+func TestEstimatedCostMicrosUncachedInputFloor(t *testing.T) {
+	t.Parallel()
+	r := NewRegistry()
+	r.modelsDev = modelsDevDataset{
+		"anthropic": {Models: map[string]modelsDevModel{
+			"claude-x": {Cost: modelsDevCost{Input: floatPtr(3.0), Output: floatPtr(15.0), CacheRead: floatPtr(0.3)}},
+		}},
+	}
+	got, ok := r.EstimatedCostMicros("anthropic", "claude-x", 100, 0, 110, 0)
+	if !ok {
+		t.Fatal("expected a cost estimate")
+	}
+	// Uncached input floors at 0; the 110 cache reads still bill.
+	if got != 33 { // 110 * $0.30/M = 33 micro-dollars
+		t.Fatalf("cost micros = %d, want 33", got)
 	}
 }
 

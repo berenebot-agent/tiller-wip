@@ -1549,7 +1549,10 @@ routeDone:
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	defer idle.Stop()
 	reader := resp.Body
-	usage := &usageCapture{}
+	// protocol is the upstream wire format: it is what the usage block's shape
+	// (and therefore its token-accounting convention) is parsed against, not the
+	// client's incoming protocol.
+	usage := &usageCapture{protocol: target}
 	// ensureStreamKeepalive commits the streaming status and starts the
 	// keepalive writer if the ordered-fallback probe did not already commit
 	// it. Reusing the same writer keeps a single goroutine writing to w.

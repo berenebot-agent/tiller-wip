@@ -436,6 +436,11 @@ func scanUsage(rows *sql.Rows, keyCols int) (map[string]UsageWindows, error) {
 	return out, rows.Err()
 }
 
+// cacheSelect sums, per window, the cache-read tokens and the whole-prompt
+// input tokens for rows that reported a cache count. input_tokens is normalised
+// at ingestion to include cached input for every provider (see
+// usageCapture.promptTokens), so cache_read/input is the hit share and cannot
+// exceed 100% for a normalised row.
 const cacheSelect = `sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
 sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN input_tokens ELSE 0 END),
 sum(CASE WHEN created_at >= ? AND cache_read_input_tokens IS NOT NULL THEN cache_read_input_tokens ELSE 0 END),
@@ -504,14 +509,10 @@ func scanCache(rows *sql.Rows, keyCols int) (map[string]CacheWindows, error) {
 }
 
 func cachePct(read, input sql.NullFloat64) *float64 {
-	if !read.Valid || !input.Valid {
+	if !read.Valid || !input.Valid || input.Float64 <= 0 {
 		return nil
 	}
-	total := input.Float64 + read.Float64
-	if total <= 0 {
-		return nil
-	}
-	p := read.Float64 / total * 100
+	p := read.Float64 / input.Float64 * 100
 	return &p
 }
 

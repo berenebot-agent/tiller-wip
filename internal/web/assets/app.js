@@ -184,11 +184,12 @@ const rowCache = (row) => {
   const inp = row.input_tokens;
   const output = row.output_tokens;
   const cache = row.cache_read_input_tokens;
-  // Anthropic's input_tokens excludes cached input, so the denominator is the
-  // whole prompt (cached + uncached) — over uncached input alone it exceeds 100%.
-  const prompt = inp + (cache || 0);
-  const line = (cache != null && prompt > 0)
-    ? `<span class="cache-hit"><b>${Math.round(cache / prompt * 100)}%</b><small>Cache</small></span>`
+  // input_tokens is the whole prompt for every provider: Anthropic's uncached
+  // input has its cache read/creation counts folded in at ingestion, and
+  // OpenAI-style prompts already include cached tokens. The cache share is
+  // therefore cached / prompt, with no provider-specific adjustment here.
+  const line = (cache != null && inp > 0)
+    ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>Cache</small></span>`
     : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
   const exact = row.provider_cost_micros;
   const cost = exact ?? row.estimated_cost_micros;

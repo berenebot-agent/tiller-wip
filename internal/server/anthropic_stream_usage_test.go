@@ -63,7 +63,7 @@ func TestTranslatedResponsesStreamUsageIncludesAnthropicCache(t *testing.T) {
 func TestAnthropicUsageConvertersIncludeCacheTokens(t *testing.T) {
 	t.Parallel()
 	state := &streamState{id: "r1", model: "m", reasoningIndex: -1, messageIndex: -1, toolIndex: -1}
-	aggregated := state.aggregatedNonstreamChat(providers.ProtocolChat, "m", "stop", &usageCapture{inputTokens: int64Ptr(10), outputTokens: int64Ptr(5), cacheReadInputTokens: int64Ptr(90), cacheCreationInputTokens: int64Ptr(20)})
+	aggregated := state.aggregatedNonstreamChat(providers.ProtocolChat, "m", "stop", &usageCapture{protocol: providers.ProtocolMessages, inputTokens: int64Ptr(10), outputTokens: int64Ptr(5), cacheReadInputTokens: int64Ptr(90), cacheCreationInputTokens: int64Ptr(20)})
 	if u := aggregated["usage"].(map[string]any); u["prompt_tokens"] != int64(120) || u["total_tokens"] != int64(125) {
 		t.Fatalf("aggregated usage = %v, want prompt_tokens=120 total_tokens=125", u)
 	}
