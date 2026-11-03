@@ -50,6 +50,7 @@ type logRow struct {
 	errorText            *string
 	errorMessage         *string
 	fallbackUsed         bool
+	reasoningStripped    bool
 	fallbackReason       *string
 	attempts             []requestAttempt
 	routeStatus          string
@@ -274,6 +275,7 @@ func (s *Server) writeLog(ctx context.Context, row *logRow) {
 		RequestBodyTruncated:     row.requestBodyTruncated,
 		ErrorBody:                row.errorBody,
 		ErrorBodyTruncated:       row.errorBodyTruncated,
+		ReasoningStripped:        row.reasoningStripped,
 		FallbackUsed:             row.fallbackUsed,
 		FallbackReason:           row.fallbackReason,
 		CreatedAt:                row.createdAt,

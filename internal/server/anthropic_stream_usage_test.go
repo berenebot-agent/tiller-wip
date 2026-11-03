@@ -31,6 +31,9 @@ func TestTranslatedChatStreamUsageIncludesAnthropicCache(t *testing.T) {
 			last = line
 		}
 	}
+	if !strings.Contains(last, `"prompt_tokens_details":{"cached_tokens":90}`) {
+		t.Fatalf("final Chat usage omitted cache-read details: %s", last)
+	}
 	// 10 uncached + 90 read + 20 written prompt, 5 output.
 	if !strings.Contains(last, `"prompt_tokens":120`) || !strings.Contains(last, `"total_tokens":125`) || !strings.Contains(last, `"completion_tokens":5`) {
 		t.Fatalf("final chat usage frame = %s, want prompt_tokens 120 / total 125 / completion 5", last)

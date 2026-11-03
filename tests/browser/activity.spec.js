@@ -276,3 +276,18 @@ test('activity export button sits beside clear and custom range downloads CSV', 
   const globalFile = await globalDownload;
   expect(globalFile.suggestedFilename()).toContain('activity');
 });
+
+test('activity shows metadata-only reasoning degradation on desktop and mobile', async ({ page }) => {
+  await openAdmin(page);
+  await page.route('**/api/admin/activity?*', route => route.fulfill({ json: { data: [{
+    id: 'reasoning-warning', requested_model: 'test/model', protocol: 'chat', streaming: false,
+    http_status: 200, latency_ms: 1, attempt_count: 1, attempt_rows: 0,
+    resolved_provider: 'test', resolved_model: 'model', reasoning_stripped: true,
+    client_name: 'test client', created_at: '2026-01-01T00:00:00Z',
+  }], limit: 20, offset: 0 } }));
+  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
+  await page.locator('[data-settings-tab="data"]').click();
+  await expect(page.locator('#global-activity-body .activity-reasoning-warning')).toHaveText('Reasoning history omitted');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator('.history-card:visible .activity-reasoning-warning')).toHaveText('Reasoning history omitted');
+});

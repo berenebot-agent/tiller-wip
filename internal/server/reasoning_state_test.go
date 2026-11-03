@@ -59,10 +59,19 @@ func TestPlaintextResponsesSummaryIsRepresentable(t *testing.T) {
 	}
 }
 
-func TestResponsesReasoningRejectedForMessages(t *testing.T) {
+func TestResponsesReasoningDegradedForMessages(t *testing.T) {
 	t.Parallel()
-	body := []byte(`{"model":"x","input":[{"type":"reasoning","encrypted_content":"opaque"}]}`)
-	if _, err := translateRequest(body, providers.ProtocolResponses, providers.ProtocolMessages, "claude-x"); err == nil {
-		t.Fatal("expected unsupported reasoning state")
+	body := []byte(`{"model":"x","input":[{"type":"reasoning","encrypted_content":"opaque"},{"type":"message","role":"user","content":"hello"}]}`)
+	out, stripped, err := translateRequestObserved(body, providers.ProtocolResponses, providers.ProtocolMessages, "claude-x")
+	if err != nil || !stripped {
+		t.Fatalf("expected observable degradation, stripped=%v err=%v", stripped, err)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatal(err)
+	}
+	messages := result["messages"].([]any)
+	if len(messages) != 1 || messages[0].(map[string]any)["role"] != "user" {
+		t.Fatalf("reasoning-only turn must be omitted: %v", result)
 	}
 }

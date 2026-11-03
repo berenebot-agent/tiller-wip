@@ -890,29 +890,37 @@ func chatToMessagesRequest(chat map[string]any, stripped *bool) (map[string]any,
 			continue
 		}
 		content := chatContentToAnthropic(message["content"])
+		turnStripped := false
 		// A history assembled by a Chat provider carries its reasoning as
 		// reasoning_content, or as reasoning_details this target cannot verify.
 		// Anthropic cannot use either as assistant thinking, so the turn is sent
 		// without it rather than refused: switching a chat from a Chat model to
 		// Claude must not be blocked by turns that model wrote. The turn is
 		// marked once so the degradation is visible in Activity, never silent.
-		if details, ok := message["reasoning_details"]; ok && len(asSlice(details)) > 0 {
+		if details, ok := message["reasoning_details"]; ok && details != nil {
 			if blocks, err := chatReasoningDetailsToAnthropic(details); err == nil {
 				content = append(blocks, content...)
+				if reasoning, _ := message["reasoning_content"].(string); len(blocks) == 0 && reasoning != "" && role == "assistant" {
+					turnStripped = true
+				}
 			} else {
-				*stripped = true
+				turnStripped = true
 			}
 		} else if reasoning, ok := message["reasoning_content"].(string); ok && reasoning != "" && role == "assistant" {
-			if len(asSlice(message["tool_calls"])) > 0 {
-				*stripped = true
-			}
+			turnStripped = true
 		}
+		*stripped = *stripped || turnStripped
 		if calls := asSlice(message["tool_calls"]); calls != nil {
 			for _, rawCall := range calls {
 				call, _ := rawCall.(map[string]any)
 				fn, _ := call["function"].(map[string]any)
 				content = append(content, map[string]any{"type": "tool_use", "id": call["id"], "name": fn["name"], "input": jsonValue(fn["arguments"])})
 			}
+		}
+		// A Responses reasoning item is a standalone assistant turn. Once its
+		// state is stripped, do not send an empty Messages content array.
+		if len(content) == 0 && len(asSlice(message["tool_calls"])) == 0 && role == "assistant" && turnStripped {
+			continue
 		}
 		messages = append(messages, map[string]any{"role": role, "content": content})
 	}
@@ -2454,6 +2462,9 @@ func (state *streamState) chatUsageDelta() map[string]any {
 		if state.hasOutputTokens {
 			usage["total_tokens"] = prompt + state.outputTokens
 		}
+	}
+	if state.hasCacheReadTokens {
+		usage["prompt_tokens_details"] = map[string]any{"cached_tokens": state.cacheReadTokens}
 	}
 	if state.hasOutputTokens {
 		usage["completion_tokens"] = state.outputTokens

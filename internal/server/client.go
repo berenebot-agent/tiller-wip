@@ -908,6 +908,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: code, errorMessage: strPtr(err.Error()), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 					continue
 				}
+				row.reasoningStripped = row.reasoningStripped || reasoningStripped
 				if reasoningStripped && s.logger != nil {
 					// The turn is sent without reasoning state the target cannot
 					// verify. Recorded so a chat switched between provider

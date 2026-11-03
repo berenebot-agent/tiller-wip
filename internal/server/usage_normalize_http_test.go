@@ -89,7 +89,7 @@ func TestStoredUsageNormalisesMessagesUpstreamOverHTTP(t *testing.T) {
 
 	resp, body := clientCall(t, router.URL, secret, "/v1/chat/completions", map[string]any{
 		"model":    "claude/model-a",
-		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		"messages": []any{map[string]any{"role": "assistant", "content": "prior answer", "reasoning_content": "private history"}, map[string]any{"role": "user", "content": "hello"}},
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("chat call: %d %v", resp.StatusCode, body)
@@ -111,6 +111,9 @@ func TestStoredUsageNormalisesMessagesUpstreamOverHTTP(t *testing.T) {
 		t.Fatalf("activity rows = %d, want 1", len(rows))
 	}
 	row := rows[0].(map[string]any)
+	if row["reasoning_stripped"] != true {
+		t.Fatal("reasoning degradation was not persisted and exposed through Activity")
+	}
 	if row["input_tokens"] != float64(120) {
 		t.Fatalf("stored input_tokens = %v, want 120 (whole prompt)", row["input_tokens"])
 	}
