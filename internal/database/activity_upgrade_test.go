@@ -311,11 +311,9 @@ INSERT INTO request_logs(id,account_id,client_key_id,requested_model,route_kind,
 	}
 }
 
-// TestActivityDataUpgradeNormalisesCacheInclusiveInput proves
-// 007_cache_inclusive_input rewrites only rows whose provenance is certain: an
-// Anthropic-shaped usage block always reports cache_creation_input_tokens, and
-// its input_tokens excludes cache. Ambiguous rows must keep their stored value.
-func TestActivityDataUpgradeNormalisesCacheInclusiveInput(t *testing.T) {
+// TestActivityDataUpgradePreservesAmbiguousInput proves that cache metrics do
+// not establish upstream accounting provenance. All historical counts survive.
+func TestActivityDataUpgradePreservesAmbiguousInput(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), ActivityFileName)
 	ctx := context.Background()
@@ -339,10 +337,12 @@ func TestActivityDataUpgradeNormalisesCacheInclusiveInput(t *testing.T) {
 		}
 	}
 	insert("anthropic", int64(10), int64(90), int64(20))     // uncached 10 + read 90 + write 20
-	insert("anthropic-read", int64(10), int64(90), int64(0)) // creation present (0) still proves the convention
-	insert("openai", int64(100), int64(90), nil)             // already inclusive
-	insert("ambiguous", int64(100), int64(40), nil)          // 140 (Anthropic) or 100 (OpenAI): do not guess
-	insert("no-input", nil, int64(40), int64(10))            // nothing to normalise
+	insert("anthropic-read", int64(10), int64(90), int64(0)) // zero creation is not provenance
+	insert("inclusive-creation", int64(120), int64(90), int64(20))
+	insert("inclusive-zero", int64(100), int64(90), int64(0))
+	insert("openai", int64(100), int64(90), nil)    // already inclusive
+	insert("ambiguous", int64(100), int64(40), nil) // 140 (Anthropic) or 100 (OpenAI): do not guess
+	insert("no-input", nil, int64(40), int64(10))   // nothing to normalise
 	adb.Close()
 
 	upgraded, err := OpenActivity(ctx, path)
@@ -350,11 +350,13 @@ func TestActivityDataUpgradeNormalisesCacheInclusiveInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]sql.NullInt64{
-		"anthropic":      {Int64: 120, Valid: true},
-		"anthropic-read": {Int64: 100, Valid: true},
-		"openai":         {Int64: 100, Valid: true},
-		"ambiguous":      {Int64: 100, Valid: true},
-		"no-input":       {},
+		"anthropic":          {Int64: 10, Valid: true},
+		"anthropic-read":     {Int64: 10, Valid: true},
+		"inclusive-creation": {Int64: 120, Valid: true},
+		"inclusive-zero":     {Int64: 100, Valid: true},
+		"openai":             {Int64: 100, Valid: true},
+		"ambiguous":          {Int64: 100, Valid: true},
+		"no-input":           {},
 	}
 	for id, expected := range want {
 		var got sql.NullInt64
@@ -374,8 +376,7 @@ func TestActivityDataUpgradeNormalisesCacheInclusiveInput(t *testing.T) {
 	}
 	upgraded.Close()
 
-	// Re-opening must not add the cache counts a second time: the version marker
-	// is what makes the rewrite idempotent.
+	// Re-opening must preserve the historical counts too.
 	reopened, err := OpenActivity(ctx, path)
 	if err != nil {
 		t.Fatal(err)
@@ -385,7 +386,7 @@ func TestActivityDataUpgradeNormalisesCacheInclusiveInput(t *testing.T) {
 	if err := reopened.QueryRowContext(ctx, `SELECT input_tokens FROM request_logs WHERE id='anthropic'`).Scan(&input); err != nil {
 		t.Fatal(err)
 	}
-	if input != 120 {
-		t.Fatalf("input_tokens after reopen = %d, want 120 (rewrite must not repeat)", input)
+	if input != 10 {
+		t.Fatalf("input_tokens after reopen = %d, want unchanged 10", input)
 	}
 }

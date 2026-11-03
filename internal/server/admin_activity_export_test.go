@@ -571,6 +571,8 @@ func TestActivityCSVExportNoSensitiveMaterial(t *testing.T) {
 	if status != 200 {
 		t.Fatalf("export: %d", status)
 	}
+	// The metadata-only column name is not reasoning content.
+	body = strings.ReplaceAll(body, "reasoning_stripped", "degradation_flag")
 	for _, forbidden := range []string{"PROMPT-SECRET-MARKER", "provider-secret", "Bearer", "sk-tr-", "Authorization", "tool", "reasoning"} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("sensitive material leaked into CSV: %q", forbidden)
@@ -804,8 +806,8 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		t.Fatalf("expected header + 1 row, got %d records", len(records))
 	}
 	header := records[0]
-	if len(header) != 31 {
-		t.Fatalf("expected 31 columns, got %d", len(header))
+	if len(header) != 32 {
+		t.Fatalf("expected 32 columns, got %d", len(header))
 	}
 	for _, h := range header {
 		if h == "warning_code" {
@@ -855,6 +857,7 @@ func TestActivityCSVExportHeaderRowAlignment(t *testing.T) {
 		{"route_kind", "virtual"},
 		{"input_tokens_source", "provider"},
 		{"output_tokens_source", "provider"},
+		{"reasoning_stripped", "false"},
 	}
 	for _, c := range checks {
 		if got := row[indexOf(c.header)]; got != c.value {

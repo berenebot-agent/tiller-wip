@@ -41,15 +41,16 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	insert := func(sc *store.Scope, id, clientID string) {
 		t.Helper()
 		err := sc.InsertRequestLog(ctx, store.RequestLogInsert{
-			ID:              id,
-			ClientKeyID:     clientID,
-			ClientName:      clientID,
-			RequestedModel:  "provider-a/model-a",
-			Protocol:        "chat",
-			HTTPStatus:      200,
-			LatencyMs:       1,
-			ClientRequestID: id,
-			CreatedAt:       database.Now(),
+			ID:                id,
+			ReasoningStripped: sc == local,
+			ClientKeyID:       clientID,
+			ClientName:        clientID,
+			RequestedModel:    "provider-a/model-a",
+			Protocol:          "chat",
+			HTTPStatus:        200,
+			LatencyMs:         1,
+			ClientRequestID:   id,
+			CreatedAt:         database.Now(),
 			Attempts: []store.RequestAttemptInsert{{
 				Provider:  "provider-a",
 				Model:     "model-a",
@@ -72,14 +73,14 @@ func TestActivityIsAccountScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" {
+	if len(globalLocal) != 1 || globalLocal[0].ID != "row-local" || !globalLocal[0].ReasoningStripped {
 		t.Fatalf("local account sees %d rows (%v), want only row-local", len(globalLocal), ids(globalLocal))
 	}
 	globalOther, err := other.ListGlobalActivity(ctx, "", 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(globalOther) != 1 || globalOther[0].ID != "row-other" {
+	if len(globalOther) != 1 || globalOther[0].ID != "row-other" || globalOther[0].ReasoningStripped {
 		t.Fatalf("other account sees %d rows (%v), want only row-other", len(globalOther), ids(globalOther))
 	}
 

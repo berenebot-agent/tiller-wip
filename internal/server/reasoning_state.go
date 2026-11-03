@@ -166,16 +166,8 @@ func validateReasoningRepresentability(source map[string]any, from, to providers
 	if from == to {
 		return nil
 	}
-	if from == providers.ProtocolResponses {
-		if to == providers.ProtocolMessages {
-			for _, raw := range asSlice(source["input"]) {
-				item, _ := raw.(map[string]any)
-				if item["type"] == "reasoning" && item["encrypted_content"] != nil {
-					return reasoningStateError{"Responses reasoning state"}
-				}
-			}
-		}
-	}
+	// Responses history destined for Messages is degraded by
+	// chatToMessagesRequest, which reports the discarded opaque state.
 	if from == providers.ProtocolChat && to == providers.ProtocolResponses {
 		for _, raw := range asSlice(source["messages"]) {
 			msg, _ := raw.(map[string]any)

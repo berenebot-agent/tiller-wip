@@ -46,11 +46,18 @@ behavior may still change before a stable `1.0`.
   Messages count has its cache read/write tokens folded in at ingestion, while
   OpenAI- and DeepSeek-style totals were already inclusive. The cache share is
   `cache_read / input_tokens` everywhere (Activity rows and the usage
-  aggregates), so it can no longer exceed 100% or be halved for
-  OpenAI-compatible providers, and estimated costs subtract the cache counts
-  uniformly. Historical rows whose provenance is unambiguous are normalised
-  once at boot; ambiguous rows keep their stored values rather than being
-  guessed at.
+  aggregates), preventing provider-convention double counting. Estimated costs
+  subtract the cache counts uniformly. Historical rows retain their original
+  values because upstream accounting provenance was not recorded; cache-creation
+  metrics alone do not prove exclusive input accounting.
+- **Translated Chat stream cache details.** Usage frames now include
+  `prompt_tokens_details.cached_tokens` when the Messages upstream reports
+  cache reads, including an explicit zero.
+- **Observable reasoning-history degradation.** Responses encrypted history
+  routed to Messages is omitted instead of rejecting the request. Discarded
+  assistant reasoning is flagged even without tool calls, persisted as the
+  metadata-only `reasoning_stripped` Activity field, shown in history, and
+  included in Activity/account CSV exports. Signed Claude details remain intact.
 
 ## [0.1.0-beta.5] - 2026-10-12
 

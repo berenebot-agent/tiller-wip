@@ -2312,7 +2312,8 @@ function activityDetailHTML(row, kind) {
   // The mobile card already shows error_text in its footer, so its detail body
   // only carries the hydrated attempt sequence (plus load errors / retry).
   const parts = kind === 'card' ? [sequence] : [resolved, sequence, error];
-  return `${parts.join('')}${loadError}${pending}`;
+  const reasoning = row.reasoning_stripped ? '<span class="activity-reasoning-warning" title="Unverifiable reasoning history was omitted during protocol translation.">Reasoning history omitted</span>' : '';
+  return `${parts.join('')}${reasoning}${loadError}${pending}`;
 }
 function resolvedActivity(row) { return activityDetailHTML(row, 'table'); }
 function activityCardDetail(row) { return activityDetailHTML(row, 'card') + `<div class="history-meta">${rowCache(row)}</div>`; }
