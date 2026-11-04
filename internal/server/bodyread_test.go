@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -169,4 +170,53 @@ func TestIsTimeoutError(t *testing.T) {
 		t.Fatal("nil classified as a timeout")
 	}
 	_ = time.Second
+}
+
+// TestBodyReadGateReleasedBeforeStreamEnds proves the gate covers only the body
+// read: while an upstream stream is still open the slot must already be free,
+// or 64 long streams would block /v1 for every tenant.
+func TestBodyReadGateReleasedBeforeStreamEnds(t *testing.T) {
+	t.Parallel()
+	hold := make(chan struct{})
+	reached := make(chan struct{})
+	var once sync.Once
+	api, _, _, secret := loggingTestHarness(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = io.WriteString(w, `{"object":"list","data":[{"id":"model-a","object":"model"}]}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		w.(http.Flusher).Flush()
+		once.Do(func() { close(reached) })
+		select {
+		case <-hold:
+		case <-r.Context().Done():
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	t.Cleanup(func() { close(hold) })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		req, _ := http.NewRequestWithContext(ctx, "POST", api.base+"/v1/chat/completions", strings.NewReader(`{"model":"provider-a/model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+secret)
+		if resp, err := api.client.Do(req); err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}()
+	select {
+	case <-reached:
+	case <-ctx.Done():
+		t.Fatal("upstream stream was never reached")
+	}
+	if n := api.server.bodyReads.active.Load(); n != 0 {
+		t.Fatalf("body-read slots held during an open stream = %d, want 0", n)
+	}
+	cancel()
+	<-done
 }

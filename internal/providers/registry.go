@@ -496,6 +496,9 @@ func (r *Registry) Discover(ctx context.Context, provider Instance) ([]Model, er
 	if err != nil {
 		return nil, err
 	}
+	if len(models) > MaxDiscoveredModels {
+		return nil, errTooManyModels
+	}
 	// opencode-free is the anonymous, keyless tier — only models in the free
 	// set (isOpenCodeFreeModel: the -free suffix minus known keyed
 	// exceptions, plus known unsuffixed free slots) are usable without a
@@ -1110,6 +1113,14 @@ func anthropicReasoning(capabilitiesRaw any) *ReasoningCapabilities {
 	return &rc
 }
 
+// MaxDiscoveredModels bounds one provider's catalogue. A user-supplied
+// endpoint (hosted custom provider) could otherwise stream millions of model
+// ids into memory and into one SQLite write transaction. Real catalogues are
+// hundreds of entries; discovery fails loud above this (refresh_error).
+const MaxDiscoveredModels = 10000
+
+var errTooManyModels = fmt.Errorf("provider catalogue exceeds %d models", MaxDiscoveredModels)
+
 func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthropic bool) ([]Model, error) {
 	endpoint, err := appendEndpoint(provider.BaseURL, "models")
 	if err != nil {
@@ -1200,6 +1211,9 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 				InputModalities:          arch.InputModalities,
 				OutputModalities:         arch.OutputModalities,
 			})
+		}
+		if len(result) > MaxDiscoveredModels {
+			return nil, errTooManyModels
 		}
 		if !payload.HasMore && payload.Next == "" {
 			break

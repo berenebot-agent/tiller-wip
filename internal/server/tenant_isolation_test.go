@@ -144,6 +144,16 @@ func TestCrossAccountHTTPIsolation(t *testing.T) {
 	}
 	modelB := payload["id"].(string)
 
+	// B cannot create a virtual model inside A's group by passing its id.
+	status, payload, _ = apiB.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupA, "name": "squat", "target_provider_id": providerB, "target_model_id": modelB})
+	if status != 404 {
+		t.Fatalf("B virtual model in A's group = %d, want 404 (%v)", status, payload)
+	}
+	status, payload, _ = apiA.request("DELETE", "/api/admin/virtual-groups/"+groupA, nil)
+	if status != 204 {
+		t.Fatalf("A can no longer delete its empty group: %d %v", status, payload)
+	}
+
 	// A's client key cannot resolve B's model.
 	resp, body := clientCall(t, apiA.base, secretA, "/v1/chat/completions", map[string]any{"model": "prov-b/model-b", "messages": []any{map[string]any{"role": "user", "content": "hi"}}})
 	if resp.StatusCode != 404 {

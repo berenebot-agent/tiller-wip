@@ -116,3 +116,26 @@ func TestTranslatedStreamCompletionUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestTranslatedJSONBodyInStreamIsBounded proves a body labelled as a stream
+// but carrying plain JSON obeys the non-streaming cap and gate, so many such
+// responses cannot each hold 64 MiB.
+func TestTranslatedJSONBodyInStreamIsBounded(t *testing.T) {
+	over := strings.NewReader(`{"x":"` + strings.Repeat("a", int(maxUpstreamNonStreamBytes)) + `"}`)
+	err := translateResponseObserved(httptest.NewRecorder(), nil, over, providers.ProtocolMessages, providers.ProtocolChat, resolvedRoute{}, &usageCapture{}, nil)
+	if !errors.Is(err, errUpstreamResponseTooLarge) {
+		t.Fatalf("oversized JSON-in-stream err = %v, want errUpstreamResponseTooLarge", err)
+	}
+	for i := 0; i < cap(nonStreamBufferGate); i++ {
+		nonStreamBufferGate <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for i := 0; i < cap(nonStreamBufferGate); i++ {
+			<-nonStreamBufferGate
+		}
+	})
+	err = translateResponseObserved(httptest.NewRecorder(), nil, strings.NewReader(`{}`), providers.ProtocolMessages, providers.ProtocolChat, resolvedRoute{}, &usageCapture{}, nil)
+	if !errors.Is(err, errUpstreamResponseTooLarge) {
+		t.Fatalf("saturated gate err = %v, want errUpstreamResponseTooLarge", err)
+	}
+}

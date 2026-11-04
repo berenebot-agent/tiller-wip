@@ -91,3 +91,40 @@ func TestAnthropicUsageConvertersIncludeCacheTokens(t *testing.T) {
 		t.Fatalf("nonstream usage = %v, want prompt_tokens=120 (cached input included)", u)
 	}
 }
+
+// TestNativeStreamRelayCapturesUsagePerProtocol proves the same-protocol relay
+// (no translation) records usage from each protocol's own event shape. A
+// Chat-only read left output tokens NULL for Claude Code and Codex traffic.
+func TestNativeStreamRelayCapturesUsagePerProtocol(t *testing.T) {
+	t.Parallel()
+	responses := "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":42,\"output_tokens\":7,\"input_tokens_details\":{\"cached_tokens\":30}}}}\n\n"
+	chat := "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":3,\"cost\":0.0002}}\n\ndata: [DONE]\n\n"
+	for _, tc := range []struct {
+		name         string
+		protocol     providers.Protocol
+		stream       string
+		in, out      int64
+		cacheRead    int64
+		wantCostSeen bool
+	}{
+		{"messages", providers.ProtocolMessages, anthropicCacheStream, 10, 5, 90, false},
+		{"responses", providers.ProtocolResponses, responses, 42, 7, 30, false},
+		{"chat", providers.ProtocolChat, chat, 11, 3, 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			usage := &usageCapture{protocol: tc.protocol}
+			if err := rewriteSSE(httptest.NewRecorder(), nil, strings.NewReader(tc.stream), "up", "client", usage); err != nil {
+				t.Fatal(err)
+			}
+			if usage.inputTokens == nil || *usage.inputTokens != tc.in || usage.outputTokens == nil || *usage.outputTokens != tc.out {
+				t.Fatalf("tokens in=%v out=%v, want %d/%d", usage.inputTokens, usage.outputTokens, tc.in, tc.out)
+			}
+			if tc.cacheRead > 0 && (usage.cacheReadInputTokens == nil || *usage.cacheReadInputTokens != tc.cacheRead) {
+				t.Fatalf("cache read = %v, want %d", usage.cacheReadInputTokens, tc.cacheRead)
+			}
+			if tc.wantCostSeen && usage.providerCostMicros == nil {
+				t.Fatal("provider-reported cost was not captured")
+			}
+		})
+	}
+}

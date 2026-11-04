@@ -631,13 +631,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		inferenceError(w, http.StatusServiceUnavailable, "api_error", "body_read_busy", "The router is busy reading request bodies. Retry shortly.", incoming == providers.ProtocolMessages)
 		return
 	}
-	defer s.bodyReads.release()
 	var body []byte
 	var err error
 	readErr := withBodyReadDeadline(w, func() error {
 		body, err = io.ReadAll(r.Body)
 		return err
 	})
+	// The gate bounds requests mid-body only. Hold it past the read and a few
+	// long streams exhaust it for every tenant.
+	s.bodyReads.release()
 	if readErr != nil {
 		if isTimeoutError(readErr) {
 			inferenceError(w, 408, "invalid_request_error", "request_timeout", "The request body was not received in time.", incoming == providers.ProtocolMessages)
@@ -2415,10 +2417,13 @@ func rewriteSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r 
 					var value any
 					if json.Unmarshal(payload, &value) == nil {
 						if m, ok := value.(map[string]any); ok {
-							if u, ok := m["usage"].(map[string]any); ok {
-								setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
-								setCacheFromUsage(u, usage)
+							// Each upstream protocol reports usage in a different place; a
+							// Chat-only read recorded nothing for native Messages/Responses.
+							target := usage.protocol
+							if target == "" {
+								target = providers.ProtocolChat
 							}
+							captureStreamUsage(m, target, usage)
 							if responsesEventHasOutput(m) {
 								obs.observe()
 							}

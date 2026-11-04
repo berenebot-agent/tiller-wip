@@ -1252,9 +1252,20 @@ func translateResponseObserved(w http.ResponseWriter, keepalive *sseKeepaliveWri
 		return translatedStreamReadError(err)
 	}
 	if prefix[0] == '{' || prefix[0] == '[' {
-		body, err := io.ReadAll(io.LimitReader(reader, 64<<20))
+		// An upstream can label a plain JSON body as a stream. Buffer it under the
+		// same cap and gate as any non-streaming response (TR-002).
+		select {
+		case nonStreamBufferGate <- struct{}{}:
+			defer func() { <-nonStreamBufferGate }()
+		default:
+			return errUpstreamResponseTooLarge
+		}
+		body, err := io.ReadAll(io.LimitReader(reader, maxUpstreamNonStreamBytes+1))
 		if err != nil {
 			return translatedStreamReadError(err)
+		}
+		if int64(len(body)) > maxUpstreamNonStreamBytes {
+			return errUpstreamResponseTooLarge
 		}
 		extractUsage(body, usage)
 		translated, err := translateNonstreamResponse(body, incoming, target, route.RequestedModel)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -1241,5 +1242,29 @@ func TestCodexClientVersionCachesResolution(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 1 {
 		t.Fatalf("release channel hits = %d, want 1", got)
+	}
+}
+
+// TestPagedDiscoveryRejectsUnboundedCatalogue proves a hostile endpoint that
+// pages model ids forever is stopped at the cap with an error, instead of
+// building an unbounded model list for the database write.
+func TestPagedDiscoveryRejectsUnboundedCatalogue(t *testing.T) {
+	t.Parallel()
+	var pages atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		page := pages.Add(1)
+		data := make([]map[string]any, 4000)
+		for i := range data {
+			data[i] = map[string]any{"id": fmt.Sprintf("m-%d-%d", page, i)}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "has_more": true, "last_id": fmt.Sprint(page)})
+	}))
+	t.Cleanup(upstream.Close)
+	models, err := NewRegistry().Discover(context.Background(), Instance{Type: "generic-openai", BaseURL: upstream.URL + "/v1", Credential: "secret"})
+	if err == nil {
+		t.Fatalf("discovery accepted %d models, want an over-limit error", len(models))
+	}
+	if got := pages.Load(); got > 5 {
+		t.Fatalf("discovery fetched %d pages before stopping, want it to stop at the cap", got)
 	}
 }

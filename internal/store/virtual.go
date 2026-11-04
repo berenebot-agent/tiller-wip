@@ -250,6 +250,16 @@ func (s *Scope) CreateVirtualModel(ctx context.Context, in CreateVirtualModelInp
 		}
 		now := now()
 		groupID := in.GroupID
+		if groupID != "" {
+			// The id comes from the request body: it must be one of this account's groups.
+			var owned int
+			if err := tx.q.QueryRowContext(ctx, `SELECT count(*) FROM virtual_provider_groups WHERE id=? AND account_id=?`, groupID, tx.accountID).Scan(&owned); err != nil {
+				return err
+			}
+			if owned == 0 {
+				return ErrVirtualGroupNotFound
+			}
+		}
 		if groupID == "" {
 			groupID = in.NewGroupID
 			if _, err := tx.q.ExecContext(ctx, `INSERT INTO namespaces(account_id,name,kind,entity_id) VALUES(?,?,'virtual',?)`, tx.accountID, in.GroupName, groupID); err != nil {

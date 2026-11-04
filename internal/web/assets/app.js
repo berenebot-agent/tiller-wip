@@ -3923,7 +3923,7 @@ async function setupAnalyticsConsent() {
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
-      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
+      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.password_setup) { $('#verify-message').textContent = 'Your email is verified. We emailed you a link to set your password.'; return; } if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
       return;
     }
     if (runtimeMode === 'hosted' && path === '/reset-password' && token) authView('reset-form');
@@ -4515,7 +4515,7 @@ $('#platform-users-list').addEventListener('click', async event => {
         const passwordEnabled = runtimeMode === 'hosted' && !!lastAccountProfile?.password_enabled && !lastAccountProfile?.google_linked;
         if (passwordEnabled) makeOnly = confirm('Use this passkey as your only sign-in method? Your password will be disabled.');
         try {
-          const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: '{}' });
+          const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: JSON.stringify(await passkeyReauth()) });
           const publicKey = prepCreate(begin.options.publicKey || begin.options);
           const cred = await navigator.credentials.create({ publicKey });
           if (!cred) throw new Error('No credential returned.');
@@ -4537,12 +4537,20 @@ $('#platform-users-list').addEventListener('click', async event => {
   // Account management.
   const fmtPasskeyDate = value => value ? new Date(value).toLocaleString() : '—';
   let lastAccountProfile = null;
+  // Proof for passkey changes: the typed password, or a passkey assertion when
+  // password sign-in is off. The server rejects a bare session.
+  const passkeyReauth = async () => {
+    if (lastAccountProfile?.password_enabled) return { current_password: $('#account-passkeys-password').value };
+    if (window.__confirmWithPasskey) await window.__confirmWithPasskey();
+    return { current_password: '' };
+  };
   function renderPasskeysCard(profile) {
     const card = $('#account-passkeys-card'); if (!card) return;
     const enabled = !!profile.passkeys_enabled;
     card.hidden = !enabled;
     if (!enabled) { lastAccountProfile = null; return; }
     lastAccountProfile = profile;
+    $('#account-passkeys-password-row').hidden = !profile.password_enabled;
     // A browser without WebAuthn cannot run any ceremony: hide Add and the
     // re-enable toggle rather than leaving controls that would fail, and say
     // why. Existing passkeys can still be listed and removed (plain HTTP).
@@ -4566,7 +4574,7 @@ $('#platform-users-list').addEventListener('click', async event => {
     }));
     list.querySelectorAll('[data-passkey-remove]').forEach(btn => btn.addEventListener('click', async () => {
       if (!confirm('Remove this passkey?')) return;
-      try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
+      try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove, ...await passkeyReauth() }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
       catch (error) { flash(errorMessage(error, 'Could not remove the passkey.'), 'error'); }
     }));
     // Password sign-in toggle: offer to turn it back on when disabled. Hidden
@@ -4580,7 +4588,7 @@ $('#platform-users-list').addEventListener('click', async event => {
     toggle.hidden = runtimeMode !== 'hosted' || passwordEnabled || googleLinked;
     toggle.textContent = 'Re-enable password sign-in';
     toggle.onclick = async () => {
-      try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }
+      try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true, ...await passkeyReauth() }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }
       catch (error) { flash(errorMessage(error, 'Could not update password sign-in.'), 'error'); }
     };
   }
