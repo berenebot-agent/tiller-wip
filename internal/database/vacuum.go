@@ -55,7 +55,32 @@ func (d *DB) VacuumActivity(ctx context.Context) error {
 	return vacuum(ctx, d.Activity)
 }
 
+// Compaction only runs when enough of the file is free pages to justify
+// holding the exclusive write lock for the whole rewrite.
+const (
+	vacuumMinFreePages = 64
+	vacuumMinFreeRatio = 0.25
+)
+
+// worthVacuuming reports whether the freelist is large enough to compact.
+func worthVacuuming(ctx context.Context, db *sql.DB) (bool, error) {
+	var free, total int64
+	if err := db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+		return false, fmt.Errorf("sqlite freelist_count: %w", err)
+	}
+	if err := db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&total); err != nil {
+		return false, fmt.Errorf("sqlite page_count: %w", err)
+	}
+	return free >= vacuumMinFreePages && total > 0 && float64(free)/float64(total) >= vacuumMinFreeRatio, nil
+}
+
 func vacuum(ctx context.Context, db *sql.DB) error {
+	// Checkpointing is cheap and never holds the exclusive lock, so it runs
+	// even when the rewrite is skipped.
+	if ok, err := worthVacuuming(ctx, db); err != nil || !ok {
+		_ = checkpointWAL(ctx, db)
+		return err
+	}
 	// Fold and truncate the WAL before compaction so the VACUUM rewrite does
 	// not have to reconcile a large write-ahead log (which can grow past the
 	// database itself). Checkpoint failures are ignored: the VACUUM is still

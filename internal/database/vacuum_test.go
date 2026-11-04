@@ -114,3 +114,19 @@ func TestVacuumActivityAndNilHandle(t *testing.T) {
 		t.Fatalf("nil activity vacuum = %v, want nil", err)
 	}
 }
+
+func TestVacuumSkippedBelowThreshold(t *testing.T) {
+	t.Parallel()
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ok, err := worthVacuuming(context.Background(), db.SQL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("fresh database should not be worth vacuuming")
+	}
+}
