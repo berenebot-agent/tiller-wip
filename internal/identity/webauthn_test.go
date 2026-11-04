@@ -25,11 +25,11 @@ import (
 func activeUser(t *testing.T, st *Store) User {
 	t.Helper()
 	ctx := context.Background()
-	result, err := st.CreateSignup(ctx, "user@example.com", "correct horse battery staple")
+	result, err := st.CreateSignup(ctx, "user@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := st.ConsumeVerification(ctx, result.VerificationToken)
+	verified, err := st.ConsumeVerification(ctx, result.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}

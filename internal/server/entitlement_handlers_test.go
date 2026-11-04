@@ -47,7 +47,7 @@ func TestPlatformStatsAggregateAccountsAndUsage(t *testing.T) {
 	t.Parallel()
 	app, _, accountID := hostedServerHarness(t, false)
 	papi := hostedPlatformAPI(t, app)
-	second, err := app.identity.CreateSignup(context.Background(), "second-platform-stats@example.com", "correct horse battery staple")
+	second, err := app.identity.CreateSignup(context.Background(), "second-platform-stats@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -456,7 +456,7 @@ func TestPlatformUsersIncludeScopedResourceAndUsageStats(t *testing.T) {
 	papi := hostedPlatformAPI(t, app)
 	ctx := context.Background()
 
-	second, err := app.identity.CreateSignup(ctx, "second-users@example.com", "correct horse battery staple")
+	second, err := app.identity.CreateSignup(ctx, "second-users@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}

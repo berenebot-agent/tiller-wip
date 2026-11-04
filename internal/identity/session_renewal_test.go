@@ -11,11 +11,11 @@ func TestUserSessionRenewalCASConflictReloadsWinner(t *testing.T) {
 	t.Parallel()
 	first, db := newTestStore(t)
 	ctx := context.Background()
-	signup, err := first.CreateSignup(ctx, "renew@example.com", "correct horse battery staple")
+	signup, err := first.CreateSignup(ctx, "renew@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	user, err := first.ConsumeVerification(ctx, signup.VerificationToken)
+	user, err := first.ConsumeVerification(ctx, signup.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
