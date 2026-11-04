@@ -9,6 +9,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -290,12 +291,17 @@ func opencodeSessionHarness(t *testing.T, upstreamA, upstreamB http.HandlerFunc)
 
 func opencodeSessionClientCall(t *testing.T, base, secret, opencodeSession string, body any) (*http.Response, map[string]any) {
 	t.Helper()
+	return opencodeSessionClientCallHeader(t, base, secret, "X-Opencode-Session", opencodeSession, body)
+}
+
+func opencodeSessionClientCallHeader(t *testing.T, base, secret, header, value string, body any) (*http.Response, map[string]any) {
+	t.Helper()
 	encoded, _ := json.Marshal(body)
 	req, _ := http.NewRequest("POST", base+"/v1/chat/completions", bytes.NewReader(encoded))
 	req.Header.Set("Authorization", "Bearer "+secret)
 	req.Header.Set("Content-Type", "application/json")
-	if opencodeSession != "" {
-		req.Header.Set("X-Opencode-Session", opencodeSession)
+	if value != "" {
+		req.Header.Set(header, value)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -384,5 +390,37 @@ func TestOpenCodeSuppliedSessionHeaderStableAcrossFallback(t *testing.T) {
 	mu.Unlock()
 	if len(got) != 3 || got[0] == "" || got[0] != got[1] || got[0] != got[2] {
 		t.Fatalf("supplied session must map to one stable upstream session, got %v", got)
+	}
+}
+
+// Pi and other third-party OpenAI-compatible clients send x-session-affinity,
+// not x-opencode-session; it must give OpenCode upstreams one stable session
+// across turns, or their prompt cache never carries over.
+func TestOpenCodeUpstreamHonoursSessionAffinityHeader(t *testing.T) {
+	t.Parallel()
+	var mu sync.Mutex
+	sessions := []string{}
+	upstream := func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}, map[string]any{"id": "model-b"}}})
+			return
+		}
+		mu.Lock()
+		sessions = append(sessions, r.Header.Get("X-Opencode-Session"))
+		mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-a", "choices": []any{}})
+	}
+	api, secret, canonical := opencodeSessionHarness(t, upstream, upstream)
+	for range 2 {
+		resp, _ := opencodeSessionClientCallHeader(t, api.base, secret, "x-session-affinity", "pi-card-1", map[string]any{"model": canonical, "messages": []any{}})
+		if resp.StatusCode != 200 {
+			t.Fatalf("request: %d", resp.StatusCode)
+		}
+	}
+	mu.Lock()
+	got := append([]string(nil), sessions...)
+	mu.Unlock()
+	if len(got) != 2 || got[0] == "" || got[0] != got[1] || !strings.HasSuffix(got[0], "pi-card-1") {
+		t.Fatalf("affinity header must map to one stable upstream session, got %v", got)
 	}
 }

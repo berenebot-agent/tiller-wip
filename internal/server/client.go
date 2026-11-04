@@ -1042,7 +1042,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// genuine client, which sends only the affinity
 				// headers (captured against opencode/1.18.26) — no
 				// X-Opencode-Session at all.
-				session := openCodeSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID, row.clientKeyID)
+				session := openCodeSessionID(clientSessionHeader(r.Header), row.clientRequestID, row.clientKeyID)
 				if freeShadow {
 					affinity := freeShadowSession(session)
 					req.Header.Set("x-session-affinity", affinity)
