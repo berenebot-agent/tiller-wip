@@ -42,7 +42,7 @@ Two client key types cover the two ways tools talk to an LLM API:
 
 ### Single — one key, one route
 
-Exposes one stable model identity — usually something simple like `main` — bound to any real or virtual model. The key itself defines the route; and whichever model the client requests will be routed to thed provider and model you select in Tiller. Change the route from the web interface and the next request follows it.
+Exposes one stable model identity — usually something simple like `main` — bound to any real or virtual model. The key itself defines the route; and whichever model the client requests will be routed to the provider and model you select in Tiller. Change the route from the web interface and the next request follows it.
 
 ### Catalogue — a controlled model list
 
