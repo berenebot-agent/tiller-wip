@@ -639,7 +639,25 @@ $('#google-consent-form').addEventListener('submit', async event => {
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-login').onclick = () => authView('login-form');
 $('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; $('#reset-login').hidden = false; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
-$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; setSessionHint(true); hideBoot(); $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await selectPlatformTab(platformTabFromHash(), { push: false }); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
+$('#platform-login-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const hadChallenge = captchaAction === 'platform_login';
+  try {
+    const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({
+      username: form.get('username'), password: form.get('password'),
+      captcha_token: hadChallenge ? authCaptchaToken('platform_login') : '',
+    }) });
+    state.csrf = session.csrf_token; setSessionHint(true); hideBoot();
+    $('#login-shell').hidden = true; $('#platform-shell').hidden = false;
+    await selectPlatformTab(platformTabFromHash(), { push: false });
+  } catch (error) {
+    showAuthError('platform-login-error', error, 'Platform login failed.');
+    if (error.code === 'captcha_required') await showAuthCaptcha('platform_login');
+  } finally {
+    if (hadChallenge) resetAuthCaptcha('platform_login');
+  }
+});
 $('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
 
 const PLATFORM_TABS = ['overview', 'users', 'plans', 'mail', 'logs', 'legal', 'settings'];
@@ -4003,6 +4021,10 @@ async function setupAnalyticsConsent() {
             } catch (error) { $('#account-email-error').textContent = `${errorMessage(error, 'Could not start the email change.')} Confirm with Google again and retry.`; }
             sessionStorage.removeItem('googleReauthEmail');
           }
+          if (googleAction === 'passkeys') {
+            await loadAccount();
+            flash('Google confirmed your identity. Choose Add a passkey or Remove to continue.');
+          }
           if (googleAction === 'unlink') await loadAccount();
           sessionStorage.removeItem('googleReauthAction');
         }
@@ -4515,6 +4537,7 @@ $('#platform-users-list').addEventListener('click', async event => {
     if (add) {
       add.addEventListener('click', async () => {
         const status = $('#account-passkeys-status');
+        if (await startPasskeyGoogleReauth()) return;
         // Prompt first; a cancel should not leave a "Waiting for your device…"
         // message behind.
         const name = prompt('Name this passkey', 'Passkey');
@@ -4551,10 +4574,27 @@ $('#platform-users-list').addEventListener('click', async event => {
   // Account management.
   const fmtPasskeyDate = value => value ? new Date(value).toLocaleString() : '—';
   let lastAccountProfile = null;
-  // Proof for passkey changes: the typed password, or a passkey assertion when
-  // password sign-in is off. The server rejects a bare session.
+  // Proof for passkey changes: password, passkey assertion, or Google re-auth.
+  // The server rejects a bare session and enforces one-use grants.
+  const startPasskeyGoogleReauth = async () => {
+    if (!lastAccountProfile?.google_linked || lastAccountProfile?.password_enabled || googleReauthValid()) return false;
+    try {
+      sessionStorage.setItem('googleReauthAction', 'passkeys');
+      const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+      location.assign(result.redirect_url);
+    } catch (error) {
+      sessionStorage.removeItem('googleReauthAction');
+      flash(errorMessage(error, 'Could not start Google confirmation.'), 'error');
+    }
+    return true;
+  };
   const passkeyReauth = async () => {
     if (lastAccountProfile?.password_enabled) return { current_password: $('#account-passkeys-password').value };
+    if (lastAccountProfile?.google_linked && googleReauthValid()) {
+      // Presentation only: the backend enforces the one-use, session-bound grant.
+      googleReauthConfirmedAt = 0;
+      return { current_password: '' };
+    }
     if (window.__confirmWithPasskey) await window.__confirmWithPasskey();
     return { current_password: '' };
   };
@@ -4587,6 +4627,7 @@ $('#platform-users-list').addEventListener('click', async event => {
       catch (error) { flash(errorMessage(error, 'Could not rename the passkey.'), 'error'); }
     }));
     list.querySelectorAll('[data-passkey-remove]').forEach(btn => btn.addEventListener('click', async () => {
+      if (await startPasskeyGoogleReauth()) return;
       if (!confirm('Remove this passkey?')) return;
       try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove, ...await passkeyReauth() }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
       catch (error) { flash(errorMessage(error, 'Could not remove the passkey.'), 'error'); }

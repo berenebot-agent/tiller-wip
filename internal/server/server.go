@@ -139,8 +139,8 @@ type Server struct {
 	testNotificationLimiter *loginLimiter
 	// loginLimiter throttles failed admin login attempts to blunt brute force.
 	loginLimiter *loginLimiter
-	// platformGlobalLimiter counts failed platform logins across all IPs, so a
-	// distributed guess cannot dodge the per-IP limit.
+	// platformGlobalLimiter escalates distributed platform failures to a
+	// challenge when Turnstile is configured, without locking out all IPs.
 	platformGlobalLimiter *loginLimiter
 	// providerRefreshLimiter caps user-triggered provider discovery per account.
 	providerRefreshLimiter *loginLimiter

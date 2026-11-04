@@ -408,3 +408,63 @@ test('local passkey management card lists passkeys and never offers password-onl
   // not shown (there is nothing to re-enable).
   await expect(page.locator('#account-password-signin-toggle')).toBeHidden();
 });
+
+
+test('Google-only user confirms with Google then adds their first passkey', async ({ page }) => {
+  await installCredentialStub(page);
+  let finish = null;
+  await mockHostedPasskeyPage(page, {
+    profile: { ...PROFILE, password_enabled: false, google_linked: true, passkeys: [] },
+    onRegisterFinish: req => { finish = req; },
+  });
+  let googleStarts = 0;
+  let assertions = 0;
+  await page.route('**/api/auth/account/passkeys/reauth/begin', route => {
+    assertions++;
+    return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { message: 'No passkey registered.' } }) });
+  });
+  await page.route('**/api/auth/google/reauth/start', route => {
+    googleStarts++;
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ redirect_url: '/?google_reauth=1#settings/account' }) });
+  });
+  page.on('dialog', dialog => dialog.accept('Phone'));
+  await openAccountTab(page);
+  await page.click('#account-passkey-add');
+  await expect(page).toHaveURL(/google_reauth=1|settings\/account/);
+  await expect(page.locator('#flash')).toContainText('Choose Add a passkey');
+  await page.click('#account-passkey-add');
+  await expect.poll(() => finish).not.toBeNull();
+  expect(googleStarts).toBe(1);
+  expect(assertions).toBe(0);
+  expect(finish.headers()['x-csrf-token']).toBe('csrf-token');
+});
+
+
+test('platform login escalates to Turnstile only when the server requests it', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.__captchaActions = [];
+    window.turnstile = {
+      render: (_selector, options) => { window.__captchaActions.push(options.action); options.callback('captcha-proof'); return 'widget'; },
+      reset: () => {}, remove: () => {},
+    };
+  });
+  await page.route('**/api/runtime', route => route.fulfill({ json: { mode: 'hosted' } }));
+  await page.route('**/api/auth/options', route => route.fulfill({ json: { turnstile_enabled: true, turnstile_site_key: 'site-key' } }));
+  await page.route('**/api/platform/session', async route => {
+    if (route.request().method() === 'GET') return route.fulfill({ status: 401, json: { error: { code: 'unauthorized' } } });
+    const body = route.request().postDataJSON();
+    attempts.push(body);
+    return route.fulfill({ status: 403, json: { error: { code: 'captcha_required', message: 'Complete the security check.' } } });
+  });
+  const attempts = [];
+  await page.goto('/platform');
+  await page.locator('#platform-login-form input[name=username]').fill('operator');
+  await page.locator('#platform-login-form input[name=password]').fill('test-password');
+  await page.locator('#platform-login-form button[type=submit]').click();
+  await expect.poll(() => attempts.length).toBe(1);
+  expect(attempts[0].captcha_token).toBe('');
+  await expect.poll(() => page.evaluate(() => window.__captchaActions)).toEqual(['platform_login']);
+  await page.locator('#platform-login-form button[type=submit]').click();
+  await expect.poll(() => attempts.length).toBe(2);
+  expect(attempts[1].captcha_token).toBe('captcha-proof');
+});
