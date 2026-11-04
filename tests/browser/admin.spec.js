@@ -817,6 +817,13 @@ test('provider deletion shows the exact name with a working copy button', async 
   await expect(page.locator('#confirm-type-value')).toHaveText(providerName);
   await expect(page.locator('#confirm-type-copy')).toBeVisible();
 
+  // Escape closes without deleting, and reopening resets the typed value.
+  await page.keyboard.press('Escape');
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('button', { name: `Browse ${providerName} models` })).toBeVisible();
+  await page.locator('#drawer-delete').click();
+  await expect(page.locator('#confirm-type-value')).toHaveText(providerName);
+
   // The copy button must land the exact name on the clipboard, not just report success.
   await page.locator('#confirm-type-copy').click();
   await expect(page.locator('#confirm-type-copy-state')).toHaveText('Copied to clipboard.');
@@ -831,8 +838,9 @@ test('provider deletion shows the exact name with a working copy button', async 
   await expect(page.locator('#confirm-error')).toHaveText('Type the provider name exactly to confirm.');
   await expect(dialog).toBeVisible();
 
+  // Enter in the input confirms; it used to activate Cancel and silently close.
   await page.locator('#confirm-type').fill(providerName);
-  await page.locator('#confirm-action').click();
+  await page.locator('#confirm-type').press('Enter');
   await expect(dialog).toBeHidden();
   await expect(page.getByRole('button', { name: `Browse ${providerName} models` })).toHaveCount(0);
 });
