@@ -346,7 +346,7 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	}
 	s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.email_verified", ActorType: "user", ActorID: u.ID})
 	if !u.PasswordEnabled {
-		// The verification link carried no password (resend path), so the stored
+		// Verification never activates the signup-time password, so the stored
 		// one was cleared. Mail a set-password link instead of opening a session.
 		if _, _, err := s.identity.IssuePasswordReset(r.Context(), u.Email); err != nil && s.logger != nil {
 			s.logger.Warn("verify-email password setup mail failed", "error_class", fmt.Sprintf("%T", err))
