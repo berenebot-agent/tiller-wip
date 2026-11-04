@@ -199,3 +199,42 @@ func TestAdminLoginRateLimit(t *testing.T) {
 		t.Fatalf("correct credential while locked out: expected 429, got %d", status)
 	}
 }
+
+// TestLoginLimiterAttemptTableFullStillAdmitsNewClients proves a table full of
+// active lockouts does not block every new client (an attacker filling it would
+// otherwise stop all signups and recovery mail).
+func TestLoginLimiterAttemptTableFullStillAdmitsNewClients(t *testing.T) {
+	t.Parallel()
+	l := newLoginLimiter(1, time.Hour, time.Hour)
+	for i := 0; i < maxLimiterEntries; i++ {
+		ip := fmt.Sprintf("10.%d.%d.%d", (i>>16)&0xff, (i>>8)&0xff, i&0xff)
+		l.allowAttempt(ip) // within budget
+		if l.allowAttempt(ip) {
+			t.Fatalf("budget not exceeded for %s", ip)
+		}
+	}
+	if !l.allowAttempt("192.0.2.99") {
+		t.Fatal("a new client was refused because the table is full of lockouts")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.attempts) > maxLimiterEntries {
+		t.Fatalf("attempt table grew to %d, want hard bound %d", len(l.attempts), maxLimiterEntries)
+	}
+}
+
+// TestLoginLimiterSharesBudgetAcrossIPv6Prefix proves rotating addresses inside
+// one /64 does not buy a fresh budget each time.
+func TestLoginLimiterSharesBudgetAcrossIPv6Prefix(t *testing.T) {
+	t.Parallel()
+	l := newLoginLimiter(2, time.Hour, time.Hour)
+	if !l.allowAttempt("2001:db8:1:2::1") || !l.allowAttempt("2001:db8:1:2::2") {
+		t.Fatal("budget of 2 should admit two attempts")
+	}
+	if l.allowAttempt("2001:db8:1:2:ffff::9") {
+		t.Fatal("a third address in the same /64 got a fresh budget")
+	}
+	if !l.allowAttempt("2001:db8:1:3::1") {
+		t.Fatal("a different /64 must keep its own budget")
+	}
+}

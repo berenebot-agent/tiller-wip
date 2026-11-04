@@ -135,6 +135,8 @@ type PlatformCounts struct {
 // Store owns hosted identity and platform-admin persistence.
 type Store struct {
 	db                 *sql.DB
+	dummyOnce          sync.Once
+	dummyHash          string
 	passwordHasher     auth.SecretHasher
 	tokenHasher        auth.SecretHasher
 	credentialHasher   auth.SecretHasher
@@ -550,17 +552,10 @@ func validBootstrapEmail(email string) bool { return ValidateEmail(email) }
 // acceptance is optional: when one is supplied it is recorded in the same
 // transaction as the user (legal_acceptances is platform-global, so it is
 // written through the identity store's own handle, not a tenant scope).
-func (s *Store) CreateSignup(ctx context.Context, email, password string, acceptance ...SignupAcceptance) (SignupResult, error) {
+func (s *Store) CreateSignup(ctx context.Context, email string, acceptance ...SignupAcceptance) (SignupResult, error) {
 	email = NormalizeEmail(email)
 	if email == "" {
 		return SignupResult{}, ErrNotFound
-	}
-	if err := ValidatePassword(password); err != nil {
-		return SignupResult{}, err
-	}
-	passwordHash, err := s.passwordHasher.Hash(password)
-	if err != nil {
-		return SignupResult{}, err
 	}
 	userID, err := id.New()
 	if err != nil {
@@ -580,7 +575,7 @@ func (s *Store) CreateSignup(ctx context.Context, email, password string, accept
 		return SignupResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,password_auth_enabled,status,created_at,updated_at) VALUES(?,?,'',0,'active',?,?)`, userID, email, formatTime(now), formatTime(now)); err != nil {
 		return SignupResult{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,plan,status,owner_user_id,created_at,updated_at) VALUES(?,'free','pending',?,?,?)`, accountID, userID, formatTime(now), formatTime(now)); err != nil {
@@ -643,15 +638,27 @@ func (s *Store) userByEmail(ctx context.Context, email string) (User, error) {
 	return u, nil
 }
 
+// verifyDummy spends one password verification against a fixed hash so an
+// unknown or password-less account takes as long as a real one and response
+// time does not reveal which emails exist.
+func (s *Store) verifyDummy(password string) {
+	s.dummyOnce.Do(func() { s.dummyHash, _ = s.passwordHasher.Hash("tiller-dummy-password") })
+	if s.dummyHash != "" {
+		_ = s.passwordHasher.Verify(password, s.dummyHash)
+	}
+}
+
 // AuthenticatePassword verifies an email/password and returns an active,
 // verified user. The handler should map every failure to a generic response.
 func (s *Store) AuthenticatePassword(ctx context.Context, email, password string) (User, error) {
 	u, err := s.userByEmail(ctx, NormalizeEmail(email))
 	if err != nil {
+		s.verifyDummy(password)
 		return User{}, err
 	}
 	var passwordHash string
 	if !u.PasswordEnabled {
+		s.verifyDummy(password)
 		return User{}, ErrNotFound
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=? AND password_auth_enabled=1`, u.ID).Scan(&passwordHash); err != nil {
@@ -709,9 +716,14 @@ func (s *Store) IssueVerification(ctx context.Context, email string) (User, stri
 	return u, raw, nil
 }
 
-// ConsumeVerification atomically consumes a valid verification token and
-// activates the owned account.
-func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, error) {
+// ConsumeVerification atomically consumes a valid verification token, sets the
+// password supplied by the person holding the link, and activates the owned
+// account. Signup collects no password: the mailbox owner chooses it here, so
+// whoever submitted the signup form can never pick the credential.
+func (s *Store) ConsumeVerification(ctx context.Context, raw, password string) (User, error) {
+	if err := ValidatePassword(password); err != nil {
+		return User{}, err
+	}
 	selector, secret, ok := parseOpaqueToken(raw)
 	if !ok {
 		return User{}, ErrInvalidToken
@@ -730,6 +742,10 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 	if err != nil || !time.Now().Before(exp) {
 		return User{}, ErrExpiredToken
 	}
+	newHash, err := s.passwordHasher.Hash(password)
+	if err != nil {
+		return User{}, err
+	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -743,7 +759,15 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET email_verified_at=?,updated_at=? WHERE id=?`, formatTime(now), formatTime(now), userID); err != nil {
+	// auth_generation is bumped so any reset token or session issued earlier
+	// (e.g. by someone who squatted the address) dies with this verification.
+	updated, err := tx.ExecContext(ctx, `UPDATE users SET email_verified_at=?,password_hash=?,password_auth_enabled=1,auth_generation=auth_generation+1,updated_at=? WHERE id=? AND email_verified_at IS NULL`, formatTime(now), newHash, formatTime(now), userID)
+	if err == nil {
+		if n, _ := updated.RowsAffected(); n != 1 {
+			return User{}, ErrInvalidToken
+		}
+	}
+	if err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET status='active',updated_at=? WHERE owner_user_id=? AND status='pending'`, formatTime(now), userID); err != nil {

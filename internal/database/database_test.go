@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -244,5 +245,33 @@ func TestMapDataDirChmodErr(t *testing.T) {
 	other := &os.PathError{Op: "chmod", Path: "/data", Err: syscall.ENOSPC}
 	if got := mapDataDirChmodErr("/data", other); got != other {
 		t.Fatalf("non-EPERM chmod error should pass through unchanged, got: %v", got)
+	}
+}
+
+// TestUnknownMigrationsDetectsNewerSchema proves a database that records a
+// migration this binary does not embed (a rollback) is detected, so Migrate can
+// warn instead of running silently against a newer schema.
+func TestUnknownMigrationsDetectsNewerSchema(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	entries, err := fs.ReadDir(migrations, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown, err := db.unknownMigrations(ctx, entries)
+	if err != nil || len(unknown) != 0 {
+		t.Fatalf("fresh database unknown = %v, err = %v, want none", unknown, err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO schema_migrations(version,applied_at) VALUES('999_from_the_future.sql','2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	unknown, err = db.unknownMigrations(ctx, entries)
+	if err != nil || len(unknown) != 1 || unknown[0] != "999_from_the_future.sql" {
+		t.Fatalf("unknown = %v, err = %v, want the future migration", unknown, err)
 	}
 }

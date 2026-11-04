@@ -543,7 +543,7 @@ $('#signup-form').addEventListener('submit', async event => {
   if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; }
   try {
     const captcha_token = authCaptchaToken('signup');
-    await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) });
+    await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), accept_terms: true, captcha_token }) });
     signupEmail = String(form.get('email') || '');
     formElement.reset();
     $('#signup-done-message').textContent = 'If the address can receive mail, a verification message will arrive shortly.';
@@ -639,7 +639,25 @@ $('#google-consent-form').addEventListener('submit', async event => {
 $('#verify-login').onclick = () => authView('login-form');
 $('#reset-login').onclick = () => authView('login-form');
 $('#reset-form').addEventListener('submit', async event => { event.preventDefault(); const token = new URLSearchParams(location.search).get('token') || ''; const form = new FormData(event.currentTarget); try { await api('/api/auth/password-reset/confirm', { method: 'POST', body: JSON.stringify({ token, password: form.get('password') }) }); $('#reset-error').textContent = 'Password changed. You can sign in now.'; $('#reset-error').style.color = 'var(--green)'; $('#reset-login').hidden = false; } catch (error) { showAuthError('reset-error', error, 'Reset failed.'); } });
-$('#platform-login-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({ username: form.get('username'), password: form.get('password') }) }); state.csrf = session.csrf_token; setSessionHint(true); hideBoot(); $('#login-shell').hidden = true; $('#platform-shell').hidden = false; await selectPlatformTab(platformTabFromHash(), { push: false }); } catch (error) { showAuthError('platform-login-error', error, 'Platform login failed.'); } });
+$('#platform-login-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const hadChallenge = captchaAction === 'platform_login';
+  try {
+    const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({
+      username: form.get('username'), password: form.get('password'),
+      captcha_token: hadChallenge ? authCaptchaToken('platform_login') : '',
+    }) });
+    state.csrf = session.csrf_token; setSessionHint(true); hideBoot();
+    $('#login-shell').hidden = true; $('#platform-shell').hidden = false;
+    await selectPlatformTab(platformTabFromHash(), { push: false });
+  } catch (error) {
+    showAuthError('platform-login-error', error, 'Platform login failed.');
+    if (error.code === 'captcha_required') await showAuthCaptcha('platform_login');
+  } finally {
+    if (hadChallenge) resetAuthCaptcha('platform_login');
+  }
+});
 $('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
 
 const PLATFORM_TABS = ['overview', 'users', 'plans', 'mail', 'logs', 'legal', 'settings'];
@@ -3381,12 +3399,13 @@ let entitySubmitSeq = 0;
 function openEntity({ eyebrow, title, fields, submit, onMount, onSubmit }) { const dialog = $('#form-dialog'), form = $('#entity-form'); $('#dialog-eyebrow').textContent = eyebrow; $('#dialog-title').textContent = title; $('#dialog-fields').innerHTML = fields; $('#dialog-submit').textContent = submit; $('#dialog-submit').disabled = false; $('#dialog-error').textContent = ''; entitySubmit = onSubmit; entitySubmitSeq += 1; form.onsubmit = handleEntitySubmit; dialog.showModal(); onMount?.(form); setTimeout(() => $('input:not([type="checkbox"]),select,textarea', form)?.focus(), 0); }
 async function handleEntitySubmit(event) { const form = event.currentTarget, button = $('#dialog-submit'); if (event.submitter?.value === 'cancel') return; event.preventDefault(); if (!form.reportValidity()) return; const submit = entitySubmit, seq = entitySubmitSeq; button.disabled = true; $('#dialog-error').textContent = ''; try { await submit(form); if (seq === entitySubmitSeq) $('#form-dialog').close(); } catch (error) { if (seq === entitySubmitSeq) $('#dialog-error').textContent = errorMessage(error); } finally { if (seq === entitySubmitSeq) button.disabled = false; } }
 
-function confirmAction({ title, copy, action, breaking = false, typeMatch = null, typeLabel = 'name' }) { return new Promise(resolve => { const dialog = $('#confirm-dialog'), form = $('form', dialog), checkWrap = $('#confirm-check-wrap'), check = $('#confirm-check'), typeWrap = $('#confirm-type-wrap'), typeInput = $('#confirm-type'); $('#confirm-title').textContent = title; $('#confirm-copy').textContent = copy; $('#confirm-action').textContent = action; $('#confirm-error').textContent = ''; checkWrap.hidden = !breaking; check.checked = false; typeWrap.hidden = !typeMatch; typeInput.value = ''; if (typeMatch) $('#confirm-type-label').textContent = `Type the ${typeLabel} to confirm`; const valid = () => !typeMatch || typeInput.value === typeMatch; const close = event => { dialog.removeEventListener('close', close); resolve(dialog.returnValue === 'confirm' && (!breaking || check.checked) && valid()); }; form.onsubmit = event => { if (event.submitter?.value !== 'confirm') return; if (breaking && !check.checked) { event.preventDefault(); $('#confirm-error').textContent = 'Acknowledge the breaking client-facing change first.'; return; } if (typeMatch && !valid()) { event.preventDefault(); $('#confirm-error').textContent = `Type the ${typeLabel} exactly to confirm.`; } }; dialog.addEventListener('close', close); dialog.showModal(); if (typeMatch) setTimeout(() => typeInput.focus(), 0); }); }
+function confirmAction({ title, copy, action, breaking = false, typeMatch = null, typeLabel = 'name' }) { return new Promise(resolve => { const dialog = $('#confirm-dialog'), form = $('form', dialog), checkWrap = $('#confirm-check-wrap'), check = $('#confirm-check'), typeWrap = $('#confirm-type-wrap'), typeInput = $('#confirm-type'), typeValue = $('#confirm-type-value'), typeCopy = $('#confirm-type-copy'), typeCopyState = $('#confirm-type-copy-state'), cancel = $('#confirm-cancel'); $('#confirm-title').textContent = title; $('#confirm-copy').textContent = copy; $('#confirm-action').textContent = action; $('#confirm-error').textContent = ''; checkWrap.hidden = !breaking; check.checked = false; typeWrap.hidden = !typeMatch; typeInput.value = ''; typeValue.textContent = typeMatch || ''; typeCopyState.textContent = ''; if (typeMatch) { $('#confirm-type-label').textContent = `Type the ${typeLabel} to confirm`; typeCopy.setAttribute('aria-label', `Copy the ${typeLabel} to confirm`); } cancel.onclick = () => dialog.close('cancel'); typeInput.onkeydown = event => { if (event.key !== 'Enter') return; event.preventDefault(); form.requestSubmit($('#confirm-action')); }; const valid = () => !typeMatch || typeInput.value === typeMatch; const close = event => { dialog.removeEventListener('close', close); resolve(dialog.returnValue === 'confirm' && (!breaking || check.checked) && valid()); }; form.onsubmit = event => { if (event.submitter?.value !== 'confirm') return; if (breaking && !check.checked) { event.preventDefault(); $('#confirm-error').textContent = 'Acknowledge the breaking client-facing change first.'; return; } if (typeMatch && !valid()) { event.preventDefault(); $('#confirm-error').textContent = `Type the ${typeLabel} exactly to confirm.`; } }; dialog.addEventListener('close', close); dialog.showModal(); if (typeMatch) setTimeout(() => typeInput.focus(), 0); }); }
 
 function selectTextContent(selector) { const node = $(selector); const sel = window.getSelection(); sel.removeAllRanges(); const range = document.createRange(); range.selectNodeContents(node); sel.addRange(range); }
 function selectSecretText() { selectTextContent('#secret-value'); }
 function showSecret(secret, { baseUrl = `${location.origin}/v1`, baseUrlLabel = 'API Base URL' } = {}) { const secure = window.isSecureContext && navigator.clipboard?.writeText; $('#secret-value').textContent = secret; $('#secret-base-url-block').hidden = !baseUrl; $('#secret-base-url-label').textContent = baseUrlLabel; $('#api-base-url').textContent = baseUrl || ''; $('#copy-secret').hidden = !secure; $('#copy-api-base-url').hidden = !secure; $('#copy-state').textContent = ''; $('#api-base-url-copy-state').textContent = ''; $('#secret-dialog').showModal(); if (!secure) { selectSecretText(); $('#copy-state').textContent = 'Key selected — press Ctrl/Cmd+C to copy it.'; $('#api-base-url-copy-state').textContent = 'Select the URL to copy it manually.'; } }
 $('#copy-secret').onclick = async () => { const text = $('#secret-value').textContent; const state = $('#copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { selectSecretText(); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy it.'; } };
+$('#confirm-type-copy').onclick = async () => { const text = $('#confirm-type-value').textContent; const state = $('#confirm-type-copy-state'); try { if (!(window.isSecureContext && navigator.clipboard?.writeText)) throw new Error('clipboard unavailable'); await navigator.clipboard.writeText(text); state.textContent = 'Copied to clipboard.'; } catch { selectTextContent('#confirm-type-value'); state.textContent = 'Clipboard copy was denied — select the text and press Ctrl/Cmd+C.'; } };
 $('#copy-api-base-url').onclick = async () => { const text = $('#api-base-url').textContent; const state = $('#api-base-url-copy-state'); if (!(window.isSecureContext && navigator.clipboard?.writeText)) return; try { await navigator.clipboard.writeText(text); state.textContent = 'Base URL copied to clipboard.'; } catch { selectTextContent('#api-base-url'); state.textContent = 'Clipboard copy was denied — press Ctrl/Cmd+C to copy the URL.'; } };
 $('#close-secret').onclick = () => { $('#secret-value').textContent = ''; $('#secret-dialog').close(); };
 
@@ -3923,7 +3942,20 @@ async function setupAnalyticsConsent() {
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
-      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
+      $('#verify-message').textContent = 'Choose a passphrase to finish verifying your email.';
+      const verifyForm = $('#verify-form'); verifyForm.hidden = false;
+      verifyForm.onsubmit = async event => {
+        event.preventDefault(); $('#verify-error').textContent = '';
+        try {
+          const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token, password: new FormData(verifyForm).get('password') }) });
+          history.replaceState(null, '', '/login'); verifyForm.reset(); verifyForm.hidden = true;
+          if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; }
+          $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false;
+        } catch (error) {
+          $('#verify-error').textContent = errorMessage(error, 'Verification failed.');
+          if (error.code !== 'invalid_password') { verifyForm.hidden = true; $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
+        }
+      };
       return;
     }
     if (runtimeMode === 'hosted' && path === '/reset-password' && token) authView('reset-form');
@@ -3988,6 +4020,10 @@ async function setupAnalyticsConsent() {
               $('#account-email-error').textContent = result.message || 'Check the new address for a confirmation link.';
             } catch (error) { $('#account-email-error').textContent = `${errorMessage(error, 'Could not start the email change.')} Confirm with Google again and retry.`; }
             sessionStorage.removeItem('googleReauthEmail');
+          }
+          if (googleAction === 'passkeys') {
+            await loadAccount();
+            flash('Google confirmed your identity. Choose Add a passkey or Remove to continue.');
           }
           if (googleAction === 'unlink') await loadAccount();
           sessionStorage.removeItem('googleReauthAction');
@@ -4501,6 +4537,7 @@ $('#platform-users-list').addEventListener('click', async event => {
     if (add) {
       add.addEventListener('click', async () => {
         const status = $('#account-passkeys-status');
+        if (await startPasskeyGoogleReauth()) return;
         // Prompt first; a cancel should not leave a "Waiting for your device…"
         // message behind.
         const name = prompt('Name this passkey', 'Passkey');
@@ -4515,7 +4552,7 @@ $('#platform-users-list').addEventListener('click', async event => {
         const passwordEnabled = runtimeMode === 'hosted' && !!lastAccountProfile?.password_enabled && !lastAccountProfile?.google_linked;
         if (passwordEnabled) makeOnly = confirm('Use this passkey as your only sign-in method? Your password will be disabled.');
         try {
-          const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: '{}' });
+          const begin = await api('/api/auth/account/passkeys/register/begin', { method: 'POST', body: JSON.stringify(await passkeyReauth()) });
           const publicKey = prepCreate(begin.options.publicKey || begin.options);
           const cred = await navigator.credentials.create({ publicKey });
           if (!cred) throw new Error('No credential returned.');
@@ -4537,12 +4574,37 @@ $('#platform-users-list').addEventListener('click', async event => {
   // Account management.
   const fmtPasskeyDate = value => value ? new Date(value).toLocaleString() : '—';
   let lastAccountProfile = null;
+  // Proof for passkey changes: password, passkey assertion, or Google re-auth.
+  // The server rejects a bare session and enforces one-use grants.
+  const startPasskeyGoogleReauth = async () => {
+    if (!lastAccountProfile?.google_linked || lastAccountProfile?.password_enabled || googleReauthValid()) return false;
+    try {
+      sessionStorage.setItem('googleReauthAction', 'passkeys');
+      const result = await api('/api/auth/google/reauth/start', { method: 'POST', body: '{}' });
+      location.assign(result.redirect_url);
+    } catch (error) {
+      sessionStorage.removeItem('googleReauthAction');
+      flash(errorMessage(error, 'Could not start Google confirmation.'), 'error');
+    }
+    return true;
+  };
+  const passkeyReauth = async () => {
+    if (lastAccountProfile?.password_enabled) return { current_password: $('#account-passkeys-password').value };
+    if (lastAccountProfile?.google_linked && googleReauthValid()) {
+      // Presentation only: the backend enforces the one-use, session-bound grant.
+      googleReauthConfirmedAt = 0;
+      return { current_password: '' };
+    }
+    if (window.__confirmWithPasskey) await window.__confirmWithPasskey();
+    return { current_password: '' };
+  };
   function renderPasskeysCard(profile) {
     const card = $('#account-passkeys-card'); if (!card) return;
     const enabled = !!profile.passkeys_enabled;
     card.hidden = !enabled;
     if (!enabled) { lastAccountProfile = null; return; }
     lastAccountProfile = profile;
+    $('#account-passkeys-password-row').hidden = !profile.password_enabled;
     // A browser without WebAuthn cannot run any ceremony: hide Add and the
     // re-enable toggle rather than leaving controls that would fail, and say
     // why. Existing passkeys can still be listed and removed (plain HTTP).
@@ -4565,8 +4627,9 @@ $('#platform-users-list').addEventListener('click', async event => {
       catch (error) { flash(errorMessage(error, 'Could not rename the passkey.'), 'error'); }
     }));
     list.querySelectorAll('[data-passkey-remove]').forEach(btn => btn.addEventListener('click', async () => {
+      if (await startPasskeyGoogleReauth()) return;
       if (!confirm('Remove this passkey?')) return;
-      try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
+      try { await api('/api/auth/account/passkeys/delete', { method: 'POST', body: JSON.stringify({ id: btn.dataset.passkeyRemove, ...await passkeyReauth() }) }); flash('Passkey removed.', 'success'); await loadAccount(); }
       catch (error) { flash(errorMessage(error, 'Could not remove the passkey.'), 'error'); }
     }));
     // Password sign-in toggle: offer to turn it back on when disabled. Hidden
@@ -4580,7 +4643,7 @@ $('#platform-users-list').addEventListener('click', async event => {
     toggle.hidden = runtimeMode !== 'hosted' || passwordEnabled || googleLinked;
     toggle.textContent = 'Re-enable password sign-in';
     toggle.onclick = async () => {
-      try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }
+      try { await api('/api/auth/account/passkeys/password-signin', { method: 'POST', body: JSON.stringify({ enabled: true, ...await passkeyReauth() }) }); flash('Password sign-in enabled.', 'success'); await loadAccount(); }
       catch (error) { flash(errorMessage(error, 'Could not update password sign-in.'), 'error'); }
     };
   }

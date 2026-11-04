@@ -1252,9 +1252,20 @@ func translateResponseObserved(w http.ResponseWriter, keepalive *sseKeepaliveWri
 		return translatedStreamReadError(err)
 	}
 	if prefix[0] == '{' || prefix[0] == '[' {
-		body, err := io.ReadAll(io.LimitReader(reader, 64<<20))
+		// An upstream can label a plain JSON body as a stream. Buffer it under the
+		// same cap and gate as any non-streaming response (TR-002).
+		select {
+		case nonStreamBufferGate <- struct{}{}:
+			defer func() { <-nonStreamBufferGate }()
+		default:
+			return errUpstreamResponseTooLarge
+		}
+		body, err := io.ReadAll(io.LimitReader(reader, maxUpstreamNonStreamBytes+1))
 		if err != nil {
 			return translatedStreamReadError(err)
+		}
+		if int64(len(body)) > maxUpstreamNonStreamBytes {
+			return errUpstreamResponseTooLarge
 		}
 		extractUsage(body, usage)
 		translated, err := translateNonstreamResponse(body, incoming, target, route.RequestedModel)
@@ -2929,4 +2940,36 @@ func responsesEncryptedFromDetails(details []any) string {
 		}
 	}
 	return ""
+}
+
+// chatUsageStreamProviders are the provider types known to accept
+// stream_options.include_usage and to send no usage in a Chat stream unless
+// asked. It is deliberately short: other OpenAI-compatible servers may reject
+// the unknown field, so they keep today's request unchanged.
+var chatUsageStreamProviders = map[string]bool{"openai": true, "azure-openai": true}
+
+// requestChatStreamUsage asks a listed provider for the final usage chunk on a
+// request the router translated into a streaming Chat call. A client-supplied
+// stream_options is never overwritten.
+func requestChatStreamUsage(body []byte, target providers.Protocol, providerType string) []byte {
+	if target != providers.ProtocolChat || !chatUsageStreamProviders[providerType] {
+		return body
+	}
+	var req map[string]json.RawMessage
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+	var stream bool
+	if json.Unmarshal(req["stream"], &stream) != nil || !stream {
+		return body
+	}
+	if _, ok := req["stream_options"]; ok {
+		return body
+	}
+	req["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
 }

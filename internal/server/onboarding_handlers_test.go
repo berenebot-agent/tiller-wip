@@ -333,7 +333,7 @@ func keys(m map[string][]byte) []string {
 // injected, so the token ciphertext column holds the raw token verbatim.
 func signupAndReadVerificationToken(t *testing.T, app *Server, api *testAPI, email string) string {
 	t.Helper()
-	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": email, "password": "correct horse battery staple", "accept_terms": true})
+	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": email, "accept_terms": true})
 	if status != http.StatusAccepted {
 		t.Fatalf("signup: %d %v", status, payload)
 	}
@@ -350,7 +350,7 @@ func signupAndReadVerificationToken(t *testing.T, app *Server, api *testAPI, ema
 func TestSignupRequiresTermsAcceptance(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
-	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": "new@example.com", "password": "correct horse battery staple", "accept_terms": false})
+	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": "new@example.com", "accept_terms": false})
 	if status != http.StatusBadRequest {
 		t.Fatalf("signup without acceptance = %d, want 400 (%v)", status, payload)
 	}
@@ -371,14 +371,14 @@ func TestSignupAttemptBudgetSurvivesSuccessfulSignup(t *testing.T) {
 	_, api, _ := hostedServerHarness(t, false)
 	for i := 0; i < 5; i++ {
 		status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{
-			"email": fmt.Sprintf("signup-%d@example.com", i), "password": "correct horse battery staple", "accept_terms": true,
+			"email": fmt.Sprintf("signup-%d@example.com", i), "accept_terms": true,
 		})
 		if status != http.StatusAccepted {
 			t.Fatalf("signup %d: %d %v", i+1, status, payload)
 		}
 	}
 	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{
-		"email": "signup-over-budget@example.com", "password": "correct horse battery staple", "accept_terms": true,
+		"email": "signup-over-budget@example.com", "accept_terms": true,
 	})
 	if status != http.StatusTooManyRequests || errorCode(payload) != "rate_limited" {
 		t.Fatalf("signup beyond per-IP budget = %d %v, want 429 rate_limited", status, payload)
@@ -410,7 +410,7 @@ func TestRecoveryBudgetCountsRequestsAcrossEndpoints(t *testing.T) {
 func TestRecoveryEmailBudgetIsHashedAndSharedAcrossEndpoints(t *testing.T) {
 	t.Parallel()
 	app, _, _ := hostedServerHarness(t, false)
-	created, err := app.identity.CreateSignup(context.Background(), "unverified@example.com", "correct horse battery staple")
+	created, err := app.identity.CreateSignup(context.Background(), "unverified@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +517,7 @@ func TestVerifyEmailMintsSessionAndRecordsAcceptance(t *testing.T) {
 	app, api, _ := hostedServerHarness(t, false)
 	token := signupAndReadVerificationToken(t, app, api, "new@example.com")
 
-	status, payload, header := api.request("POST", "/api/auth/verify-email", map[string]any{"token": token})
+	status, payload, header := api.request("POST", "/api/auth/verify-email", map[string]any{"token": token, "password": "correct horse battery staple"})
 	if status != http.StatusOK {
 		t.Fatalf("verify-email: %d %v", status, payload)
 	}
@@ -543,7 +543,7 @@ func TestVerifyEmailMintsSessionAndRecordsAcceptance(t *testing.T) {
 		t.Fatalf("signup acceptance rows = %d, want 1", acceptances)
 	}
 	// The link is one-time: replaying it must fail.
-	status, _, _ = api.request("POST", "/api/auth/verify-email", map[string]any{"token": token})
+	status, _, _ = api.request("POST", "/api/auth/verify-email", map[string]any{"token": token, "password": "correct horse battery staple"})
 	if status != http.StatusBadRequest {
 		t.Fatalf("replayed verification token status = %d, want 400", status)
 	}

@@ -360,6 +360,9 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 		Targets:     toStoreTargets(input.Targets),
 	})
 	switch {
+	case errors.Is(err, store.ErrVirtualGroupNotFound):
+		adminError(w, 404, "not_found", "Virtual group not found.")
+		return
 	case errors.Is(err, store.ErrVirtualTargetNotFound):
 		adminError(w, 400, "invalid_target", "Target model does not exist.")
 		return

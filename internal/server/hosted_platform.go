@@ -18,6 +18,9 @@ import (
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
+// platformGlobalKey is the single bucket for the all-IP platform login limit.
+const platformGlobalKey = "platform"
+
 func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
@@ -28,15 +31,22 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
+	// Escalate distributed failures to a challenge, never a global credential
+	// lockout. Without Turnstile configured, per-IP throttling remains.
+	if s.platformGlobalLimiter.locked(platformGlobalKey) && !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "platform_login") {
+		return
+	}
 	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.TillerPlatformAdminUser, s.config.TillerPlatformAdminPassword) {
 		s.loginLimiter.recordFailure(key)
+		s.platformGlobalLimiter.recordFailure(platformGlobalKey)
 		adminError(w, http.StatusUnauthorized, "invalid_credentials", "Invalid platform credentials.")
 		return
 	}

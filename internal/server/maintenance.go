@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -119,21 +120,32 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 	if dir == "" {
 		dir = filepath.Join(s.config.DataDir, "backups")
 	}
-	run := func() {
+	run := func(compact bool) {
 		path, err := s.db.Backup(ctx, dir)
 		if err != nil {
 			s.warnBackup("scheduled backup failed", err)
 		} else if err := database.Verify(ctx, path); err != nil {
 			s.warnBackup("scheduled backup verification failed", err)
+			// A snapshot that fails its check must not sit under the normal name
+			// where a restore of "the newest snapshot" would pick it.
+			if rmErr := os.Remove(path); rmErr != nil {
+				s.warnBackup("could not remove failed backup snapshot", rmErr)
+			}
 		} else if _, err := database.PruneBackups(dir, s.config.BackupRetention, time.Now()); err != nil {
 			s.warnBackup("scheduled backup prune failed", err)
+		}
+		// VACUUM holds the write lock for its whole run, which would stall
+		// plan-cap bookings and Activity writes. Never compact on the boot pass:
+		// a restart should not start serving traffic into a multi-second lock.
+		if !compact {
+			return
 		}
 		// Compact after the snapshot so the pages freed by deletion are
 		// reclaimed in place.
 		s.vacuumOne(ctx, "core", s.db.VacuumCore)
 		s.vacuumOne(ctx, "activity", s.db.VacuumActivity)
 	}
-	run()
+	run(false)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -141,14 +153,14 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run()
+			run(true)
 		}
 	}
 }
 
 // vacuumOne runs one database's compaction, logging start and completion at
-// Info and failures at Warn by error class only (never the raw error, which
-// could embed a path or SQL text). A failed vacuum is non-fatal: the database
+// Info and failures at Warn with the error message (a filesystem/SQLite error,
+// never request content). A failed vacuum is non-fatal: the database
 // stays usable, it is just not compacted this pass.
 func (s *Server) vacuumOne(ctx context.Context, db string, fn func(context.Context) error) {
 	if s.logger == nil {
@@ -157,7 +169,7 @@ func (s *Server) vacuumOne(ctx context.Context, db string, fn func(context.Conte
 	s.logger.Info("database vacuum started", "db", db)
 	start := time.Now()
 	if err := fn(ctx); err != nil {
-		s.logger.Warn("database vacuum failed", "db", db, "error_class", fmt.Sprintf("%T", err))
+		s.logger.Warn("database vacuum failed", "db", db, "error_class", fmt.Sprintf("%T", err), "error", err.Error())
 		return
 	}
 	s.logger.Info("database vacuum completed", "db", db, "duration_ms", time.Since(start).Milliseconds())
@@ -170,5 +182,7 @@ func (s *Server) warnBackup(msg string, err error) {
 	if s.logger == nil {
 		return
 	}
-	s.logger.Warn(msg, "error_class", fmt.Sprintf("%T", err))
+	// The message distinguishes a full disk from a permissions error from
+	// corruption. These are filesystem/SQLite errors, not request content.
+	s.logger.Warn(msg, "error_class", fmt.Sprintf("%T", err), "error", err.Error())
 }

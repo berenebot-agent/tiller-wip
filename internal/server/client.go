@@ -631,13 +631,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 		inferenceError(w, http.StatusServiceUnavailable, "api_error", "body_read_busy", "The router is busy reading request bodies. Retry shortly.", incoming == providers.ProtocolMessages)
 		return
 	}
-	defer s.bodyReads.release()
 	var body []byte
 	var err error
 	readErr := withBodyReadDeadline(w, func() error {
 		body, err = io.ReadAll(r.Body)
 		return err
 	})
+	// The gate bounds requests mid-body only. Hold it past the read and a few
+	// long streams exhaust it for every tenant.
+	s.bodyReads.release()
 	if readErr != nil {
 		if isTimeoutError(readErr) {
 			inferenceError(w, 408, "invalid_request_error", "request_timeout", "The request body was not received in time.", incoming == providers.ProtocolMessages)
@@ -846,6 +848,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.errorText = strPtr(class)
 				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 				row.fallbackReason = strPtr(class)
+				if failAfterCommit(class) {
+					return
+				}
 				inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 				return
 			}
@@ -917,6 +922,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				// After translation, re-apply the canonical selector for the target.
 				attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
+				attemptBody = requestChatStreamUsage(attemptBody, target, candidate.Provider.Type)
 			} else {
 				var attemptRaw map[string]json.RawMessage
 				_ = json.Unmarshal(attemptBody, &attemptRaw)
@@ -1042,7 +1048,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// genuine client, which sends only the affinity
 				// headers (captured against opencode/1.18.26) — no
 				// X-Opencode-Session at all.
-				session := openCodeSessionID(r.Header.Get("x-opencode-session"), row.clientRequestID, row.clientKeyID)
+				session := openCodeSessionID(clientSessionHeader(r.Header), row.clientRequestID, row.clientKeyID)
 				if freeShadow {
 					affinity := freeShadowSession(session)
 					req.Header.Set("x-session-affinity", affinity)
@@ -1416,7 +1422,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						headerLatencyMs: headerLatencyMs,
 					}
 					nonTranslationFailure = true
-					if !s.recordPreOutputFailure(w, r, row, candidate, attempt, class, cooldownSeconds, incoming) {
+					if !s.recordPreOutputFailure(w, r, row, candidate, attempt, class, cooldownSeconds, incoming, streamKeepalive != nil) {
+						// A committed stream is written only through the keepalive
+						// writer; recordPreOutputFailure skipped its own JSON error.
+						if streamKeepalive != nil && row.errorText != nil {
+							failAfterCommit(*row.errorText)
+						}
 						return
 					}
 					continue
@@ -1763,9 +1774,10 @@ routeDone:
 // monthly cap has already acquired its concurrency ticket, so this releases it
 // before returning. The caller starts the ticket unconditionally on admission
 // and the request's deferred clientEnd releases it; on rejection the tracker is
-// left exactly as it was. Plan lookup failure is logged and allowed through: a
-// quota read must never fail-open into a 500 for the request. Local mode and an
-// off enforcement flag only start the ticket (unlimited).
+// left exactly as it was. A plan lookup or reservation failure fails closed with
+// a retryable 503: the monthly cap must never be bypassed because the database
+// errored. Local mode and an off enforcement flag only start the ticket
+// (unlimited).
 func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, identity auth.ClientIdentity, routeID, requested string, anthropic bool) bool {
 	if s.config.Mode != config.ModeHosted || !s.scope(r).EnforcingLimits() {
 		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
@@ -1774,10 +1786,10 @@ func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, iden
 	plan, err := s.storeHandle().EntitlementsForAccount(r.Context(), identity.AccountID)
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Warn("plan lookup failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+			s.logger.Warn("plan lookup failed; rejecting request", "error_class", fmt.Sprintf("%T", err))
 		}
-		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
-		return false
+		quotaUnavailable(w, anthropic)
+		return true
 	}
 	now := time.Now()
 	// A limit of store.Unlimited always acquires, so a rejection here is only
@@ -1791,9 +1803,11 @@ func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, iden
 		reserved, err := s.scopeFor(identity.AccountID).ReserveUsageCounter(r.Context(), store.UsagePeriod(now), plan.MonthlyRequests)
 		if err != nil {
 			if s.logger != nil {
-				s.logger.Warn("usage reservation failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+				s.logger.Warn("usage reservation failed; rejecting request", "error_class", fmt.Sprintf("%T", err))
 			}
-			return false
+			s.inflight.clientEnd(identity.AccountID, identity.ID, routeID, false)
+			quotaUnavailable(w, anthropic)
+			return true
 		}
 		if !reserved {
 			s.inflight.clientEnd(identity.AccountID, identity.ID, routeID, false)
@@ -1815,6 +1829,13 @@ func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, iden
 	return false
 }
 
+// quotaUnavailable writes the retryable fail-closed response used when the
+// plan or usage counter cannot be read.
+func quotaUnavailable(w http.ResponseWriter, anthropic bool) {
+	w.Header().Set("Retry-After", "1")
+	inferenceError(w, http.StatusServiceUnavailable, "service_unavailable", "quota_unavailable", "Usage allowance could not be verified. Retry shortly.", anthropic)
+}
+
 func markLastAttemptFailed(row *logRow, class string) {
 	if len(row.attempts) == 0 {
 		return
@@ -1831,7 +1852,7 @@ func markLastAttemptFailed(row *logRow, class string) {
 // terminal error was written, in which case the caller must stop the loop.
 func (s *Server) recordPreOutputFailure(
 	w http.ResponseWriter, r *http.Request, row *logRow, candidate resolvedRoute,
-	attempt requestAttempt, class string, cooldownSeconds int, incoming providers.Protocol,
+	attempt requestAttempt, class string, cooldownSeconds int, incoming providers.Protocol, committed bool,
 ) bool {
 	row.attempts = append(row.attempts, attempt)
 	s.logAttempt(row, attempt)
@@ -1844,7 +1865,9 @@ func (s *Server) recordPreOutputFailure(
 		row.errorText = strPtr(clientClass)
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(clientClass))
 		row.fallbackReason = strPtr(clientClass)
-		inferenceError(w, 502, "api_error", clientClass, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+		if !committed {
+			inferenceError(w, 502, "api_error", clientClass, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+		}
 		return false
 	}
 	row.fallbackUsed = true
@@ -2415,10 +2438,13 @@ func rewriteSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, r 
 					var value any
 					if json.Unmarshal(payload, &value) == nil {
 						if m, ok := value.(map[string]any); ok {
-							if u, ok := m["usage"].(map[string]any); ok {
-								setUsage(usage, u["prompt_tokens"], u["completion_tokens"])
-								setCacheFromUsage(u, usage)
+							// Each upstream protocol reports usage in a different place; a
+							// Chat-only read recorded nothing for native Messages/Responses.
+							target := usage.protocol
+							if target == "" {
+								target = providers.ProtocolChat
 							}
+							captureStreamUsage(m, target, usage)
 							if responsesEventHasOutput(m) {
 								obs.observe()
 							}

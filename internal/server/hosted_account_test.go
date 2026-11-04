@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,10 +11,13 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/hostedauth"
+	"github.com/tiller-router/tiller-router/internal/store"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -335,4 +339,124 @@ func TestPlatformMailQueueEndpoint(t *testing.T) {
 	if _, ok := queue["log"]; !ok {
 		t.Fatalf("mail queue payload missing log: %v", queue)
 	}
+}
+
+// TestVerifyEmailSetsPasswordFromLinkHolder drives the HTTP flow: verification
+// requires a password, a weak one is rejected without burning the token, and
+// the chosen one opens a session and logs in.
+func TestVerifyEmailSetsPasswordFromLinkHolder(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	ctx := context.Background()
+	signup, err := app.identity.CreateSignup(ctx, "squatted@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
+	status, _, _ := anon.request("POST", "/api/auth/verify-email", map[string]any{"token": signup.VerificationToken, "password": "short"})
+	if status != 400 {
+		t.Fatalf("weak password status = %d, want 400", status)
+	}
+	status, payload, header := anon.request("POST", "/api/auth/verify-email", map[string]any{"token": signup.VerificationToken, "password": "owner chosen passphrase"})
+	if status != 200 || payload["verified"] != true || payload["authenticated"] != true {
+		t.Fatalf("verify: %d %v", status, payload)
+	}
+	if !strings.Contains(strings.Join(header.Values("Set-Cookie"), ";"), userSessionCookie) {
+		t.Fatal("verification did not open a session")
+	}
+	status, _, _ = anon.request("POST", "/api/auth/login", map[string]any{"email": "squatted@example.com", "password": "owner chosen passphrase"})
+	if status != 200 {
+		t.Fatalf("login with chosen password = %d", status)
+	}
+}
+
+// Without configured CAPTCHA, distributed failures must not globally lock out
+// the operator. Per-IP throttling remains in force.
+func TestPlatformLoginDistributedFailuresPreserveAccessWithoutCaptcha(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
+	login := func(ip, password string) int {
+		status, _, _ := anon.requestWithHeaders("POST", "/api/platform/session", map[string]any{"username": "platform-admin", "password": password}, map[string]string{"X-Forwarded-For": ip})
+		return status
+	}
+	for i := 0; i < 20; i++ {
+		if got := login(fmt.Sprintf("203.0.113.%d", i+1), "wrong"); got != http.StatusUnauthorized {
+			t.Fatalf("guess %d = %d, want 401", i+1, got)
+		}
+	}
+	if got := login("198.51.100.7", "platform-secret"); got != http.StatusOK {
+		t.Fatalf("valid login from a fresh IP after distributed failures = %d, want 200", got)
+	}
+}
+
+// TestProviderRefreshRateLimitedPerAccount proves user-triggered provider
+// refreshes are capped per account in hosted mode (10 per 10 minutes), with a
+// Retry-After, so repeated discovery cannot be used to load the host.
+func TestProviderRefreshRateLimitedPerAccount(t *testing.T) {
+	t.Parallel()
+	_, api, _ := hostedAccountServer(t)
+	for i := 0; i < 10; i++ {
+		status, payload, _ := api.request("POST", "/api/admin/providers/missing/refresh", nil)
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("refresh %d limited too early: %v", i+1, payload)
+		}
+	}
+	status, _, header := api.request("POST", "/api/admin/providers/missing/refresh", nil)
+	if status != http.StatusTooManyRequests || header.Get("Retry-After") == "" {
+		t.Fatalf("11th refresh = %d (Retry-After %q), want 429 with Retry-After", status, header.Get("Retry-After"))
+	}
+}
+
+// CAPTCHA verification uses a local mock; no external service is contacted.
+func TestPlatformLoginChallengeAfterDistributedFailures(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	err := app.storeHandle().SavePlatformSettings(context.Background(), store.PlatformSettingsProposal{
+		AuditRetentionDays: 30,
+		Auth:               store.PlatformAuthSettings{TurnstileEnabled: true, TurnstileSiteKey: "test-site", TurnstileSecret: "test-secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		switch r.Form.Get("response") {
+		case "good":
+			io.WriteString(w, `{"success":true,"hostname":"tiller.example.com","action":"platform_login"}`)
+		case "unavailable":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			io.WriteString(w, `{"success":false}`)
+		}
+	}))
+	defer verifier.Close()
+	app.turnstileVerifier = hostedauth.NewTurnstileVerifier(&http.Client{Transport: platformCaptchaTransport{url: verifier.URL}})
+	for i := 0; i < 20; i++ {
+		app.platformGlobalLimiter.recordFailure(platformGlobalKey)
+	}
+	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
+	for _, tc := range []struct {
+		token string
+		want  int
+	}{{"", 403}, {"bad", 403}, {"unavailable", 503}, {"good", 200}} {
+		status, _, _ := anon.requestWithHeaders("POST", "/api/platform/session", map[string]any{"username": "platform-admin", "password": "platform-secret", "captcha_token": tc.token}, map[string]string{"X-Forwarded-For": "198.51.100.7"})
+		if status != tc.want {
+			t.Fatalf("challenge %q status = %d, want %d", tc.token, status, tc.want)
+		}
+	}
+}
+
+type platformCaptchaTransport struct{ url string }
+
+func (p platformCaptchaTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	clone := r.Clone(r.Context())
+	target, err := url.Parse(p.url)
+	if err != nil {
+		return nil, err
+	}
+	clone.URL = target
+	return http.DefaultTransport.RoundTrip(clone)
 }

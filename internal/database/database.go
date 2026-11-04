@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -320,15 +321,55 @@ func (d *DB) Close() error {
 	return d.SQL.Close()
 }
 
+// unknownMigrations lists recorded migration versions that are not embedded in
+// this binary.
+func (d *DB) unknownMigrations(ctx context.Context, entries []fs.DirEntry) ([]string, error) {
+	known := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		known[e.Name()] = true
+	}
+	rows, err := d.SQL.QueryContext(ctx, `SELECT version FROM schema_migrations ORDER BY version`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var unknown []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		if !known[v] {
+			unknown = append(unknown, v)
+		}
+	}
+	return unknown, rows.Err()
+}
+
 func (d *DB) Migrate(ctx context.Context) error {
 	if _, err := d.SQL.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL) STRICT`); err != nil {
 		return fmt.Errorf("initialize migrations: %w", err)
 	}
+	// Retain applied migration 054_verification_token_password.sql even though
+	// verification now writes the chosen password directly to users. Deployed
+	// ledgers contain 054; removing it triggers the unknown-migration guard.
 	entries, err := fs.ReadDir(migrations, "migrations")
 	if err != nil {
 		return err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+
+	if unknown, err := d.unknownMigrations(ctx, entries); err != nil {
+		return err
+	} else if len(unknown) > 0 {
+		// An older binary on a newer database (a rollback). The schema may have
+		// columns or tables this code does not know, so refuse to start unless
+		// the operator explicitly accepts the risk.
+		if os.Getenv("TILLER_ALLOW_SCHEMA_ROLLBACK") != "1" {
+			return fmt.Errorf("database schema is newer than this binary (unknown migrations %v): restore a snapshot taken before the upgrade, or set TILLER_ALLOW_SCHEMA_ROLLBACK=1 to start anyway", unknown)
+		}
+		slog.Warn("database schema is newer than this binary; starting because TILLER_ALLOW_SCHEMA_ROLLBACK=1", "unknown_migrations", unknown)
+	}
 
 	// SQLite cannot alter constraints in place, so migrations that make
 	// uniqueness account-local rebuild their tables (create-new, copy, drop,

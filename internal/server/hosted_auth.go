@@ -148,7 +148,6 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		Email        string `json:"email"`
-		Password     string `json:"password"`
 		AcceptTerms  bool   `json:"accept_terms"`
 		CaptchaToken string `json:"captcha_token"`
 	}
@@ -190,12 +189,8 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		IP:               clientIP(r, s.config.TrustedProxy),
 		UserAgent:        r.UserAgent(),
 	}
-	result, err := s.identity.CreateSignup(r.Context(), input.Email, input.Password, acceptance)
+	result, err := s.identity.CreateSignup(r.Context(), input.Email, acceptance)
 	if err != nil {
-		if errors.Is(err, identity.ErrWeakPassword) || errors.Is(err, identity.ErrPasswordTooLong) {
-			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
-			return
-		}
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 		return
 	}
@@ -333,13 +328,18 @@ func (s *Server) userLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Token string `json:"token"`
+		Token    string `json:"token"`
+		Password string `json:"password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
-	u, err := s.identity.ConsumeVerification(r.Context(), input.Token)
+	u, err := s.identity.ConsumeVerification(r.Context(), input.Token, input.Password)
+	if errors.Is(err, identity.ErrWeakPassword) || errors.Is(err, identity.ErrPasswordTooLong) {
+		adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
+		return
+	}
 	if err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_verification", "This verification link is invalid or expired.")
 		return
