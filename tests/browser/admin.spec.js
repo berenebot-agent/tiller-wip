@@ -800,6 +800,44 @@ test('real model search matches the displayed canonical model ID', async ({ page
 });
 
 
+test('provider deletion shows the exact name with a working copy button', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openAdmin(page);
+  const csrf = await adminCsrf(page);
+  const providerName = 'copy-confirm-provider';
+  await createProvider(page, csrf, providerName);
+
+  await page.getByRole('link', { name: 'Providers' }).click();
+  await page.getByRole('button', { name: `Browse ${providerName} models` }).click();
+  await page.locator('#drawer-delete').click();
+
+  const dialog = page.locator('#confirm-dialog');
+  await expect(dialog).toBeVisible();
+  await expect(page.locator('#confirm-type-label')).toHaveText('Type the provider name to confirm');
+  await expect(page.locator('#confirm-type-value')).toHaveText(providerName);
+  await expect(page.locator('#confirm-type-copy')).toBeVisible();
+
+  // The copy button must land the exact name on the clipboard, not just report success.
+  await page.locator('#confirm-type-copy').click();
+  await expect(page.locator('#confirm-type-copy-state')).toHaveText('Copied to clipboard.');
+  await expect.poll(
+    () => page.evaluate(() => navigator.clipboard.readText()),
+    { timeout: 3000 }
+  ).toBe(providerName);
+
+  // Showing/copying the name does not weaken the typed confirmation.
+  await page.locator('#confirm-type').fill('wrong-name');
+  await page.locator('#confirm-action').click();
+  await expect(page.locator('#confirm-error')).toHaveText('Type the provider name exactly to confirm.');
+  await expect(dialog).toBeVisible();
+
+  await page.locator('#confirm-type').fill(providerName);
+  await page.locator('#confirm-action').click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('button', { name: `Browse ${providerName} models` })).toHaveCount(0);
+});
+
+
 test('activity loads clear a previously shown error on success', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await openAdmin(page);
