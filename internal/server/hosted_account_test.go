@@ -16,7 +16,6 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
-	"github.com/tiller-router/tiller-router/internal/mailoutbox"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -340,38 +339,32 @@ func TestPlatformMailQueueEndpoint(t *testing.T) {
 	}
 }
 
-// TestVerifyEmailFromResendMailsPasswordSetup drives the full HTTP flow for a
-// verification link that carries no password: no session is opened, the stored
-// password is gone, and a set-password email is queued.
-func TestVerifyEmailFromResendMailsPasswordSetup(t *testing.T) {
+// TestVerifyEmailSetsPasswordFromLinkHolder drives the HTTP flow: verification
+// requires a password, a weak one is rejected without burning the token, and
+// the chosen one opens a session and logs in.
+func TestVerifyEmailSetsPasswordFromLinkHolder(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	ctx := context.Background()
-	if _, err := app.identity.CreateSignup(ctx, "squatted@example.com", "attacker chosen password"); err != nil {
+	signup, err := app.identity.CreateSignup(ctx, "squatted@example.com")
+	if err != nil {
 		t.Fatal(err)
-	}
-	_, token, err := app.identity.IssueVerification(ctx, "squatted@example.com")
-	if err != nil || token == "" {
-		t.Fatalf("resend: %v", err)
 	}
 	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
-	status, payload, header := anon.request("POST", "/api/auth/verify-email", map[string]any{"token": token})
-	if status != 200 || payload["verified"] != true || payload["password_setup"] != true {
+	status, _, _ := anon.request("POST", "/api/auth/verify-email", map[string]any{"token": signup.VerificationToken, "password": "short"})
+	if status != 400 {
+		t.Fatalf("weak password status = %d, want 400", status)
+	}
+	status, payload, header := anon.request("POST", "/api/auth/verify-email", map[string]any{"token": signup.VerificationToken, "password": "owner chosen passphrase"})
+	if status != 200 || payload["verified"] != true || payload["authenticated"] != true {
 		t.Fatalf("verify: %d %v", status, payload)
 	}
-	if payload["authenticated"] == true || strings.Contains(strings.Join(header.Values("Set-Cookie"), ";"), userSessionCookie) {
-		t.Fatalf("verification without a password opened a session: %v", payload)
+	if !strings.Contains(strings.Join(header.Values("Set-Cookie"), ";"), userSessionCookie) {
+		t.Fatal("verification did not open a session")
 	}
-	status, _, _ = anon.request("POST", "/api/auth/login", map[string]any{"email": "squatted@example.com", "password": "attacker chosen password"})
-	if status == 200 {
-		t.Fatal("attacker password logs in after verification")
-	}
-	var queued int
-	if err := app.db.SQL.QueryRow(`SELECT count(*) FROM mail_outbox WHERE recipient='squatted@example.com' AND type=?`, mailoutbox.TypePasswordReset).Scan(&queued); err != nil {
-		t.Fatal(err)
-	}
-	if queued != 1 {
-		t.Fatalf("queued password-reset mails = %d, want 1", queued)
+	status, _, _ = anon.request("POST", "/api/auth/login", map[string]any{"email": "squatted@example.com", "password": "owner chosen passphrase"})
+	if status != 200 {
+		t.Fatalf("login with chosen password = %d", status)
 	}
 }
 

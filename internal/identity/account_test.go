@@ -45,11 +45,11 @@ func newAccountStore(t *testing.T) (*Store, *sql.DB, *recordingQueue) {
 func signupAndVerify(t *testing.T, st *Store, email, password string) (User, UserSession) {
 	t.Helper()
 	ctx := context.Background()
-	result, err := st.CreateSignup(ctx, email, password)
+	result, err := st.CreateSignup(ctx, email)
 	if err != nil {
 		t.Fatal(err)
 	}
-	verified, err := st.ConsumeVerification(ctx, result.VerificationToken)
+	verified, err := st.ConsumeVerification(ctx, result.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestSignupEnqueuesVerificationMail(t *testing.T) {
 	t.Parallel()
 	st, db, q := newAccountStore(t)
 	ctx := context.Background()
-	result, err := st.CreateSignup(ctx, "queue@example.com", "correct horse battery staple")
+	result, err := st.CreateSignup(ctx, "queue@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestRequestEmailChangeTakenIsSilent(t *testing.T) {
 	t.Parallel()
 	st, _, q := newAccountStore(t)
 	ctx := context.Background()
-	if _, err := st.CreateSignup(ctx, "taken@example.com", "correct horse battery staple"); err != nil {
+	if _, err := st.CreateSignup(ctx, "taken@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	u, session := signupAndVerify(t, st, "owner@example.com", "correct horse battery staple")
@@ -295,7 +295,7 @@ func TestConfirmEmailChangeRaceIsRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Another account claims the address between request and confirm.
-	if _, err := st.CreateSignup(ctx, "want@example.com", "correct horse battery staple"); err != nil {
+	if _, err := st.CreateSignup(ctx, "want@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ConfirmEmailChange(ctx, token); !errors.Is(err, ErrEmailTaken) {

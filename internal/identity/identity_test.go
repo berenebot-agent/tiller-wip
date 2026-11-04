@@ -31,7 +31,7 @@ func TestSignupVerifySessionAndReset(t *testing.T) {
 	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
-	result, err := st.CreateSignup(ctx, " User@Example.COM ", "correct horse battery staple")
+	result, err := st.CreateSignup(ctx, " User@Example.COM ")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,14 +45,14 @@ func TestSignupVerifySessionAndReset(t *testing.T) {
 	if stored == result.VerificationToken || stored == "" {
 		t.Fatal("raw verification token was persisted")
 	}
-	verified, err := st.ConsumeVerification(ctx, result.VerificationToken)
+	verified, err := st.ConsumeVerification(ctx, result.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !verified.Verified() || verified.AccountStatus != "active" {
 		t.Fatalf("verified user = %+v", verified)
 	}
-	if _, err := st.ConsumeVerification(ctx, result.VerificationToken); err == nil {
+	if _, err := st.ConsumeVerification(ctx, result.VerificationToken, "correct horse battery staple"); err == nil {
 		t.Fatal("verification token was reusable")
 	}
 	session, err := st.CreateUserSession(ctx, verified)
@@ -82,11 +82,11 @@ func TestAccountSuspensionInvalidatesSessions(t *testing.T) {
 	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
-	result, err := st.CreateSignup(ctx, "suspend@example.com", "correct horse battery staple")
+	result, err := st.CreateSignup(ctx, "suspend@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := st.ConsumeVerification(ctx, result.VerificationToken)
+	u, err := st.ConsumeVerification(ctx, result.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,11 +106,11 @@ func TestUserSessionRejectsMismatchedAccountOwner(t *testing.T) {
 	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
-	firstSignup, err := st.CreateSignup(ctx, "first@example.com", "correct horse battery staple")
+	firstSignup, err := st.CreateSignup(ctx, "first@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstUser, err := st.ConsumeVerification(ctx, firstSignup.VerificationToken)
+	firstUser, err := st.ConsumeVerification(ctx, firstSignup.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,11 +118,11 @@ func TestUserSessionRejectsMismatchedAccountOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSignup, err := st.CreateSignup(ctx, "second@example.com", "correct horse battery staple")
+	secondSignup, err := st.CreateSignup(ctx, "second@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondUser, err := st.ConsumeVerification(ctx, secondSignup.VerificationToken)
+	secondUser, err := st.ConsumeVerification(ctx, secondSignup.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,13 +146,13 @@ func TestPlatformCounts(t *testing.T) {
 	t.Parallel()
 	st, db := newTestStore(t)
 	ctx := context.Background()
-	if _, err := st.CreateSignup(ctx, "pending@example.com", "correct horse battery staple"); err != nil {
+	if _, err := st.CreateSignup(ctx, "pending@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.CreateGoogleSignup(ctx, "active@example.com", "google-subject", SignupAcceptance{TermsUpdatedAt: "2026-09-01T00:00:00Z", PrivacyUpdatedAt: "2026-09-01T00:00:00Z"}); err != nil {
 		t.Fatal(err)
 	}
-	suspended, err := st.CreateSignup(ctx, "suspended@example.com", "correct horse battery staple")
+	suspended, err := st.CreateSignup(ctx, "suspended@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,11 +384,11 @@ func TestVerifyKeepsPasswordChosenAtSignup(t *testing.T) {
 	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
-	res, err := st.CreateSignup(ctx, "new@example.com", "correct horse battery staple")
+	res, err := st.CreateSignup(ctx, "new@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	u, err := st.ConsumeVerification(ctx, res.VerificationToken)
+	u, err := st.ConsumeVerification(ctx, res.VerificationToken, "correct horse battery staple")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,47 +400,36 @@ func TestVerifyKeepsPasswordChosenAtSignup(t *testing.T) {
 	}
 }
 
-// TestResendVerificationDoesNotActivateSquatterPassword reproduces the
-// pre-account takeover: an attacker signs up with the victim's address, the
-// victim's own signup is swallowed as a duplicate, and the victim verifies
-// through "resend". The attacker's password must not survive that, and the
-// victim must be able to set their own through the reset flow.
-func TestResendVerificationDoesNotActivateSquatterPassword(t *testing.T) {
+// TestVerificationPasswordComesFromLinkHolder covers pre-account takeover:
+// signup collects no password, so whoever submitted the form for the victim's
+// address cannot log in; the mailbox owner chooses the password when they
+// verify, and a weak password does not consume the token.
+func TestVerificationPasswordComesFromLinkHolder(t *testing.T) {
 	t.Parallel()
 	st, _ := newTestStore(t)
 	ctx := context.Background()
-	if _, err := st.CreateSignup(ctx, "victim@example.com", "attacker chosen password"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.CreateSignup(ctx, "victim@example.com", "victim chosen password"); err == nil {
-		t.Fatal("duplicate signup unexpectedly succeeded")
-	}
-	_, token, err := st.IssueVerification(ctx, "victim@example.com")
-	if err != nil || token == "" {
-		t.Fatalf("resend: %v %q", err, token)
-	}
-	u, err := st.ConsumeVerification(ctx, token)
+	signup, err := st.CreateSignup(ctx, "victim@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !u.Verified() || u.PasswordEnabled {
-		t.Fatalf("after resend verification: verified=%v passwordEnabled=%v, want verified with password cleared", u.Verified(), u.PasswordEnabled)
+	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", ""); err == nil {
+		t.Fatal("password login works before verification")
 	}
-	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", "attacker chosen password"); err == nil {
-		t.Fatal("attacker password still logs in after the victim verified")
+	if _, err := st.ConsumeVerification(ctx, signup.VerificationToken, "short"); !errors.Is(err, ErrWeakPassword) {
+		t.Fatalf("weak password: %v, want ErrWeakPassword", err)
 	}
-	_, reset, err := st.IssuePasswordReset(ctx, "victim@example.com")
-	if err != nil || reset == "" {
-		t.Fatalf("reset after verification: %v %q", err, reset)
+	u, err := st.ConsumeVerification(ctx, signup.VerificationToken, "victim chosen password")
+	if err != nil {
+		t.Fatalf("token consumed by the weak attempt: %v", err)
 	}
-	if _, err := st.ConsumePasswordReset(ctx, reset, "victim chosen password"); err != nil {
-		t.Fatal(err)
+	if !u.Verified() || !u.PasswordEnabled {
+		t.Fatalf("verified=%v passwordEnabled=%v, want both true", u.Verified(), u.PasswordEnabled)
 	}
 	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", "victim chosen password"); err != nil {
-		t.Fatalf("victim login after setting password: %v", err)
+		t.Fatalf("victim login: %v", err)
 	}
-	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", "attacker chosen password"); err == nil {
-		t.Fatal("attacker password works after victim reset")
+	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", ""); err == nil {
+		t.Fatal("empty password logs in")
 	}
 }
 
@@ -471,11 +460,11 @@ func TestAuthenticatePasswordUnknownEmailCostsOneVerification(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	res, err := st.CreateSignup(ctx, "known@example.com", "correct horse battery staple")
+	res, err := st.CreateSignup(ctx, "known@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.ConsumeVerification(ctx, res.VerificationToken); err != nil {
+	if _, err := st.ConsumeVerification(ctx, res.VerificationToken, "correct horse battery staple"); err != nil {
 		t.Fatal(err)
 	}
 	count.Store(0)

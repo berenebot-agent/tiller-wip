@@ -59,7 +59,6 @@
       <form id="signup-form" class="stack-form" hidden>
         <p class="eyebrow">CREATE ACCOUNT</p>
         <label>Email <input name="email" type="email" autocomplete="email" required></label>
-        <label>Passphrase <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
         <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms">Terms of Service</a> and acknowledge the <a href="/legal/privacy">Privacy Policy</a>.</label>
         <p class="form-error" id="signup-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Create account</button>
@@ -108,6 +107,10 @@
         <p class="eyebrow">EMAIL VERIFICATION</p><h2>Check your email</h2>
         <p id="verify-message">Verifying your link…</p>
         <p class="form-error" id="verify-error" role="alert"></p>
+        <form id="verify-form" class="stack-form" hidden>
+          <label>Choose a passphrase <input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+          <button class="btn btn-primary btn-wide" type="submit">Verify email and set passphrase</button>
+        </form>
         <label id="verify-email-wrap" hidden>Email <input id="verify-email" type="email" autocomplete="email"></label>
         <button class="btn btn-secondary btn-wide" id="resend-verification" type="button" hidden>Send verification email again</button>
         <button class="btn btn-primary btn-wide" id="verify-login" type="button" hidden>Continue to sign in</button>

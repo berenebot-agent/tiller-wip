@@ -543,7 +543,7 @@ $('#signup-form').addEventListener('submit', async event => {
   if (form.get('accept_terms') !== 'on') { showAuthError('signup-error', { message: 'Please agree to the Terms of Service to continue.' }, 'Signup failed.'); return; }
   try {
     const captcha_token = authCaptchaToken('signup');
-    await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), password: form.get('password'), accept_terms: true, captcha_token }) });
+    await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), accept_terms: true, captcha_token }) });
     signupEmail = String(form.get('email') || '');
     formElement.reset();
     $('#signup-done-message').textContent = 'If the address can receive mail, a verification message will arrive shortly.';
@@ -3923,7 +3923,20 @@ async function setupAnalyticsConsent() {
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
-      try { const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token }) }); history.replaceState(null, '', '/login'); if (result && result.password_setup) { $('#verify-message').textContent = 'Your email is verified. We emailed you a link to set your password.'; return; } if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; } $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false; } catch (error) { $('#verify-message').textContent = ''; $('#verify-error').textContent = errorMessage(error, 'Verification failed.'); $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
+      $('#verify-message').textContent = 'Choose a passphrase to finish verifying your email.';
+      const verifyForm = $('#verify-form'); verifyForm.hidden = false;
+      verifyForm.onsubmit = async event => {
+        event.preventDefault(); $('#verify-error').textContent = '';
+        try {
+          const result = await api('/api/auth/verify-email', { method: 'POST', body: JSON.stringify({ token, password: new FormData(verifyForm).get('password') }) });
+          history.replaceState(null, '', '/login'); verifyForm.reset(); verifyForm.hidden = true;
+          if (result && result.authenticated) { $('#verify-message').textContent = 'Your email is verified.'; showApp(result); return; }
+          $('#verify-message').textContent = 'Your email is verified.'; $('#verify-login').hidden = false;
+        } catch (error) {
+          $('#verify-error').textContent = errorMessage(error, 'Verification failed.');
+          if (error.code !== 'invalid_password') { verifyForm.hidden = true; $('#verify-email-wrap').hidden = false; exposeResend('#resend-verification', '#verify-email', '#verify-error'); }
+        }
+      };
       return;
     }
     if (runtimeMode === 'hosted' && path === '/reset-password' && token) authView('reset-form');

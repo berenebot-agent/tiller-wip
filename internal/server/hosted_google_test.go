@@ -255,11 +255,11 @@ func TestPendingGoogleLinkGrantAllowsLinkWithoutPassword(t *testing.T) {
 	seedGooglePlatformSettings(t, app)
 
 	// A second, unlinked, password-enabled account.
-	u, err := app.identity.CreateSignup(context.Background(), "candidate@example.com", "another correct horse battery", identity.SignupAcceptance{})
+	u, err := app.identity.CreateSignup(context.Background(), "candidate@example.com", identity.SignupAcceptance{})
 	if err != nil {
 		t.Fatalf("create candidate: %v", err)
 	}
-	if _, err := app.identity.ConsumeVerification(context.Background(), u.VerificationToken); err != nil {
+	if _, err := app.identity.ConsumeVerification(context.Background(), u.VerificationToken, "another correct horse battery"); err != nil {
 		t.Fatalf("verify candidate: %v", err)
 	}
 

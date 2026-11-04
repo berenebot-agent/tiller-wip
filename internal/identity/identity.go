@@ -552,17 +552,10 @@ func validBootstrapEmail(email string) bool { return ValidateEmail(email) }
 // acceptance is optional: when one is supplied it is recorded in the same
 // transaction as the user (legal_acceptances is platform-global, so it is
 // written through the identity store's own handle, not a tenant scope).
-func (s *Store) CreateSignup(ctx context.Context, email, password string, acceptance ...SignupAcceptance) (SignupResult, error) {
+func (s *Store) CreateSignup(ctx context.Context, email string, acceptance ...SignupAcceptance) (SignupResult, error) {
 	email = NormalizeEmail(email)
 	if email == "" {
 		return SignupResult{}, ErrNotFound
-	}
-	if err := ValidatePassword(password); err != nil {
-		return SignupResult{}, err
-	}
-	passwordHash, err := s.passwordHasher.Hash(password)
-	if err != nil {
-		return SignupResult{}, err
 	}
 	userID, err := id.New()
 	if err != nil {
@@ -582,7 +575,7 @@ func (s *Store) CreateSignup(ctx context.Context, email, password string, accept
 		return SignupResult{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,status,created_at,updated_at) VALUES(?,?,?,'active',?,?)`, userID, email, passwordHash, formatTime(now), formatTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,password_auth_enabled,status,created_at,updated_at) VALUES(?,?,'',0,'active',?,?)`, userID, email, formatTime(now), formatTime(now)); err != nil {
 		return SignupResult{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,plan,status,owner_user_id,created_at,updated_at) VALUES(?,'free','pending',?,?,?)`, accountID, userID, formatTime(now), formatTime(now)); err != nil {
@@ -723,9 +716,14 @@ func (s *Store) IssueVerification(ctx context.Context, email string) (User, stri
 	return u, raw, nil
 }
 
-// ConsumeVerification atomically consumes a valid verification token and
-// activates the owned account.
-func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, error) {
+// ConsumeVerification atomically consumes a valid verification token, sets the
+// password supplied by the person holding the link, and activates the owned
+// account. Signup collects no password: the mailbox owner chooses it here, so
+// whoever submitted the signup form can never pick the credential.
+func (s *Store) ConsumeVerification(ctx context.Context, raw, password string) (User, error) {
+	if err := ValidatePassword(password); err != nil {
+		return User{}, err
+	}
 	selector, secret, ok := parseOpaqueToken(raw)
 	if !ok {
 		return User{}, ErrInvalidToken
@@ -744,6 +742,10 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 	if err != nil || !time.Now().Before(exp) {
 		return User{}, ErrExpiredToken
 	}
+	newHash, err := s.passwordHasher.Hash(password)
+	if err != nil {
+		return User{}, err
+	}
 	now := time.Now().UTC()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -757,12 +759,14 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	// The signup-time password was chosen by whoever submitted the form, not
-	// necessarily the mailbox owner, so a verification click must never activate
-	// it (signup-takeover). Drop it and bump the generation so older reset
-	// tokens and sessions die; the caller emails a set-password link, which only
-	// the mailbox owner can use.
-	_, err = tx.ExecContext(ctx, `UPDATE users SET email_verified_at=?,password_hash='',password_auth_enabled=0,auth_generation=auth_generation+1,updated_at=? WHERE id=? AND email_verified_at IS NULL`, formatTime(now), formatTime(now), userID)
+	// auth_generation is bumped so any reset token or session issued earlier
+	// (e.g. by someone who squatted the address) dies with this verification.
+	updated, err := tx.ExecContext(ctx, `UPDATE users SET email_verified_at=?,password_hash=?,password_auth_enabled=1,auth_generation=auth_generation+1,updated_at=? WHERE id=? AND email_verified_at IS NULL`, formatTime(now), newHash, formatTime(now), userID)
+	if err == nil {
+		if n, _ := updated.RowsAffected(); n != 1 {
+			return User{}, ErrInvalidToken
+		}
+	}
 	if err != nil {
 		return User{}, err
 	}
