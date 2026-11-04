@@ -34,6 +34,8 @@ const (
 	// users.email. It is never valid mail and is never sent anywhere; it only
 	// satisfies users.email's UNIQUE/format constraints.
 	localOperatorEmailDomain = "local.invalid"
+	// LocalOperatorEmailDomain exposes it so callers can recover the username.
+	LocalOperatorEmailDomain = localOperatorEmailDomain
 )
 
 // ErrLocalOperatorExists means the local account already has an owner user.

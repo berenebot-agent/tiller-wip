@@ -161,7 +161,7 @@ func beginChallenge(t *testing.T, payload map[string]any) string {
 // returns the finish status and payload.
 func registerPasskeyForTest(t *testing.T, api *testAPI, auth *httpTestAuthenticator, name string) (int, map[string]any) {
 	t.Helper()
-	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{})
+	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{"current_password": "correct horse battery staple"})
 	if status != 200 {
 		t.Fatalf("register begin: %d %v", status, begin)
 	}
@@ -216,7 +216,7 @@ func (a *testAPI) requestWithHeaders(method, path string, body any, headers map[
 func TestPasskeyRegistrationRequiresCSRF(t *testing.T) {
 	t.Parallel()
 	_, api := hostedWebAuthnServer(t)
-	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{})
+	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{"current_password": "correct horse battery staple"})
 	if status != 200 {
 		t.Fatalf("begin: %d %v", status, begin)
 	}
@@ -265,7 +265,7 @@ func TestPasskeyRegisterRenameDeleteFlow(t *testing.T) {
 	if status, payload := registerPasskeyForTest(t, api, auth2, "Phone"); status != 200 {
 		t.Fatalf("second register: %d %v", status, payload)
 	}
-	status, _, _ = api.request("POST", "/api/auth/account/passkeys/delete", map[string]any{"id": id})
+	status, _, _ = api.request("POST", "/api/auth/account/passkeys/delete", map[string]any{"id": id, "current_password": "correct horse battery staple"})
 	if status != 200 {
 		t.Fatalf("delete: %d", status)
 	}
@@ -341,7 +341,7 @@ func TestPasskeyOnlyReauthAuthorisesPasswordChange(t *testing.T) {
 		t.Fatalf("register: %d %v", status, payload)
 	}
 	// Make the passkey the only sign-in method.
-	status, payload, _ := api.request("POST", "/api/auth/account/passkeys/password-signin", map[string]any{"enabled": false})
+	status, payload, _ := api.request("POST", "/api/auth/account/passkeys/password-signin", map[string]any{"enabled": false, "current_password": "correct horse battery staple"})
 	if status != 200 {
 		t.Fatalf("disable password sign-in: %d %v", status, payload)
 	}
@@ -419,6 +419,7 @@ func TestEnablePasswordRefusedWhenGoogleLinked(t *testing.T) {
 	api.client.Jar.SetCookies(base, []*http.Cookie{{Name: userSessionCookie, Value: session.Token, Path: "/"}})
 	api.csrf = session.CSRFToken
 
+	app.grantGoogleReauth(session.Token)
 	status, payload, _ := api.request("POST", "/api/auth/account/passkeys/password-signin", map[string]any{"enabled": true})
 	if status != http.StatusConflict {
 		t.Fatalf("enable password while Google linked = %d %v, want 409", status, payload)
@@ -478,7 +479,7 @@ func TestPasskeyRenameAudited(t *testing.T) {
 	if status, _, _ := api.request("POST", "/api/auth/account/passkeys/rename", map[string]any{"id": id, "name": "Renamed"}); status != 200 {
 		t.Fatalf("rename: %d", status)
 	}
-	if status, _, _ := api.request("POST", "/api/auth/account/passkeys/password-signin", map[string]any{"enabled": false}); status != 200 {
+	if status, _, _ := api.request("POST", "/api/auth/account/passkeys/password-signin", map[string]any{"enabled": false, "current_password": "correct horse battery staple"}); status != 200 {
 		t.Fatalf("disable: %d", status)
 	}
 	for _, event := range []string{"user.passkey_added", "user.passkey_renamed", "user.password_signin_disabled"} {
@@ -489,5 +490,32 @@ func TestPasskeyRenameAudited(t *testing.T) {
 		if count == 0 {
 			t.Errorf("audit event %q was not recorded", event)
 		}
+	}
+}
+
+// TestPasskeyChangesRequireReauthentication proves a bare session cookie (a
+// stolen or unattended session) cannot add or remove a passkey or toggle
+// password sign-in. Otherwise the thief could mint their own passkey and then
+// pass every later re-authentication gate.
+func TestPasskeyChangesRequireReauthentication(t *testing.T) {
+	t.Parallel()
+	_, api := hostedWebAuthnServer(t)
+	for _, tc := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"/api/auth/account/passkeys/register/begin", map[string]any{}},
+		{"/api/auth/account/passkeys/register/begin", map[string]any{"current_password": "wrong password here"}},
+		{"/api/auth/account/passkeys/delete", map[string]any{"id": "x"}},
+		{"/api/auth/account/passkeys/password-signin", map[string]any{"enabled": false}},
+	} {
+		status, payload, _ := api.request("POST", tc.path, tc.body)
+		if status != http.StatusUnauthorized {
+			t.Fatalf("%s without re-auth = %d %v, want 401", tc.path, status, payload)
+		}
+	}
+	status, list, _ := api.request("GET", "/api/auth/account/passkeys", nil)
+	if status != 200 || len(list["passkeys"].([]any)) != 0 {
+		t.Fatalf("passkeys after rejected attempts: %d %v", status, list)
 	}
 }

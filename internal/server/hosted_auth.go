@@ -345,6 +345,15 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.recordAccountAudit(r.Context(), u.AccountID, store.AuditEvent{Event: "user.email_verified", ActorType: "user", ActorID: u.ID})
+	if !u.PasswordEnabled {
+		// The verification link carried no password (resend path), so the stored
+		// one was cleared. Mail a set-password link instead of opening a session.
+		if _, _, err := s.identity.IssuePasswordReset(r.Context(), u.Email); err != nil && s.logger != nil {
+			s.logger.Warn("verify-email password setup mail failed", "error_class", fmt.Sprintf("%T", err))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"verified": true, "password_setup": true})
+		return
+	}
 	// Verifying an email address is a strong signal that the owner of the
 	// address is present, so mint a session for exactly the user the consumed
 	// token belongs to. A leaked link can only ever mint a session for its own

@@ -586,7 +586,7 @@ func (s *Store) CreateSignup(ctx context.Context, email, password string, accept
 	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,plan,status,owner_user_id,created_at,updated_at) VALUES(?,'free','pending',?,?,?)`, accountID, userID, formatTime(now), formatTime(now)); err != nil {
 		return SignupResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO email_verification_tokens(id,user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?,?)`, selector, userID, tokenHash, formatTime(now), formatTime(now.Add(verificationTTL))); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO email_verification_tokens(id,user_id,token_hash,created_at,expires_at,password_hash) VALUES(?,?,?,?,?,?)`, selector, userID, tokenHash, formatTime(now), formatTime(now.Add(verificationTTL)), passwordHash); err != nil {
 		return SignupResult{}, err
 	}
 	if err := s.enqueueMail(ctx, tx, mailoutbox.QueuedMessage{UserID: userID, Type: mailoutbox.TypeVerifyEmail, Recipient: email, Token: rawToken}); err != nil {
@@ -717,7 +717,8 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 		return User{}, ErrInvalidToken
 	}
 	var userID, hash, expires string
-	if err := s.db.QueryRowContext(ctx, `SELECT user_id,token_hash,expires_at FROM email_verification_tokens WHERE id=? AND used_at IS NULL`, selector).Scan(&userID, &hash, &expires); err != nil {
+	var boundPassword sql.NullString
+	if err := s.db.QueryRowContext(ctx, `SELECT user_id,token_hash,expires_at,password_hash FROM email_verification_tokens WHERE id=? AND used_at IS NULL`, selector).Scan(&userID, &hash, &expires, &boundPassword); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return User{}, ErrInvalidToken
 		}
@@ -743,7 +744,15 @@ func (s *Store) ConsumeVerification(ctx context.Context, raw string) (User, erro
 	if n, _ := result.RowsAffected(); n != 1 {
 		return User{}, ErrAlreadyUsed
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET email_verified_at=?,updated_at=? WHERE id=?`, formatTime(now), formatTime(now), userID); err != nil {
+	if boundPassword.Valid {
+		_, err = tx.ExecContext(ctx, `UPDATE users SET email_verified_at=?,password_hash=?,updated_at=? WHERE id=?`, formatTime(now), boundPassword.String, formatTime(now), userID)
+	} else {
+		// The mailbox owner did not choose the stored password (resend path), so
+		// it cannot be trusted: drop it and bump the generation so older reset
+		// tokens and sessions die. The caller emails a set-password link.
+		_, err = tx.ExecContext(ctx, `UPDATE users SET email_verified_at=?,password_hash='',password_auth_enabled=0,auth_generation=auth_generation+1,updated_at=? WHERE id=? AND email_verified_at IS NULL`, formatTime(now), formatTime(now), userID)
+	}
+	if err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET status='active',updated_at=? WHERE owner_user_id=? AND status='pending'`, formatTime(now), userID); err != nil {

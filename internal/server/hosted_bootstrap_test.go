@@ -181,7 +181,7 @@ func TestLocalToHostedConversionPreservesOperatorAndPasskeys(t *testing.T) {
 	api.csrf, _ = login["csrf_token"].(string)
 	// Register a passkey on the operator.
 	auth := newHTTPTestAuthenticator(t)
-	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{})
+	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{"current_password": "operator-password"})
 	if status != 200 {
 		t.Fatalf("register begin = %d %v", status, begin)
 	}

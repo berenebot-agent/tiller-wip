@@ -10,10 +10,12 @@ import (
 	"net/netip"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/mailoutbox"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -334,5 +336,40 @@ func TestPlatformMailQueueEndpoint(t *testing.T) {
 	}
 	if _, ok := queue["log"]; !ok {
 		t.Fatalf("mail queue payload missing log: %v", queue)
+	}
+}
+
+// TestVerifyEmailFromResendMailsPasswordSetup drives the full HTTP flow for a
+// verification link that carries no password: no session is opened, the stored
+// password is gone, and a set-password email is queued.
+func TestVerifyEmailFromResendMailsPasswordSetup(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	ctx := context.Background()
+	if _, err := app.identity.CreateSignup(ctx, "squatted@example.com", "attacker chosen password"); err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := app.identity.IssueVerification(ctx, "squatted@example.com")
+	if err != nil || token == "" {
+		t.Fatalf("resend: %v", err)
+	}
+	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
+	status, payload, header := anon.request("POST", "/api/auth/verify-email", map[string]any{"token": token})
+	if status != 200 || payload["verified"] != true || payload["password_setup"] != true {
+		t.Fatalf("verify: %d %v", status, payload)
+	}
+	if payload["authenticated"] == true || strings.Contains(strings.Join(header.Values("Set-Cookie"), ";"), userSessionCookie) {
+		t.Fatalf("verification without a password opened a session: %v", payload)
+	}
+	status, _, _ = anon.request("POST", "/api/auth/login", map[string]any{"email": "squatted@example.com", "password": "attacker chosen password"})
+	if status == 200 {
+		t.Fatal("attacker password logs in after verification")
+	}
+	var queued int
+	if err := app.db.SQL.QueryRow(`SELECT count(*) FROM mail_outbox WHERE recipient='squatted@example.com' AND type=?`, mailoutbox.TypePasswordReset).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 1 {
+		t.Fatalf("queued password-reset mails = %d, want 1", queued)
 	}
 }

@@ -375,3 +375,70 @@ func TestBootstrapHostedInvalidCredentialsDoNotMutate(t *testing.T) {
 		t.Fatalf("invalid bootstrap user count = %d, want 0", count)
 	}
 }
+
+// TestVerifyKeepsPasswordChosenAtSignup is the normal onboarding path: the link
+// that came with the signup activates the password typed in that signup, so the
+// new user logs in at once with no reset step.
+func TestVerifyKeepsPasswordChosenAtSignup(t *testing.T) {
+	t.Parallel()
+	st, _ := newTestStore(t)
+	ctx := context.Background()
+	res, err := st.CreateSignup(ctx, "new@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := st.ConsumeVerification(ctx, res.VerificationToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !u.PasswordEnabled {
+		t.Fatal("signup verification disabled password sign-in")
+	}
+	if _, err := st.AuthenticatePassword(ctx, "new@example.com", "correct horse battery staple"); err != nil {
+		t.Fatalf("login after verification: %v", err)
+	}
+}
+
+// TestResendVerificationDoesNotActivateSquatterPassword reproduces the
+// pre-account takeover: an attacker signs up with the victim's address, the
+// victim's own signup is swallowed as a duplicate, and the victim verifies
+// through "resend". The attacker's password must not survive that, and the
+// victim must be able to set their own through the reset flow.
+func TestResendVerificationDoesNotActivateSquatterPassword(t *testing.T) {
+	t.Parallel()
+	st, _ := newTestStore(t)
+	ctx := context.Background()
+	if _, err := st.CreateSignup(ctx, "victim@example.com", "attacker chosen password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateSignup(ctx, "victim@example.com", "victim chosen password"); err == nil {
+		t.Fatal("duplicate signup unexpectedly succeeded")
+	}
+	_, token, err := st.IssueVerification(ctx, "victim@example.com")
+	if err != nil || token == "" {
+		t.Fatalf("resend: %v %q", err, token)
+	}
+	u, err := st.ConsumeVerification(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !u.Verified() || u.PasswordEnabled {
+		t.Fatalf("after resend verification: verified=%v passwordEnabled=%v, want verified with password cleared", u.Verified(), u.PasswordEnabled)
+	}
+	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", "attacker chosen password"); err == nil {
+		t.Fatal("attacker password still logs in after the victim verified")
+	}
+	_, reset, err := st.IssuePasswordReset(ctx, "victim@example.com")
+	if err != nil || reset == "" {
+		t.Fatalf("reset after verification: %v %q", err, reset)
+	}
+	if _, err := st.ConsumePasswordReset(ctx, reset, "victim chosen password"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", "victim chosen password"); err != nil {
+		t.Fatalf("victim login after setting password: %v", err)
+	}
+	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", "attacker chosen password"); err == nil {
+		t.Fatal("attacker password works after victim reset")
+	}
+}

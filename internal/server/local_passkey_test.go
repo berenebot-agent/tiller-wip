@@ -89,7 +89,7 @@ func TestLocalPasskeyRegisterAndLogin(t *testing.T) {
 	}
 
 	// Register (management endpoints are behind requireAdminUser locally).
-	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{})
+	status, begin, _ := api.request("POST", "/api/auth/account/passkeys/register/begin", map[string]any{"current_password": "correct horse"})
 	if status != 200 {
 		t.Fatalf("register begin = %d %v", status, begin)
 	}

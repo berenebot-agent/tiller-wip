@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -170,12 +171,60 @@ func (s *Server) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, userSessionPayload(session))
 }
 
+// requireSignInReauth gates changes to the account's sign-in methods behind the
+// same proof as password/email changes (password, a fresh passkey assertion, or
+// a Google re-auth). A bare session cookie must not be enough to add a passkey,
+// remove one, or toggle password sign-in: a stolen session could otherwise mint
+// its own factor and then pass every later re-auth check.
+func (s *Server) requireSignInReauth(w http.ResponseWriter, r *http.Request, user identity.User, password string) bool {
+	var err error
+	if s.config.Mode == config.ModeHosted {
+		_, err = s.reauthenticateSensitive(r, user.ID, password)
+	} else {
+		err = s.verifyLocalOperatorPassword(r.Context(), user, password)
+	}
+	if err != nil {
+		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing sign-in methods.")
+		return false
+	}
+	return true
+}
+
+// verifyLocalOperatorPassword checks the local operator's password. Their row
+// stores a hash bound to the username (the legacy credential format), so the
+// plain VerifyPassword used for hosted users cannot match it. The username is
+// recovered from the synthetic address; the configured name covers a mixed-case
+// username, which the address lower-cases.
+func (s *Server) verifyLocalOperatorPassword(ctx context.Context, user identity.User, password string) error {
+	names := []string{strings.TrimSuffix(user.Email, "@"+identity.LocalOperatorEmailDomain)}
+	if s.config.TillerUser != "" {
+		names = append(names, s.config.TillerUser)
+	}
+	var err error
+	for _, name := range names {
+		if _, err = s.identity.AuthenticateLocalOperator(ctx, name, password); err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
 // passkeyRegisterBegin starts a registration ceremony for the signed-in user.
 func (s *Server) passkeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	if s.passkeyUnavailable(w) {
 		return
 	}
 	user := r.Context().Value(userKey).(identity.User)
+	var input struct {
+		CurrentPassword string `json:"current_password"`
+	}
+	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+		respondDecodeError(w, err)
+		return
+	}
+	if !s.requireSignInReauth(w, r, user, input.CurrentPassword) {
+		return
+	}
 	opts, err := s.identity.BeginPasskeyRegistration(r.Context(), user)
 	if err != nil {
 		if errors.Is(err, identity.ErrWebAuthnUnavailable) {
@@ -279,10 +328,14 @@ func (s *Server) passkeyDelete(w http.ResponseWriter, r *http.Request) {
 	}
 	user := r.Context().Value(userKey).(identity.User)
 	var input struct {
-		ID string `json:"id"`
+		ID              string `json:"id"`
+		CurrentPassword string `json:"current_password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
+		return
+	}
+	if !s.requireSignInReauth(w, r, user, input.CurrentPassword) {
 		return
 	}
 	err := s.identity.DeletePasskey(r.Context(), user.ID, input.ID)
@@ -308,10 +361,14 @@ func (s *Server) setPasswordSignIn(w http.ResponseWriter, r *http.Request) {
 	}
 	user := r.Context().Value(userKey).(identity.User)
 	var input struct {
-		Enabled bool `json:"enabled"`
+		Enabled         bool   `json:"enabled"`
+		CurrentPassword string `json:"current_password"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
+		return
+	}
+	if !s.requireSignInReauth(w, r, user, input.CurrentPassword) {
 		return
 	}
 	// Local mode keeps password sign-in permanently available as the operator's
