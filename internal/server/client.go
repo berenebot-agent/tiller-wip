@@ -1774,9 +1774,10 @@ routeDone:
 // monthly cap has already acquired its concurrency ticket, so this releases it
 // before returning. The caller starts the ticket unconditionally on admission
 // and the request's deferred clientEnd releases it; on rejection the tracker is
-// left exactly as it was. Plan lookup failure is logged and allowed through: a
-// quota read must never fail-open into a 500 for the request. Local mode and an
-// off enforcement flag only start the ticket (unlimited).
+// left exactly as it was. A plan lookup or reservation failure fails closed with
+// a retryable 503: the monthly cap must never be bypassed because the database
+// errored. Local mode and an off enforcement flag only start the ticket
+// (unlimited).
 func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, identity auth.ClientIdentity, routeID, requested string, anthropic bool) bool {
 	if s.config.Mode != config.ModeHosted || !s.scope(r).EnforcingLimits() {
 		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
@@ -1785,10 +1786,10 @@ func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, iden
 	plan, err := s.storeHandle().EntitlementsForAccount(r.Context(), identity.AccountID)
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Warn("plan lookup failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+			s.logger.Warn("plan lookup failed; rejecting request", "error_class", fmt.Sprintf("%T", err))
 		}
-		s.inflight.tryAcquire(identity.AccountID, store.Unlimited, identity.ID, routeID, requested)
-		return false
+		quotaUnavailable(w, anthropic)
+		return true
 	}
 	now := time.Now()
 	// A limit of store.Unlimited always acquires, so a rejection here is only
@@ -1802,9 +1803,11 @@ func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, iden
 		reserved, err := s.scopeFor(identity.AccountID).ReserveUsageCounter(r.Context(), store.UsagePeriod(now), plan.MonthlyRequests)
 		if err != nil {
 			if s.logger != nil {
-				s.logger.Warn("usage reservation failed; allowing request", "error_class", fmt.Sprintf("%T", err))
+				s.logger.Warn("usage reservation failed; rejecting request", "error_class", fmt.Sprintf("%T", err))
 			}
-			return false
+			s.inflight.clientEnd(identity.AccountID, identity.ID, routeID, false)
+			quotaUnavailable(w, anthropic)
+			return true
 		}
 		if !reserved {
 			s.inflight.clientEnd(identity.AccountID, identity.ID, routeID, false)
@@ -1824,6 +1827,13 @@ func (s *Server) beginClientRequest(w http.ResponseWriter, r *http.Request, iden
 		}
 	}
 	return false
+}
+
+// quotaUnavailable writes the retryable fail-closed response used when the
+// plan or usage counter cannot be read.
+func quotaUnavailable(w http.ResponseWriter, anthropic bool) {
+	w.Header().Set("Retry-After", "1")
+	inferenceError(w, http.StatusServiceUnavailable, "service_unavailable", "quota_unavailable", "Usage allowance could not be verified. Retry shortly.", anthropic)
 }
 
 func markLastAttemptFailed(row *logRow, class string) {

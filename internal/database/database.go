@@ -360,9 +360,12 @@ func (d *DB) Migrate(ctx context.Context) error {
 		return err
 	} else if len(unknown) > 0 {
 		// An older binary on a newer database (a rollback). The schema may have
-		// columns or tables this code does not know. Warn loudly, keep running:
-		// restore a snapshot if behaviour looks wrong.
-		slog.Warn("database schema is newer than this binary: it records migrations this build does not contain; a rollback may misbehave, restore a snapshot taken before the upgrade if it does", "unknown_migrations", unknown)
+		// columns or tables this code does not know, so refuse to start unless
+		// the operator explicitly accepts the risk.
+		if os.Getenv("TILLER_ALLOW_SCHEMA_ROLLBACK") != "1" {
+			return fmt.Errorf("database schema is newer than this binary (unknown migrations %v): restore a snapshot taken before the upgrade, or set TILLER_ALLOW_SCHEMA_ROLLBACK=1 to start anyway", unknown)
+		}
+		slog.Warn("database schema is newer than this binary; starting because TILLER_ALLOW_SCHEMA_ROLLBACK=1", "unknown_migrations", unknown)
 	}
 
 	// SQLite cannot alter constraints in place, so migrations that make

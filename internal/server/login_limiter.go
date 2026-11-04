@@ -18,6 +18,10 @@ type loginLimiter struct {
 	max      int           // consecutive failures before lockout
 	window   time.Duration // counting window for consecutive failures
 	lockout  time.Duration // how long a lockout lasts
+	// overflow is a single shared budget used only while a map is full of
+	// active lockouts, so a saturated table degrades to a global throttle
+	// rather than to unmetered attempts.
+	overflow loginFailure
 }
 
 type loginFailure struct {
@@ -60,6 +64,28 @@ func (l *loginLimiter) purge(now time.Time) {
 	}
 }
 
+// overflowAllow charges the shared overflow budget and reports whether the
+// attempt is within it. Callers must hold l.mu.
+func (l *loginLimiter) overflowAllow(now time.Time) bool {
+	o := &l.overflow
+	if !o.until.IsZero() {
+		if now.Before(o.until) {
+			return false
+		}
+		*o = loginFailure{}
+	}
+	if o.count == 0 || now.Sub(o.first) > l.window {
+		o.count = 0
+		o.first = now
+	}
+	o.count++
+	if o.count > l.max {
+		o.until = now.Add(l.lockout)
+		return false
+	}
+	return true
+}
+
 // locked reports whether the client is currently locked out. A lockout that
 // has expired is cleared so the next attempt starts fresh. Entries that are
 // merely counting failures (never locked out) are left untouched.
@@ -69,7 +95,8 @@ func (l *loginLimiter) locked(key string) bool {
 	defer l.mu.Unlock()
 	f, ok := l.failures[key]
 	if !ok {
-		return false
+		// A saturated table throttles unknown clients through the shared budget.
+		return len(l.failures) >= maxLimiterEntries && time.Now().Before(l.overflow.until)
 	}
 	if f.until.IsZero() {
 		return false // counting failures, not locked out
@@ -107,7 +134,9 @@ func (l *loginLimiter) recordFailure(key string) bool {
 					}
 				}
 				if !evicted {
-					return false
+					// Every entry is an active lockout: charge the shared
+					// overflow budget and report a lockout once it is spent.
+					return !l.overflowAllow(now)
 				}
 			}
 		}
@@ -165,10 +194,10 @@ func (l *loginLimiter) allowAttempt(key string) bool {
 				}
 			}
 			if len(l.attempts) >= maxLimiterEntries {
-				// Every entry is an active lockout. Refusing here would block
-				// all new clients (signup, recovery) for as long as an attacker
-				// keeps the table full, so let this attempt through unmetered.
-				return true
+				// Every entry is an active lockout. Charge a shared overflow
+				// budget instead of admitting unmetered attempts: legitimate
+				// clients still get through until the shared budget is spent.
+				return l.overflowAllow(now)
 			}
 		}
 		l.attempts[key] = &loginFailure{count: 1, first: now}
