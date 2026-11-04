@@ -171,7 +171,11 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		// Activity writer is always flushed (StopBackground) and the database is
 		// always closed. Return the first error after both are attempted.
 		shutdownErr := httpServer.Shutdown(shutdownCtx)
-		stopErr := app.StopBackground(shutdownCtx)
+		// A long stream can use the whole HTTP drain budget. The Activity flush
+		// needs its own, or it returns at once and the database closes under it.
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer stopCancel()
+		stopErr := app.StopBackground(stopCtx)
 		closeErr := db.Close()
 		if shutdownErr != nil {
 			return shutdownErr

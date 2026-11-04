@@ -299,3 +299,32 @@ func TestSentCountAndRecent(t *testing.T) {
 		t.Fatalf("dead attempts = %d, want %d failed attempts", got, maxAttempts)
 	}
 }
+
+// cancellingMailer simulates a shutdown that cancels the worker context while
+// the provider call is in flight, after the provider has accepted the mail.
+type cancellingMailer struct{ cancel context.CancelFunc }
+
+func (m cancellingMailer) Send(_ context.Context, _ mailer.Message) (mailer.SendResult, error) {
+	m.cancel()
+	return mailer.SendResult{MessageID: "accepted"}, nil
+}
+
+// TestSentMarkSurvivesShutdownCancellation proves a mail the provider accepted
+// is still marked sent when the context is cancelled right after, so the next
+// boot does not send it twice.
+func TestSentMarkSurvivesShutdownCancellation(t *testing.T) {
+	t.Parallel()
+	o, _ := newTestOutbox(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o.mailer = cancellingMailer{cancel: cancel}
+	id := enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
+	o.processDue(ctx)
+	var sentAt sql.NullString
+	if err := o.db.QueryRow(`SELECT sent_at FROM mail_outbox WHERE id=?`, id).Scan(&sentAt); err != nil {
+		t.Fatal(err)
+	}
+	if !sentAt.Valid {
+		t.Fatal("accepted mail was not marked sent after the context was cancelled")
+	}
+}

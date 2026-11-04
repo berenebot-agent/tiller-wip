@@ -53,7 +53,7 @@ func TestModelsDevEnabledFlag(t *testing.T) {
 	t.Setenv("TILLER_USERNAME", "admin")
 	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
-	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret-0123456789")
 	t.Setenv("TILLER_DATA_DIR", dir)
 
 	// Default on when the env var is unset/empty.
@@ -99,7 +99,7 @@ func TestDebugPprofFlag(t *testing.T) {
 	t.Setenv("TILLER_USERNAME", "admin")
 	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
-	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret-0123456789")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 
@@ -154,7 +154,7 @@ func TestHostedDebugPprofRequiresPlatformCredentials(t *testing.T) {
 	}
 
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
-	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret-0123456789")
 	if _, err := Load(); err != nil {
 		t.Fatalf("hosted TILLER_DEBUG_PPROF=true with platform credentials: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestModeAndPublicURL(t *testing.T) {
 	t.Setenv("TILLER_USERNAME", "admin@example.com")
 	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
-	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret-0123456789")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "")
 	t.Setenv("TILLER_PUBLIC_URL", "")
@@ -304,7 +304,7 @@ func TestPublicURLValidation(t *testing.T) {
 	t.Setenv("TILLER_USERNAME", "admin@example.com")
 	t.Setenv("TILLER_PASSWORD", "secret")
 	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
-	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret-0123456789")
 	t.Setenv("TILLER_DATA_DIR", dir)
 	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.1")
 	t.Setenv("TILLER_MODE", "hosted")
@@ -687,5 +687,21 @@ func TestAdminAPIKeyRejectedInHostedMode(t *testing.T) {
 	t.Setenv("TILLER_ADMIN_API_KEY", "mt-tr-jL3SJahdI8Yq.AGSBNfRhXQuIuXV87bP7wWv5sjBNDUGDLZamkrGVC4I")
 	if _, err := Load(); err == nil {
 		t.Fatal("TILLER_ADMIN_API_KEY must be rejected in hosted mode")
+	}
+}
+
+func TestHostedPlatformPasswordMinimumLength(t *testing.T) {
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://tiller.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "127.0.0.1/32")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "a")
+	if _, err := Load(); err == nil {
+		t.Fatal("hosted mode accepted a one-character platform password")
+	}
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "0123456789abcdef")
+	if _, err := Load(); err != nil {
+		t.Fatalf("16-character platform password rejected: %v", err)
 	}
 }

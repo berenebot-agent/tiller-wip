@@ -64,6 +64,7 @@ func (l *loginLimiter) purge(now time.Time) {
 // has expired is cleared so the next attempt starts fresh. Entries that are
 // merely counting failures (never locked out) are left untouched.
 func (l *loginLimiter) locked(key string) bool {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	f, ok := l.failures[key]
@@ -83,6 +84,7 @@ func (l *loginLimiter) locked(key string) bool {
 // recordFailure registers a failed attempt and reports whether the client is
 // now locked out (i.e. this failure crossed the threshold).
 func (l *loginLimiter) recordFailure(key string) bool {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -134,6 +136,7 @@ func (l *loginLimiter) recordFailure(key string) bool {
 // successful operations do not clear this budget. The request that would
 // exceed the budget starts a lockout and is rejected.
 func (l *loginLimiter) allowAttempt(key string) bool {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
@@ -162,7 +165,10 @@ func (l *loginLimiter) allowAttempt(key string) bool {
 				}
 			}
 			if len(l.attempts) >= maxLimiterEntries {
-				return false
+				// Every entry is an active lockout. Refusing here would block
+				// all new clients (signup, recovery) for as long as an attacker
+				// keeps the table full, so let this attempt through unmetered.
+				return true
 			}
 		}
 		l.attempts[key] = &loginFailure{count: 1, first: now}
@@ -193,6 +199,7 @@ func (l *loginLimiter) purgeAttempts(now time.Time) {
 // success clears only the consecutive-failure record for a successful login;
 // request budgets intentionally remain charged.
 func (l *loginLimiter) success(key string) {
+	key = limiterKey(key)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.failures, key)
@@ -248,4 +255,23 @@ func clientIP(r *http.Request, trustedProxy netip.Prefix) string {
 		}
 	}
 	return addrs[0].String()
+}
+
+// limiterKey collapses an IPv6 address to its /64 so one host cannot dodge a
+// per-address budget by rotating through the addresses of its own prefix. Keys
+// that are not IP addresses (hashed emails, selectors) pass through unchanged.
+func limiterKey(key string) string {
+	addr, err := netip.ParseAddr(key)
+	if err != nil {
+		return key
+	}
+	addr = addr.Unmap()
+	if !addr.Is6() {
+		return addr.String()
+	}
+	prefix, err := addr.Prefix(64)
+	if err != nil {
+		return key
+	}
+	return prefix.String()
 }

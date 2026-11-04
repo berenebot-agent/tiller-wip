@@ -2941,3 +2941,35 @@ func responsesEncryptedFromDetails(details []any) string {
 	}
 	return ""
 }
+
+// chatUsageStreamProviders are the provider types known to accept
+// stream_options.include_usage and to send no usage in a Chat stream unless
+// asked. It is deliberately short: other OpenAI-compatible servers may reject
+// the unknown field, so they keep today's request unchanged.
+var chatUsageStreamProviders = map[string]bool{"openai": true, "azure-openai": true}
+
+// requestChatStreamUsage asks a listed provider for the final usage chunk on a
+// request the router translated into a streaming Chat call. A client-supplied
+// stream_options is never overwritten.
+func requestChatStreamUsage(body []byte, target providers.Protocol, providerType string) []byte {
+	if target != providers.ProtocolChat || !chatUsageStreamProviders[providerType] {
+		return body
+	}
+	var req map[string]json.RawMessage
+	if json.Unmarshal(body, &req) != nil {
+		return body
+	}
+	var stream bool
+	if json.Unmarshal(req["stream"], &stream) != nil || !stream {
+		return body
+	}
+	if _, ok := req["stream_options"]; ok {
+		return body
+	}
+	req["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	out, err := json.Marshal(req)
+	if err != nil {
+		return body
+	}
+	return out
+}

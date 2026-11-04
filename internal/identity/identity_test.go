@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -440,5 +441,53 @@ func TestResendVerificationDoesNotActivateSquatterPassword(t *testing.T) {
 	}
 	if _, err := st.AuthenticatePassword(ctx, "victim@example.com", "attacker chosen password"); err == nil {
 		t.Fatal("attacker password works after victim reset")
+	}
+}
+
+type countingHasher struct {
+	fastsecret.Hasher
+	verifies *atomic.Int64
+}
+
+func (h countingHasher) Verify(secret, encoded string) bool {
+	h.verifies.Add(1)
+	return h.Hasher.Verify(secret, encoded)
+}
+
+// TestAuthenticatePasswordUnknownEmailCostsOneVerification proves an unknown
+// email does the same password-hash work as a known one, so timing does not
+// reveal which addresses have accounts.
+func TestAuthenticatePasswordUnknownEmailCostsOneVerification(t *testing.T) {
+	t.Parallel()
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	count := &atomic.Int64{}
+	h := countingHasher{verifies: count}
+	st, err := New(db.SQL, h, fastsecret.Hasher{}, fastsecret.Hasher{}, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	res, err := st.CreateSignup(ctx, "known@example.com", "correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ConsumeVerification(ctx, res.VerificationToken); err != nil {
+		t.Fatal(err)
+	}
+	count.Store(0)
+	if _, err := st.AuthenticatePassword(ctx, "known@example.com", "wrong password here"); err == nil {
+		t.Fatal("wrong password accepted")
+	}
+	known := count.Load()
+	count.Store(0)
+	if _, err := st.AuthenticatePassword(ctx, "nobody@example.com", "wrong password here"); err == nil {
+		t.Fatal("unknown email accepted")
+	}
+	if got := count.Load(); got != known || got != 1 {
+		t.Fatalf("unknown email verifications = %d, known = %d, want both 1", got, known)
 	}
 }

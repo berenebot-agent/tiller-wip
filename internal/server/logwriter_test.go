@@ -181,3 +181,31 @@ func TestLogWriterDiscardBarrierFiltersDeletedKey(t *testing.T) {
 		t.Fatalf("late deleted row count=%d, want 0", deletedCount)
 	}
 }
+
+// TestLogWriterStopAfterExpiredContextStillDrains proves a stop attempt whose
+// context already expired (the HTTP drain used the whole shutdown budget) does
+// not lose queued rows: a second stop with a fresh context completes the flush.
+func TestLogWriterStopAfterExpiredContextStillDrains(t *testing.T) {
+	t.Parallel()
+	app, db := newLogWriterServer(t)
+	w := newLogWriter(app.scopeFor, app.logger)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	w.start(ctx)
+	w.enqueue(writerRow("late-row"))
+	expired, expire := context.WithCancel(context.Background())
+	expire()
+	_ = w.stop(expired)
+	fresh, freshCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer freshCancel()
+	if err := w.stop(fresh); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := activityDB(t, db).QueryRow(`SELECT count(*) FROM request_logs WHERE id='late-row'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("row lost after an expired stop: count=%d", n)
+	}
+}
