@@ -328,3 +328,45 @@ func TestSentMarkSurvivesShutdownCancellation(t *testing.T) {
 		t.Fatal("accepted mail was not marked sent after the context was cancelled")
 	}
 }
+
+// A provider can accept the mail while another operation exhausts the SQL pool.
+// The completion write must retain its own deadline after shutdown cancellation.
+type poolHoldingMailer struct {
+	db     *sql.DB
+	conn   *sql.Conn
+	cancel context.CancelFunc
+}
+
+func (m *poolHoldingMailer) Send(ctx context.Context, _ mailer.Message) (mailer.SendResult, error) {
+	var err error
+	m.conn, err = m.db.Conn(ctx)
+	if err != nil {
+		return mailer.SendResult{}, err
+	}
+	m.cancel()
+	return mailer.SendResult{MessageID: "accepted"}, nil
+}
+func TestSentMarkDeadlineBoundsPoolWait(t *testing.T) {
+	t.Parallel()
+	o, _ := newTestOutbox(t)
+	o.db.SetMaxOpenConns(1)
+	enqueueOnce(t, o, QueuedMessage{Type: TypeVerifyEmail, Recipient: "a@example.com", Token: "tok"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sender := &poolHoldingMailer{db: o.db, cancel: cancel}
+	o.mailer = sender
+	defer func() {
+		if sender.conn != nil {
+			sender.conn.Close()
+		}
+	}()
+	start := time.Now()
+	o.processDue(ctx)
+	if sender.conn == nil {
+		t.Fatal("provider did not acquire connection")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 4*time.Second || elapsed > 10*time.Second {
+		t.Fatalf("completion wait = %s, want approximately 5s", elapsed)
+	}
+}

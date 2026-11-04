@@ -26,16 +26,22 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := clientIP(r, s.config.TrustedProxy)
-	if s.loginLimiter.locked(key) || s.platformGlobalLimiter.locked(platformGlobalKey) {
+	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 		return
 	}
 	var input struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username     string `json:"username"`
+		Password     string `json:"password"`
+		CaptchaToken string `json:"captcha_token"`
 	}
 	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
+		return
+	}
+	// Escalate distributed failures to a challenge, never a global credential
+	// lockout. Without Turnstile configured, per-IP throttling remains.
+	if s.platformGlobalLimiter.locked(platformGlobalKey) && !s.verifyAuthCaptcha(w, r, input.CaptchaToken, "platform_login") {
 		return
 	}
 	if !s.identity.AuthenticatePlatform(input.Username, input.Password, s.config.TillerPlatformAdminUser, s.config.TillerPlatformAdminPassword) {

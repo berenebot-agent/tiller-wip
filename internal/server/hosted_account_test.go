@@ -16,6 +16,8 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/hostedauth"
+	"github.com/tiller-router/tiller-router/internal/store"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -368,9 +370,9 @@ func TestVerifyEmailSetsPasswordFromLinkHolder(t *testing.T) {
 	}
 }
 
-// TestPlatformLoginGlobalLimitAcrossIPs proves guesses spread over many client
-// addresses still hit a shared limit, so the per-IP lockout cannot be dodged.
-func TestPlatformLoginGlobalLimitAcrossIPs(t *testing.T) {
+// Without configured CAPTCHA, distributed failures must not globally lock out
+// the operator. Per-IP throttling remains in force.
+func TestPlatformLoginDistributedFailuresPreserveAccessWithoutCaptcha(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
 	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
@@ -383,8 +385,8 @@ func TestPlatformLoginGlobalLimitAcrossIPs(t *testing.T) {
 			t.Fatalf("guess %d = %d, want 401", i+1, got)
 		}
 	}
-	if got := login("198.51.100.7", "platform-secret"); got != http.StatusTooManyRequests {
-		t.Fatalf("login from a fresh IP after 20 distributed failures = %d, want 429", got)
+	if got := login("198.51.100.7", "platform-secret"); got != http.StatusOK {
+		t.Fatalf("valid login from a fresh IP after distributed failures = %d, want 200", got)
 	}
 }
 
@@ -404,4 +406,57 @@ func TestProviderRefreshRateLimitedPerAccount(t *testing.T) {
 	if status != http.StatusTooManyRequests || header.Get("Retry-After") == "" {
 		t.Fatalf("11th refresh = %d (Retry-After %q), want 429 with Retry-After", status, header.Get("Retry-After"))
 	}
+}
+
+// CAPTCHA verification uses a local mock; no external service is contacted.
+func TestPlatformLoginChallengeAfterDistributedFailures(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	err := app.storeHandle().SavePlatformSettings(context.Background(), store.PlatformSettingsProposal{
+		AuditRetentionDays: 30,
+		Auth:               store.PlatformAuthSettings{TurnstileEnabled: true, TurnstileSiteKey: "test-site", TurnstileSecret: "test-secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		switch r.Form.Get("response") {
+		case "good":
+			io.WriteString(w, `{"success":true,"hostname":"tiller.example.com","action":"platform_login"}`)
+		case "unavailable":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			io.WriteString(w, `{"success":false}`)
+		}
+	}))
+	defer verifier.Close()
+	app.turnstileVerifier = hostedauth.NewTurnstileVerifier(&http.Client{Transport: platformCaptchaTransport{url: verifier.URL}})
+	for i := 0; i < 20; i++ {
+		app.platformGlobalLimiter.recordFailure(platformGlobalKey)
+	}
+	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
+	for _, tc := range []struct {
+		token string
+		want  int
+	}{{"", 403}, {"bad", 403}, {"unavailable", 503}, {"good", 200}} {
+		status, _, _ := anon.requestWithHeaders("POST", "/api/platform/session", map[string]any{"username": "platform-admin", "password": "platform-secret", "captcha_token": tc.token}, map[string]string{"X-Forwarded-For": "198.51.100.7"})
+		if status != tc.want {
+			t.Fatalf("challenge %q status = %d, want %d", tc.token, status, tc.want)
+		}
+	}
+}
+
+type platformCaptchaTransport struct{ url string }
+
+func (p platformCaptchaTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	clone := r.Clone(r.Context())
+	target, err := url.Parse(p.url)
+	if err != nil {
+		return nil, err
+	}
+	clone.URL = target
+	return http.DefaultTransport.RoundTrip(clone)
 }

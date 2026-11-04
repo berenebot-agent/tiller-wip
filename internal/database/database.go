@@ -350,6 +350,9 @@ func (d *DB) Migrate(ctx context.Context) error {
 	if _, err := d.SQL.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL) STRICT`); err != nil {
 		return fmt.Errorf("initialize migrations: %w", err)
 	}
+	// Retain applied migration 054_verification_token_password.sql even though
+	// verification now writes the chosen password directly to users. Deployed
+	// ledgers contain 054; removing it triggers the unknown-migration guard.
 	entries, err := fs.ReadDir(migrations, "migrations")
 	if err != nil {
 		return err
