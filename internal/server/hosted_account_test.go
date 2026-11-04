@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -371,5 +372,43 @@ func TestVerifyEmailFromResendMailsPasswordSetup(t *testing.T) {
 	}
 	if queued != 1 {
 		t.Fatalf("queued password-reset mails = %d, want 1", queued)
+	}
+}
+
+// TestPlatformLoginGlobalLimitAcrossIPs proves guesses spread over many client
+// addresses still hit a shared limit, so the per-IP lockout cannot be dodged.
+func TestPlatformLoginGlobalLimitAcrossIPs(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	anon := &testAPI{t: t, base: api.base, client: &http.Client{}, server: app}
+	login := func(ip, password string) int {
+		status, _, _ := anon.requestWithHeaders("POST", "/api/platform/session", map[string]any{"username": "platform-admin", "password": password}, map[string]string{"X-Forwarded-For": ip})
+		return status
+	}
+	for i := 0; i < 20; i++ {
+		if got := login(fmt.Sprintf("203.0.113.%d", i+1), "wrong"); got != http.StatusUnauthorized {
+			t.Fatalf("guess %d = %d, want 401", i+1, got)
+		}
+	}
+	if got := login("198.51.100.7", "platform-secret"); got != http.StatusTooManyRequests {
+		t.Fatalf("login from a fresh IP after 20 distributed failures = %d, want 429", got)
+	}
+}
+
+// TestProviderRefreshRateLimitedPerAccount proves user-triggered provider
+// refreshes are capped per account in hosted mode (10 per 10 minutes), with a
+// Retry-After, so repeated discovery cannot be used to load the host.
+func TestProviderRefreshRateLimitedPerAccount(t *testing.T) {
+	t.Parallel()
+	_, api, _ := hostedAccountServer(t)
+	for i := 0; i < 10; i++ {
+		status, payload, _ := api.request("POST", "/api/admin/providers/missing/refresh", nil)
+		if status == http.StatusTooManyRequests {
+			t.Fatalf("refresh %d limited too early: %v", i+1, payload)
+		}
+	}
+	status, _, header := api.request("POST", "/api/admin/providers/missing/refresh", nil)
+	if status != http.StatusTooManyRequests || header.Get("Retry-After") == "" {
+		t.Fatalf("11th refresh = %d (Retry-After %q), want 429 with Retry-After", status, header.Get("Retry-After"))
 	}
 }

@@ -848,6 +848,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				row.errorText = strPtr(class)
 				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
 				row.fallbackReason = strPtr(class)
+				if failAfterCommit(class) {
+					return
+				}
 				inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 				return
 			}
@@ -919,6 +922,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				}
 				// After translation, re-apply the canonical selector for the target.
 				attemptBody = applyReasoningSelector(attemptBody, canonicalSelector, target, candidate.ReasoningCapabilities)
+				attemptBody = requestChatStreamUsage(attemptBody, target, candidate.Provider.Type)
 			} else {
 				var attemptRaw map[string]json.RawMessage
 				_ = json.Unmarshal(attemptBody, &attemptRaw)
@@ -1418,7 +1422,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						headerLatencyMs: headerLatencyMs,
 					}
 					nonTranslationFailure = true
-					if !s.recordPreOutputFailure(w, r, row, candidate, attempt, class, cooldownSeconds, incoming) {
+					if !s.recordPreOutputFailure(w, r, row, candidate, attempt, class, cooldownSeconds, incoming, streamKeepalive != nil) {
+						// A committed stream is written only through the keepalive
+						// writer; recordPreOutputFailure skipped its own JSON error.
+						if streamKeepalive != nil && row.errorText != nil {
+							failAfterCommit(*row.errorText)
+						}
 						return
 					}
 					continue
@@ -1833,7 +1842,7 @@ func markLastAttemptFailed(row *logRow, class string) {
 // terminal error was written, in which case the caller must stop the loop.
 func (s *Server) recordPreOutputFailure(
 	w http.ResponseWriter, r *http.Request, row *logRow, candidate resolvedRoute,
-	attempt requestAttempt, class string, cooldownSeconds int, incoming providers.Protocol,
+	attempt requestAttempt, class string, cooldownSeconds int, incoming providers.Protocol, committed bool,
 ) bool {
 	row.attempts = append(row.attempts, attempt)
 	s.logAttempt(row, attempt)
@@ -1846,7 +1855,9 @@ func (s *Server) recordPreOutputFailure(
 		row.errorText = strPtr(clientClass)
 		row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(clientClass))
 		row.fallbackReason = strPtr(clientClass)
-		inferenceError(w, 502, "api_error", clientClass, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+		if !committed {
+			inferenceError(w, 502, "api_error", clientClass, "The upstream provider could not complete the request.", incoming == providers.ProtocolMessages)
+		}
 		return false
 	}
 	row.fallbackUsed = true

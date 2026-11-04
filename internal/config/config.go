@@ -23,6 +23,9 @@ const (
 	ModeHosted Mode = "hosted"
 )
 
+// minPlatformPasswordLen is the shortest accepted hosted platform-admin password.
+const minPlatformPasswordLen = 16
+
 // MailBootstrap is the optional mail configuration supplied via environment
 // variables. It is used once, as a seed, when the platform has no persisted
 // mail configuration; the database is authoritative after that. Secrets here
@@ -348,6 +351,11 @@ func Load() (Config, error) {
 	} else {
 		if c.TillerPlatformAdminUser == "" || c.TillerPlatformAdminPassword == "" {
 			return Config{}, errors.New("TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD are required in hosted mode")
+		}
+		// The platform console controls every tenant and is guarded by one shared
+		// password with no second factor, so refuse a guessable one at boot.
+		if len(c.TillerPlatformAdminPassword) < minPlatformPasswordLen {
+			return Config{}, fmt.Errorf("TILLER_PLATFORM_ADMIN_PASSWORD must be at least %d characters in hosted mode", minPlatformPasswordLen)
 		}
 		if err := validatePlatformUsername(c.TillerPlatformAdminUser); err != nil {
 			return Config{}, fmt.Errorf("TILLER_PLATFORM_ADMIN_USERNAME: %w", err)

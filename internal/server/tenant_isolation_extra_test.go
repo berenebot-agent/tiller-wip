@@ -115,3 +115,16 @@ func TestUsageCacheAccountIsolation(t *testing.T) {
 		t.Fatal("invalidating account A wrongly dropped account B's cache")
 	}
 }
+
+// TestProviderRefreshNotLimitedLocally proves the refresh cap is hosted-only: a
+// local operator can refresh as often as they like.
+func TestProviderRefreshNotLimitedLocally(t *testing.T) {
+	t.Parallel()
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	for i := 0; i < 15; i++ {
+		status, payload, _ := api.request("POST", "/api/admin/providers/missing/refresh", nil)
+		if status == 429 {
+			t.Fatalf("local refresh %d was rate limited: %v", i+1, payload)
+		}
+	}
+}

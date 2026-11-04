@@ -282,7 +282,9 @@ func (o *Outbox) processDue(ctx context.Context) {
 			o.fail(ctx, row, err)
 			continue
 		}
-		if _, err := o.db.ExecContext(ctx, `UPDATE mail_outbox SET sent_at=?,provider_message_id=?,token_ciphertext=NULL,last_error=NULL WHERE id=?`, formatTime(time.Now()), nullableText(result.MessageID), row.id); err != nil {
+		// The mail is already out: record it even if shutdown cancelled ctx, or the
+		// next boot sends it again.
+		if _, err := o.db.ExecContext(context.WithoutCancel(ctx), `UPDATE mail_outbox SET sent_at=?,provider_message_id=?,token_ciphertext=NULL,last_error=NULL WHERE id=?`, formatTime(time.Now()), nullableText(result.MessageID), row.id); err != nil {
 			o.warn("mail outbox completion write failed", err)
 		}
 	}

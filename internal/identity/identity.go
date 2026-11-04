@@ -135,6 +135,8 @@ type PlatformCounts struct {
 // Store owns hosted identity and platform-admin persistence.
 type Store struct {
 	db                 *sql.DB
+	dummyOnce          sync.Once
+	dummyHash          string
 	passwordHasher     auth.SecretHasher
 	tokenHasher        auth.SecretHasher
 	credentialHasher   auth.SecretHasher
@@ -643,15 +645,27 @@ func (s *Store) userByEmail(ctx context.Context, email string) (User, error) {
 	return u, nil
 }
 
+// verifyDummy spends one password verification against a fixed hash so an
+// unknown or password-less account takes as long as a real one and response
+// time does not reveal which emails exist.
+func (s *Store) verifyDummy(password string) {
+	s.dummyOnce.Do(func() { s.dummyHash, _ = s.passwordHasher.Hash("tiller-dummy-password") })
+	if s.dummyHash != "" {
+		_ = s.passwordHasher.Verify(password, s.dummyHash)
+	}
+}
+
 // AuthenticatePassword verifies an email/password and returns an active,
 // verified user. The handler should map every failure to a generic response.
 func (s *Store) AuthenticatePassword(ctx context.Context, email, password string) (User, error) {
 	u, err := s.userByEmail(ctx, NormalizeEmail(email))
 	if err != nil {
+		s.verifyDummy(password)
 		return User{}, err
 	}
 	var passwordHash string
 	if !u.PasswordEnabled {
+		s.verifyDummy(password)
 		return User{}, ErrNotFound
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=? AND password_auth_enabled=1`, u.ID).Scan(&passwordHash); err != nil {

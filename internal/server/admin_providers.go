@@ -161,6 +161,9 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	if input.Enabled != nil {
 		enabled = *input.Enabled
 	}
+	if !s.providerDiscoveryAllowed(w, r) {
+		return
+	}
 	providerID, err := id.New()
 	if err != nil {
 		adminError(w, 500, "internal_error", "Could not create provider.")
@@ -357,7 +360,27 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 	w.WriteHeader(204)
 }
 
+// providerDiscoveryAllowed limits user-triggered discovery (provider create and
+// manual refresh) per account in hosted mode. Each one makes outbound calls and
+// rewrites the provider's model rows, so repeating it is the cheap way to load
+// the host. Scheduled and OAuth-completion refreshes are not counted.
+func (s *Server) providerDiscoveryAllowed(w http.ResponseWriter, r *http.Request) bool {
+	sc := s.scope(r)
+	if s.config.Mode != config.ModeHosted || !sc.EnforcingLimits() {
+		return true
+	}
+	if s.providerRefreshLimiter.allowAttempt(sc.AccountID()) {
+		return true
+	}
+	w.Header().Set("Retry-After", "600")
+	adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many provider refreshes. Try again in a few minutes.")
+	return false
+}
+
 func (s *Server) refreshProvider(w http.ResponseWriter, r *http.Request) {
+	if !s.providerDiscoveryAllowed(w, r) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
 	if err := s.providers.Refresh(ctx, s.scope(r).AccountID(), r.PathValue("id")); err != nil {
