@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,6 +20,23 @@ import (
 // surface with `Authorization: Bearer mt-tr-…` instead of the browser session.
 // Token lifecycle management itself is cookie-only: a token can never list,
 // create, re-scope, rotate, or revoke tokens — it may only introspect itself.
+
+// errBootManagementTokenNameTaken reports that an ordinary token already holds
+// the environment-managed token's name, so the boot seed cannot proceed.
+var errBootManagementTokenNameTaken = errors.New("an existing management API token is named \"" + bootManagementTokenName + "\", which is reserved for the TILLER_ADMIN_API_KEY token; unset TILLER_ADMIN_API_KEY and restart, rename or delete that token in the admin UI (API tokens), then set the key again")
+
+func (s *Server) checkBootManagementTokenNameFree() error {
+	rows, err := s.scopeFor(database.LocalAccountID).ListManagementTokens(context.Background())
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.ID != bootManagementTokenID && row.Name == bootManagementTokenName {
+			return errBootManagementTokenNameTaken
+		}
+	}
+	return nil
+}
 
 // bootManagementTokenID and bootManagementTokenName are the fixed identity of
 // the environment-managed credential. A fixed id makes re-seeding idempotent:
@@ -40,6 +58,13 @@ func (s *Server) seedManagementToken(plaintext string) error {
 	}
 	scopesJSON, err := auth.ValidateManagementScopes(auth.FullManagementScopes())
 	if err != nil {
+		return err
+	}
+	// A token created before the name was reserved can hold it; the upsert
+	// would then fail on the (account_id, name) uniqueness rule with an opaque
+	// SQLite error. Fail with an actionable message instead. Deliberately no
+	// automatic rename (Ben, 2026-11-06: deployments are few, fail loud).
+	if err := s.checkBootManagementTokenNameFree(); err != nil {
 		return err
 	}
 	return s.tokens.InvalidateWith(bootManagementTokenID, func() error {
@@ -133,6 +158,24 @@ func validManagementTokenName(name string) bool {
 	return name != "" && len(name) <= 100
 }
 
+// reservedManagementTokenName reports whether name collides with the
+// environment-managed token's name. It is reserved unconditionally (not only
+// while TILLER_ADMIN_API_KEY is set), because the key may be added later and
+// the boot seed would then fail on the (account_id, name) uniqueness rule.
+// Callers pass the already-trimmed name; the match ignores case.
+func reservedManagementTokenName(name string) bool {
+	return strings.EqualFold(name, bootManagementTokenName)
+}
+
+// rejectReservedManagementTokenName writes the error for a reserved name.
+func rejectReservedManagementTokenName(w http.ResponseWriter, name string) bool {
+	if !reservedManagementTokenName(name) {
+		return false
+	}
+	adminError(w, 400, "reserved_name", fmt.Sprintf("The name %q is reserved for the environment-managed token.", bootManagementTokenName))
+	return true
+}
+
 func (s *Server) listManagementTokens(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.scope(r).ListManagementTokens(r.Context())
 	if err != nil {
@@ -160,6 +203,9 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 	input.Name = strings.TrimSpace(input.Name)
 	if !validManagementTokenName(input.Name) {
 		adminError(w, 400, "invalid_name", "Token names must be 1-100 characters.")
+		return
+	}
+	if rejectReservedManagementTokenName(w, input.Name) {
 		return
 	}
 	if len(input.Description) > 500 {
@@ -259,6 +305,9 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimSpace(*input.Name)
 		if !validManagementTokenName(name) {
 			adminError(w, 400, "invalid_name", "Token names must be 1-100 characters.")
+			return
+		}
+		if rejectReservedManagementTokenName(w, name) {
 			return
 		}
 		update.Name = name

@@ -327,6 +327,10 @@ func (s *Server) userLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
+	// Same-origin like every other public auth POST: this route mints a session.
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	var input struct {
 		Token    string `json:"token"`
 		Password string `json:"password"`

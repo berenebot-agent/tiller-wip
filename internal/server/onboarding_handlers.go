@@ -211,23 +211,26 @@ func (s *Server) writeAccountActivityCSV(out io.Writer, run func(fn func(store.A
 		return err
 	}
 	written := 0
+	// Every string column goes through neutralizeCSVField, including ones that
+	// today hold only server-generated values, so adding a column never needs a
+	// re-audit of which fields a tenant or provider can influence.
 	if err := run(func(row store.ActivityRow) error {
 		virtualModel := ""
 		if row.RouteKind != nil && *row.RouteKind == "virtual" && row.RouteModel != nil {
 			virtualModel = *row.RouteModel
 		}
 		if err := write([]string{
-			row.CreatedAt, neutralizeCSVField(row.ClientName), neutralizeCSVField(row.RequestedModel),
+			neutralizeCSVField(row.CreatedAt), neutralizeCSVField(row.ClientName), neutralizeCSVField(row.RequestedModel),
 			neutralizeCSVField(strPtrOrEmpty(row.ExposedModel)), neutralizeCSVField(virtualModel),
 			neutralizeCSVField(strPtrOrEmpty(row.RouteModel)), neutralizeCSVField(strPtrOrEmpty(row.ResolvedProvider)),
-			neutralizeCSVField(strPtrOrEmpty(row.ResolvedModel)), row.Protocol,
+			neutralizeCSVField(strPtrOrEmpty(row.ResolvedModel)), neutralizeCSVField(row.Protocol),
 			boolString(row.Streaming), intString(row.HTTPStatus), int64String(row.LatencyMs),
 			int64PtrOrEmpty(row.InputTokens), int64PtrOrEmpty(row.OutputTokens), int64PtrOrEmpty(row.CacheReadInputTokens),
 			int64PtrOrEmpty(row.CacheCreationInputTokens), intString(row.AttemptCount), boolString(row.FallbackUsed),
-			strPtrOrEmpty(row.FallbackReason), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
-			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), row.ClientRequestID,
-			strPtrOrEmpty(row.RouteKind),
-			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), strPtrOrEmpty(row.InputTokensSource), strPtrOrEmpty(row.OutputTokensSource), boolString(row.ReasoningStripped),
+			neutralizeCSVField(strPtrOrEmpty(row.FallbackReason)), neutralizeCSVField(strPtrOrEmpty(row.ErrorMessage)),
+			neutralizeCSVField(strPtrOrEmpty(row.ProviderRequestID)), neutralizeCSVField(row.ClientRequestID),
+			neutralizeCSVField(strPtrOrEmpty(row.RouteKind)),
+			int64PtrOrEmpty(row.EstimatedCostMicros), int64PtrOrEmpty(row.ProviderCostMicros), neutralizeCSVField(strPtrOrEmpty(row.InputTokensSource)), neutralizeCSVField(strPtrOrEmpty(row.OutputTokensSource)), boolString(row.ReasoningStripped),
 		}); err != nil {
 			return err
 		}
@@ -259,9 +262,9 @@ func writeAccountAuditCSV(out io.Writer, rows []store.AuditRow) error {
 	}
 	for _, row := range rows {
 		if err := write([]string{
-			row.ID, neutralizeCSVField(row.Event), neutralizeCSVField(row.ActorType),
+			neutralizeCSVField(row.ID), neutralizeCSVField(row.Event), neutralizeCSVField(row.ActorType),
 			neutralizeCSVField(row.ActorID), neutralizeCSVField(row.TargetType),
-			neutralizeCSVField(row.TargetID), row.Outcome, neutralizeCSVField(row.Metadata), row.CreatedAt,
+			neutralizeCSVField(row.TargetID), neutralizeCSVField(row.Outcome), neutralizeCSVField(row.Metadata), neutralizeCSVField(row.CreatedAt),
 		}); err != nil {
 			return err
 		}

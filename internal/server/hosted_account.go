@@ -147,6 +147,9 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 // confirmEmailChange is public: the token arrives from the new address and
 // carries the initiating session selector so confirmation keeps that session.
 func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSameOrigin(w, r) {
+		return
+	}
 	var input struct {
 		Token string `json:"token"`
 	}

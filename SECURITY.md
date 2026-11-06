@@ -171,6 +171,17 @@ not yield an account takeover. Rows that exhaust their retries are dead-lettered
 and surface on the platform dashboard; queued and recently dead counts are shown
 to the operator.
 
+**Platform mail transport.** The mail provider (Resend, Brevo or SMTP) is
+configured only by the environment-only platform operator, and is treated as
+operator-trusted rather than tenant input. Unlike provider base URLs, webhooks
+and OAuth clients, the mail transports are deliberately **not** routed through
+the hosted outbound address policy: SMTP dials the configured host and port
+directly (so a relay on a private or Docker-network address works), and the
+Resend/Brevo HTTP clients honour `HTTP_PROXY`/`HTTPS_PROXY` for operators that
+egress through a proxy. Configuration validation checks completeness and format
+only, not destination addresses. Treat the platform operator credential as
+able to direct mail traffic to any host the container can reach.
+
 Platform administration uses the environment-only
 `TILLER_PLATFORM_ADMIN_USERNAME` and `TILLER_PLATFORM_ADMIN_PASSWORD`
 credentials at `/platform`. Customers use separate email/password identities at

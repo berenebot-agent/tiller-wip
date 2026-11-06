@@ -36,8 +36,8 @@ func (s *Server) passkeyUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// passkeyFinishBody bounds the body and applies the same read deadline every
-// other JSON endpoint uses, buffering the body so the WebAuthn library can
+// passkeyFinishBody bounds the body, admits it through the dedicated pre-auth
+// gate (never the inference gate) with a short absolute deadline, buffering the body so the WebAuthn library can
 // still parse it from a fresh reader. Without this the library reads
 // request.Body directly with no cap, deadline, or admission gate.
 func (s *Server) passkeyFinishBody(w http.ResponseWriter, r *http.Request) bool {
@@ -48,14 +48,14 @@ func (s *Server) passkeyFinishBody(w http.ResponseWriter, r *http.Request) bool 
 		adminError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON.")
 		return false
 	}
-	if !s.bodyReads.acquire() {
+	if !s.preAuthBodyReads.acquire("") {
 		adminError(w, http.StatusServiceUnavailable, "body_read_busy", "The router is busy reading request bodies. Retry shortly.")
 		return false
 	}
-	defer s.bodyReads.release()
+	defer s.preAuthBodyReads.release("")
 	r.Body = http.MaxBytesReader(w, r.Body, webauthnFinishMaxBytes)
 	var body []byte
-	if err := withBodyReadDeadline(w, func() error {
+	if err := withBodyReadDeadlineFor(w, preAuthBodyReadDeadline, func() error {
 		var readErr error
 		body, readErr = io.ReadAll(r.Body)
 		return readErr
