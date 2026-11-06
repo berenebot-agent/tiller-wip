@@ -59,6 +59,13 @@ behavior may still change before a stable `1.0`.
   metadata-only `reasoning_stripped` Activity field, shown in history, and
   included in Activity/account CSV exports. Signed Claude details remain intact.
 
+### Removed
+
+- **Bulk revoke control in Settings → Management API.** The "Revoke browser-managed
+  tokens" card is gone, along with its confirmation copy; individual tokens keep
+  their Rotate and Delete actions. `POST /api/admin/api-tokens/revoke-all` remains
+  available for scripts.
+
 ## [0.1.0-beta.5] - 2026-10-12
 
 Fifth public beta. Adds headless administration over the management API,

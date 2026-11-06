@@ -1,11 +1,6 @@
 const { test, expect, request } = require('@playwright/test');
 const { openAdmin } = require('./helpers');
 
-// The revoke-all assertion is account-global, so the two tests in this file run
-// in order. Sharding still gives each shard its own router, and the token names
-// are unique to this spec.
-test.describe.configure({ mode: 'serial' });
-
 const BASE = process.env.TILLER_BROWSER_BASE_URL || 'http://127.0.0.1:18080';
 
 async function openManagementApi(page) {
@@ -108,25 +103,7 @@ test('create an API token with provider access, use it headlessly, rotate and de
   await expect(page.locator('#api-tokens-empty')).toBeVisible();
 });
 
-test('bulk revocation invalidates browser-managed tokens', async ({ page }) => {
-  await openManagementApi(page);
-
-  for (const name of ['e2e bulk one', 'e2e bulk two']) {
-    await page.locator('#create-api-token').click();
-    await page.locator('#form-dialog [name="token_name"]').fill(name);
-    await page.locator('#dialog-submit').click();
-    await expect(page.locator('#secret-value')).toHaveText(/^mt-tr-/);
-    await page.locator('#close-secret').click();
-  }
-  await expect(page.locator('#api-tokens-body tr')).toHaveCount(2);
-
-  await page.locator('#revoke-all-api-tokens').click();
-  await page.locator('#confirm-action').click();
-  await expect(page.locator('#api-tokens-body tr')).toHaveCount(0);
-  await expect(page.locator('#api-tokens-empty')).toBeVisible();
-});
-
-test('environment-managed token has no lifecycle controls and bulk copy is explicit', async ({ page }) => {
+test('environment-managed token has no lifecycle controls', async ({ page }) => {
   await page.route('**/api/admin/api-tokens', async route => {
     if (route.request().method() !== 'GET') return route.continue();
     const response = await route.fetch();
@@ -138,7 +115,4 @@ test('environment-managed token has no lifecycle controls and bulk copy is expli
   const row = page.locator('#api-tokens-body tr').filter({ hasText: 'boot-admin' });
   await expect(row).toContainText('Environment-managed');
   await expect(row.locator('button')).toHaveCount(0);
-  await expect(page.locator('#revoke-all-api-tokens')).toHaveText('Revoke browser-managed tokens');
-  await page.locator('#revoke-all-api-tokens').click();
-  await expect(page.locator('#confirm-dialog')).toContainText('environment-managed bootstrap token is excluded');
 });
