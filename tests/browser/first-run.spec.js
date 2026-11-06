@@ -14,7 +14,7 @@ test('first-run setup claims the instance, opens the wizard, and completes onboa
   const setupForm = page.locator('#setup-form');
   await expect(setupForm).toBeVisible();
   await expect(page.locator('#login-form')).toBeHidden();
-  await setupForm.getByLabel('Admin username').fill(ADMIN_USER);
+  await setupForm.getByLabel('Tiller username').fill(ADMIN_USER);
   await setupForm.getByLabel('Password', { exact: true }).fill(ADMIN_PASS);
   await setupForm.getByLabel('Confirm password').fill(ADMIN_PASS);
 
@@ -99,7 +99,7 @@ test('wizard-created credential logs in after logout and reload', async ({ page 
   // one-worker shard runs these in file order, but this keeps the test robust
   // to reordering).
   if (await page.locator('#setup-form').isVisible()) {
-    await page.locator('#setup-form').getByLabel('Admin username').fill(ADMIN_USER);
+    await page.locator('#setup-form').getByLabel('Tiller username').fill(ADMIN_USER);
     await page.locator('#setup-form').getByLabel('Password', { exact: true }).fill(ADMIN_PASS);
     await page.locator('#setup-form').getByLabel('Confirm password').fill(ADMIN_PASS);
     await page.locator('#setup-form').getByRole('button', { name: 'Create admin and continue' }).click();
@@ -111,7 +111,7 @@ test('wizard-created credential logs in after logout and reload', async ({ page 
   }
   await expect(page.locator('#login-form')).toBeVisible();
   await expect(page.locator('#setup-form')).toBeHidden();
-  await page.getByLabel('Tiller username').fill(ADMIN_USER);
+  await page.locator('#login-form').getByLabel('Tiller username').fill(ADMIN_USER);
   await page.locator('#login-form').getByLabel('Password').fill(ADMIN_PASS);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
@@ -122,7 +122,7 @@ test('wizard-created credential logs in after logout and reload', async ({ page 
   // Wrong password is rejected and does not fall back to any default.
   await page.locator('#logout').click();
   await expect(page.locator('#login-form')).toBeVisible();
-  await page.getByLabel('Tiller username').fill(ADMIN_USER);
+  await page.locator('#login-form').getByLabel('Tiller username').fill(ADMIN_USER);
   await page.locator('#login-form').getByLabel('Password').fill('wrong-password');
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.locator('#login-error')).toContainText('Invalid administrator credentials.');
