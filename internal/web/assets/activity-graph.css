@@ -5,7 +5,7 @@
 .graph-stage {
   background: var(--paper);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--r-lg);
   box-shadow: var(--shadow);
   position: relative;
   overflow: auto;
@@ -15,7 +15,7 @@
   width: 100%;
   min-width: 760px;
   height: calc(600px + var(--graph-extra-height, 0px));
-  background: radial-gradient(circle at 50% 40%, #fbfdfe, #eef3f6);
+  background: var(--paper);
 }
 .graph-stage .empty-state {
   position: absolute;
@@ -30,9 +30,9 @@
   pointer-events: none;
 }
 .col-title {
-  font: 700 17px var(--mono);
+  font: 600 15px var(--sans);
   fill: var(--muted);
-  letter-spacing: 0.12em;
+  letter-spacing: 0.02em;
 }
 .edge {
   fill: none;
@@ -97,8 +97,8 @@
 }
 .node-clickable:hover .node-body,
 .node-clickable:focus-visible .node-body {
-  stroke: #77bce8;
-  stroke-width: 3px;
+  stroke: var(--blue);
+  stroke-width: 2.5px;
 }
 @keyframes node-pulse {
   0%, 100% {
@@ -110,19 +110,20 @@
 }
 .node-label {
   font-family: var(--mono);
-  font-size: 17px;
-  fill: var(--navy);
-  paint-order: stroke;
+  font-size: 16px;
+  font-weight: 500;
+  fill: var(--ink);
+  paint-order: stroke fill;
   stroke: #fff;
-  stroke-width: 5px;
+  stroke-width: 3px;
   stroke-linejoin: round;
 }
 .node-sub {
-  font-size: 14px;
+  font-size: 13px;
   fill: var(--muted);
-  paint-order: stroke;
+  paint-order: stroke fill;
   stroke: #fff;
-  stroke-width: 4px;
+  stroke-width: 3px;
   stroke-linejoin: round;
 }
 .node-enter {

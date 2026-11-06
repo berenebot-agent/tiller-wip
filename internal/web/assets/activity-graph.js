@@ -1332,9 +1332,9 @@ export function init(root, data, options = {}) {
   gLActive = d3.select(svg).append('g');
   gN = d3.select(svg).append('g');
   gP = d3.select(svg).append('g');
-  d3.select(svg).append('text').attr('class', 'col-title').attr('x', 113).attr('y', 30).text('CLIENTS');
-  d3.select(svg).append('text').attr('class', 'col-title').attr('x', 478).attr('y', 30).text('TILLER MODELS');
-  d3.select(svg).append('text').attr('class', 'col-title').attr('x', 938).attr('y', 30).text('REAL MODELS');
+  d3.select(svg).append('text').attr('class', 'col-title').attr('x', 113).attr('y', 30).text('Clients');
+  d3.select(svg).append('text').attr('class', 'col-title').attr('x', 478).attr('y', 30).text('Tiller models');
+  d3.select(svg).append('text').attr('class', 'col-title').attr('x', 938).attr('y', 30).text('Real models');
   buildIndexes(data || {});
   sim = d3.forceSimulation(nodes)
     .force('link', null);
