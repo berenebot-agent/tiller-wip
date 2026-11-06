@@ -2875,11 +2875,6 @@ async function deleteApiToken(token) {
   try { await api(`/api/admin/api-tokens/${token.id}`, { method: 'DELETE' }); flash('API token deleted.'); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
 }
 
-async function revokeAllApiTokens() {
-  if (!await confirmAction({ title: 'Revoke browser-managed API tokens?', copy: 'All browser-managed API tokens are invalidated immediately, including tokens used by running automations. The environment-managed bootstrap token is excluded; remove its configured key and restart to revoke it.', action: 'Revoke browser-managed tokens' })) return;
-  try { const result = await api('/api/admin/api-tokens/revoke-all', { method: 'POST' }); flash(result.environment_managed_excluded ? 'Browser-managed API tokens revoked. The environment-managed token remains active.' : 'Browser-managed API tokens revoked.'); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
-}
-
 async function loadManagementTokens() {
   if (runtimeMode === 'hosted') return;
   const token = ++state.loadToken;
@@ -2910,7 +2905,6 @@ function renderManagementTokens() {
 function managementTokenById(id) { return managementTokens.find(row => row.id === id); }
 
 $('#create-api-token').addEventListener('click', () => openCreateApiToken());
-$('#revoke-all-api-tokens').addEventListener('click', () => revokeAllApiTokens());
 $('#api-tokens-body').addEventListener('click', event => {
   const edit = event.target.closest('[data-api-token-edit]');
   if (edit) { const token = managementTokenById(edit.dataset.apiTokenEdit); if (token) openEditApiToken(token); return; }
