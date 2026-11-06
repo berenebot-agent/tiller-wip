@@ -298,7 +298,7 @@ export class LiveRequests {
 
   paintStatus() {
     const labels = { connecting: 'Connecting…', connected: 'Live', reconnecting: 'Reconnecting…', paused: 'Paused while tab is hidden' };
-    for (const node of this.root.querySelectorAll('[data-live-connection]')) node.textContent = labels[this.connection] || this.connection;
+    for (const node of this.root.querySelectorAll('[data-live-connection]')) { node.textContent = labels[this.connection] || this.connection; node.dataset.state = this.connection; }
     for (const node of this.root.querySelectorAll('[data-live-request-notice]')) node.textContent = [this.message, this.omittedCount ? `${this.omittedCount} older completed rows omitted this session (200-row limit).` : ''].filter(Boolean).join(' ');
   }
 

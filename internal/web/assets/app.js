@@ -99,7 +99,14 @@ const MODEL_USAGE_SORTS = new Set(['1h', '24h', '7d']);
 // usage-sorted model drawer may still be in catalogue order.
 let modelsResortPending = false;
 const collapsedModels = new Set(); const collapsedVirtual = new Set(); const collapsedClients = new Set(); const collapsedPermissionGroups = new Set(); const collapsedPermissionSections = new Set();
-const GROUP_ARROW = { up: '▼', down: '▶' };
+// ICON holds the few UI glyphs the control panel draws inline. One stroke
+// weight and one 16px grid, so every action icon reads as the same family
+// (the nav icons live as <symbol>s in index.html).
+const svgIcon = d => `<svg class="ui-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="${d}"/></svg>`;
+const ICON = { up: svgIcon('M8 12.5v-9M4.5 7 8 3.5 11.5 7'), down: svgIcon('M8 3.5v9M4.5 9 8 12.5 11.5 9'), close: svgIcon('M4 4l8 8M12 4l-8 8'), check: svgIcon('M3.5 8.5 6.5 11.5 12.5 4.5') };
+// Disclosure chevrons are drawn in CSS (.group-arrow, .permission-collapse) and
+// rotated from aria-expanded, so the glyph text is intentionally empty.
+const GROUP_ARROW = { up: '', down: '' };
 const MODEL_EXPAND_BATCH_SIZE = 20;
 const groupRevealFrames = new WeakMap();
 const h = value => String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
@@ -142,13 +149,30 @@ const fmtCost = (micros) => {
 // their DOM from this single source so the .tok element is never re-wrapped and
 // transitions between loading, populated, and empty states keep consistent
 // structure. cost is an optional estimated spend in micro-dollars.
+// fmtTok renders a token total compactly: 1.24M, 386K, 912. The unit is
+// split out so the number can be set in tabular figures beside a quiet suffix.
+const fmtTok = (tokens) => {
+  const v = Number(tokens || 0);
+  if (v >= 1e6) return { n: (v / 1e6).toFixed(2), unit: 'M tok' };
+  if (v >= 1e3) return { n: (v / 1e3).toFixed(v >= 1e5 ? 0 : 1), unit: 'K tok' };
+  return { n: String(v), unit: 'tok' };
+};
+const fmtCount = (v) => {
+  if (v == null) return '—';
+  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
+  if (v >= 1e4) return `${(v / 1e3).toFixed(1)}K`;
+  return Number(v).toLocaleString();
+};
 const renderTokInner = (tokens, pct, loading = false, cost = null) => {
   if (loading) return tokLoadingInner;
   if (!tokens && pct == null && cost == null) return '—';
-  const num = tokens ? `<b>${(tokens / 1e6).toFixed(2)}</b><small>Mtok</small>` : '';
+  const t = fmtTok(tokens);
+  const num = tokens ? `<b>${t.n}</b><small>${t.unit}</small>` : '';
+  // Cache share and cost are shown only when known: "n.a." placeholders on
+  // every row were noise that hid the numbers people actually scan for.
   const cache = (pct != null && !isNaN(pct))
-    ? `<span class="cache-hit"><b>${Math.round(pct)}%</b><small>Cache</small></span>`
-    : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
+    ? `<span class="cache-hit" title="Share of input served from the provider cache"><b>${Math.round(pct)}%</b><small>cached</small></span>`
+    : '';
   const costText = fmtCost(cost);
   const costEl = costText ? `<span class="tok-cost" title="Estimated from published model prices — not a billing figure"><b>${costText}</b><small>est.</small></span>` : '';
   return `${num}${cache}${costEl}`;
@@ -169,7 +193,7 @@ const tokenBreakdownTitle = (types, window) => {
 const estimatedMark = (clientId) => {
   const src = state.usage?.client_token_sources?.[clientId];
   const est = src?.estimated?.['7d'];
-  return est ? ' (est.)' : '';
+  return est ? ' <span class="est-mark" title="Totals include locally estimated token counts because the provider did not report usage">est.</span>' : '';
 };
 // A cell is "loading" only while the usage envelope is unknown AND this cell has
 // no value yet. Once any snapshot/fetch has landed (usageReady), absent data is
@@ -189,15 +213,18 @@ const rowCache = (row) => {
   // OpenAI-style prompts already include cached tokens. The cache share is
   // therefore cached / prompt, with no provider-specific adjustment here.
   const line = (cache != null && inp > 0)
-    ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>Cache</small></span>`
-    : `<span class="cache-hit na"><small>n.a. Cache</small></span>`;
+    ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>cached</small></span>`
+    : '';
   const exact = row.provider_cost_micros;
   const cost = exact ?? row.estimated_cost_micros;
-  const costLine = cost == null ? '<small>Cost —</small>' : `<span class="tok-cost"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<small>est.</small>' : ''}</span>`;
-  return `<span class="activity-tokens"><b>${row.input_tokens_source === 'estimated' ? '~' : ''}${inp ?? '—'} / ${output ?? '—'}</b>${line}${costLine}</span>`;
+  const costLine = cost == null ? '' : `<span class="tok-cost"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<small>est.</small>' : ''}</span>`;
+  if (inp == null && output == null) return '<span class="activity-tokens"><span class="meta-line">—</span></span>';
+  const est = row.input_tokens_source === 'estimated' ? '~' : '';
+  return `<span class="activity-tokens" title="Input / output tokens"><b>${est}${fmtCount(inp)}</b><small>in</small> <b>${fmtCount(output)}</b><small>out</small>${line}${costLine}</span>`;
 };
 const VIEWS = ['providers', 'virtual', 'clients', 'activity', 'settings'];
 const viewFromHash = () => { const raw = (location.hash.replace(/^#\/?/, '') || 'clients'); const v = raw.split('/')[0]; return v === 'models' ? 'providers' : VIEWS.includes(v) ? v : 'clients'; };
+const activityTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'activity' && parts[1] === 'history' ? 'history' : 'live'; };
 const settingsTabFromHash = () => { const parts = location.hash.replace(/^#\/?/, '').split('/'); return parts[0] === 'settings' && parts[1] ? parts[1] : ''; };
 
 async function api(path, options = {}) {
@@ -712,13 +739,13 @@ async function navigate(view) {
   if (view !== 'providers' && drawerProviderID) closeProviderDrawer(false);
   state.view = view;
   // Preserve the settings sub-tab in the hash; only the base view is rewritten.
-  const desiredHash = view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : '#' + view;
+  const desiredHash = view === 'settings' ? ('#settings' + (settingsTabFromHash() && settingsTabFromHash() !== 'routing' ? '/' + settingsTabFromHash() : '')) : view === 'activity' && activityTabFromHash() === 'history' ? '#activity/history' : '#' + view;
   if (location.hash !== desiredHash) {
     if (legacyModelsHash) history.replaceState(null, '', desiredHash);
     else history.pushState(null, '', desiredHash);
   }
   $$('.view').forEach(panel => panel.classList.toggle('active', panel.id === `view-${view}`)); $$('[data-view]').forEach(button => button.classList.toggle('active', button.dataset.view === view));
-  try { if (view === 'providers') await loadProviders(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') await loadActivityView(); if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); if (settingsTab === 'api') await loadManagementTokens(); } }
+  try { if (view === 'providers') await loadProviders(); if (view === 'virtual') await loadVirtual(); if (view === 'clients') await loadClients(); if (view === 'activity') { showActivityTab(activityTabFromHash()); await loadActivityView(); } if (view === 'settings') { showSettingsTab(settingsTabFromHash() || settingsTab); await loadSettings(); if (settingsTab === 'account') await loadAccount(); if (settingsTab === 'api') await loadManagementTokens(); } }
   catch (error) { flash(errorMessage(error), 'error'); }
   if (view !== 'activity') destroyActivityView();
 }
@@ -779,9 +806,10 @@ async function loadProviders(search = $('#provider-search').value) {
 }
 function renderProviders(providers = state.providers) {
   $('#providers-empty').hidden = providers.length > 0;
+  $('#view-providers').classList.toggle('is-empty', state.providers.length === 0);
   $('#providers-cards').innerHTML = providers.map(providerCard).join('');
   const available = state.providers.reduce((sum, item) => sum + item.available_model_count, 0), retired = state.providers.reduce((sum, item) => sum + item.model_count - item.available_model_count, 0), errors = state.providers.filter(item => item.last_refresh_error).length;
-  $('#provider-metrics').innerHTML = metric(state.providers.length, 'Provider instances') + metric(available, 'Available models') + metric(retired, 'Retired models') + metric(errors, 'Refresh errors');
+  $('#provider-metrics').innerHTML = metric(state.providers.length, state.providers.length === 1 ? 'Provider' : 'Providers') + metric(available, 'Available models') + metric(retired, 'Retired models') + metric(errors, 'Refresh errors', errors > 0);
   $$('[data-provider-open]').forEach(button => button.onclick = () => openProviderDrawer(button.dataset.providerOpen));
   $$('#providers-cards .provider-card').forEach(card => card.addEventListener('click', event => { if (!event.target.closest('[data-provider-open], summary, a, button, input, select, details')) openProviderDrawer(card.dataset.providerId); }));
 }
@@ -790,14 +818,16 @@ function providerCard(provider) {
   const stateLabel = provider.enabled ? (provider.last_refresh_error ? 'Refresh error' : 'Enabled') : 'Disabled';
   const retired = provider.model_count - provider.available_model_count;
   const providerLabel = typeLabel(provider.type) || 'Provider';
-  const countLabel = `${provider.available_model_count} ${provider.available_model_count === 1 ? 'model' : 'models'}`;
-  return `<article class="provider-card${provider.enabled ? '' : ' provider-card-disabled'}" data-provider-id="${h(provider.id)}" data-provider-name="${h(provider.name.toLowerCase())}" data-provider-type="${h(providerLabel.toLowerCase())}">
-    <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models">${providerMark(provider.type, providerLabel, 'provider-card-mark')}<span class="provider-card-identity"><strong>${h(provider.name)} · ${h(countLabel)}</strong><small>${h(providerLabel)} · ${(provider.protocols || []).map(h).join(' · ') || 'provider default'}${retired ? ` · ${retired} retired` : ''}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</button>
+  const refreshed = provider.last_refresh_at ? relativeAge(Date.now() - Date.parse(provider.last_refresh_at)) : 'Never';
+  const usage = providerQuotaHTML(provider) + providerCostHTML(provider);
+  return `<article class="provider-card${provider.enabled ? '' : ' provider-card-disabled'}${provider.last_refresh_error ? ' provider-card-error' : ''}" data-provider-id="${h(provider.id)}" data-provider-name="${h(provider.name.toLowerCase())}" data-provider-type="${h(providerLabel.toLowerCase())}">
+    <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models">${providerMark(provider.type, providerLabel, 'provider-card-mark')}<span class="provider-card-identity"><strong>${h(provider.name)}</strong><small>${h(providerLabel)}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</button>
+    <dl class="provider-card-facts"><div><dt>Models</dt><dd>${h(provider.available_model_count)}${retired ? `<small> +${h(retired)} retired</small>` : ''}</dd></div><div><dt>API</dt><dd class="provider-card-protocols">${(provider.protocols || []).map(p => `<span class="protocol">${h(p)}</span>`).join('') || '<span class="meta-line">Default</span>'}</dd></div><div><dt>Refreshed</dt><dd title="${h(date(provider.last_refresh_at))}">${h(refreshed)}</dd></div></dl>
     ${provider.last_refresh_error ? `<p class="provider-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
-    <div class="provider-usage">${providerQuotaHTML(provider)}${providerCostHTML(provider)}</div>
+    ${usage ? `<div class="provider-usage">${usage}</div>` : ''}
   </article>`;
 }
-const metric = (value, label) => `<div class="metric"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
+const metric = (value, label, alert = false) => `<div class="metric${alert ? ' is-alert' : ''}"><strong>${h(value)}</strong><span>${h(label)}</span></div>`;
 // subscriptionProviderTypes have a flat-fee subscription: quota is the right
 // signal and a per-token cost would be misleading, so no cost line is shown.
 const subscriptionProviderTypes = ['codex-subscription', 'claude-subscription', 'github-copilot', 'ollama-cloud', 'opencode-go'];
@@ -883,6 +913,8 @@ const typeLabel = type => state.providerTypes.find(item => item.type === type)?.
 
 $('#add-provider').onclick = () => openProvider();
 $('#add-provider-empty').onclick = () => openProvider();
+$('#add-client-empty').onclick = () => openClient();
+$('#add-virtual-empty').onclick = () => (state.groups.length ? openVirtualModel() : openVirtualGroup());
 function providerFields(provider) {
   const options = state.providerTypes.map(item => `<option value="${h(item.type)}" ${provider?.type === item.type ? 'selected' : ''}>${h(item.label)}</option>`).join('');
   const selectedProtocols = provider?.protocols || ['chat'];
@@ -1191,7 +1223,7 @@ function mobileUsage(model, kind = 'real') {
 function modelCard(model) {
   const available = model.available;
   return `<article class="mobile-card model-card" data-mobile-card="${h(model.id)}">
-    <button class="mobile-card-head mobile-card-toggle" data-mobile-model-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-model-detail-${h(model.id)}"><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.provider_name)} · ${h(model.upstream_model_id)}</small></span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-model-toggle="${h(model.id)}" aria-expanded="false" aria-controls="mobile-model-detail-${h(model.id)}"><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.provider_name)} · ${h(model.upstream_model_id)}</small></span><span class="mobile-card-chevron" aria-hidden="true"></span></button>
     <div class="mobile-card-usage">${mobileUsage(model)}</div>
     <div class="mobile-card-detail" id="mobile-model-detail-${h(model.id)}" hidden><dl class="mobile-detail-grid"><div><dt>Provider</dt><dd>${h(model.provider_name)}</dd></div><div><dt>Native ID</dt><dd><code>${h(model.upstream_model_id)}</code></dd></div><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-model-activity="${h(model.id)}">Activity</button><button class="btn btn-small btn-secondary" data-mobile-model-capabilities="${h(model.id)}">Capabilities</button>${model.origin === 'manual' ? `<button class="btn btn-small btn-danger" data-mobile-model-delete="${h(model.id)}">Delete</button>` : ''}</div></div>
   </article>`;
@@ -1262,6 +1294,7 @@ function renderVirtual() {
   const byGroup = new Map(); state.virtualModels.forEach(model => { const key = model.group_name || '—'; if (!byGroup.has(key)) byGroup.set(key, []); byGroup.get(key).push(model); });
   const groupNames = searching ? [...byGroup.keys()] : [...new Set([...state.groups.map(g => g.name), ...byGroup.keys()])];
   $('#virtual-empty').hidden = state.virtualModels.length > 0 || (!searching && state.groups.length > 0);
+  $('#view-virtual').classList.toggle('is-empty', !searching && state.virtualModels.length === 0 && state.groups.length === 0);
   const html = groupNames.sort((a, b) => a.localeCompare(b)).map(name => {
     const models = byGroup.get(name) || [];
     const grp = state.groups.find(g => g.name === name);
@@ -1308,10 +1341,10 @@ function virtualModelCard(model) {
   const ordered = model.routing_mode === 'ordered_fallback';
   const draft = mobileVirtualDraftState(model.id);
   const expanded = mobileVirtualExpanded.has(model.id);
-  const targetRows = targets.length ? targets.map((target, index) => `<li class="mobile-target-row"><span class="target-index">${String(index + 1).padStart(2, '0')}</span>${resolutionIndicator(target)}<span class="mobile-target-name">${h(target.provider_name)}/${h(target.upstream_model_id)}</span>${ordered ? `<label class="mobile-target-toggle"><span>Use</span><input type="checkbox" class="switch" data-mobile-target-toggle="${h(model.id)}" data-mobile-target-index="${index}" ${target.enabled ? 'checked' : ''} aria-label="Use target ${index + 1}"></label><span class="mobile-target-actions"><button type="button" data-mobile-target-up="${h(model.id)}" data-mobile-target-index="${index}" ${index === 0 ? 'disabled' : ''} aria-label="Move target ${index + 1} up">↑</button><button type="button" data-mobile-target-down="${h(model.id)}" data-mobile-target-index="${index}" ${index === targets.length - 1 ? 'disabled' : ''} aria-label="Move target ${index + 1} down">↓</button><button type="button" data-mobile-target-remove="${h(model.id)}" data-mobile-target-index="${index}" ${targets.length <= 1 ? 'disabled' : ''} aria-label="Remove target ${index + 1}">×</button></span>` : ''}${target.enabled ? '' : '<small>disabled</small>'}</li>`).join('') : `<li><span class="target-index">01</span><span>No target configured</span></li>`;
+  const targetRows = targets.length ? targets.map((target, index) => `<li class="mobile-target-row"><span class="target-index">${String(index + 1).padStart(2, '0')}</span>${resolutionIndicator(target)}<span class="mobile-target-name">${h(target.provider_name)}/${h(target.upstream_model_id)}</span>${ordered ? `<label class="mobile-target-toggle"><span>Use</span><input type="checkbox" class="switch" data-mobile-target-toggle="${h(model.id)}" data-mobile-target-index="${index}" ${target.enabled ? 'checked' : ''} aria-label="Use target ${index + 1}"></label><span class="mobile-target-actions"><button type="button" data-mobile-target-up="${h(model.id)}" data-mobile-target-index="${index}" ${index === 0 ? 'disabled' : ''} aria-label="Move target ${index + 1} up">${ICON.up}</button><button type="button" data-mobile-target-down="${h(model.id)}" data-mobile-target-index="${index}" ${index === targets.length - 1 ? 'disabled' : ''} aria-label="Move target ${index + 1} down">${ICON.down}</button><button type="button" data-mobile-target-remove="${h(model.id)}" data-mobile-target-index="${index}" ${targets.length <= 1 ? 'disabled' : ''} aria-label="Remove target ${index + 1}">${ICON.close}</button></span>` : ''}${target.enabled ? '' : '<small>disabled</small>'}</li>`).join('') : `<li><span class="target-index">01</span><span>No target configured</span></li>`;
   const addModelControl = ordered ? `<label class="mobile-target-add-wrap"><span>Add model</span><div class="combobox mobile-target-add-combobox" data-mobile-target-add="${h(model.id)}"><input type="text" placeholder="Search available model…" aria-label="Add model to fallback queue"><input type="hidden"></div></label>` : '';
   return `<article class="mobile-card virtual-model-card" data-mobile-card="${h(model.id)}">
-    <button class="mobile-card-head mobile-card-toggle" data-mobile-virtual-toggle="${h(model.id)}" aria-expanded="${expanded}" aria-controls="mobile-virtual-detail-${h(model.id)}"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(statusLabel)}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed route')}</small></span><span class="virtual-routable-count">${routable} routable</span><span class="mobile-card-chevron" aria-hidden="true">▾</span></button>
+    <button class="mobile-card-head mobile-card-toggle" data-mobile-virtual-toggle="${h(model.id)}" aria-expanded="${expanded}" aria-controls="mobile-virtual-detail-${h(model.id)}"><span class="status-roundel${model.available ? '' : ' status-roundel-broken'}" role="img" aria-label="${h(statusLabel)}"></span><span class="mobile-card-heading"><strong>${h(model.canonical_model_id)}</strong><small>${h(model.routing_mode === 'ordered_fallback' ? 'Ordered fallback' : 'Fixed route')}</small></span><span class="virtual-routable-count">${routable} routable</span><span class="mobile-card-chevron" aria-hidden="true"></span></button>
     <div class="mobile-card-detail" id="mobile-virtual-detail-${h(model.id)}"${expanded ? '' : ' hidden'}><div class="mobile-target-list"><div class="mobile-target-list-head"><p class="mobile-card-label">${ordered ? 'Fallback order' : 'Target'}</p>${ordered ? '<small>Move, disable, or remove targets here. Changes stay pending until Apply.</small>' : ''}</div><ol>${targetRows}</ol>${addModelControl}${ordered ? '<div class="mobile-target-pending-actions"><button class="btn btn-small btn-primary" type="button" data-mobile-target-apply="' + h(model.id) + '" ' + (draft?.dirty ? '' : 'disabled') + '>Apply changes</button><button class="btn btn-small btn-secondary" type="button" data-mobile-target-discard="' + h(model.id) + '" ' + (draft?.dirty ? '' : 'disabled') + '>Discard</button></div>' : ''}</div><dl class="mobile-detail-grid"><div><dt>Context</dt><dd>${h(capabilityNumber(model.context_length))}</dd></div><div><dt>Max output</dt><dd>${h(capabilityNumber(model.max_output_tokens))}</dd></div></dl><div class="mobile-card-actions"><button class="btn btn-small btn-secondary" data-mobile-virtual-capabilities="${h(model.id)}">Capabilities</button><button class="btn btn-small btn-secondary" data-mobile-virtual-edit="${h(model.id)}">Edit settings</button><button class="btn btn-small btn-danger" data-mobile-virtual-delete="${h(model.id)}">Delete</button></div></div>
   </article>`;
 }
@@ -1529,7 +1562,7 @@ const capabilityList = (values, empty = 'Not reported') => Array.isArray(values)
 const capabilityState = value => value == null ? 'Not reported' : value ? 'Yes' : 'No';
 const capabilityBound = value => value == null ? 'No limit reported' : new Intl.NumberFormat().format(value);
 function reasoningCapabilities(caps) {
-  if (!caps) return `<section class="reasoning-capabilities" data-reasoning-state="unknown" aria-label="Reasoning capabilities"><div class="reasoning-heading"><p class="eyebrow">REASONING CONTROLS</p><strong>Not reported</strong></div><p class="meta-line">The upstream did not report configurable reasoning metadata.</p></section>`;
+  if (!caps) return `<section class="reasoning-capabilities" data-reasoning-state="unknown" aria-label="Reasoning capabilities"><div class="reasoning-heading"><p class="section-label">Reasoning controls</p><strong>Not reported</strong></div><p class="meta-line">The upstream did not report configurable reasoning metadata.</p></section>`;
   const options = Array.isArray(caps.options) ? caps.options : [];
   const thinkingModes = Array.isArray(caps.thinking_modes) ? caps.thinking_modes : [];
   const hasToggle = options.some(option => option.type === 'toggle');
@@ -1544,7 +1577,7 @@ function reasoningCapabilities(caps) {
     return `<div class="reasoning-detail"><small>${h(option.type || 'Selector')}</small><strong>Supported</strong></div>`;
   }).filter(Boolean).join('') : '';
   const hasSelectors = options.length > 0 || thinkingModes.length > 0;
-  return `<section class="reasoning-capabilities" data-reasoning-state="known" aria-label="Reasoning capabilities"><div class="reasoning-heading"><p class="eyebrow">REASONING CONTROLS</p><strong>${hasSelectors ? 'Configurable selectors' : 'No configurable selectors'}</strong></div><div class="reasoning-selector-grid">${hasSelectors ? (selectors || `<div class="reasoning-detail"><small>Selector summary</small><strong>Thinking modes reported</strong></div>`) : `<div class="reasoning-empty"><strong>No configurable selectors</strong><span class="meta-line">The source reported reasoning metadata, but no selectable controls.</span></div>`}</div><div class="reasoning-meta-grid"><div class="reasoning-detail"><small>Toggle support</small><strong>${hasToggle ? 'Supported' : 'Not supported'}</strong></div><div class="reasoning-detail"><small>Thinking modes</small><div class="capability-chips">${capabilityList(thinkingModes)}</div></div><div class="reasoning-detail"><small>Default effort</small><strong>${capabilityValue(caps.default_effort)}</strong></div><div class="reasoning-detail"><small>Mandatory</small><strong>${capabilityState(caps.mandatory)}</strong></div><div class="reasoning-detail"><small>Default enabled</small><strong>${capabilityState(caps.default_enabled)}</strong></div><div class="reasoning-detail reasoning-detail-wide"><small>Accepted parameter names</small><div class="capability-chips">${capabilityList(caps.parameters)}</div></div></div></section>`;
+  return `<section class="reasoning-capabilities" data-reasoning-state="known" aria-label="Reasoning capabilities"><div class="reasoning-heading"><p class="section-label">Reasoning controls</p><strong>${hasSelectors ? 'Configurable selectors' : 'No configurable selectors'}</strong></div><div class="reasoning-selector-grid">${hasSelectors ? (selectors || `<div class="reasoning-detail"><small>Selector summary</small><strong>Thinking modes reported</strong></div>`) : `<div class="reasoning-empty"><strong>No configurable selectors</strong><span class="meta-line">The source reported reasoning metadata, but no selectable controls.</span></div>`}</div><div class="reasoning-meta-grid"><div class="reasoning-detail"><small>Toggle support</small><strong>${hasToggle ? 'Supported' : 'Not supported'}</strong></div><div class="reasoning-detail"><small>Thinking modes</small><div class="capability-chips">${capabilityList(thinkingModes)}</div></div><div class="reasoning-detail"><small>Default effort</small><strong>${capabilityValue(caps.default_effort)}</strong></div><div class="reasoning-detail"><small>Mandatory</small><strong>${capabilityState(caps.mandatory)}</strong></div><div class="reasoning-detail"><small>Default enabled</small><strong>${capabilityState(caps.default_enabled)}</strong></div><div class="reasoning-detail reasoning-detail-wide"><small>Accepted parameter names</small><div class="capability-chips">${capabilityList(caps.parameters)}</div></div></div></section>`;
 }
 async function refreshProviderCatalogues(providerIDs) {
   for (const providerID of [...new Set(providerIDs.filter(Boolean))]) await api(`/api/admin/providers/${providerID}/refresh`, { method: 'POST' });
@@ -1559,7 +1592,7 @@ function openCapabilities(model) {
   $('#capabilities-title').textContent = `${model.canonical_model_id} capabilities`;
   $('#refresh-capabilities').dataset.kind = 'virtual';
   $('#refresh-capabilities').dataset.modelId = model.id;
-  $('#capabilities-content').innerHTML = `<section class="capability-effective"><p class="eyebrow">AGGREGATE / ADVERTISED TO HERMES + V1</p><div class="capability-grid"><div><small>Context window</small><strong>${capabilityNumber(effectiveContext)}</strong></div><div><small>Max output</small><strong>${capabilityNumber(effectiveOutput)}</strong></div></div><div class="capability-flags">${capFlags(model)}</div>${reasoningCapabilities(model.reasoning_capabilities)}<p class="capability-note">An individual fallback target may use its provider default when it does not support a selector from the aggregate.</p></section><section class="capability-targets"><p class="eyebrow">EXACT FALLBACK TARGETS</p>${targets.length ? targets.map((target, index) => `<article class="capability-target"><div class="capability-target-head"><div><strong>${String(index + 1).padStart(2, '0')} · ${h(target.provider_name)}/${h(target.upstream_model_id)}</strong><span class="meta-line">${target.native_protocol ? h(target.native_protocol) : 'Provider default'} · ${target.enabled && target.available ? 'eligible' : h(target.warning || 'not eligible')}</span></div><div class="capability-values"><span><small>Context</small><b>${capabilityNumber(target.context_length)}</b></span><span><small>Output</small><b>${capabilityNumber(target.max_output_tokens)}</b></span></div></div><div class="capability-flags">${capFlags(target)}</div>${reasoningCapabilities(target.reasoning_capabilities)}</article>`).join('') : '<p class="meta-line">No targets configured.</p>'}</section><p class="form-error" id="capabilities-refresh-error" role="alert"></p>`;
+  $('#capabilities-content').innerHTML = `<section class="capability-effective"><p class="section-label">Aggregate advertised to clients (Hermes + /v1)</p><div class="capability-grid"><div><small>Context window</small><strong>${capabilityNumber(effectiveContext)}</strong></div><div><small>Max output</small><strong>${capabilityNumber(effectiveOutput)}</strong></div></div><div class="capability-flags">${capFlags(model)}</div>${reasoningCapabilities(model.reasoning_capabilities)}<p class="capability-note">An individual fallback target may use its provider default when it does not support a selector from the aggregate.</p></section><section class="capability-targets"><p class="section-label">Fallback targets</p>${targets.length ? targets.map((target, index) => `<article class="capability-target"><div class="capability-target-head"><div><strong>${String(index + 1).padStart(2, '0')} · ${h(target.provider_name)}/${h(target.upstream_model_id)}</strong><span class="meta-line">${target.native_protocol ? h(target.native_protocol) : 'Provider default'} · ${target.enabled && target.available ? 'eligible' : h(target.warning || 'not eligible')}</span></div><div class="capability-values"><span><small>Context</small><b>${capabilityNumber(target.context_length)}</b></span><span><small>Output</small><b>${capabilityNumber(target.max_output_tokens)}</b></span></div></div><div class="capability-flags">${capFlags(target)}</div>${reasoningCapabilities(target.reasoning_capabilities)}</article>`).join('') : '<p class="meta-line">No targets configured.</p>'}</section><p class="form-error" id="capabilities-refresh-error" role="alert"></p>`;
   $('#capabilities-dialog').showModal();
 }
 function openRealModelCapabilities(model) {
@@ -1568,7 +1601,7 @@ function openRealModelCapabilities(model) {
   $('#refresh-capabilities').dataset.kind = 'real';
   $('#refresh-capabilities').dataset.modelId = model.id;
   const modalities = (list) => list && list.length ? h(list.join(', ')) : 'Not reported';
-  $('#capabilities-content').innerHTML = `<section class="capability-effective"><p class="eyebrow">ADVERTISED TO HERMES + V1</p><div class="capability-grid"><div><small>Context window</small><strong>${capabilityNumber(model.context_length)}</strong></div><div><small>Max output</small><strong>${capabilityNumber(model.max_output_tokens)}</strong></div></div><div class="capability-flags">${capFlags(model)}</div>${reasoningCapabilities(model.reasoning_capabilities)}</section><section class="capability-targets"><p class="eyebrow">EXACT UPSTREAM</p><article class="capability-target"><div class="capability-target-head"><div><strong>${h(model.provider_name)}/${h(model.upstream_model_id)}</strong><span class="meta-line">${model.native_protocol ? h(model.native_protocol) : 'Provider default'} · ${model.available ? 'available' : 'retired'} · first seen ${date(model.first_seen_at)}</span></div><div class="capability-values"><span><small>Input</small><b>${modalities(model.input_modalities)}</b></span><span><small>Output</small><b>${modalities(model.output_modalities)}</b></span></div></div></article></section><p class="form-error" id="capabilities-refresh-error" role="alert"></p>`;
+  $('#capabilities-content').innerHTML = `<section class="capability-effective"><p class="section-label">Advertised to clients (Hermes + /v1)</p><div class="capability-grid"><div><small>Context window</small><strong>${capabilityNumber(model.context_length)}</strong></div><div><small>Max output</small><strong>${capabilityNumber(model.max_output_tokens)}</strong></div></div><div class="capability-flags">${capFlags(model)}</div>${reasoningCapabilities(model.reasoning_capabilities)}</section><section class="capability-targets"><p class="section-label">Upstream model</p><article class="capability-target"><div class="capability-target-head"><div><strong>${h(model.provider_name)}/${h(model.upstream_model_id)}</strong><span class="meta-line">${model.native_protocol ? h(model.native_protocol) : 'Provider default'} · ${model.available ? 'available' : 'retired'} · first seen ${date(model.first_seen_at)}</span></div><div class="capability-values"><span><small>Input</small><b>${modalities(model.input_modalities)}</b></span><span><small>Output</small><b>${modalities(model.output_modalities)}</b></span></div></div></article></section><p class="form-error" id="capabilities-refresh-error" role="alert"></p>`;
   $('#capabilities-dialog').showModal();
 }
 $('#refresh-capabilities').onclick = async () => {
@@ -1692,7 +1725,7 @@ function openVirtualModel(model = null, onSaved = null) { if (!model && capReach
   const targets = model?.targets?.length ? model.targets : [{provider_model_id:model?.target_model_id,enabled:true}];
   const makePicker = (target, row = null) => { const box = document.createElement('div'); box.className='combobox'; box.innerHTML='<input type="text" placeholder="Type a provider or model name…"><input type="hidden" name="target_model" required>'; const input=$('input[type="text"]',box), hidden=$('input[type="hidden"]',box); const pickerOptions=[...options]; const stale=target?.provider_model_id && !options.some(item=>item.value===target.provider_model_id); if(stale){ const label=target?.provider_name&&target?.upstream_model_id?`${target.provider_name} / ${target.upstream_model_id}`:target.provider_model_id; pickerOptions.unshift({value:target.provider_model_id,label:`Unavailable · ${label}`,disabled:true}); } const picker=combobox({ input, hidden, options:pickerOptions, placeholder:'Type a provider or model name…' }); picker.setOptions(pickerOptions); const found=options.find(item=>item.value===target?.provider_model_id); if(found) picker.select(options.indexOf(found)); else if(stale){ hidden.value=target.provider_model_id; input.value=pickerOptions[0].label; } else if(!target?.provider_model_id && options.length){ picker.select(0); } const original=target?.provider_model_id||null; input.addEventListener('focus',()=>{ if(input.value||hidden.value){ input.value=''; hidden.value=''; } }); input.addEventListener('blur',()=>{ if(hidden.value) return; if(original){ const idx=options.findIndex(item=>item.value===original); if(idx>=0) picker.select(idx); else { hidden.value=original; input.value=pickerOptions[0].label; } } }); const wrap=document.createElement('div'); wrap.className='combobox-wrap'; wrap.append(box); if(stale){ const err=document.createElement('small'); err.className='target-error'; err.textContent='Remove or replace unavailable model'; wrap.append(err); } return wrap; };
   const updateControls = () => { const rows=$$('.target-row',fallback); rows.forEach((row,index)=>{ $('.target-index',row).textContent=String(index+1).padStart(2,'0'); $('[data-target-up]',row).disabled=index===0; $('[data-target-down]',row).disabled=index===rows.length-1; }); };
-   const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; enableLabel.innerHTML='<span class="target-toggle-copy">Use</span>'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up"><span class="target-action-glyph">↑</span><span class="target-action-text">Up</span></button><button type="button" data-target-down title="Move target down" aria-label="Move target down"><span class="target-action-glyph">↓</span><span class="target-action-text">Down</span></button><button type="button" data-target-remove title="Remove target" aria-label="Remove target"><span class="target-action-glyph">×</span><span class="target-action-text">Remove</span></button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
+   const addFallback = (target = {}) => { const row=document.createElement('div'); row.className='target-row'; const enableLabel=document.createElement('label'); enableLabel.className='target-enable'; enableLabel.title='Enable this target during fallback'; enableLabel.innerHTML='<span class="target-toggle-copy">Use</span>'; const enable=document.createElement('input'); enable.type='checkbox'; enable.className='switch'; enable.checked=target.enabled!==false; enable.setAttribute('aria-label','Enable target'); enableLabel.append(enable); row.append(Object.assign(document.createElement('span'),{className:'target-index'}),makePicker(target),enableLabel); const actions=document.createElement('div'); actions.className='target-actions'; actions.innerHTML='<button type="button" data-target-up title="Move target up" aria-label="Move target up"><span class="target-action-glyph">'+ICON.up+'</span><span class="target-action-text">Up</span></button><button type="button" data-target-down title="Move target down" aria-label="Move target down"><span class="target-action-glyph">'+ICON.down+'</span><span class="target-action-text">Down</span></button><button type="button" data-target-remove title="Remove target" aria-label="Remove target"><span class="target-action-glyph">'+ICON.close+'</span><span class="target-action-text">Remove</span></button>'; $('[data-target-up]',actions).onclick=()=>{ const previous=row.previousElementSibling; if(previous) { fallback.insertBefore(row,previous); updateControls(); } }; $('[data-target-down]',actions).onclick=()=>{ const next=row.nextElementSibling; if(next) { fallback.insertBefore(next,row); updateControls(); } }; $('[data-target-remove]',actions).onclick=()=>{ if($$('.target-row',fallback).length>1) { row.remove(); updateControls(); } }; row.append(actions); fallback.append(row); updateControls(); };
    fixed.append(makePicker(targets[0])); targets.forEach(addFallback); const syncMode=()=>{ const ordered=mode.value==='ordered_fallback'; fixed.hidden=ordered; fallback.hidden=!ordered; addButton.hidden=!ordered; hint.hidden=!ordered; }; mode.onchange=syncMode; syncMode(); addButton.onclick=()=>{ if($$('.target-row',fallback).length<16) addFallback(); else flash('The admin UI supports up to 16 targets.', 'info'); };
   const nameInput = $('[name="name"]', form); if (model) { const wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === model.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); }
   }, onSubmit: async form => { const values = new FormData(form); const ordered=values.get('routing_mode')==='ordered_fallback'; const rows=ordered ? $$('.target-row',form) : [ $('[data-fixed-target]',form) ];   const targets=rows.map(row=>({provider_model_id:$('[name="target_model"]',row).value,enabled:ordered ? !!row.querySelector('.target-enable input')?.checked : true})); if(targets.some(target=>!target.provider_model_id)) throw new Error('Choose a target model.'); if(targets.some(target=>target.provider_model_id && !availableOptions.some(o=>o.value===target.provider_model_id))) throw new Error('Replace the unavailable target model before saving.'); const payload = { name: values.get('name'), routing_mode: values.get('routing_mode'), targets }; if (model) { if(!ordered) payload.fixed_target_id=targets[0].provider_model_id; payload.confirm_breaking_change = values.get('confirm') === 'on'; await api(`/api/admin/virtual-models/${model.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); $('#form-dialog').close(); flash('Virtual routing updated. New requests use the new target immediately.'); } else { const groupID = values.get('group_id'); if (groupID) payload.group_id = groupID; else payload.group_name = values.get('group_name'); await api('/api/admin/virtual-models', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); $('#form-dialog').close(); flash('Virtual route created.'); } await loadVirtual(); await loadClients(); if (onSaved) await onSaved(payload.name); } }); }
@@ -1846,21 +1879,20 @@ if (window.visualViewport) {
 }
 // catalogueLabel names a Catalogue client's model set: its linked template, or
 // Custom for a client with its own permissions.
-function catalogueLabel(client) { return client.template_id ? `Template · ${client.template_name}` : 'Custom'; }
+function catalogueLabel(client) { return client.template_id ? `Template · ${client.template_name}` : 'Custom selection'; }
 function clientCard(client) {
   const statusDot = `<span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span>`;
   const routeSummary = client.type === 'single'
     ? `<code class="model-id">${h(client.single_target_canonical || 'Unavailable target')}</code>`
     : `<span class="meta-line">Catalogue — ${client.template_id ? `template ${h(client.template_name)}` : 'custom model permissions'}</span>`;
   const quickAction = client.type === 'single'
-    ? `<button class="client-route-button" data-client-route="${h(client.id)}" aria-label="Change route for ${h(client.name)}"><span>Current model</span><strong>${h(client.single_target_canonical || 'Unavailable target')}</strong><i aria-hidden="true">›</i></button>`
-    : `<button class="client-permission-button" data-client-models="${h(client.id)}" aria-label="Manage permissions for ${h(client.name)}"><span>Catalogue</span><strong>${h(catalogueLabel(client))}</strong><i aria-hidden="true">›</i></button>`;
+    ? `<button class="client-route-button" data-client-route="${h(client.id)}" aria-label="Change route for ${h(client.name)}"><span>Current model</span><strong>${h(client.single_target_canonical || 'Unavailable target')}</strong><i aria-hidden="true"></i></button>`
+    : `<button class="client-permission-button" data-client-models="${h(client.id)}" aria-label="Manage permissions for ${h(client.name)}"><span>Catalogue</span><strong>${h(catalogueLabel(client))}</strong><i aria-hidden="true"></i></button>`;
   return `<article class="client-card" data-client-id="${h(client.id)}">
     <button class="client-card-head" data-card-toggle="${h(client.id)}" aria-expanded="false" aria-controls="client-detail-${h(client.id)}">
       ${statusDot}
       <span class="client-card-heading"><span class="client-card-name">${h(client.name)}</span></span>
-      ${client.group ? `<span class="group-badge">${h(client.group)}</span>` : ''}
-      <span class="client-card-chevron" aria-hidden="true">▾</span>
+      <span class="client-card-chevron" aria-hidden="true"></span>
     </button>
     <div class="client-card-quick-actions">${quickAction}</div>
     <div class="client-card-detail" id="client-detail-${h(client.id)}" hidden>
@@ -1884,12 +1916,13 @@ function clientCard(client) {
 }
 function clientRow(client) {
   const routeCell = client.type === 'single'
-    ? `<div class="client-route-picker" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">✓</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">✕</button></div></div>`
-    : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>${h(catalogueLabel(client))}</strong><i aria-hidden="true">›</i></button>`;
+    ? `<div class="client-route-picker" data-client-id="${h(client.id)}"><div class="combobox" data-inline-route><input type="text" aria-label="Route for ${h(client.name)}"><input type="hidden"></div><div class="route-confirm" data-route-confirm hidden><button class="route-confirm-tick" data-route-tick type="button" title="Apply new route" aria-label="Apply new route">${ICON.check}</button><button class="route-confirm-cancel" data-route-cancel type="button" title="Cancel" aria-label="Cancel route change">${ICON.close}</button></div></div>`
+    : `<button class="route-button" data-client-models="${h(client.id)}" aria-label="Manage models for ${h(client.name)}"><span>Catalogue</span><strong>${h(catalogueLabel(client))}</strong><i aria-hidden="true"></i></button>`;
   return { attr: ` data-client-id="${h(client.id)}"`, html: `<td class="primary-cell"><div class="client-name-line"><span class="status-roundel${client.enabled ? '' : ' status-roundel-broken'}" role="img" aria-label="${client.enabled ? 'Enabled' : 'Disabled'}" title="${client.enabled ? 'Enabled' : 'Disabled'}"><span class="status-roundel-spin" aria-hidden="true"></span></span><strong>${h(client.name)}</strong>${estimatedMark(client.id)}</div><small>${h(client.description || 'No description')}</small></td><td>${routeCell}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['1h'], state.usage?.client_cache?.[client.id]?.['1h'], '1h', state.usage?.client_cost?.[client.id]?.['1h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['24h'], state.usage?.client_cache?.[client.id]?.['24h'], '24h', state.usage?.client_cost?.[client.id]?.['24h'], state.usage?.client_tokens?.[client.id])}</td><td>${tok(state.usage?.client_keys?.[client.id]?.['7d'], state.usage?.client_cache?.[client.id]?.['7d'], '7d', state.usage?.client_cost?.[client.id]?.['7d'], state.usage?.client_tokens?.[client.id])}</td><td><div class="actions"><button class="btn btn-small btn-secondary" data-client-activity="${h(client.id)}">Activity</button><button class="btn btn-small btn-secondary" data-client-rotate="${h(client.id)}">Rotate</button><button class="btn btn-small btn-secondary" data-client-edit="${h(client.id)}">Settings</button><button class="btn btn-small btn-danger" data-client-delete="${h(client.id)}">Delete</button></div></td>` };
 }
 function renderClients() {
   $('#clients-empty').hidden = state.clients.length > 0;
+  $('#view-clients').classList.toggle('is-empty', state.clients.length === 0 && !$('#client-search').value && !$('#client-group-filter').value);
   const mobileByGroup = new Map();
   state.clients.forEach(client => {
     const group = client.group || 'default';
@@ -1945,7 +1978,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const templates = state.templates || [];
   const catalogueAccessField = !client && !onSaved ? `<label data-catalogue-access-field hidden>Catalogue access <select name="catalogue_access"><option value="custom">Custom — choose models after creating</option><option value="all">All models — every model in the current catalogue</option>${templates.map(t => `<option value="template:${h(t.id)}">Template · ${h(t.name)}</option>`).join('')}</select><small>${templates.length ? 'Saved catalogues are managed from Catalogue templates.' : 'No saved catalogues yet — choose Custom or All models.'}</small></label>` : '';
   // Settings only links to the catalogue screen for an existing Catalogue client.
-  const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} — manage ›</button></div>` : '';
+  const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} · Manage models</button></div>` : '';
   // Detailed error bodies are opt-in per client. Hosted mode never captures
   // them, so the control is hidden there.
   const bodyLog = client?.log_error_bodies || 'inherit';
@@ -2059,7 +2092,7 @@ async function openPermissionMatrix(target, onSaved = null) {
     permissionTarget = { ...target, selected: target.templateID || '', clientData: target.kind === 'client' ? structuredClone(data) : null };
     state.permissionData = data;
     $('#permissions-error').textContent = '';
-    $('#permissions-eyebrow').textContent = target.kind === 'template' ? 'CATALOGUE TEMPLATE' : 'CLIENT MODEL ACCESS';
+    
     $('#permissions-title').textContent = `Manage models · ${target.name}`;
     const select = $('#permission-template');
     const showSource = target.kind === 'client' && !target.wizard;
@@ -2185,7 +2218,7 @@ function renderPermissions() {
     const groups = state.permissionData.groups.filter(g => g.kind === kind);
     if (!groups.length) return '';
     const collapsed = collapsedPermissionSections.has(kind);
-    const label = kind === 'real' ? 'REAL MODELS' : 'VIRTUAL MODELS';
+    const label = kind === 'real' ? 'Real models' : 'Virtual models';
     return `<section class="permission-section"><header class="permission-section-head"><button class="permission-collapse" data-permission-section="${h(kind)}" aria-expanded="${collapsed ? 'false' : 'true'}" aria-label="Collapse ${h(label)}">${collapsed ? GROUP_ARROW.down : GROUP_ARROW.up}</button><h3>${h(label)}</h3></header><div class="permission-section-body${collapsed ? ' permission-section-hidden' : ''}">${groups.map(renderGroup).join('')}</div></section>`;
   };
   $('#permission-groups').innerHTML = ['real', 'virtual'].map(renderSection).join('');
@@ -2304,7 +2337,7 @@ $('#save-permissions').onclick = async () => {
     if (target.kind === 'client' && $('#form-dialog').open) {
       const client = state.clients.find(item => item.id === target.id);
       const link = $('[data-open-catalogue]', $('#form-dialog'));
-      if (client && link) link.textContent = `${catalogueLabel(client)} — manage ›`;
+      if (client && link) link.textContent = `${catalogueLabel(client)} · Manage models`;
     }
     if ($('#templates-dialog').open) renderTemplates();
     if (hook) await hook();
@@ -2686,32 +2719,7 @@ const globalActivityFeed = createActivityFeed({
 function loadGlobalActivity() { return globalActivityFeed.reload(); }
 filterInput('#global-activity-search', value => { globalActivityFeed.setSearch(value); });
 
-const mobileHistoryState = { rows: [], offset: 0, limit: ACTIVITY_PAGE_SIZE, search: '', hasMore: true, loading: false };
-function renderMobileHistory(state) {
-  $('#mobile-history-body').innerHTML = state.loading ? '<p class="meta-line">Loading activity…</p>' : state.rows.map(row => activityHistoryCard(row, true)).join('');
-  $('#mobile-history-empty').hidden = state.loading || state.rows.length > 0;
-  updateActivityCount(state, '#mobile-history-count');
-}
-function appendMobileHistory(state, page) {
-  const list = $('#mobile-history-body');
-  page.forEach(row => list.insertAdjacentHTML('beforeend', activityHistoryCard(row, true)));
-  $('#mobile-history-empty').hidden = state.rows.length > 0;
-  updateActivityCount(state, '#mobile-history-count');
-}
-const mobileHistoryFeed = createActivityFeed({
-  state: mobileHistoryState,
-  containers: () => [$('#mobile-history-body')],
-  scrollHosts: () => [$('#mobile-history-body')],
-  resetScroll: () => { $('#mobile-history-body').scrollTop = 0; },
-  showError: message => { $('#mobile-history-error').textContent = message; },
-  fetch: (offset, limit, search, signal) => api(`/api/admin/activity?limit=${limit + 1}&offset=${offset}&search=${encodeURIComponent(search || '')}`, { signal }),
-  render: renderMobileHistory,
-  append: appendMobileHistory,
-});
-function loadMobileHistory() { return mobileHistoryFeed.reload(); }
-$('#open-mobile-history').onclick = () => { mobileHistoryState.search = ''; $('#mobile-history-search').value = ''; loadMobileHistory(); $('#mobile-history-dialog').showModal(); };
-$('#close-mobile-history').onclick = $('#done-mobile-history').onclick = () => $('#mobile-history-dialog').close();
-filterInput('#mobile-history-search', value => { mobileHistoryFeed.setSearch(value); });
+
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
@@ -2736,10 +2744,9 @@ async function loadSettings() {
   const token = ++state.loadToken;
   const settings = await api('/api/admin/settings');
   if (token !== state.loadToken) return;
-  $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; applyHostedNotificationPolicy(hosted, nf); await loadGlobalActivity();
+  $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; applyHostedNotificationPolicy(hosted, nf);
 }
-async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-top'), $('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (runtimeMode !== 'hosted') { body.notifications_event_admin_login = notificationsValues.get('notifications_event_admin_login') === 'on'; } if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
-$('#save-settings-top').addEventListener('click', saveSettings);
+async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (runtimeMode !== 'hosted') { body.notifications_event_admin_login = notificationsValues.get('notifications_event_admin_login') === 'on'; } if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
 $('#save-settings-bottom').addEventListener('click', saveSettings);
 $('[name="log_error_bodies"]', $('#settings-form')).addEventListener('change', async event => { try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ log_error_bodies: event.target.checked }) }); flash(event.target.checked ? 'Detailed error logging enabled.' : 'Detailed error logging disabled.'); } catch (error) { event.target.checked = !event.target.checked; $('#settings-error').textContent = errorMessage(error); } });
 $('[name="notifications_auth_header"]', $('#notifications-form')).addEventListener('input', () => { authHeaderDirty = true; authHeaderClear = false; });
@@ -2928,8 +2935,7 @@ function showSettingsTab(tab) {
   $('#settings-tab-api').hidden = runtimeMode === 'hosted';
   // Account and Management API actions save themselves; the shared save bar
   // only applies to the config cards.
-  $('#save-settings-top').hidden = tab === 'account' || tab === 'api';
-  $('#save-settings-bottom').hidden = tab === 'account' || tab === 'api';
+  $('.settings-savebar').hidden = tab === 'account' || tab === 'api' || tab === 'data';
 }
 // accountTabAvailable reports whether the Settings → Account panel applies:
 // hosted installs always, and local installs only when passkeys are enabled
@@ -3391,7 +3397,7 @@ let entitySubmit = null;
 // request (and its follow-up reloads) were in flight. Without this, a slow
 // save's trailing close() shut a dialog the user had already reopened.
 let entitySubmitSeq = 0;
-function openEntity({ eyebrow, title, fields, submit, onMount, onSubmit }) { const dialog = $('#form-dialog'), form = $('#entity-form'); $('#dialog-eyebrow').textContent = eyebrow; $('#dialog-title').textContent = title; $('#dialog-fields').innerHTML = fields; $('#dialog-submit').textContent = submit; $('#dialog-submit').disabled = false; $('#dialog-error').textContent = ''; entitySubmit = onSubmit; entitySubmitSeq += 1; form.onsubmit = handleEntitySubmit; dialog.showModal(); onMount?.(form); setTimeout(() => $('input:not([type="checkbox"]),select,textarea', form)?.focus(), 0); }
+function openEntity({ eyebrow, title, fields, submit, onMount, onSubmit }) { const dialog = $('#form-dialog'), form = $('#entity-form'); $('#dialog-title').textContent = title; $('#dialog-fields').innerHTML = fields; $('#dialog-submit').textContent = submit; $('#dialog-submit').disabled = false; $('#dialog-submit').hidden = false; $('#dialog-error').textContent = ''; entitySubmit = onSubmit; entitySubmitSeq += 1; form.onsubmit = handleEntitySubmit; dialog.showModal(); onMount?.(form); setTimeout(() => $('input:not([type="checkbox"]),select,textarea', form)?.focus(), 0); }
 async function handleEntitySubmit(event) { const form = event.currentTarget, button = $('#dialog-submit'); if (event.submitter?.value === 'cancel') return; event.preventDefault(); if (!form.reportValidity()) return; const submit = entitySubmit, seq = entitySubmitSeq; button.disabled = true; $('#dialog-error').textContent = ''; try { await submit(form); if (seq === entitySubmitSeq) $('#form-dialog').close(); } catch (error) { if (seq === entitySubmitSeq) $('#dialog-error').textContent = errorMessage(error); } finally { if (seq === entitySubmitSeq) button.disabled = false; } }
 
 function confirmAction({ title, copy, action, breaking = false, typeMatch = null, typeLabel = 'name' }) { return new Promise(resolve => { const dialog = $('#confirm-dialog'), form = $('form', dialog), checkWrap = $('#confirm-check-wrap'), check = $('#confirm-check'), typeWrap = $('#confirm-type-wrap'), typeInput = $('#confirm-type'), typeValue = $('#confirm-type-value'), typeCopy = $('#confirm-type-copy'), typeCopyState = $('#confirm-type-copy-state'), cancel = $('#confirm-cancel'); $('#confirm-title').textContent = title; $('#confirm-copy').textContent = copy; $('#confirm-action').textContent = action; $('#confirm-error').textContent = ''; checkWrap.hidden = !breaking; check.checked = false; typeWrap.hidden = !typeMatch; typeInput.value = ''; typeValue.textContent = typeMatch || ''; typeCopyState.textContent = ''; if (typeMatch) { $('#confirm-type-label').textContent = `Type the ${typeLabel} to confirm`; typeCopy.setAttribute('aria-label', `Copy the ${typeLabel} to confirm`); } cancel.onclick = () => dialog.close('cancel'); typeInput.onkeydown = event => { if (event.key !== 'Enter') return; event.preventDefault(); form.requestSubmit($('#confirm-action')); }; const valid = () => !typeMatch || typeInput.value === typeMatch; const close = event => { dialog.removeEventListener('close', close); resolve(dialog.returnValue === 'confirm' && (!breaking || check.checked) && valid()); }; form.onsubmit = event => { if (event.submitter?.value !== 'confirm') return; if (breaking && !check.checked) { event.preventDefault(); $('#confirm-error').textContent = 'Acknowledge the breaking client-facing change first.'; return; } if (typeMatch && !valid()) { event.preventDefault(); $('#confirm-error').textContent = `Type the ${typeLabel} exactly to confirm.`; } }; dialog.addEventListener('close', close); dialog.showModal(); if (typeMatch) setTimeout(() => typeInput.focus(), 0); }); }
@@ -3481,6 +3487,27 @@ async function ensureActivityGraph() {
     return null;
   }
 }
+// Activity has two panels: Live (graph + live requests) and History (the
+// searchable request log). The tab lives in the hash (#activity/history) so
+// deep links and the back button work like the Settings tabs.
+let activityTab = 'live';
+function showActivityTab(tab) {
+  activityTab = tab === 'history' ? 'history' : 'live';
+  $$('[data-activity-tab]').forEach(btn => { const on = btn.dataset.activityTab === activityTab; btn.classList.toggle('active', on); btn.setAttribute('aria-selected', String(on)); btn.tabIndex = on ? 0 : -1; });
+  $$('[data-activity-panel]').forEach(panel => { panel.hidden = panel.dataset.activityPanel !== activityTab; });
+  if (activityTab === 'history') loadGlobalActivity();
+}
+$$('[data-activity-tab]').forEach(btn => btn.addEventListener('click', () => {
+  const hash = btn.dataset.activityTab === 'history' ? '#activity/history' : '#activity';
+  if (location.hash !== hash) history.pushState(null, '', hash);
+  showActivityTab(btn.dataset.activityTab);
+}));
+$('[role="tablist"][aria-label="Activity views"]').addEventListener('keydown', event => {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  const next = activityTab === 'live' ? 'history' : 'live';
+  const btn = $(`[data-activity-tab="${next}"]`);
+  btn.click(); btn.focus(); event.preventDefault();
+});
 async function loadActivityView() {
   liveRequests.start();
   const token = ++state.loadToken;
@@ -3593,9 +3620,10 @@ function patchTokenCell(cell, tokens, pct, cost = null) {
   const cacheEl = $('.cache-hit b', cell);
   const costEl = $('.tok-cost b', cell);
   const hasStructured = Boolean(numEl) || Boolean(cacheEl);
+  const cacheKnown = pct != null && !isNaN(pct);
   // When only a cost is present, the structure differs from the token shape;
   // rebuild so the cost line appears without a spurious Mtok/cache block.
-  if (populated !== hasStructured || Boolean(costText) !== Boolean(costEl)) {
+  if (populated !== hasStructured || Boolean(costText) !== Boolean(costEl) || cacheKnown !== Boolean(cacheEl) || Boolean(tokens) !== Boolean(numEl)) {
     cell.innerHTML = renderTokInner(tokens, pct, false, cost);
     const newNum = $('b', cell);
     if (newNum) markChanged(newNum);
@@ -3606,10 +3634,13 @@ function patchTokenCell(cell, tokens, pct, cost = null) {
     return;
   }
   if (!populated) return;
-  const num = tokens ? `${(tokens / 1e6).toFixed(2)}` : '';
-  const cache = (pct != null && !isNaN(pct)) ? `${Math.round(pct)}%` : '';
+  const t = fmtTok(tokens);
+  const num = tokens ? t.n : '';
+  const cache = cacheKnown ? `${Math.round(pct)}%` : '';
   if (numEl && numEl.textContent !== num) {
     numEl.textContent = num;
+    const unitEl = numEl.nextElementSibling;
+    if (unitEl && unitEl.tagName === 'SMALL') unitEl.textContent = t.unit;
     markChanged(numEl);
   }
   if (cacheEl && cacheEl.textContent !== cache) {

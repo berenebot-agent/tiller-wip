@@ -874,10 +874,9 @@ test('activity loads clear a previously shown error on success', async ({ page }
   await expect(page.locator('#activity-dialog')).toBeHidden();
 
   // 2. Global activity section: same sentinel-then-success pattern must clear the error.
-  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
-  await page.locator('[data-settings-tab="data"]').click();
-  await expect(page.locator('#view-settings')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
+  await page.locator('#nav-links').getByRole('link', { name: 'Activity' }).click();
+  await page.locator('[data-activity-tab="history"]').click();
+  await expect(page.locator('#activity-panel-history')).toBeVisible();
 
   await page.evaluate(() => { document.querySelector('#global-activity-error').textContent = 'sentinel-error'; });
   await page.locator('#global-activity-search').fill(clientName);
@@ -1015,10 +1014,9 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
   // The same affordance must exist in the Global activity table.
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
-  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
-  await page.locator('[data-settings-tab="data"]').click();
-  await expect(page.locator('#view-settings')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
+  await page.locator('#nav-links').getByRole('link', { name: 'Activity' }).click();
+  await page.locator('[data-activity-tab="history"]').click();
+  await expect(page.locator('#activity-panel-history')).toBeVisible();
   const globalCell = page.locator('#global-activity-body tr .activity-request-id').first();
   await expect(globalCell).toBeVisible();
   const globalId = await globalCell.getAttribute('data-copy-request-id');
