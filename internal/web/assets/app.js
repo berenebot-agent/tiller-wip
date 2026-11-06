@@ -1251,7 +1251,7 @@ function resolutionStatus(target) {
 }
 function resolutionIndicator(target) {
   const status = resolutionStatus(target);
-  return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${status[1]}" title="${status[1]}">${RESOLUTION_ICONS[status[0]]}<span class="resolution-indicator-spin" aria-hidden="true"></span></span>`;
+  return `<span class="resolution-indicator resolution-${status[0]}" role="img" aria-label="${h(status[1])}" title="${h(status[1])}">${RESOLUTION_ICONS[status[0]]}<span class="resolution-indicator-spin" aria-hidden="true"></span></span>`;
 }
 function targetActivityKey(virtualID, targetID) {
   return `${virtualID}\u0000${targetID}`;
