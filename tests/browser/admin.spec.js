@@ -14,7 +14,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
   await expect(page.locator('.brand-mark')).toBeVisible();
 
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await page.getByLabel('Client name').fill('Container browser client');
   await page.getByLabel('Description').fill('Disposable Playwright workflow');
   await page.locator('select[name="type"]').selectOption('catalogue');
@@ -80,13 +80,13 @@ test('insecure origin (plain HTTP): one-time-secret hides the Copy button and se
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
-  await page.getByLabel('Tiller username').fill(ADMIN_USER);
+  await page.locator('#login-form').getByLabel('Tiller username').fill(ADMIN_USER);
   // Scope to the login form: the reset form's "New password" label also
   // substring-matches getByLabel('Password') in strict mode.
   await page.locator('#login-form').getByLabel('Password').fill(ADMIN_PASS);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await page.getByLabel('Client name').fill('Insecure copy client');
   await page.getByLabel('Description').fill('Confirms the Copy button is hidden on plain HTTP');
   await page.locator('select[name="type"]').selectOption('catalogue');
@@ -311,7 +311,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   expect(virtualResponse.status()).toBe(201);
 
   await page.getByRole('link', { name: 'Clients' }).click();
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await page.getByLabel('Client name').fill(clientName);
   await page.locator('#form-dialog select[name="type"]').selectOption('single');
   await expect(page.locator('#form-dialog').getByLabel('Client-facing model name')).toHaveValue('main');
@@ -936,7 +936,7 @@ test('client key group: listing badge, create/edit dialog, and filter', async ({
   await expect(page.locator('#form-dialog')).toBeHidden();
 
   // Create dialog defaults group to "default".
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await expect(page.locator('#form-dialog')).toBeVisible();
   await expect(page.locator('#form-dialog input[name="group"]')).toHaveValue('default');
 });

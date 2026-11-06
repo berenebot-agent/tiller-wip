@@ -22,7 +22,9 @@ async function loginFresh(browser) {
   const page = await context.newPage();
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
-  await page.getByLabel('Tiller username').fill(ADMIN_USER);
+  // Scope to the login form: the hidden first-run setup form has an input
+  // with the same "Tiller username" label, which breaks strict mode.
+  await page.locator('#login-form').getByLabel('Tiller username').fill(ADMIN_USER);
   // Scope to the login form: the reset form's "New password" label also
   // substring-matches getByLabel('Password') in strict mode.
   await page.locator('#login-form').getByLabel('Password').fill(ADMIN_PASS);
