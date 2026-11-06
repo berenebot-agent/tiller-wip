@@ -196,20 +196,21 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
 /* --- Token / cache / cost cells ----------------------------------------- */
 .tok,.activity-tokens{white-space:nowrap;font-variant-numeric:tabular-nums}
 .activity-tokens{display:inline-flex;flex-wrap:wrap;align-items:baseline;column-gap:3px;row-gap:1px}
-.tok>b,.activity-tokens>b{font:500 var(--fs) var(--mono);color:var(--ink)}
-.tok>small,.activity-tokens>small{color:var(--muted);font-size:var(--fs-xs)}
+.tok-amt>b,.activity-tokens>b{font:500 var(--fs) var(--mono);color:var(--ink)}
+.tok-amt>small,.activity-tokens>small{color:var(--muted);font-size:var(--fs-xs)}
 .activity-tokens>small+b{margin-left:4px}
 /* In the narrow 1h/24h/7d columns the cell is a two-line readout: tokens on
-   top, cache share and cost below. */
-.tok{display:inline-grid;grid-template-columns:auto auto;column-gap:4px;row-gap:1px;align-items:baseline;justify-content:start}
-.tok>b{grid-column:1;grid-row:1}
-.tok>small{grid-column:2;grid-row:1}
-.tok .cache-hit{grid-column:1;grid-row:2;margin:0}
-.tok .tok-cost{grid-column:2;grid-row:2;margin:0}
-.tok>small+.tok-cost,.tok>.tok-cost:first-child{grid-column:1/-1}
+   top, cache share and cost below. One flex line per row, never a shared
+   inline-grid: auto grid tracks size to the widest item across both rows, so a
+   wide lower-row figure would widen the first column and push the unit away
+   from its number. */
+.tok{display:inline-flex;flex-direction:column;align-items:flex-start;row-gap:1px}
+.tok-amt,.tok-meta{display:inline-flex;align-items:baseline}
+.tok-amt{gap:4px}
+.tok-meta{gap:8px}
 .cache-hit,.tok-cost{display:inline-flex;align-items:baseline;gap:2px;margin-left:8px;color:var(--muted)}
+.tok-meta>.cache-hit,.tok-meta>.tok-cost{margin-left:0}
 .cache-hit b,.tok-cost b{font:500 var(--fs-sm) var(--mono);color:var(--text-2)}
-.cache-hit small,.tok-cost small{font-size:var(--fs-xs);color:var(--muted)}
 .tok-cost b{color:var(--green)}
 .tok b.is-flip,.cache-hit b.is-flip,.tok-cost b.is-flip{animation:tok-flip .18s ease-out}
 @keyframes tok-flip{0%{color:var(--blue)}100%{color:inherit}}

@@ -149,8 +149,6 @@ const fmtCost = (micros) => {
 // their DOM from this single source so the .tok element is never re-wrapped and
 // transitions between loading, populated, and empty states keep consistent
 // structure. cost is an optional estimated spend in micro-dollars.
-// fmtTok renders a token total compactly: 1.24M, 386K, 912. The unit is
-// split out so the number can be set in tabular figures beside a quiet suffix.
 // fmtTok renders a usage total in one consistent unit (Mtok) so columns compare
 // at a glance. The unit is split out so the number can sit in tabular figures.
 const fmtTok = (tokens) => ({ n: (Number(tokens || 0) / 1e6).toFixed(2), unit: 'Mtok' });
@@ -159,15 +157,21 @@ const renderTokInner = (tokens, pct, loading = false, cost = null) => {
   if (loading) return tokLoadingInner;
   if (!tokens && pct == null && cost == null) return '—';
   const t = fmtTok(tokens);
-  const num = tokens ? `<b>${t.n}</b><small>${t.unit}</small>` : '';
+  // Two independent flex lines — amount + unit on top, cache share and cost
+  // below. A shared grid would size the first column from the widest item in
+  // either row, pushing the unit away from its number. The words "cached" and
+  // "est." are never repeated per row: their meaning lives in each figure's
+  // title, with an .sr-only word so assistive tech still hears it.
+  const amount = tokens ? `<span class="tok-amt"><b>${t.n}</b><small>${t.unit}</small></span>` : '';
   // Cache share and cost are shown only when known: "n.a." placeholders on
   // every row were noise that hid the numbers people actually scan for.
   const cache = (pct != null && !isNaN(pct))
-    ? `<span class="cache-hit" title="Share of input served from the provider cache"><b>${Math.round(pct)}%</b><small>cached</small></span>`
+    ? `<span class="cache-hit" title="${Math.round(pct)}% of input tokens served from the provider cache"><b>${Math.round(pct)}%</b><span class="sr-only">cached</span></span>`
     : '';
   const costText = fmtCost(cost);
-  const costEl = costText ? `<span class="tok-cost" title="Estimated from published model prices — not a billing figure"><b>${costText}</b><small>est.</small></span>` : '';
-  return `${num}${cache}${costEl}`;
+  const costEl = costText ? `<span class="tok-cost" title="Estimated from published model prices — not a billing figure"><b>${costText}</b><span class="sr-only">estimated</span></span>` : '';
+  const meta = (cache || costEl) ? `<span class="tok-meta">${cache}${costEl}</span>` : '';
+  return `${amount}${meta}`;
 };
 
 // tokenBreakdownTitle builds the tooltip for a token cell from the per-type
@@ -204,12 +208,13 @@ const rowCache = (row) => {
   // input has its cache read/creation counts folded in at ingestion, and
   // OpenAI-style prompts already include cached tokens. The cache share is
   // therefore cached / prompt, with no provider-specific adjustment here.
-  const line = (cache != null && inp > 0)
-    ? `<span class="cache-hit"><b>${Math.round(cache / inp * 100)}%</b><small>cached</small></span>`
-    : '';
+  const pct = (cache != null && inp > 0) ? Math.round(cache / inp * 100) : null;
+  const line = pct == null
+    ? ''
+    : `<span class="cache-hit" title="${pct}% of input tokens served from the provider cache"><b>${pct}%</b><span class="sr-only">cached</span></span>`;
   const exact = row.provider_cost_micros;
   const cost = exact ?? row.estimated_cost_micros;
-  const costLine = cost == null ? '' : `<span class="tok-cost"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<small>est.</small>' : ''}</span>`;
+  const costLine = cost == null ? '' : `<span class="tok-cost" title="Estimated from published model prices — not a billing figure"><b>${exact == null ? '~' : ''}${fmtCost(cost)}</b>${exact == null ? '<span class="sr-only">estimated</span>' : ''}</span>`;
   if (inp == null && output == null) return '<span class="activity-tokens"><span class="meta-line">—</span></span>';
   const est = row.input_tokens_source === 'estimated' ? '~' : '';
   return `<span class="activity-tokens" title="Input / output tokens"><b>${est}${fmtCount(inp)}</b><small>in</small> <b>${fmtCount(output)}</b><small>out</small>${line}${costLine}</span>`;
@@ -897,8 +902,8 @@ function providerCostHTML(provider) {
     }
   }
   if (windows.every(w => totals[w] == null)) return '';
-  const part = window => totals[window] == null ? `${window} —` : `${window} ${estimated[window] ? '~' : ''}${fmtCost(totals[window])}${estimated[window] ? ' est.' : ''}`;
-  return `<div class="provider-cost"><span>${windows.map(part).join(' · ')}</span></div>`;
+  const part = window => totals[window] == null ? `${window} —` : `${window} ${estimated[window] ? '~' : ''}${fmtCost(totals[window])}`;
+  return `<div class="provider-cost" title="Estimated from published model prices — not a billing figure"><span>${windows.map(part).join(' · ')}</span></div>`;
 }
 const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="badge badge-${kind}">${h(label)}</span>`;
 const typeLabel = type => state.providerTypes.find(item => item.type === type)?.label || type;
@@ -3618,7 +3623,7 @@ function patchTokenCell(cell, tokens, pct, cost = null) {
   }
   const costText = fmtCost(cost);
   const populated = Boolean(tokens) || (pct != null && !isNaN(pct)) || Boolean(costText);
-  const numEl = cell.querySelector(':scope > b');
+  const numEl = cell.querySelector('.tok-amt > b');
   const cacheEl = $('.cache-hit b', cell);
   const costEl = $('.tok-cost b', cell);
   const hasStructured = Boolean(numEl) || Boolean(cacheEl);
@@ -3647,14 +3652,16 @@ function patchTokenCell(cell, tokens, pct, cost = null) {
   }
   if (cacheEl && cacheEl.textContent !== cache) {
     cacheEl.textContent = cache;
+    // The share is spelled out in the figure's tooltip, so it has to follow the
+    // patched value or hover would report the previous snapshot's percentage.
+    const cacheWrap = cacheEl.closest('.cache-hit');
+    if (cacheWrap) cacheWrap.title = cache ? `${cache} of input tokens served from the provider cache` : '';
     markChanged(cacheEl);
   }
   if (costEl && costEl.textContent !== costText) {
     costEl.textContent = costText;
     markChanged(costEl);
   }
-  const costLabel = $('.tok-cost small', cell);
-  if (costLabel && costs) costLabel.textContent = costs.estimated?.[window] ? 'est.' : 'reported';
 }
 
 // Patch the resolution icon for one target line from the current state.
