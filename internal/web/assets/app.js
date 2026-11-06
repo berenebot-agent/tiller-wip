@@ -151,18 +151,10 @@ const fmtCost = (micros) => {
 // structure. cost is an optional estimated spend in micro-dollars.
 // fmtTok renders a token total compactly: 1.24M, 386K, 912. The unit is
 // split out so the number can be set in tabular figures beside a quiet suffix.
-const fmtTok = (tokens) => {
-  const v = Number(tokens || 0);
-  if (v >= 1e6) return { n: (v / 1e6).toFixed(2), unit: 'M tok' };
-  if (v >= 1e3) return { n: (v / 1e3).toFixed(v >= 1e5 ? 0 : 1), unit: 'K tok' };
-  return { n: String(v), unit: 'tok' };
-};
-const fmtCount = (v) => {
-  if (v == null) return '—';
-  if (v >= 1e6) return `${(v / 1e6).toFixed(2)}M`;
-  if (v >= 1e4) return `${(v / 1e3).toFixed(1)}K`;
-  return Number(v).toLocaleString();
-};
+// fmtTok renders a usage total in one consistent unit (Mtok) so columns compare
+// at a glance. The unit is split out so the number can sit in tabular figures.
+const fmtTok = (tokens) => ({ n: (Number(tokens || 0) / 1e6).toFixed(2), unit: 'Mtok' });
+const fmtCount = (v) => (v == null ? '—' : Number(v).toLocaleString());
 const renderTokInner = (tokens, pct, loading = false, cost = null) => {
   if (loading) return tokLoadingInner;
   if (!tokens && pct == null && cost == null) return '—';
@@ -1289,6 +1281,15 @@ function resolutionIndicator(target) {
 function targetActivityKey(virtualID, targetID) {
   return `${virtualID}\u0000${targetID}`;
 }
+// Clicking anywhere on a virtual-model row that is not itself a control opens
+// that model's settings (delegated once; the tbody survives re-renders).
+$('#virtual-body').addEventListener('click', event => {
+  if (event.target.closest('button, a, input, select, textarea, label, [data-copy-request-id], .group-toggle')) return;
+  if (getSelection()?.toString()) return;
+  const row = event.target.closest('tr[data-virtual-id]');
+  const model = row && state.virtualModels.find(item => item.id === row.dataset.virtualId);
+  if (model) openVirtualModel(model);
+});
 function renderVirtual() {
   const searching = ($('#virtual-search').value || '').trim().length > 0;
   const byGroup = new Map(); state.virtualModels.forEach(model => { const key = model.group_name || '—'; if (!byGroup.has(key)) byGroup.set(key, []); byGroup.get(key).push(model); });
@@ -1314,6 +1315,7 @@ function renderVirtual() {
    patchVirtualActivityRows();
   $$('.group-toggle', $('#virtual-body')).forEach(header => header.onclick = toggleGroup);
   $$('[data-model-activity]', $('#virtual-body')).forEach(button => button.onclick = event => { event.stopPropagation(); openModelActivity(state.virtualModels.find(item => item.canonical_model_id === button.dataset.modelActivity), 'virtual'); });
+  $('#virtual-body').classList.add('rows-clickable');
   $$('[data-virtual-edit]').forEach(button => button.onclick = () => openVirtualModel(state.virtualModels.find(item => item.id === button.dataset.virtualEdit)));
   $$('[data-virtual-capabilities]').forEach(button => button.onclick = event => { event.stopPropagation(); openCapabilities(state.virtualModels.find(item => item.id === button.dataset.virtualCapabilities)); });
   $$('[data-virtual-delete]').forEach(button => button.onclick = () => deleteVirtualModel(button.dataset.virtualDelete));
