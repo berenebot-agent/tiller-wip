@@ -94,12 +94,7 @@ main{max-width:1500px;margin:0 auto;padding:28px 28px 64px}
 .btn[disabled],.btn:disabled{opacity:.5;cursor:not-allowed;box-shadow:none}
 .btn:active:not(:disabled){box-shadow:none}
 
-/* Row actions: quiet until hovered, so a table of twenty rows is not a wall of buttons. */
-.actions{display:flex;justify-content:flex-end;gap:2px;white-space:nowrap}
-.actions .btn-secondary,.actions .btn-danger{background:transparent;border-color:transparent;box-shadow:none;color:var(--text-2)}
-.actions .btn-secondary:hover{background:var(--sunken);border-color:transparent;color:var(--ink)}
-.actions .btn-danger{color:var(--muted)}
-.actions .btn-danger:hover{background:var(--red-bg);color:var(--red)}
+.actions{display:flex;justify-content:flex-end;white-space:nowrap}
 
 /* --- Metrics ------------------------------------------------------------ */
 .metric-strip{display:grid;grid-template-columns:repeat(4,1fr);margin-bottom:16px;background:var(--paper);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow)}
@@ -192,10 +187,6 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
 .count-badge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:18px;padding:0 6px;border-radius:999px;background:var(--sunken);border:1px solid var(--line-dark);color:var(--text-2);font:500 var(--fs-xs) var(--sans);margin-right:8px;font-variant-numeric:tabular-nums}
 .group-toggle .meta-line{font-size:var(--fs-sm)}
 .banner-actions{display:inline-flex;float:right;gap:2px;margin-left:14px;vertical-align:middle}
-.banner-actions .btn-secondary,.banner-actions .btn-danger{min-height:24px;background:transparent;border-color:transparent;box-shadow:none;color:var(--text-2)}
-.banner-actions .btn-secondary:hover{background:var(--paper);border-color:var(--line)}
-.banner-actions .btn-danger{color:var(--muted)}
-.banner-actions .btn-danger:hover{background:var(--red-bg);color:var(--red)}
 .group-row-hidden{display:none}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;transition-duration:.001ms!important;scroll-behavior:auto!important}}
 .capabilities-dialog{width:min(760px,calc(100vw - 30px))}.capabilities-dialog>section{display:flex;flex-direction:column}.capabilities-content{padding:22px}.capability-effective{padding:16px;margin-bottom:20px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg)}.capability-effective .section-label,.capability-targets>.section-label{margin-bottom:11px}.capability-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.capability-grid>div{padding:12px 14px;background:white;border:1px solid var(--line)}.capability-grid small,.capability-values small{display:block;color:var(--muted);font:500 var(--fs-sm) var(--sans)}.capability-grid strong{display:block;margin-top:4px;color:var(--ink);font:600 25px var(--sans)}.capability-targets{display:grid;gap:8px}.capability-target{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:12px 14px;border:1px solid var(--line);background:var(--paper)}.capability-target strong{display:block;color:var(--ink);font-size:13px}.capability-target .meta-line{display:block;margin-top:3px}.capability-values{display:flex;gap:18px;text-align:right;flex:none}.capability-values b{display:block;color:var(--ink);font:500 12px var(--mono);margin-top:3px}.capability-flags{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px}.capability-flag{font:500 11px var(--mono);padding:2px 7px;border:1px solid var(--line);border-radius:4px;background:white;color:var(--ink)}.capabilities-dialog footer{flex:none}
@@ -225,7 +216,7 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
 .tok-loading{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;background:var(--blue-pale)}
 .tok-loading-spin{width:10px;height:10px;border-radius:50%;border:2px solid rgba(37,113,176,.25);border-top-color:var(--blue);animation:status-roundel-spin 1.05s linear infinite}
 @media (prefers-reduced-motion:reduce){.tok-loading-spin{animation:none}}
-.clients-table{min-width:min(960px, 100%)}.client-route-picker{min-width:0}.client-route-picker input[type="text"]{font:500 var(--fs-sm) var(--mono)}.combobox-list li[aria-disabled="true"]{color:#9aa9b5;cursor:not-allowed;background:#f5f7f8}.primary-cell .secret-fingerprint{display:block;margin-top:6px}.badge-info{background:#e8f2f7;color:#1f627f}
+.clients-table{min-width:min(960px, 100%)}.client-route-picker{min-width:0}.combobox-list li[aria-disabled="true"]{color:#9aa9b5;cursor:not-allowed;background:#f5f7f8}.primary-cell .secret-fingerprint{display:block;margin-top:6px}.badge-info{background:#e8f2f7;color:#1f627f}
 
 /* Client model access: compact status-first table and one routing dialog. */
 .clients-table{max-width:100%}
@@ -861,7 +852,7 @@ input.switch:checked{background:var(--blue)}
 .route-button:hover,.route-button:focus-visible,.client-route-button:hover,.client-route-button:focus-visible,.client-permission-button:hover,.client-permission-button:focus-visible{border-color:var(--blue);background:var(--paper);box-shadow:0 0 0 3px rgba(37,113,176,.12);outline:0}
 .route-button span,.client-route-button span,.client-permission-button span{flex:none;padding:0 6px;border-radius:var(--r-sm);background:var(--sunken);color:var(--text-2);font:500 var(--fs-xs)/1.7 var(--sans)}
 .route-button strong,.client-permission-button strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 var(--fs) var(--sans)}
-.client-route-button strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:500 var(--fs-sm) var(--mono)}
+.client-route-button strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .route-button i,.client-route-button i,.client-permission-button i{flex:none;width:16px;height:16px;background:var(--muted);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 4.5 3.5 3.5-3.5 3.5'/%3E%3C/svg%3E") center/16px no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6.5 4.5 3.5 3.5-3.5 3.5'/%3E%3C/svg%3E") center/16px no-repeat}
 .route-button:hover i,.client-route-button:hover i,.client-permission-button:hover i{background:var(--blue)}
 .route-button-error{border-color:var(--red-line);background:var(--red-bg)}
@@ -947,3 +938,15 @@ input.switch:checked{background:var(--blue)}
 #virtual-empty{border:0;box-shadow:none}
 .empty-state code{padding:1px 5px;border-radius:var(--r-sm);background:var(--sunken);font-size:.92em}
 #view-providers.is-empty #provider-metrics,#view-providers.is-empty [data-filter-bar="providers"]{display:none}
+
+/* --- Row actions, route font, clickable rows (review tweaks) --------------- */
+/* Row actions read as real buttons: bordered, white fill, red text for delete. */
+.actions .btn-secondary,.actions .btn-danger,.banner-actions .btn-secondary,.banner-actions .btn-danger{background:var(--paper);border-color:var(--line-input);box-shadow:var(--shadow-sm);color:var(--ink)}
+.actions .btn-secondary:hover,.banner-actions .btn-secondary:hover{background:var(--hover);border-color:#aebbc8;color:var(--ink)}
+.actions .btn-danger,.banner-actions .btn-danger{border-color:var(--red-line);color:var(--red)}
+.actions .btn-danger:hover,.banner-actions .btn-danger:hover{background:var(--red-bg);border-color:var(--red);color:var(--red)}
+.actions,.banner-actions{gap:6px}
+/* Single-client route picker uses the same face as the catalogue control. */
+.client-route-picker input[type="text"],.client-route-button strong{font:500 var(--fs) var(--sans)}
+/* Virtual-model rows are clickable as a whole (opens settings). */
+.rows-clickable tr[data-virtual-id]{cursor:pointer}
