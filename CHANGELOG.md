@@ -28,6 +28,13 @@ behavior may still change before a stable `1.0`.
 
 ### Changed
 
+- **Quieter usage cells.** Every token cell (Clients, Providers → Models,
+  Virtual models, mobile model cards and Activity history) now shows the cache
+  share and cost as bare figures — `484.85 Mtok` over `97%  $1.02` — instead of
+  repeating "cached" and "est." on every row. The meaning moved into each
+  figure's tooltip, with an assistive-text word retained, and the unit now sits
+  tight against its number instead of being pushed away by the wider lower row.
+  Provider cards drop the same "est." suffix.
 - **Activity graph readability.** Increase lane headings and node labels to
   17px, secondary labels to 14px, and adjust text bounds and row spacing to
   keep graph lines clear of the larger labels. Inline Fallback buttons match
