@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -324,6 +325,34 @@ func TestPruneRequestLogsClampsRetentionToPlan(t *testing.T) {
 	}
 	if configured != 30 {
 		t.Fatalf("stored retention_days = %d, want 30 (unchanged)", configured)
+	}
+}
+
+// TestPruneRequestLogsDeletesAcrossBatches verifies the batched prune keeps
+// looping until every expired row is gone (more than one batch) and leaves
+// recent rows alone.
+func TestPruneRequestLogsDeletesAcrossBatches(t *testing.T) {
+	t.Parallel()
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	ctx := context.Background()
+	st := store.New(db.SQL, store.WithActivityDB(db.Activity))
+	if err := st.For(database.LocalAccountID).CreateClientKey(ctx, planClientInput("ret-key")); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-400 * 24 * time.Hour).Format(time.RFC3339Nano)
+	for i := 0; i < 1250; i++ {
+		insertLogAt(t, db, fmt.Sprintf("old-%d", i), old)
+	}
+	insertLogAt(t, db, "recent", time.Now().UTC().Format(time.RFC3339Nano))
+	if err := st.PruneRequestLogs(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got := countLogs(t, db); got != 1 {
+		t.Fatalf("after batched prune = %d rows, want 1", got)
 	}
 }
 
