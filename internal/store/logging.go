@@ -237,17 +237,36 @@ type retentionKey struct {
 	days int
 }
 
+// pruneBatchSize bounds how many request_logs rows one prune transaction
+// deletes. Each delete cascades into request_attempts, and SQLite allows a
+// single writer, so one unbounded DELETE after a long downtime would hold the
+// Activity write lock past busy_timeout and make the async log writer drop
+// batches. Small transactions let those writes interleave.
+const (
+	pruneBatchSize  = 500
+	pruneBatchPause = 20 * time.Millisecond
+)
+
 func (s *Store) pruneAccountRequestLogs(ctx context.Context, account string, keys []retentionKey, now time.Time) error {
-	tx, err := s.activity.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
 	for _, key := range keys {
 		cutoff := now.UTC().Add(-time.Duration(key.days) * 24 * time.Hour).Format(time.RFC3339Nano)
-		if _, err := tx.ExecContext(ctx, `DELETE FROM request_logs WHERE account_id=? AND client_key_id=? AND created_at < ?`, account, key.id, cutoff); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("prune request logs (retention %d): %w", key.days, err)
+		for {
+			res, err := s.activity.ExecContext(ctx, `DELETE FROM request_logs WHERE id IN (
+				SELECT id FROM request_logs WHERE account_id=? AND client_key_id=? AND created_at < ? LIMIT ?)`,
+				account, key.id, cutoff, pruneBatchSize)
+			if err != nil {
+				return fmt.Errorf("prune request logs (retention %d): %w", key.days, err)
+			}
+			n, err := res.RowsAffected()
+			if err != nil || n < pruneBatchSize {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(pruneBatchPause):
+			}
 		}
 	}
-	return tx.Commit()
+	return nil
 }
