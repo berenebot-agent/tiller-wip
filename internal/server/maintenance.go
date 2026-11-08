@@ -121,6 +121,7 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 		dir = filepath.Join(s.config.DataDir, "backups")
 	}
 	run := func(compact bool) {
+		started := time.Now()
 		path, err := s.db.Backup(ctx, dir)
 		if err != nil {
 			s.warnBackup("scheduled backup failed", err)
@@ -131,8 +132,11 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 			if rmErr := os.Remove(path); rmErr != nil {
 				s.warnBackup("could not remove failed backup snapshot", rmErr)
 			}
-		} else if _, err := database.PruneBackups(dir, s.config.BackupRetention, time.Now()); err != nil {
-			s.warnBackup("scheduled backup prune failed", err)
+		} else {
+			if _, err := database.PruneBackups(dir, s.config.BackupRetention, time.Now()); err != nil {
+				s.warnBackup("scheduled backup prune failed", err)
+			}
+			s.logBackupSnapshot(started, path)
 		}
 		// VACUUM holds the write lock for its whole run, which would stall
 		// plan-cap bookings and Activity writes. Never compact on the boot pass:
@@ -173,6 +177,23 @@ func (s *Server) vacuumOne(ctx context.Context, db string, fn func(context.Conte
 		return
 	}
 	s.logger.Info("database vacuum completed", "db", db, "duration_ms", time.Since(start).Milliseconds())
+}
+
+// logBackupSnapshot records a verified snapshot's cost at Info, mirroring
+// vacuumOne's shape. Successful backups were otherwise silent — only failures
+// were logged — so how long the pass took and how large the snapshot was could
+// only be inferred from file timestamps. duration_ms covers the snapshot, its
+// verification and the retention prune; size_bytes is the snapshot that is now
+// a restore point.
+func (s *Server) logBackupSnapshot(started time.Time, path string) {
+	if s.logger == nil {
+		return
+	}
+	attrs := []any{"duration_ms", time.Since(started).Milliseconds()}
+	if info, err := os.Stat(path); err == nil {
+		attrs = append(attrs, "size_bytes", info.Size())
+	}
+	s.logger.Info("database backup completed", append([]any{"db", "core"}, attrs...)...)
 }
 
 // warnBackup logs a backup failure by error type only; error strings from the
