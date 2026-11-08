@@ -136,6 +136,11 @@ func servicePragmas() url.Values {
 	q.Add("_pragma", "journal_mode(WAL)")
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "temp_store(MEMORY)")
+	// A database created from now on is born in incremental auto-vacuum mode:
+	// freed pages become reclaimable by the maintenance pass in bounded chunks.
+	// On an existing file this is a no-op until the one-off conversion rewrite
+	// in vacuum() applies it.
+	q.Add("_pragma", "auto_vacuum(INCREMENTAL)")
 	return q
 }
 

@@ -138,9 +138,11 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 			}
 			s.logBackupSnapshot(started, path)
 		}
-		// VACUUM holds the write lock for its whole run, which would stall
-		// plan-cap bookings and Activity writes. Never compact on the boot pass:
-		// a restart should not start serving traffic into a multi-second lock.
+		// A pass can take the write lock for a database-sized rewrite exactly
+		// once, when a database created before incremental auto-vacuum is
+		// converted. Never run that on the boot pass: a restart should not start
+		// serving traffic into it. Steady-state passes free a bounded page budget
+		// and hold the lock for a fraction of a second.
 		if !compact {
 			return
 		}
@@ -162,21 +164,23 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 	}
 }
 
-// vacuumOne runs one database's compaction, logging start and completion at
+// vacuumOne runs one database's reclamation, logging start and completion at
 // Info and failures at Warn with the error message (a filesystem/SQLite error,
-// never request content). A failed vacuum is non-fatal: the database
-// stays usable, it is just not compacted this pass.
-func (s *Server) vacuumOne(ctx context.Context, db string, fn func(context.Context) error) {
+// never request content). A failed pass is non-fatal: the database stays
+// usable, it is just not compacted this pass.
+func (s *Server) vacuumOne(ctx context.Context, db string, fn func(context.Context) (database.VacuumResult, error)) {
 	if s.logger == nil {
 		return
 	}
 	s.logger.Info("database vacuum started", "db", db)
 	start := time.Now()
-	if err := fn(ctx); err != nil {
+	result, err := fn(ctx)
+	if err != nil {
 		s.logger.Warn("database vacuum failed", "db", db, "error_class", fmt.Sprintf("%T", err), "error", err.Error())
 		return
 	}
-	s.logger.Info("database vacuum completed", "db", db, "duration_ms", time.Since(start).Milliseconds())
+	s.logger.Info("database vacuum completed", "db", db, "duration_ms", time.Since(start).Milliseconds(),
+		"converted", result.Converted, "freed_pages", result.FreedPages)
 }
 
 // logBackupSnapshot records a verified snapshot's cost at Info, mirroring

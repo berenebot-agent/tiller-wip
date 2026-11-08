@@ -6,25 +6,54 @@ import (
 	"fmt"
 )
 
-// VacuumCore compacts the central database in place, returning pages freed by
-// deletes to the filesystem. SQLite never shrinks a database file on its own
-// (auto_vacuum is off), so without a VACUUM the core file keeps its high-water
-// mark after the Activity split and routine session/audit cleanup.
+// IncrementalVacuumPages bounds how many freelist pages a single maintenance
+// pass returns to the filesystem. Reclaiming space in fixed-size chunks keeps
+// the write lock to a bounded slice instead of the whole-file rewrite a
+// `VACUUM` performs: a full rewrite of the 1.1 GB Activity database measured
+// ~21 s on this deployment, while one 4096-page (16 MiB) chunk costs a fraction
+// of a second even where fsync latency is ~300 ms.
+const IncrementalVacuumPages = 4096
+
+// autoVacuumIncremental is SQLite's PRAGMA auto_vacuum value for incremental
+// mode: freed pages stay on the freelist until `PRAGMA incremental_vacuum` asks
+// for them back, so reclamation is driven by the maintenance pass rather than
+// by whichever COMMIT happens to free a page.
+const autoVacuumIncremental = 2
+
+// VacuumResult reports what one maintenance pass did, so the caller can log the
+// work performed and not just how long it took.
+type VacuumResult struct {
+	// Converted is true when the database still ran with auto_vacuum off and
+	// this pass performed the one-off full rewrite that switches it on. That
+	// rewrite is the only database-sized lock this path can take, and it
+	// happens at most once per database.
+	Converted bool
+	// FreedPages is how many freelist pages the pass returned to the
+	// filesystem, capped by the per-pass budget.
+	FreedPages int64
+}
+
+// VacuumCore reclaims free pages from the central database, returning the space
+// deletes have freed to the filesystem.
 //
-// VACUUM cannot run inside a transaction; it rewrites the file into a temporary
-// copy, so it needs free disk roughly equal to the database size and takes an
-// exclusive lock on the database. maintenanceMu serializes it against a
-// concurrent backup snapshot, which also rewrites the core file.
-func (d *DB) VacuumCore(ctx context.Context) error {
+// SQLite only shrinks a file by itself in incremental auto-vacuum mode, so the
+// first pass over a database created before that mode existed converts it with
+// a single full rewrite. Every pass after that frees a bounded number of pages,
+// which is what makes the step safe to run against a live instance: the lock is
+// sized by the budget, not by the file.
+//
+// maintenanceMu serializes it against a concurrent backup snapshot, which also
+// rewrites the core file.
+func (d *DB) VacuumCore(ctx context.Context) (VacuumResult, error) {
 	d.maintenanceMu.Lock()
 	defer d.maintenanceMu.Unlock()
-	return vacuum(ctx, d.SQL)
+	return vacuum(ctx, d.SQL, IncrementalVacuumPages)
 }
 
 // checkpointWAL folds the write-ahead log back into the main database and
-// truncates it. Under WAL a VACUUM must reconcile the WAL before rewriting the
-// file, so an unchecked WAL (which can grow larger than the database itself)
-// turns compaction into a costly full-log replay. TRUNCATE also returns the WAL
+// truncates it. Under WAL a rewrite must reconcile the WAL before it runs, so
+// an unchecked WAL (which can grow larger than the database itself) turns
+// compaction into a costly full-log replay. TRUNCATE also returns the WAL
 // file to zero bytes so the space is reclaimed on disk. It is best-effort: a
 // busy checkpoint (an active reader/writer) is not a vacuum failure, so the
 // error is returned only for the caller to decide whether to surface it.
@@ -42,56 +71,108 @@ func checkpointWAL(ctx context.Context, db *sql.DB) error {
 	return rows.Err()
 }
 
-// VacuumActivity compacts the Activity database. It is a no-op when Activity is
-// unavailable, matching its best-effort telemetry posture (see OpenActivity).
-// It shares maintenanceMu so a core backup and an Activity compaction never
-// rewrite files at the same time.
-func (d *DB) VacuumActivity(ctx context.Context) error {
+// VacuumActivity reclaims free pages from the Activity database. It is a no-op
+// when Activity is unavailable, matching its best-effort telemetry posture (see
+// OpenActivity). It shares maintenanceMu so a core backup and an Activity
+// reclamation never rewrite files at the same time.
+func (d *DB) VacuumActivity(ctx context.Context) (VacuumResult, error) {
 	if d.Activity == nil {
-		return nil
+		return VacuumResult{}, nil
 	}
 	d.maintenanceMu.Lock()
 	defer d.maintenanceMu.Unlock()
-	return vacuum(ctx, d.Activity)
+	return vacuum(ctx, d.Activity, IncrementalVacuumPages)
 }
 
-// Compaction only runs when enough of the file is free pages to justify
-// holding the exclusive write lock for the whole rewrite.
-const (
-	vacuumMinFreePages = 64
-	vacuumMinFreeRatio = 0.25
-)
+// vacuum reclaims space from one database within a page budget.
+//
+// The WAL is checkpointed first because that is cheap, never holds the
+// exclusive lock, and keeps the log from becoming the largest object in the
+// directory. A database still in `auto_vacuum=NONE` is converted with a single
+// full rewrite — the one unbounded step — and every later pass frees at most
+// budgetPages pages, so the caller's write lock is bounded by the budget rather
+// than by the file size.
+func vacuum(ctx context.Context, db *sql.DB, budgetPages int) (VacuumResult, error) {
+	var result VacuumResult
+	_ = checkpointWAL(ctx, db)
 
-// worthVacuuming reports whether the freelist is large enough to compact.
-func worthVacuuming(ctx context.Context, db *sql.DB) (bool, error) {
-	var free, total int64
-	if err := db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
-		return false, fmt.Errorf("sqlite freelist_count: %w", err)
+	// Pin one connection: auto_vacuum is a connection-level pragma whose change
+	// only takes effect once the file is rewritten, so the pragma and the
+	// VACUUM that applies it must run together.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return result, fmt.Errorf("sqlite vacuum connection: %w", err)
 	}
-	if err := db.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&total); err != nil {
-		return false, fmt.Errorf("sqlite page_count: %w", err)
-	}
-	return free >= vacuumMinFreePages && total > 0 && float64(free)/float64(total) >= vacuumMinFreeRatio, nil
-}
+	defer conn.Close()
 
-func vacuum(ctx context.Context, db *sql.DB) error {
-	// Checkpointing is cheap and never holds the exclusive lock, so it runs
-	// even when the rewrite is skipped.
-	if ok, err := worthVacuuming(ctx, db); err != nil || !ok {
+	mode, err := autoVacuumMode(ctx, conn)
+	if err != nil {
+		return result, err
+	}
+	if mode != autoVacuumIncremental {
+		if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
+			return result, fmt.Errorf("sqlite auto_vacuum: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx, `VACUUM`); err != nil {
+			return result, fmt.Errorf("sqlite vacuum: %w", err)
+		}
+		result.Converted = true
+		// The conversion rewrites the file through the WAL; fold it back so the
+		// reclaimed space is real on disk.
 		_ = checkpointWAL(ctx, db)
-		return err
+		return result, nil
 	}
-	// Fold and truncate the WAL before compaction so the VACUUM rewrite does
-	// not have to reconcile a large write-ahead log (which can grow past the
-	// database itself). Checkpoint failures are ignored: the VACUUM is still
-	// correct against whatever WAL state exists, just slower.
-	_ = checkpointWAL(ctx, db)
-	if _, err := db.ExecContext(ctx, `VACUUM`); err != nil {
-		return fmt.Errorf("sqlite vacuum: %w", err)
+
+	before, err := freelistCount(ctx, conn)
+	if err != nil {
+		return result, err
 	}
-	// VACUUM rewrites the database through the WAL, leaving the log non-empty
-	// again. Checkpoint once more so the compaction actually reclaims the WAL
-	// space on disk rather than just moving it back into a new log.
+	if before == 0 {
+		return result, nil
+	}
+	budget := int64(budgetPages)
+	if budget <= 0 || budget > before {
+		budget = before
+	}
+	// incremental_vacuum takes no bind parameters; the value is an integer this
+	// package computes, never caller input.
+	rows, err := conn.QueryContext(ctx, fmt.Sprintf(`PRAGMA incremental_vacuum(%d)`, budget))
+	if err != nil {
+		return result, fmt.Errorf("sqlite incremental_vacuum: %w", err)
+	}
+	for rows.Next() {
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return result, fmt.Errorf("sqlite incremental_vacuum: %w", err)
+	}
+	rows.Close()
+
+	after, err := freelistCount(ctx, conn)
+	if err != nil {
+		return result, err
+	}
+	result.FreedPages = before - after
+	// Reclaimed pages move through the WAL, so truncate it once more; without
+	// this the space is free in the main file but still occupied by the log.
 	_ = checkpointWAL(ctx, db)
-	return nil
+	return result, nil
+}
+
+// autoVacuumMode reports the database's PRAGMA auto_vacuum value.
+func autoVacuumMode(ctx context.Context, conn *sql.Conn) (int, error) {
+	var mode int
+	if err := conn.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return 0, fmt.Errorf("sqlite auto_vacuum: %w", err)
+	}
+	return mode, nil
+}
+
+// freelistCount reports how many pages are on the database's freelist.
+func freelistCount(ctx context.Context, conn *sql.Conn) (int64, error) {
+	var free int64
+	if err := conn.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+		return 0, fmt.Errorf("sqlite freelist_count: %w", err)
+	}
+	return free, nil
 }
