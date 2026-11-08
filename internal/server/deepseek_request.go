@@ -24,7 +24,17 @@ import "encoding/json"
 //     Only applied when `tools` is present — that is the condition that triggers
 //     the requirement.
 //
-//  2. Toggle mapping. DeepSeek does not read OpenRouter's `reasoning.enabled`
+//  2. Role vocabulary. DeepSeek's Chat surface accepts only
+//     system/user/assistant/tool and rejects OpenAI's `developer` role with
+//     HTTP 422 ("messages[0].role: unknown variant 'developer'") before
+//     inference runs. `developer` is OpenAI's higher-precedence replacement for
+//     `system`, so the rename is semantic-preserving; an OpenAI-shaped client
+//     (the pi harness writes its system prompt there) cannot know which
+//     chat-compatible upstream is strict, and a same-protocol Chat forward is
+//     otherwise relayed verbatim. Message order and content are preserved — only
+//     the role token changes.
+//
+//  3. Toggle mapping. DeepSeek does not read OpenRouter's `reasoning.enabled`
 //     object; its OpenAI-format thinking controls are
 //     `thinking: {"type": "enabled"|"disabled"}` plus top-level
 //     `reasoning_effort`. The router's toggle mapping (applyChatReasoning) emits
@@ -76,10 +86,38 @@ func normalizeDeepSeekRequest(body []byte) ([]byte, error) {
 		changed = true
 	}
 
+	if normalizeDeepSeekRoles(request) {
+		changed = true
+	}
+
 	if !changed {
 		return body, nil
 	}
 	return json.Marshal(request)
+}
+
+// normalizeDeepSeekRoles rewrites OpenAI's `developer` role onto `system`, which
+// is the role DeepSeek accepts for the same message. It returns whether it
+// changed the request. Non-object entries and every other role are left alone,
+// so a body that never carried `developer` is returned unchanged and the caller
+// keeps the original bytes.
+func normalizeDeepSeekRoles(request map[string]any) bool {
+	messages, ok := request["messages"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if message["role"] == "developer" {
+			message["role"] = "system"
+			changed = true
+		}
+	}
+	return changed
 }
 
 // backfillDeepSeekReasoningContent fills a missing `reasoning_content` on every
