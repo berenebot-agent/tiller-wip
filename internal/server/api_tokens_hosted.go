@@ -111,13 +111,15 @@ func (s *Server) notifyManagementTokenCreated(ctx context.Context, user identity
 
 // revokeAccountManagementTokens deletes every browser-managed token for an
 // account and drops them from the verification cache. "Sign out everywhere"
-// calls it when the user opts in; password resets deliberately do not.
-func (s *Server) revokeAccountManagementTokens(ctx context.Context, accountID string) {
+// calls it when the user opts in; password resets deliberately do not. It
+// returns the database error: a failed delete leaves the tokens valid, so the
+// caller must not report them revoked. The cache is dropped either way, which
+// is harmless because an authenticating token is re-read from the database.
+func (s *Server) revokeAccountManagementTokens(ctx context.Context, accountID string) error {
 	if !s.hostedTokens() || accountID == "" {
-		return
+		return nil
 	}
-	if _, err := s.scopeFor(accountID).RevokeAllManagementTokens(ctx); err != nil && s.logger != nil {
-		s.logger.Warn("revoking management tokens failed", "error_class", "database")
-	}
+	_, err := s.scopeFor(accountID).RevokeAllManagementTokens(ctx)
 	s.tokens.InvalidateAccount(accountID)
+	return err
 }
