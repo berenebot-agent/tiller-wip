@@ -91,7 +91,7 @@ func TestManagementGuideServedInHosted(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("hosted guide = %d", resp.StatusCode)
 	}
-	for _, want := range []string{"Hosted accounts", "60 requests per minute", "rate_limited", "/api/admin/catalogue-templates", "not available to hosted tokens"} {
+	for _, want := range []string{"Hosted accounts", "Paging and limits", "must be public", "60 requests per minute", "rate_limited", "/api/admin/catalogue-templates", "not available to hosted tokens"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("hosted guide missing %q", want)
 		}
@@ -214,8 +214,12 @@ func TestManagementDiscoveryDocument(t *testing.T) {
 	if _, ok := doc["capabilities"].([]any); !ok {
 		t.Fatalf("capabilities missing or wrong type: %v", doc["capabilities"])
 	}
-	if _, ok := doc["limits"].(map[string]any); !ok {
+	limits, ok := doc["limits"].(map[string]any)
+	if !ok {
 		t.Fatalf("limits missing: %v", doc["limits"])
+	}
+	if limits["page_size_max"] != float64(200) || limits["offset_max"] != float64(10000) || limits["admin_request_body_bytes"] != float64(32<<20) {
+		t.Fatalf("limits = %v", limits)
 	}
 
 	// Accept: application/json negotiates the same document at /api.

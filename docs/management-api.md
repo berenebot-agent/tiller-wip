@@ -47,7 +47,10 @@ Hosted tokens follow the same model with extra guard rails:
   (`429 rate_limited` with `Retry-After`).
 - Suspending or deleting the account revokes tokens immediately. "Sign out
   everywhere" offers to revoke them too; a password reset leaves them in place.
-- You receive an email when a token is created.
+- Provider base URLs must be public: addresses that resolve to private or
+  internal networks are rejected, and some provider types are not offered.
+- You receive an email when a token is created, if the instance has mail
+  configured.
 
 ## 2. Authenticate
 
@@ -86,6 +89,14 @@ curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 `{id}` in a path is a resource id returned by the matching list endpoint. Field
 names above are illustrative; the dashboard's own requests are the reference for
 payloads.
+
+## Paging and limits
+
+List endpoints accept `limit` (default 50, maximum 200), `offset` (capped at
+10000) and, where supported, `search`. To read further than that, narrow with
+`search` or use the CSV export routes. Admin request bodies are limited to
+32 MiB. `/api.json` reports these as `page_size_default`, `page_size_max`,
+`offset_max` and `admin_request_body_bytes`.
 
 ## Errors
 

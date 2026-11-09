@@ -72,7 +72,8 @@ func (s *Server) discoveryLimits() map[string]any {
 	limits := map[string]any{
 		"page_size_default":               50,
 		"page_size_max":                   200,
-		"request_body_bytes":              32 << 20,
+		"admin_request_body_bytes":        32 << 20,
+		"offset_max":                      10000,
 		"activity_retention_days_default": 30,
 	}
 	if s.config.Mode == config.ModeHosted {
@@ -222,6 +223,17 @@ func renderManagementGuideMarkdown(info managementGuideInfo) string {
 	b.WriteString("map, so you can label client rows without a second request. An id missing from\n")
 	b.WriteString("that map belongs to a client key that has since been deleted (its history is\n")
 	b.WriteString("retained).\n\n")
+	b.WriteString("## Paging and limits\n\n")
+	b.WriteString("List endpoints accept `limit` (default 50, maximum 200), `offset` (capped at\n")
+	b.WriteString("10000) and, where supported, `search`. To read further than that, narrow with\n")
+	b.WriteString("`search` or use the CSV export routes. Admin request bodies are limited to\n")
+	b.WriteString("32 MiB.\n\n")
+	if info.Hosted {
+		b.WriteString("On hosted accounts, provider base URLs must be public: addresses that resolve to\n")
+		b.WriteString("private or internal networks are rejected, and some provider types are not\n")
+		b.WriteString("offered. Token-creation notices are emailed only when the instance has mail\n")
+		b.WriteString("configured.\n\n")
+	}
 	b.WriteString("## Errors\n\n")
 	b.WriteString("Failures use the envelope `{\"error\":{\"code\":\"...\",\"message\":\"...\"}}`:\n\n")
 	b.WriteString("- `401 invalid_api_token` — missing, unknown, disabled, or malformed token.\n")
@@ -291,6 +303,11 @@ func renderManagementGuideHTML(info managementGuideInfo) string {
 
 	b.WriteString("<h2>Reading usage</h2>\n")
 	b.WriteString("<p><code>GET /api/admin/usage</code> groups token, cache, and cost figures by client key id, virtual model, and real model (<code>provider/model</code>). Virtual- and real-model keys are already display names; client-key aggregates are keyed by the opaque <code>client_key_id</code>. The same response carries <code>client_key_names</code>, a <code>{id: name}</code> map, so you can label client rows without a second request. An id missing from that map belongs to a client key that has since been deleted (its history is retained).</p>\n")
+	b.WriteString("<h2>Paging and limits</h2>\n")
+	b.WriteString("<p>List endpoints accept <code>limit</code> (default 50, maximum 200), <code>offset</code> (capped at 10000) and, where supported, <code>search</code>. To read further than that, narrow with <code>search</code> or use the CSV export routes. Admin request bodies are limited to 32 MiB.</p>\n")
+	if info.Hosted {
+		b.WriteString("<p>On hosted accounts, provider base URLs must be public: addresses that resolve to private or internal networks are rejected, and some provider types are not offered. Token-creation notices are emailed only when the instance has mail configured.</p>\n")
+	}
 	b.WriteString("<h2>Errors</h2>\n")
 	b.WriteString("<p>Failures use the envelope <code>{\"error\":{\"code\":\"...\",\"message\":\"...\"}}</code>:</p>\n")
 	b.WriteString("<ul>\n<li><code>401 invalid_api_token</code> — missing, unknown, disabled, or malformed token.</li>\n<li><code>401 token_expired</code> — the token's expiry has passed.</li>\n<li><code>403 insufficient_scope</code> — the token's ceiling is below the route's tier.</li>\n<li><code>429 authentication_rate_limited</code> — too many failed attempts; retry after <code>Retry-After</code> seconds.</li>\n")

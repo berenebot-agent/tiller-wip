@@ -13,7 +13,9 @@ behavior may still change before a stable `1.0`.
   are generated from the routes the server registers, so they cannot drift —
   catalogue-template routes, previously missing from the guide, are now listed.
   Hosted instances serve them too, with the hosted limits. New
-  `docs/management-api.md` is the GitHub-facing guide.
+  `docs/management-api.md` is the GitHub-facing guide. The discovery field
+  `request_body_bytes` is renamed `admin_request_body_bytes` (it only describes
+  admin JSON requests), and `offset_max` is added.
 - **Management API tokens in hosted mode.** Hosted customers can now create
   `mt-tr-` tokens under Settings → Management API. Hosted tokens are stricter
   than local ones: creating, rotating, widening or re-enabling needs
