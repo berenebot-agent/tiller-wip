@@ -14,7 +14,7 @@ test('admin login, responsive navigation, one-time secret, and system view', asy
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
   await expect(page.locator('.brand-mark')).toBeVisible();
 
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await page.getByLabel('Client name').fill('Container browser client');
   await page.getByLabel('Description').fill('Disposable Playwright workflow');
   await page.locator('select[name="type"]').selectOption('catalogue');
@@ -80,13 +80,13 @@ test('insecure origin (plain HTTP): one-time-secret hides the Copy button and se
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Tiller Router' })).toBeVisible();
-  await page.getByLabel('Tiller username').fill(ADMIN_USER);
+  await page.locator('#login-form').getByLabel('Tiller username').fill(ADMIN_USER);
   // Scope to the login form: the reset form's "New password" label also
   // substring-matches getByLabel('Password') in strict mode.
   await page.locator('#login-form').getByLabel('Password').fill(ADMIN_PASS);
   await page.getByRole('button', { name: 'Sign in' }).click();
   await expect(page.getByRole('heading', { name: 'Clients', exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await page.getByLabel('Client name').fill('Insecure copy client');
   await page.getByLabel('Description').fill('Confirms the Copy button is hidden on plain HTTP');
   await page.locator('select[name="type"]').selectOption('catalogue');
@@ -311,7 +311,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   expect(virtualResponse.status()).toBe(201);
 
   await page.getByRole('link', { name: 'Clients' }).click();
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await page.getByLabel('Client name').fill(clientName);
   await page.locator('#form-dialog select[name="type"]').selectOption('single');
   await expect(page.locator('#form-dialog').getByLabel('Client-facing model name')).toHaveValue('main');
@@ -874,10 +874,9 @@ test('activity loads clear a previously shown error on success', async ({ page }
   await expect(page.locator('#activity-dialog')).toBeHidden();
 
   // 2. Global activity section: same sentinel-then-success pattern must clear the error.
-  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
-  await page.locator('[data-settings-tab="data"]').click();
-  await expect(page.locator('#view-settings')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
+  await page.locator('#nav-links').getByRole('link', { name: 'Activity' }).click();
+  await page.locator('[data-activity-tab="history"]').click();
+  await expect(page.locator('#activity-panel-history')).toBeVisible();
 
   await page.evaluate(() => { document.querySelector('#global-activity-error').textContent = 'sentinel-error'; });
   await page.locator('#global-activity-search').fill(clientName);
@@ -937,7 +936,7 @@ test('client key group: listing badge, create/edit dialog, and filter', async ({
   await expect(page.locator('#form-dialog')).toBeHidden();
 
   // Create dialog defaults group to "default".
-  await page.getByRole('button', { name: '+ Add client' }).click();
+  await page.locator('#add-client').click();
   await expect(page.locator('#form-dialog')).toBeVisible();
   await expect(page.locator('#form-dialog input[name="group"]')).toHaveValue('default');
 });
@@ -1015,10 +1014,9 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
   // The same affordance must exist in the Global activity table.
   await page.getByRole('button', { name: 'Done' }).click();
   await expect(page.locator('#activity-dialog')).toBeHidden();
-  await page.locator('#nav-links').getByRole('link', { name: 'Settings' }).click();
-  await page.locator('[data-settings-tab="data"]').click();
-  await expect(page.locator('#view-settings')).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Global activity' })).toBeVisible();
+  await page.locator('#nav-links').getByRole('link', { name: 'Activity' }).click();
+  await page.locator('[data-activity-tab="history"]').click();
+  await expect(page.locator('#activity-panel-history')).toBeVisible();
   const globalCell = page.locator('#global-activity-body tr .activity-request-id').first();
   await expect(globalCell).toBeVisible();
   const globalId = await globalCell.getAttribute('data-copy-request-id');
@@ -1247,7 +1245,10 @@ test('virtual-model target combobox: non-matching text still blocks submission',
   await expect(page.locator('#form-dialog')).toBeVisible();
 
   // Cancel and clean up the group so we leave the suite tidy.
-  await page.getByRole('button', { name: 'Cancel' }).click();
+  // Scope to the dialog: virtual-group rows are role=button after the UI
+  // restructure, so a page-wide name match can also hit a group named
+  // "cancel-route-vg" left behind by the inline-picker test.
+  await page.locator('#form-dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
   const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-nomatch-vg')).json();
   const group = groupList.data.find(g => g.name === 'vm-nomatch-vg');
   if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });

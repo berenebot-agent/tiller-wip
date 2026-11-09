@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/store"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -651,5 +653,56 @@ func TestAdminAPIKeyEnvironmentManagedLifecycle(t *testing.T) {
 		if retainedStatus != 200 {
 			t.Fatal("configuration change revoked a browser-managed token")
 		}
+	}
+}
+
+// TestManagementTokenReservedNameRejected proves an ordinary token can never
+// take the environment-managed token's name (any case, any surrounding
+// whitespace) on create or rename, whether or not the environment key is set.
+func TestManagementTokenReservedNameRejected(t *testing.T) {
+	t.Parallel()
+	api, _, _ := newManagementHarness(t)
+	scopes := map[string]int{"providers": auth.ScopeRead}
+	for _, name := range []string{"boot-admin", " BOOT-ADMIN ", "Boot-Admin"} {
+		status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": name, "scopes": scopes})
+		if status != 400 || errorCode(payload) != "reserved_name" {
+			t.Fatalf("create %q = %d %v", name, status, payload)
+		}
+	}
+	id, _ := createManagementToken(t, api, "ordinary", scopes, "")
+	status, payload, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"name": " boot-admin"})
+	if status != 400 || errorCode(payload) != "reserved_name" {
+		t.Fatalf("rename to reserved name = %d %v", status, payload)
+	}
+	status, payload, _ = api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"name": "boot-admin-2"})
+	if status != 200 {
+		t.Fatalf("rename to a non-reserved name = %d %v", status, payload)
+	}
+}
+
+// TestAdminAPIKeySeedFailsLoudOnExistingReservedName proves a token created
+// before the name was reserved makes the boot seed fail with the actionable
+// error rather than an opaque SQLite uniqueness failure, and that clearing the
+// collision lets the seed succeed.
+func TestAdminAPIKeySeedFailsLoudOnExistingReservedName(t *testing.T) {
+	t.Parallel()
+	_, _, app := newManagementHarness(t)
+	scope := app.scopeFor(database.LocalAccountID)
+	ctx := context.Background()
+	if err := scope.CreateManagementToken(ctx, store.CreateManagementTokenInput{ID: "legacy-token", Name: "boot-admin", Selector: "legacysel", Hash: "x", Fingerprint: "fp", Scopes: "{}"}); err != nil {
+		t.Fatal(err)
+	}
+	seed := "mt-tr-B9HQyF1IQyLu.NJh92J65MNar2AZWWJU6rzFB8eHTYAabB6SYEHF7rLA"
+	if err := app.seedManagementToken(seed); !errors.Is(err, errBootManagementTokenNameTaken) {
+		t.Fatalf("seed with colliding name err = %v, want errBootManagementTokenNameTaken", err)
+	}
+	if _, err := scope.DeleteManagementToken(ctx, "legacy-token"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.seedManagementToken(seed); err != nil {
+		t.Fatalf("seed after clearing the collision: %v", err)
+	}
+	if err := app.seedManagementToken(seed); err != nil {
+		t.Fatalf("re-seed over the boot token itself: %v", err)
 	}
 }

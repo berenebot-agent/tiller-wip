@@ -157,7 +157,13 @@ func build(cfg Config) (Mailer, error) {
 	}
 }
 
-// Validate enforces the hosted mail transport policy.
+// Validate checks that a mail configuration is complete and well formed:
+// provider, from address, credentials, SMTP host/port/mode. It does not apply
+// the hosted outbound address policy (internal/hostednet): the mail transports
+// dial the configured destination directly, and only the environment-only
+// platform operator can set them, so an internal relay (for example an SMTP
+// sidecar on the Docker network) and HTTP_PROXY egress keep working. See
+// SECURITY.md, "Platform mail transport".
 func Validate(cfg Config) error {
 	if cfg.Provider == "" {
 		return nil

@@ -626,8 +626,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	// Bound the body phase before it can hold a connection indefinitely, and
 	// admit it through the process-wide gate so a slow-upload flood cannot park
 	// an unbounded number of buffers before plan concurrency applies. The gate
-	// and maxInferenceBodyBytes together bound the aggregate (TR-002).
-	if !s.bodyReads.acquire() {
+	// and maxInferenceBodyBytes together bound the aggregate (TR-002); the
+	// per-account share keeps one tenant from holding every slot.
+	if !s.bodyReads.acquire(identity.AccountID) {
 		inferenceError(w, http.StatusServiceUnavailable, "api_error", "body_read_busy", "The router is busy reading request bodies. Retry shortly.", incoming == providers.ProtocolMessages)
 		return
 	}
@@ -639,7 +640,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	})
 	// The gate bounds requests mid-body only. Hold it past the read and a few
 	// long streams exhaust it for every tenant.
-	s.bodyReads.release()
+	s.bodyReads.release(identity.AccountID)
 	if readErr != nil {
 		if isTimeoutError(readErr) {
 			inferenceError(w, 408, "invalid_request_error", "request_timeout", "The request body was not received in time.", incoming == providers.ProtocolMessages)

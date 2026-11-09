@@ -184,6 +184,81 @@ func assistantValues(body map[string]any, key string) []any {
 	return values
 }
 
+func TestNormalizeDeepSeekRequestMapsDeveloperRoleToSystem(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		// wantRoles is the expected role sequence; wantSame asserts the body
+		// must come back byte-identical (no gratuitous rewrite).
+		wantRoles []any
+		wantSame  bool
+	}{
+		{
+			name:      "developer role becomes system, order preserved",
+			body:      `{"model":"deepseek-flash","messages":[{"role":"developer","content":"rules"},{"role":"user","content":"hello"},{"role":"assistant","content":"hi"}]}`,
+			wantRoles: []any{"system", "user", "assistant"},
+		},
+		{
+			name:      "every developer role is renamed",
+			body:      `{"model":"deepseek-flash","messages":[{"role":"developer","content":"a"},{"role":"user","content":"b"},{"role":"developer","content":"c"}]}`,
+			wantRoles: []any{"system", "user", "system"},
+		},
+		{
+			name:      "accepted roles untouched",
+			body:      `{"model":"deepseek-flash","messages":[{"role":"system","content":"a"},{"role":"tool","content":"b"}]}`,
+			wantRoles: []any{"system", "tool"},
+			wantSame:  true,
+		},
+		{
+			name:      "no messages is a no-op",
+			body:      `{"model":"deepseek-flash"}`,
+			wantRoles: []any{},
+			wantSame:  true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := normalizeDeepSeekRequest([]byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantSame && string(result) != tc.body {
+				t.Fatalf("body rewritten when it should be untouched:\n got %s\nwant %s", result, tc.body)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(result, &body); err != nil {
+				t.Fatal(err)
+			}
+			roles := messageValues(body, "role")
+			if !reflect.DeepEqual(roles, tc.wantRoles) {
+				t.Fatalf("roles = %v, want %v in %s", roles, tc.wantRoles, result)
+			}
+			// The rename must never touch message content or its position.
+			var before map[string]any
+			if err := json.Unmarshal([]byte(tc.body), &before); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := messageValues(body, "content"), messageValues(before, "content"); !reflect.DeepEqual(got, want) {
+				t.Fatalf("message content changed: got %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// messageValues returns the given key of every object-shaped message, in order.
+func messageValues(body map[string]any, key string) []any {
+	messages, _ := body["messages"].([]any)
+	values := []any{}
+	for _, raw := range messages {
+		message, _ := raw.(map[string]any)
+		if value, exists := message[key]; exists {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
 func TestIsReasoningRoundtripError(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

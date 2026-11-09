@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,44 +21,150 @@ func TestBodyReadGateBoundsConcurrency(t *testing.T) {
 	g := &bodyReadGate{}
 	held := 0
 	for i := 0; i < maxConcurrentBodyReads; i++ {
-		if !g.acquire() {
+		if !g.acquire("") {
 			t.Fatalf("gate refused at %d, before the cap", i)
 		}
 		held++
 	}
-	if g.acquire() {
+	if g.acquire("") {
 		t.Fatal("gate admitted beyond the cap")
 	}
 	for i := 0; i < held; i++ {
-		g.release()
+		g.release("")
 	}
-	if g.active.Load() != 0 {
-		t.Fatalf("active = %d after releasing all, want 0", g.active.Load())
+	if n := g.inUse(); n != 0 {
+		t.Fatalf("active = %d after releasing all, want 0", n)
 	}
-	if !g.acquire() {
+	if !g.acquire("") {
 		t.Fatal("released capacity was not reusable")
 	}
-	g.release()
+	g.release("")
+}
+
+// TestBodyReadGatePerAccountShare proves one account saturating its share of
+// the inference gate cannot deny a second account (the pentest's cross-tenant
+// denial of inference), and that the aggregate ceiling still holds across
+// accounts.
+func TestBodyReadGatePerAccountShare(t *testing.T) {
+	t.Parallel()
+	g := &bodyReadGate{max: maxConcurrentBodyReads, perKey: maxConcurrentBodyReadsPerAccount}
+	for i := 0; i < maxConcurrentBodyReadsPerAccount; i++ {
+		if !g.acquire("acct-a") {
+			t.Fatalf("account A refused at %d, before its share", i)
+		}
+	}
+	if g.acquire("acct-a") {
+		t.Fatal("account A admitted beyond its per-account share")
+	}
+	if !g.acquire("acct-b") {
+		t.Fatal("account B was denied while only account A was saturated")
+	}
+	g.release("acct-b")
+	// Fill the aggregate with distinct accounts; the global cap still applies.
+	for i := maxConcurrentBodyReadsPerAccount; i < maxConcurrentBodyReads; i++ {
+		if !g.acquire(fmt.Sprintf("acct-%d", i)) {
+			t.Fatalf("aggregate refused at %d, before the cap", i)
+		}
+	}
+	if g.acquire("acct-new") {
+		t.Fatal("gate admitted beyond the aggregate cap")
+	}
+	g.release("acct-a")
+	if g.acquire("acct-a") == false {
+		t.Fatal("a released slot was not reusable by its account")
+	}
+	g.mu.Lock()
+	keys := len(g.byKey)
+	g.mu.Unlock()
+	if keys != maxConcurrentBodyReads-maxConcurrentBodyReadsPerAccount+1 {
+		t.Fatalf("tracked accounts = %d", keys)
+	}
+}
+
+// TestBodyReadGateReleaseForgetsIdleAccounts keeps the per-account map bounded
+// by the accounts currently mid-body.
+func TestBodyReadGateReleaseForgetsIdleAccounts(t *testing.T) {
+	t.Parallel()
+	g := &bodyReadGate{max: maxConcurrentBodyReads, perKey: maxConcurrentBodyReadsPerAccount}
+	if !g.acquire("acct-a") {
+		t.Fatal("refused")
+	}
+	g.release("acct-a")
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if len(g.byKey) != 0 || g.active != 0 {
+		t.Fatalf("byKey=%v active=%d after release", g.byKey, g.active)
+	}
+}
+
+// TestPreAuthBodyGateIsSeparateFromInference proves a saturated pre-auth gate
+// (anonymous passkey-finish bodies) leaves the inference gate untouched.
+func TestPreAuthBodyGateIsSeparateFromInference(t *testing.T) {
+	t.Parallel()
+	_, _, s := newManagementHarness(t)
+	for i := 0; i < maxConcurrentPreAuthBodyReads; i++ {
+		if !s.preAuthBodyReads.acquire("") {
+			t.Fatalf("pre-auth gate refused at %d", i)
+		}
+	}
+	if s.preAuthBodyReads.acquire("") {
+		t.Fatal("pre-auth gate admitted beyond its cap")
+	}
+	if !s.bodyReads.acquire("acct") {
+		t.Fatal("inference gate denied while only the pre-auth gate was full")
+	}
+	s.bodyReads.release("acct")
+	for i := 0; i < maxConcurrentPreAuthBodyReads; i++ {
+		s.preAuthBodyReads.release("")
+	}
+}
+
+// TestPasskeyFinishBodyUsesPreAuthGate proves the anonymous passkey-finish body
+// read charges the pre-auth gate, not the inference gate.
+func TestPasskeyFinishBodyUsesPreAuthGate(t *testing.T) {
+	t.Parallel()
+	_, _, s := newManagementHarness(t)
+	for i := 0; i < maxConcurrentPreAuthBodyReads; i++ {
+		s.preAuthBodyReads.acquire("")
+	}
+	defer func() {
+		for i := 0; i < maxConcurrentPreAuthBodyReads; i++ {
+			s.preAuthBodyReads.release("")
+		}
+	}()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/passkey/finish", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	if s.passkeyFinishBody(rec, req) {
+		t.Fatal("passkey finish admitted with the pre-auth gate full")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if n := s.bodyReads.inUse(); n != 0 {
+		t.Fatalf("inference gate slots in use = %d, want 0", n)
+	}
 }
 
 // TestBodyReadGateConcurrentAcquireRelease exercises the counter under
 // contention so a race is caught by the race detector.
 func TestBodyReadGateConcurrentAcquireRelease(t *testing.T) {
 	t.Parallel()
-	g := &bodyReadGate{}
+	g := &bodyReadGate{max: maxConcurrentBodyReads, perKey: maxConcurrentBodyReadsPerAccount}
 	var wg sync.WaitGroup
 	for i := 0; i < 200; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			if g.acquire() {
-				g.release()
+			key := fmt.Sprintf("acct-%d", i%5)
+			if g.acquire(key) {
+				g.release(key)
 			}
-		}()
+		}(i)
 	}
 	wg.Wait()
-	if g.active.Load() != 0 {
-		t.Fatalf("active = %d after concurrent use, want 0", g.active.Load())
+	if n := g.inUse(); n != 0 {
+		t.Fatalf("active = %d after concurrent use, want 0", n)
 	}
 }
 
@@ -214,7 +321,7 @@ func TestBodyReadGateReleasedBeforeStreamEnds(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("upstream stream was never reached")
 	}
-	if n := api.server.bodyReads.active.Load(); n != 0 {
+	if n := api.server.bodyReads.inUse(); n != 0 {
 		t.Fatalf("body-read slots held during an open stream = %d, want 0", n)
 	}
 	cancel()

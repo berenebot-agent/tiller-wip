@@ -121,6 +121,7 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 		dir = filepath.Join(s.config.DataDir, "backups")
 	}
 	run := func(compact bool) {
+		started := time.Now()
 		path, err := s.db.Backup(ctx, dir)
 		if err != nil {
 			s.warnBackup("scheduled backup failed", err)
@@ -131,12 +132,17 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 			if rmErr := os.Remove(path); rmErr != nil {
 				s.warnBackup("could not remove failed backup snapshot", rmErr)
 			}
-		} else if _, err := database.PruneBackups(dir, s.config.BackupRetention, time.Now()); err != nil {
-			s.warnBackup("scheduled backup prune failed", err)
+		} else {
+			if _, err := database.PruneBackups(dir, s.config.BackupRetention, time.Now()); err != nil {
+				s.warnBackup("scheduled backup prune failed", err)
+			}
+			s.logBackupSnapshot(started, path)
 		}
-		// VACUUM holds the write lock for its whole run, which would stall
-		// plan-cap bookings and Activity writes. Never compact on the boot pass:
-		// a restart should not start serving traffic into a multi-second lock.
+		// A pass can take the write lock for a database-sized rewrite exactly
+		// once, when a database created before incremental auto-vacuum is
+		// converted. Never run that on the boot pass: a restart should not start
+		// serving traffic into it. Steady-state passes free a bounded page budget
+		// and hold the lock for a fraction of a second.
 		if !compact {
 			return
 		}
@@ -158,21 +164,40 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 	}
 }
 
-// vacuumOne runs one database's compaction, logging start and completion at
+// vacuumOne runs one database's reclamation, logging start and completion at
 // Info and failures at Warn with the error message (a filesystem/SQLite error,
-// never request content). A failed vacuum is non-fatal: the database
-// stays usable, it is just not compacted this pass.
-func (s *Server) vacuumOne(ctx context.Context, db string, fn func(context.Context) error) {
+// never request content). A failed pass is non-fatal: the database stays
+// usable, it is just not compacted this pass.
+func (s *Server) vacuumOne(ctx context.Context, db string, fn func(context.Context) (database.VacuumResult, error)) {
 	if s.logger == nil {
 		return
 	}
 	s.logger.Info("database vacuum started", "db", db)
 	start := time.Now()
-	if err := fn(ctx); err != nil {
+	result, err := fn(ctx)
+	if err != nil {
 		s.logger.Warn("database vacuum failed", "db", db, "error_class", fmt.Sprintf("%T", err), "error", err.Error())
 		return
 	}
-	s.logger.Info("database vacuum completed", "db", db, "duration_ms", time.Since(start).Milliseconds())
+	s.logger.Info("database vacuum completed", "db", db, "duration_ms", time.Since(start).Milliseconds(),
+		"converted", result.Converted, "freed_pages", result.FreedPages)
+}
+
+// logBackupSnapshot records a verified snapshot's cost at Info, mirroring
+// vacuumOne's shape. Successful backups were otherwise silent — only failures
+// were logged — so how long the pass took and how large the snapshot was could
+// only be inferred from file timestamps. duration_ms covers the snapshot, its
+// verification and the retention prune; size_bytes is the snapshot that is now
+// a restore point.
+func (s *Server) logBackupSnapshot(started time.Time, path string) {
+	if s.logger == nil {
+		return
+	}
+	attrs := []any{"duration_ms", time.Since(started).Milliseconds()}
+	if info, err := os.Stat(path); err == nil {
+		attrs = append(attrs, "size_bytes", info.Size())
+	}
+	s.logger.Info("database backup completed", append([]any{"db", "core"}, attrs...)...)
 }
 
 // warnBackup logs a backup failure by error type only; error strings from the

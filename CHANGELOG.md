@@ -28,6 +28,13 @@ behavior may still change before a stable `1.0`.
 
 ### Changed
 
+- **Quieter usage cells.** Every token cell (Clients, Providers → Models,
+  Virtual models, mobile model cards and Activity history) now shows the cache
+  share and cost as bare figures — `484.85 Mtok` over `97%  $1.02` — instead of
+  repeating "cached" and "est." on every row. The meaning moved into each
+  figure's tooltip, with an assistive-text word retained, and the unit now sits
+  tight against its number instead of being pushed away by the wider lower row.
+  Provider cards drop the same "est." suffix.
 - **Activity graph readability.** Increase lane headings and node labels to
   17px, secondary labels to 14px, and adjust text bounds and row spacing to
   keep graph lines clear of the larger labels. Inline Fallback buttons match
@@ -58,6 +65,13 @@ behavior may still change before a stable `1.0`.
   assistant reasoning is flagged even without tool calls, persisted as the
   metadata-only `reasoning_stripped` Activity field, shown in history, and
   included in Activity/account CSV exports. Signed Claude details remain intact.
+
+### Removed
+
+- **Bulk revoke control in Settings → Management API.** The "Revoke browser-managed
+  tokens" card is gone, along with its confirmation copy; individual tokens keep
+  their Rotate and Delete actions. `POST /api/admin/api-tokens/revoke-all` remains
+  available for scripts.
 
 ## [0.1.0-beta.5] - 2026-10-12
 
