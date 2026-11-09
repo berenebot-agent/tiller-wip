@@ -87,6 +87,25 @@ func render(msgType, baseURL, token string, params map[string]string) (Rendered,
 				footnote:    "If this was you, no action is needed — the change takes effect once the new address is confirmed. If this wasn't you, reset your password to cancel it.",
 			}),
 		}, true
+	case TypeAPITokenCreated:
+		link := strings.TrimRight(baseURL, "/") + "/forgot-password"
+		name := params["token_name"]
+		return Rendered{
+			Subject: "A new Tiller API token was created",
+			Text: "A management API token named \"" + name + "\" was created on your Tiller account.\n\n" +
+				"If this was not you, delete the token in Settings → Management API and reset your password: " + link,
+			HTML: layout(layoutData{
+				preheader: "A management API token was created on your Tiller account.",
+				heading:   "New API token created",
+				paragraphs: []string{
+					"A management API token was created on your Tiller Router account:",
+				},
+				notice:      name,
+				buttonLabel: "Reset your password",
+				buttonURL:   link,
+				footnote:    "If this was you, no action is needed. If it wasn't, delete the token under Settings → Management API and reset your password.",
+			}),
+		}, true
 	default:
 		return Rendered{}, false
 	}

@@ -178,6 +178,8 @@ type Server struct {
 	// token-guessing flood cannot lock inference keys out (and vice versa).
 	managementTokenSelectorLimiter *loginLimiter
 	managementTokenAddressLimiter  *loginLimiter
+	managementAccountLimiter       *loginLimiter // hosted: per-account management API request budget
+	tokenStepUpLimiter             *loginLimiter // hosted: failed re-authentication when minting tokens
 	oauthStartLimiter              *loginLimiter
 	oauthCallbackLimiter           *loginLimiter
 	backgroundCtx                  context.Context
@@ -490,7 +492,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			}
 		}
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, tokens: tokens, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]notificationCooldownEntry{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), platformGlobalLimiter: newLoginLimiter(20, 15*time.Minute, 15*time.Minute), providerRefreshLimiter: newLoginLimiter(10, 10*time.Minute, 10*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementTokenSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), managementTokenAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), bodyReads: bodyReadGate{max: maxConcurrentBodyReads, perKey: maxConcurrentBodyReadsPerAccount}, preAuthBodyReads: bodyReadGate{max: maxConcurrentPreAuthBodyReads}, usageAgg: map[string]*usageAggEntry{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, tokens: tokens, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]notificationCooldownEntry{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), platformGlobalLimiter: newLoginLimiter(20, 15*time.Minute, 15*time.Minute), providerRefreshLimiter: newLoginLimiter(10, 10*time.Minute, 10*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementTokenSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), managementTokenAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementAccountLimiter: newLoginLimiter(hostedManagementRequestsPerMinute, time.Minute, time.Minute), tokenStepUpLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), bodyReads: bodyReadGate{max: maxConcurrentBodyReads, perKey: maxConcurrentBodyReadsPerAccount}, preAuthBodyReads: bodyReadGate{max: maxConcurrentPreAuthBodyReads}, usageAgg: map[string]*usageAggEntry{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
@@ -713,8 +715,9 @@ func (s *Server) Handler() http.Handler {
 	} else {
 		mux.Handle("GET /api/admin/backup/export", s.requireAdmin(http.HandlerFunc(s.exportBackup)))
 	}
-	if s.config.Mode != config.ModeHosted {
-		// Management API token lifecycle. Cookie-only by design: an API token
+	{
+		// Management API token lifecycle (local and hosted; hosted adds step-up,
+		// expiry, tier and count limits in the handlers). Cookie-only by design: an API token
 		// can never list, mint, re-scope, rotate, or revoke tokens, including
 		// itself. The self endpoint is the one token-accessible route with no
 		// scope requirement (read-only introspection).
@@ -725,6 +728,8 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("PATCH /api/admin/api-tokens/{id}", s.requireAdmin(http.HandlerFunc(s.updateManagementToken)))
 		mux.Handle("DELETE /api/admin/api-tokens/{id}", s.requireAdmin(http.HandlerFunc(s.deleteManagementToken)))
 		mux.Handle("POST /api/admin/api-tokens/{id}/rotate", s.requireAdmin(http.HandlerFunc(s.rotateManagementToken)))
+	}
+	if s.config.Mode != config.ModeHosted {
 		// Public usage guide for the management API, served at the API base
 		// itself so a copied "API path" always lands somewhere useful (HTML
 		// for humans, markdown for agents that request text/markdown).
@@ -1003,12 +1008,9 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 // area means the route requires a valid token but no scope grant (used only by
 // the self-introspection endpoint).
 //
-// Hosted mode has no management tokens: the wrapper is exactly requireAdmin
-// there (which delegates to requireUser).
+// Hosted mode accepts the same two principals: the cookie path is requireUser
+// (via requireAdmin) and the token path is account-scoped by the token row.
 func (s *Server) requireManage(area string, tier int, next http.Handler) http.Handler {
-	if s.config.Mode == config.ModeHosted {
-		return s.requireAdmin(next)
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Any Authorization header selects the token path, even a non-Bearer
 		// one: a request must never silently downgrade to cookie auth.
@@ -1056,6 +1058,11 @@ func (s *Server) requireManagementToken(w http.ResponseWriter, r *http.Request, 
 	}
 	s.managementTokenSelectorLimiter.success(selector)
 	s.managementTokenAddressLimiter.success(address)
+	if s.config.Mode == config.ModeHosted && !s.managementAccountLimiter.allowAttempt(identity.AccountID) {
+		w.Header().Set("Retry-After", "60")
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Management API request budget for this account exceeded. Try again shortly.")
+		return
+	}
 	if area != "" && !identity.Allows(area, tier) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{
 			"code":     "insufficient_scope",

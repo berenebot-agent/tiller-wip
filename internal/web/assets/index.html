@@ -335,7 +335,7 @@
           <div class="settings-panel system-grid" id="settings-panel-api" data-settings-panel="api" role="tabpanel" hidden>
             <article class="system-card settings-card">
               <h2>Management API</h2>
-              <p>API tokens let scripts and agents manage Tiller over the same REST API this dashboard uses, authenticated with an <code>Authorization: Bearer</code> header. Grant each token read, write, or delete access per area; higher levels include the lower ones. Tokens are shown once and can be rotated or revoked at any time.</p>
+              <p>API tokens let scripts and agents manage Tiller over the same REST API this dashboard uses, authenticated with an <code>Authorization: Bearer</code> header. Grant each token read, write, or delete access per area; higher levels include the lower ones. Tokens are shown once and can be rotated or revoked at any time. On hosted accounts, creating or widening a token asks for your password and new tokens default to a 30-day expiry.</p>
               <div class="setting-actions"><button class="btn btn-primary" type="button" id="create-api-token">Create API token</button></div>
               <div class="activity-table-shell"><table class="form-table" id="api-tokens-table"><thead><tr><th>Name</th><th>Access</th><th>Token</th><th>Created</th><th>Expires</th><th>Last used</th><th>Status</th><th></th></tr></thead><tbody id="api-tokens-body"></tbody></table></div>
               <div class="empty-state" id="api-tokens-empty" hidden><span>∅</span><h2>No API tokens</h2><p>Create a token to manage Tiller from scripts, agents, or integrations.</p></div>

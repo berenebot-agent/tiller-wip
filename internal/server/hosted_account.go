@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/identity"
@@ -174,11 +175,24 @@ func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
 // revokeOwnSessions logs the user out everywhere, including this device.
 func (s *Server) revokeOwnSessions(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(userSessionKey).(identity.UserSession)
+	// Tokens survive sign-out unless the caller opts in to revoking them.
+	var input struct {
+		RevokeTokens bool `json:"revoke_tokens"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+			respondDecodeError(w, err)
+			return
+		}
+	}
 	if err := s.identity.RevokeAllUserSessions(r.Context(), session.User.ID); err != nil {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not revoke sessions.")
 		return
 	}
-	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.sessions_revoked", ActorType: "user", ActorID: session.User.ID})
+	if input.RevokeTokens {
+		s.revokeAccountManagementTokens(r.Context(), session.User.AccountID)
+	}
+	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.sessions_revoked", Metadata: map[string]string{"tokens_revoked": strconv.FormatBool(input.RevokeTokens)}, ActorType: "user", ActorID: session.User.ID})
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.user_sessions_revoked", ActorType: "user", TargetType: "account", TargetID: session.User.AccountID})
 	s.clearCookie(w, userSessionCookie)
 	w.WriteHeader(http.StatusNoContent)
@@ -237,6 +251,7 @@ func (s *Server) purgeAccount(ctx context.Context, accountID string) error {
 	}
 	s.identity.InvalidateAccount(accountID)
 	s.clients.InvalidateAccount(accountID)
+	s.tokens.InvalidateAccount(accountID)
 	if err := s.storeHandle().BeginActivityCleanup(accountID, ""); err != nil {
 		return err
 	}
