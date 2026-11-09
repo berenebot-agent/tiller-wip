@@ -106,6 +106,14 @@ func (s *Scope) ListManagementTokens(ctx context.Context) ([]ManagementTokenRow,
 	return out, rows.Err()
 }
 
+// CountManagementTokens returns how many browser-managed tokens the account
+// holds (the environment-managed boot token is excluded).
+func (s *Scope) CountManagementTokens(ctx context.Context) (int, error) {
+	var n int
+	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_tokens WHERE account_id=? AND id<>?`, s.accountID, EnvironmentManagementTokenID).Scan(&n)
+	return n, err
+}
+
 // GetManagementToken returns one management token from the scope's account.
 func (s *Scope) GetManagementToken(ctx context.Context, id string) (ManagementTokenRow, error) {
 	return s.scanManagementTokenRow(s.q.QueryRowContext(ctx, `SELECT id,name,description,secret_fingerprint,scopes,enabled,expires_at,last_used_at,created_at,rotated_at,updated_at FROM api_tokens WHERE id=? AND account_id=?`, id, s.accountID))

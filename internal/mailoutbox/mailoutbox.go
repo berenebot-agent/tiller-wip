@@ -33,6 +33,7 @@ const (
 	TypePasswordReset      = "password_reset"
 	TypeEmailChangeConfirm = "email_change_confirm"
 	TypeEmailChangeWarning = "email_change_warning"
+	TypeAPITokenCreated    = "api_token_created"
 )
 
 // maxAttempts is the delivery cap: attempt 1 is immediate, failures 1-4 back

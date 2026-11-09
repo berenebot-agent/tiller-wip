@@ -6,7 +6,7 @@ covered in the [README](../README.md).
 
 ## Management API
 
-The web interface is a pure client of a JSON REST API under `/api/admin/*`. In local mode you can drive that same API from scripts and agents (for example a Hermes agent) with a **management API token**: create one under **Settings → Management API**, and authenticate with `Authorization: Bearer mt-tr-…`. No cookie or CSRF token is involved.
+The web interface is a pure client of a JSON REST API under `/api/admin/*`. You can drive that same API from scripts and agents (for example a Hermes agent) with a **management API token**: create one under **Settings → Management API**, and authenticate with `Authorization: Bearer mt-tr-…`. No cookie or CSRF token is involved.
 
 Each token carries per-area access with three escalating levels — `read` ⊂ `write` ⊂ `delete`:
 
@@ -20,6 +20,7 @@ Each token carries per-area access with three escalating levels — `read` ⊂ `
 
 Notes:
 
+- **Hosted accounts** get the same feature with limits: creating, rotating or widening a token asks for your password (or a fresh passkey/Google check); new tokens default to a 30-day expiry (you can choose never), access is limited to read and write, an account can hold 10, and all of them share 60 requests per minute. "Sign out everywhere" asks whether to revoke tokens too; password resets leave them in place. The `/api` usage guide is served by local installs only.
 - Tokens are shown **once** at creation; only a bcrypt hash is stored. Rotate or revoke at any time; expiry is optional (presets or a custom date).
 - Token management itself is browser-only: a token can never list, mint, or edit tokens. It can introspect itself (`GET /api/admin/api-tokens/self`).
 - Permanently out of reach for tokens: backup/account export, identity (password, passkeys, email, account deletion, sessions), onboarding, debug endpoints, and the live SSE stream.

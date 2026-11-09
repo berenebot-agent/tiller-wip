@@ -335,6 +335,20 @@ func (a *ManagementTokenAuthenticator) InvalidateWith(tokenID string, publish fu
 	return nil
 }
 
+// InvalidateAccount immediately drops every cached token for an account.
+// Account suspension, deletion and credential-reset events use it so
+// containment does not wait for the cache TTL.
+func (a *ManagementTokenAuthenticator) InvalidateAccount(accountID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	atomic.AddUint64(&a.rev, 1)
+	for key, entry := range a.entries {
+		if entry.identity.AccountID == accountID {
+			delete(a.entries, key)
+		}
+	}
+}
+
 // InvalidateAll drops the entire cache, e.g. after revoke-all.
 func (a *ManagementTokenAuthenticator) InvalidateAll() {
 	a.mu.Lock()

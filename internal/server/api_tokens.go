@@ -13,10 +13,12 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
+	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
-// Management API tokens (local mode). A token authenticates the admin REST
+// Management API tokens (local and hosted; see api_tokens_hosted.go for the
+// hosted policy). A token authenticates the admin REST
 // surface with `Authorization: Bearer mt-tr-…` instead of the browser session.
 // Token lifecycle management itself is cookie-only: a token can never list,
 // create, re-scope, rotate, or revoke tokens — it may only introspect itself.
@@ -195,6 +197,7 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		Description string         `json:"description"`
 		Scopes      map[string]int `json:"scopes"`
 		ExpiresAt   string         `json:"expires_at"`
+		Password    string         `json:"password"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -221,6 +224,24 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		adminError(w, 400, "invalid_expiry", err.Error())
 		return
+	}
+	if s.hostedTokens() {
+		if msg := hostedTokenScopeError(input.Scopes); msg != "" {
+			adminError(w, 400, "invalid_scopes", msg)
+			return
+		}
+		count, err := s.scope(r).CountManagementTokens(r.Context())
+		if err != nil {
+			adminError(w, 500, "database_error", "Could not create API token.")
+			return
+		}
+		if count >= hostedMaxManagementTokens {
+			adminError(w, 409, "token_limit_reached", fmt.Sprintf("Accounts can hold at most %d API tokens. Delete one first.", hostedMaxManagementTokens))
+			return
+		}
+		if !s.hostedTokenStepUp(w, r, input.Password) {
+			return
+		}
 	}
 	generated, err := auth.GenerateManagementTokenWithHasher(s.secretHasher)
 	if err != nil {
@@ -256,6 +277,11 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		TargetID:   tokenID,
 		Metadata:   map[string]string{"name": input.Name},
 	})
+	if s.hostedTokens() {
+		if user, ok := r.Context().Value(userKey).(identity.User); ok {
+			s.notifyManagementTokenCreated(r.Context(), user, input.Name)
+		}
+	}
 	// The plaintext token is never recorded anywhere; this response is the
 	// only place it exists outside the operator's clipboard.
 	writeJSON(w, 201, map[string]any{
@@ -279,6 +305,7 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 		Scopes      *map[string]int `json:"scopes"`
 		Enabled     *bool           `json:"enabled"`
 		ExpiresAt   *string         `json:"expires_at"`
+		Password    string          `json:"password"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -338,6 +365,22 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 		}
 		update.ExpiresAt = expiresAt
 	}
+	if s.hostedTokens() {
+		if input.Scopes != nil {
+			if msg := hostedTokenScopeError(*input.Scopes); msg != "" {
+				adminError(w, 400, "invalid_scopes", msg)
+				return
+			}
+		}
+		// Widening access or extending lifetime is equivalent to minting a
+		// stronger token, so it needs the same re-authentication.
+		widened := input.Scopes != nil && widensManagementScopes(auth.ParseManagementScopes(current.Scopes), *input.Scopes)
+		extended := input.ExpiresAt != nil && current.ExpiresAt.Valid && (!update.ExpiresAt.Valid || update.ExpiresAt.String > current.ExpiresAt.String)
+		reenabled := input.Enabled != nil && *input.Enabled && !current.Enabled
+		if (widened || extended || reenabled) && !s.hostedTokenStepUp(w, r, input.Password) {
+			return
+		}
+	}
 	// The mutation and cache invalidation publish together so a token whose
 	// scopes were just narrowed cannot authorize from a stale cache entry.
 	err = s.tokens.InvalidateWith(tokenID, func() error {
@@ -373,6 +416,24 @@ func (s *Server) rotateManagementToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokenID := r.PathValue("id")
+	if s.hostedTokens() {
+		var input struct {
+			Password string `json:"password"`
+		}
+		if r.ContentLength != 0 {
+			if err := decodeJSON(w, r, &input); err != nil {
+				adminError(w, 400, "invalid_request", err.Error())
+				return
+			}
+		}
+		if _, err := s.scope(r).GetManagementToken(r.Context(), tokenID); errors.Is(err, store.ErrManagementTokenNotFound) {
+			adminError(w, 404, "not_found", "API token not found.")
+			return
+		}
+		if !s.hostedTokenStepUp(w, r, input.Password) {
+			return
+		}
+	}
 	generated, err := auth.GenerateManagementTokenWithHasher(s.secretHasher)
 	if err != nil {
 		adminError(w, 500, "internal_error", "Could not rotate API token.")

@@ -2792,8 +2792,15 @@ const MANAGEMENT_API_AREA_TIERS = { providers: [1, 2, 3], virtual: [1, 2, 3], cl
 let managementTokens = [];
 let managementScopeReader = null;
 
+// managementPasswordField is the hosted step-up input. It may stay empty when a
+// passkey or Google re-authentication was just completed.
+function managementPasswordField() {
+  return runtimeMode === 'hosted' ? '<label>Confirm your password <input type="password" name="token_password" autocomplete="current-password" placeholder="Required to create or widen tokens"></label>' : '';
+}
+function managementPassword(form) { return runtimeMode === 'hosted' ? String(form.elements.token_password?.value || '') : ''; }
+
 function managementScopeGrid(scopes = {}) {
-  return `<div class="scope-grid" data-scope-grid>${MANAGEMENT_API_AREAS.map(area => `<div class="scope-row" data-scope-area="${area.key}"><span class="scope-area-label">${h(area.label)}</span><div class="scope-tiers">${MANAGEMENT_API_TIERS.map(tier => { const offered = MANAGEMENT_API_AREA_TIERS[area.key].includes(tier.level); return `<button type="button" class="scope-tier" data-scope-tier="${tier.level}" aria-pressed="false"${offered ? '' : ' disabled'}>${tier.key}</button>`; }).join('')}</div></div>`).join('')}</div>`;
+  return `<div class="scope-grid" data-scope-grid>${MANAGEMENT_API_AREAS.map(area => `<div class="scope-row" data-scope-area="${area.key}"><span class="scope-area-label">${h(area.label)}</span><div class="scope-tiers">${MANAGEMENT_API_TIERS.map(tier => { const offered = MANAGEMENT_API_AREA_TIERS[area.key].includes(tier.level) && !(runtimeMode === 'hosted' && tier.level > 2); return `<button type="button" class="scope-tier" data-scope-tier="${tier.level}" aria-pressed="false"${offered ? '' : ' disabled'}>${tier.key}</button>`; }).join('')}</div></div>`).join('')}</div>`;
 }
 
 // wireManagementScopeGrid paints the escalating toggles: clicking a tier sets
@@ -2830,10 +2837,12 @@ function managementExpiryFromForm(form) {
   return new Date(Date.now() + Number(choice) * 86400000).toISOString();
 }
 
-function managementExpiryField(expiresAt) {
+function managementExpiryField(expiresAt, isEdit = false) {
   const custom = !!expiresAt;
-  const options = [['', 'Never'], ['30', '30 days'], ['90', '90 days'], ['365', '365 days'], ['custom', 'Custom date…']]
-    .map(([value, label]) => `<option value="${value}"${(custom ? value === 'custom' : value === '') ? ' selected' : ''}>${label}</option>`).join('');
+  // Hosted defaults new tokens to 30 days; "Never" stays available.
+  const choices = [['', 'Never'], ['30', '30 days'], ['90', '90 days'], ['365', '365 days'], ['custom', 'Custom date…']];
+  const selected = custom ? 'custom' : (runtimeMode === 'hosted' && !isEdit ? '30' : '');
+  const options = choices.map(([value, label]) => `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('');
   return `<label>Expiry <select name="token_expiry">${options}</select></label><label id="token-expiry-custom-row"${custom ? '' : ' hidden'}>Custom expiry <input type="date" name="token_expiry_custom" value="${h(custom ? expiresAt.slice(0, 10) : '')}"></label>`;
 }
 
@@ -2846,12 +2855,12 @@ function openCreateApiToken() {
     eyebrow: 'NEW API TOKEN',
     title: 'Create API token',
     submit: 'Create token',
-    fields: `<label>Name <input name="token_name" maxlength="100" required placeholder="e.g. Hermes agent"></label><label>Description <textarea name="token_description" rows="2" maxlength="500" placeholder="Optional notes about what uses this token"></textarea></label>${managementExpiryField('')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid({})}</fieldset>`,
+    fields: `<label>Name <input name="token_name" maxlength="100" required placeholder="e.g. Hermes agent"></label><label>Description <textarea name="token_description" rows="2" maxlength="500" placeholder="Optional notes about what uses this token"></textarea></label>${managementExpiryField('')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid({})}</fieldset>${managementPasswordField()}`,
     onMount: form => { managementScopeReader = wireManagementScopeGrid(form, {}); wireManagementExpiry(form); },
     onSubmit: async form => {
       const name = String(form.elements.token_name.value || '').trim();
       if (!name) throw new Error('Give the token a name.');
-      const result = await api('/api/admin/api-tokens', { method: 'POST', body: JSON.stringify({ name, description: form.elements.token_description.value || '', scopes: managementScopeReader(), expires_at: managementExpiryFromForm(form) }) });
+      const result = await api('/api/admin/api-tokens', { method: 'POST', body: JSON.stringify({ name, description: form.elements.token_description.value || '', scopes: managementScopeReader(), expires_at: managementExpiryFromForm(form), password: managementPassword(form) }) });
       showSecret(result.token, { baseUrl: `${location.origin}/api/admin`, baseUrlLabel: 'Management API' });
       flash('API token created.');
       await loadManagementTokens();
@@ -2867,12 +2876,12 @@ function openEditApiToken(token) {
     eyebrow: 'EDIT API TOKEN',
     title: `Edit ${token.name}`,
     submit: 'Save token',
-    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="toggle-label"><input class="switch" type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
+    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="toggle-label"><input class="switch" type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '', true)}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>${managementPasswordField()}`,
     onMount: form => { managementScopeReader = wireManagementScopeGrid(form, token.scopes); wireManagementExpiry(form); },
     onSubmit: async form => {
       const name = String(form.elements.token_name.value || '').trim();
       if (!name) throw new Error('Give the token a name.');
-      await api(`/api/admin/api-tokens/${token.id}`, { method: 'PATCH', body: JSON.stringify({ name, description: form.elements.token_description.value || '', scopes: managementScopeReader(), enabled: form.elements.token_enabled.checked, expires_at: managementExpiryFromForm(form) }) });
+      await api(`/api/admin/api-tokens/${token.id}`, { method: 'PATCH', body: JSON.stringify({ name, description: form.elements.token_description.value || '', scopes: managementScopeReader(), enabled: form.elements.token_enabled.checked, expires_at: managementExpiryFromForm(form), password: managementPassword(form) }) });
       flash('API token updated.');
       await loadManagementTokens();
     },
@@ -2880,8 +2889,24 @@ function openEditApiToken(token) {
 }
 
 async function rotateApiToken(token) {
+  const rotateNow = async password => {
+    const result = await api(`/api/admin/api-tokens/${token.id}/rotate`, { method: 'POST', body: JSON.stringify({ password }) });
+    showSecret(result.token, { baseUrl: `${location.origin}/api/admin`, baseUrlLabel: 'Management API' });
+    await loadManagementTokens();
+  };
+  if (runtimeMode === 'hosted') {
+    // Hosted rotation re-authenticates, so it uses a form instead of a bare confirm.
+    openEntity({
+      eyebrow: 'ROTATE API TOKEN',
+      title: `Rotate ${token.name}?`,
+      submit: 'Rotate token',
+      fields: `<p>The current token stops working immediately. Access and settings are preserved and the new token is shown once.</p>${managementPasswordField()}`,
+      onSubmit: async form => { await rotateNow(managementPassword(form)); },
+    });
+    return;
+  }
   if (!await confirmAction({ title: `Rotate ${token.name}?`, copy: 'The current token stops working immediately. Access and settings are preserved and the new token is shown once.', action: 'Rotate token' })) return;
-  try { const result = await api(`/api/admin/api-tokens/${token.id}/rotate`, { method: 'POST' }); showSecret(result.token, { baseUrl: `${location.origin}/api/admin`, baseUrlLabel: 'Management API' }); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
+  try { await rotateNow(''); } catch (error) { flash(errorMessage(error), 'error'); }
 }
 
 async function deleteApiToken(token) {
@@ -2934,12 +2959,12 @@ $('#api-tokens-body').addEventListener('click', event => {
 const SETTINGS_TABS = ['account', 'routing', 'logging', 'notifications', 'data', 'api'];
 let settingsTab = 'routing';
 function showSettingsTab(tab) {
-  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable()) || (tab === 'api' && runtimeMode === 'hosted')) tab = 'routing';
+  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable()) || false) tab = 'routing';
   settingsTab = tab;
   $$('.settings-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.settingsTab === tab));
   $$('.settings-panel').forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.classList.toggle('active', active); panel.hidden = !active; });
   $('#settings-tab-account').hidden = !accountTabAvailable();
-  $('#settings-tab-api').hidden = runtimeMode === 'hosted';
+  $('#settings-tab-api').hidden = false;
   // Account and Management API actions save themselves; the shared save bar
   // only applies to the config cards.
   $('.settings-savebar').hidden = tab === 'account' || tab === 'api' || tab === 'data';
@@ -2956,7 +2981,7 @@ $$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSet
 // runs once /api/runtime has been parsed (see initialise()).
 function applyAccountTabVisibility() {
   $('#settings-tab-account').hidden = !accountTabAvailable();
-  $('#settings-tab-api').hidden = runtimeMode === 'hosted';
+  $('#settings-tab-api').hidden = false;
 }
 
 async function loadAccount() {
@@ -3325,8 +3350,22 @@ $('#account-email-form').addEventListener('submit', async event => {
   catch (error) { sessionStorage.removeItem('googleReauthAction'); sessionStorage.removeItem('googleReauthEmail'); note.textContent = errorMessage(error, 'Could not start the email change.'); }
 });
 $('#account-revoke-sessions').addEventListener('click', async () => {
-  const button = $('#account-revoke-sessions'); button.disabled = true; $('#account-sessions-error').textContent = '';
-  try { await api('/api/auth/account/sessions/revoke-all', { method: 'POST', body: '{}' }); showLogin(); }
+  const button = $('#account-revoke-sessions'); $('#account-sessions-error').textContent = '';
+  const revoke = async revokeTokens => { await api('/api/auth/account/sessions/revoke-all', { method: 'POST', body: JSON.stringify({ revoke_tokens: revokeTokens }) }); showLogin(); };
+  button.disabled = true;
+  try {
+    // Tokens keep working across sign-out unless the user opts to revoke them.
+    const tokens = (await api('/api/admin/api-tokens').catch(() => ({ data: [] }))).data || [];
+    if (!tokens.length) { await revoke(false); return; }
+    button.disabled = false;
+    openEntity({
+      eyebrow: 'SIGN OUT EVERYWHERE',
+      title: 'Sign out all sessions?',
+      submit: 'Sign out everywhere',
+      fields: `<p>This signs out every browser session, including this one. Your ${tokens.length} API token${tokens.length === 1 ? '' : 's'} keep working unless you revoke them too.</p><label class="toggle-label"><input class="switch" type="checkbox" name="revoke_tokens"> Also revoke all API tokens <span class="meta-line">Recommended if you suspect a token or device is compromised.</span></label>`,
+      onSubmit: async form => { await revoke(form.elements.revoke_tokens.checked); },
+    });
+  }
   catch (error) { $('#account-sessions-error').textContent = errorMessage(error, 'Could not sign out sessions.'); button.disabled = false; }
 });
 $('#account-export').addEventListener('click', async event => {

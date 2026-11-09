@@ -8,6 +8,15 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Management API tokens in hosted mode.** Hosted customers can now create
+  `mt-tr-` tokens under Settings → Management API. Hosted tokens are stricter
+  than local ones: creating, rotating, widening or re-enabling needs
+  re-authentication, new tokens default to a 30-day expiry (no expiry is
+  allowed), access is capped at read/write, each account may hold 10, and all of
+  an account's tokens share a 60 requests/minute budget. Suspending or deleting
+  the account revokes tokens immediately; "sign out everywhere" asks whether to
+  revoke them too (password resets leave them alone). A security email is sent
+  when a token is created.
 - **Per-client detailed error body logging.** Each client key now carries its
   own mode for detailed error content: *inherit* (the default, follow the
   account-wide Detailed Error Logging setting), *always* (capture failed request
