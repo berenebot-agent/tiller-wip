@@ -185,12 +185,18 @@ func (s *Server) revokeOwnSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Revoke tokens first, and stop if that fails: the user stays signed in and
+	// sees an error rather than being told tokens were revoked when they were
+	// not. Deleting tokens is idempotent, so a retry is safe.
+	if input.RevokeTokens {
+		if err := s.revokeAccountManagementTokens(r.Context(), session.User.AccountID); err != nil {
+			adminError(w, http.StatusInternalServerError, "token_revocation_failed", "Could not revoke API tokens, so you were not signed out. Try again.")
+			return
+		}
+	}
 	if err := s.identity.RevokeAllUserSessions(r.Context(), session.User.ID); err != nil {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not revoke sessions.")
 		return
-	}
-	if input.RevokeTokens {
-		s.revokeAccountManagementTokens(r.Context(), session.User.AccountID)
 	}
 	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.sessions_revoked", Metadata: map[string]string{"tokens_revoked": strconv.FormatBool(input.RevokeTokens)}, ActorType: "user", ActorID: session.User.ID})
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.user_sessions_revoked", ActorType: "user", TargetType: "account", TargetID: session.User.AccountID})

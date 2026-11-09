@@ -298,6 +298,42 @@ func TestHostedTokensSignOutEverywhereIsOptIn(t *testing.T) {
 	}
 }
 
+// TestHostedSignOutTokenRevocationFailureIsReported proves a failed token
+// delete is surfaced and does not sign the user out or claim success.
+func TestHostedSignOutTokenRevocationFailureIsReported(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	_, token := hostedMintToken(t, api, "stubborn", map[string]int{"client_keys": 1})
+	if status, _, _ := bearerRequest(t, api.base, token, "GET", "/api/admin/client-keys", nil); status != 200 {
+		t.Fatal("token should work before the failure")
+	}
+	// Make the token delete fail while the rest of the database keeps working.
+	if _, err := app.db.SQL.Exec(`CREATE TRIGGER block_token_delete BEFORE DELETE ON api_tokens BEGIN SELECT RAISE(ABORT, 'blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ := api.request("POST", "/api/auth/account/sessions/revoke-all", map[string]any{"revoke_tokens": true})
+	if status != 500 || payload["error"].(map[string]any)["code"] != "token_revocation_failed" {
+		t.Fatalf("revoke with failing delete: %d %v, want 500 token_revocation_failed", status, payload)
+	}
+	// The session is intact (not signed out) and the token still exists.
+	if status, _, _ := api.request("GET", "/api/auth/account", nil); status != 200 {
+		t.Fatalf("session after failed revoke = %d, want 200", status)
+	}
+	if status, _, _ := bearerRequest(t, api.base, token, "GET", "/api/admin/client-keys", nil); status != 200 {
+		t.Fatalf("token after failed revoke = %d, want 200 (still valid, not claimed revoked)", status)
+	}
+	// Once the fault clears, a retry succeeds and the token dies.
+	if _, err := app.db.SQL.Exec(`DROP TRIGGER block_token_delete`); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, _ := api.request("POST", "/api/auth/account/sessions/revoke-all", map[string]any{"revoke_tokens": true}); status != 204 {
+		t.Fatalf("retry = %d, want 204", status)
+	}
+	if status, _, _ := bearerRequest(t, api.base, token, "GET", "/api/admin/client-keys", nil); status != 401 {
+		t.Fatalf("token after successful retry = %d, want 401", status)
+	}
+}
+
 func TestHostedTokensSurvivePasswordReset(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
