@@ -218,8 +218,9 @@ TILLER_INGRESS_NETWORK_EXTERNAL=true                 # set only for a pre-existi
 
 ## Advanced
 
-Headless and hosted-operation topics live in
-[docs/ADVANCED.md](docs/ADVANCED.md): management API tokens and scopes,
+Headless and hosted-operation topics: [docs/management-api.md](docs/management-api.md) covers the management API
+(tokens, scopes, quickstart; every instance also serves `/api/admin`, `/api.json`
+and `/api/openapi.json`), and [docs/ADVANCED.md](docs/ADVANCED.md) covers
 embedding Tiller as another application's LLM gateway, hosted Compose
 networking, hosted Google sign-in and Turnstile, and DNS recovery after
 restarts.

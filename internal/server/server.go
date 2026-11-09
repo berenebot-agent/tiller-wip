@@ -178,8 +178,9 @@ type Server struct {
 	// token-guessing flood cannot lock inference keys out (and vice versa).
 	managementTokenSelectorLimiter *loginLimiter
 	managementTokenAddressLimiter  *loginLimiter
-	managementAccountLimiter       *loginLimiter // hosted: per-account management API request budget
-	tokenStepUpLimiter             *loginLimiter // hosted: failed re-authentication when minting tokens
+	managementRoutes               []managementRoute // token-reachable routes, recorded by handleManage
+	managementAccountLimiter       *loginLimiter     // hosted: per-account management API request budget
+	tokenStepUpLimiter             *loginLimiter     // hosted: failed re-authentication when minting tokens
 	oauthStartLimiter              *loginLimiter
 	oauthCallbackLimiter           *loginLimiter
 	backgroundCtx                  context.Context
@@ -613,6 +614,7 @@ func (s *Server) startLogPruner(ctx context.Context) {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.managementRoutes = nil
 	mux.HandleFunc("GET /api/runtime", s.runtime)
 	mux.HandleFunc("GET /health/live", s.liveHealth)
 	mux.HandleFunc("GET /health/ready", s.ready)
@@ -729,79 +731,83 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("DELETE /api/admin/api-tokens/{id}", s.requireAdmin(http.HandlerFunc(s.deleteManagementToken)))
 		mux.Handle("POST /api/admin/api-tokens/{id}/rotate", s.requireAdmin(http.HandlerFunc(s.rotateManagementToken)))
 	}
-	if s.config.Mode != config.ModeHosted {
-		// Public usage guide for the management API, served at the API base
-		// itself so a copied "API path" always lands somewhere useful (HTML
-		// for humans, markdown for agents that request text/markdown).
+	{
+		// Public usage guide for the management API (local and hosted), served
+		// at the API base itself so a copied "API path" always lands somewhere
+		// useful (HTML for humans, markdown for agents that request
+		// text/markdown). It carries no secrets and is generated from the
+		// registered routes, so it cannot drift from what the server enforces.
 		mux.HandleFunc("GET /api", s.managementGuide)
 		mux.HandleFunc("GET /api/admin", s.managementGuide)
-		// Machine-readable discovery for host SDKs and embedding probes.
+		// Machine-readable discovery and OpenAPI for host SDKs, agents and
+		// embedding probes.
 		mux.HandleFunc("GET /api.json", s.managementDiscovery)
+		mux.HandleFunc("GET /api/openapi.json", s.managementOpenAPI)
 	}
 	// Resource-management surface. requireManage accepts the browser admin
 	// session (with CSRF) or a management API token with the required scope
 	// (local mode). Identity, backup-export, debug, setup, and the live SSE
 	// route stay plain requireAdmin: management tokens can never reach them.
-	mux.Handle("GET /api/admin/provider-types", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.providerTypes)))
-	mux.Handle("GET /api/admin/providers", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.listProviders)))
-	mux.Handle("POST /api/admin/providers", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.createProvider)))
-	mux.Handle("PATCH /api/admin/providers/{id}", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.updateProvider)))
-	mux.Handle("DELETE /api/admin/providers/{id}", s.requireManage("providers", auth.ScopeDelete, http.HandlerFunc(s.deleteProvider)))
-	mux.Handle("PUT /api/admin/providers/{id}/credential", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.replaceProviderCredential)))
-	mux.Handle("POST /api/admin/providers/{id}/oauth/start", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.startProviderOAuth)))
-	mux.Handle("POST /api/admin/providers/{id}/oauth/callback", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.completeProviderOAuth)))
-	mux.Handle("GET /api/admin/providers/{id}/oauth/status", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.providerOAuthStatus)))
-	mux.Handle("DELETE /api/admin/providers/{id}/oauth", s.requireManage("providers", auth.ScopeDelete, http.HandlerFunc(s.disconnectProviderOAuth)))
+	s.handleManage(mux, "GET /api/admin/provider-types", "providers", auth.ScopeRead, http.HandlerFunc(s.providerTypes))
+	s.handleManage(mux, "GET /api/admin/providers", "providers", auth.ScopeRead, http.HandlerFunc(s.listProviders))
+	s.handleManage(mux, "POST /api/admin/providers", "providers", auth.ScopeWrite, http.HandlerFunc(s.createProvider))
+	s.handleManage(mux, "PATCH /api/admin/providers/{id}", "providers", auth.ScopeWrite, http.HandlerFunc(s.updateProvider))
+	s.handleManage(mux, "DELETE /api/admin/providers/{id}", "providers", auth.ScopeDelete, http.HandlerFunc(s.deleteProvider))
+	s.handleManage(mux, "PUT /api/admin/providers/{id}/credential", "providers", auth.ScopeWrite, http.HandlerFunc(s.replaceProviderCredential))
+	s.handleManage(mux, "POST /api/admin/providers/{id}/oauth/start", "providers", auth.ScopeWrite, http.HandlerFunc(s.startProviderOAuth))
+	s.handleManage(mux, "POST /api/admin/providers/{id}/oauth/callback", "providers", auth.ScopeWrite, http.HandlerFunc(s.completeProviderOAuth))
+	s.handleManage(mux, "GET /api/admin/providers/{id}/oauth/status", "providers", auth.ScopeRead, http.HandlerFunc(s.providerOAuthStatus))
+	s.handleManage(mux, "DELETE /api/admin/providers/{id}/oauth", "providers", auth.ScopeDelete, http.HandlerFunc(s.disconnectProviderOAuth))
 
-	mux.Handle("POST /api/admin/providers/{id}/refresh", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.refreshProvider)))
-	mux.Handle("POST /api/admin/providers/{id}/models", s.requireManage("providers", auth.ScopeWrite, http.HandlerFunc(s.addManualModel)))
-	mux.Handle("GET /api/admin/providers/{id}/models", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.listProviderModels)))
-	mux.Handle("GET /api/admin/providers/{id}/models/lookup", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.lookupManualModel)))
-	mux.Handle("DELETE /api/admin/models/{id}", s.requireManage("providers", auth.ScopeDelete, http.HandlerFunc(s.deleteManualModel)))
-	mux.Handle("GET /api/admin/models", s.requireManage("providers", auth.ScopeRead, http.HandlerFunc(s.listAllModels)))
-	mux.Handle("GET /api/admin/virtual-groups", s.requireManage("virtual", auth.ScopeRead, http.HandlerFunc(s.listVirtualGroups)))
-	mux.Handle("POST /api/admin/virtual-groups", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.createVirtualGroup)))
-	mux.Handle("PATCH /api/admin/virtual-groups/{id}", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.updateVirtualGroup)))
-	mux.Handle("DELETE /api/admin/virtual-groups/{id}", s.requireManage("virtual", auth.ScopeDelete, http.HandlerFunc(s.deleteVirtualGroup)))
-	mux.Handle("GET /api/admin/virtual-models", s.requireManage("virtual", auth.ScopeRead, http.HandlerFunc(s.listVirtualModels)))
-	mux.Handle("POST /api/admin/virtual-models", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.createVirtualModel)))
-	mux.Handle("PATCH /api/admin/virtual-models/{id}", s.requireManage("virtual", auth.ScopeWrite, http.HandlerFunc(s.updateVirtualModel)))
-	mux.Handle("DELETE /api/admin/virtual-models/{id}", s.requireManage("virtual", auth.ScopeDelete, http.HandlerFunc(s.deleteVirtualModel)))
-	mux.Handle("GET /api/admin/client-keys", s.requireManage("client_keys", auth.ScopeRead, http.HandlerFunc(s.listClientKeys)))
-	mux.Handle("POST /api/admin/client-keys", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.createClientKey)))
-	mux.Handle("PATCH /api/admin/client-keys/{id}", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.updateClientKey)))
-	mux.Handle("DELETE /api/admin/client-keys/{id}", s.requireManage("client_keys", auth.ScopeDelete, http.HandlerFunc(s.deleteClientKey)))
-	mux.Handle("POST /api/admin/client-keys/{id}/rotate", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.rotateClientKey)))
-	mux.Handle("GET /api/admin/client-keys/{id}/permissions", s.requireManage("client_keys", auth.ScopeRead, http.HandlerFunc(s.getPermissions)))
-	mux.Handle("PUT /api/admin/client-keys/{id}/permissions", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.updatePermissions)))
-	mux.Handle("GET /api/admin/catalogue-templates", s.requireManage("client_keys", auth.ScopeRead, http.HandlerFunc(s.listTemplates)))
-	mux.Handle("POST /api/admin/catalogue-templates", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.createTemplate)))
-	mux.Handle("GET /api/admin/catalogue-templates/{id}", s.requireManage("client_keys", auth.ScopeRead, http.HandlerFunc(s.getTemplate)))
-	mux.Handle("PATCH /api/admin/catalogue-templates/{id}", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.updateTemplate)))
-	mux.Handle("DELETE /api/admin/catalogue-templates/{id}", s.requireManage("client_keys", auth.ScopeDelete, http.HandlerFunc(s.deleteTemplate)))
-	mux.Handle("GET /api/admin/catalogue-templates/{id}/permissions", s.requireManage("client_keys", auth.ScopeRead, http.HandlerFunc(s.getTemplatePermissions)))
-	mux.Handle("PUT /api/admin/catalogue-templates/{id}/permissions", s.requireManage("client_keys", auth.ScopeWrite, http.HandlerFunc(s.updateTemplatePermissions)))
-	mux.Handle("GET /api/admin/client-keys/{id}/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listActivity)))
-	mux.Handle("GET /api/admin/client-keys/{id}/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportClientActivityCSV)))
-	mux.Handle("DELETE /api/admin/client-keys/{id}/activity", s.requireManage("monitoring", auth.ScopeDelete, http.HandlerFunc(s.clearActivity)))
-	mux.Handle("GET /api/admin/virtual-models/{id}/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listVirtualActivity)))
-	mux.Handle("GET /api/admin/virtual-models/{id}/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportVirtualActivityCSV)))
-	mux.Handle("GET /api/admin/models/{id}/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listRealModelActivity)))
-	mux.Handle("GET /api/admin/models/{id}/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportRealModelActivityCSV)))
-	mux.Handle("GET /api/admin/settings", s.requireManage("settings", auth.ScopeRead, http.HandlerFunc(s.getSettings)))
-	mux.Handle("PUT /api/admin/settings", s.requireManage("settings", auth.ScopeWrite, http.HandlerFunc(s.updateSettings)))
-	mux.Handle("POST /api/admin/notifications/test", s.requireManage("settings", auth.ScopeWrite, http.HandlerFunc(s.sendTestNotification)))
-	mux.Handle("GET /api/admin/usage", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.usage)))
-	mux.Handle("GET /api/admin/quota", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.quotaEndpoint)))
+	s.handleManage(mux, "POST /api/admin/providers/{id}/refresh", "providers", auth.ScopeWrite, http.HandlerFunc(s.refreshProvider))
+	s.handleManage(mux, "POST /api/admin/providers/{id}/models", "providers", auth.ScopeWrite, http.HandlerFunc(s.addManualModel))
+	s.handleManage(mux, "GET /api/admin/providers/{id}/models", "providers", auth.ScopeRead, http.HandlerFunc(s.listProviderModels))
+	s.handleManage(mux, "GET /api/admin/providers/{id}/models/lookup", "providers", auth.ScopeRead, http.HandlerFunc(s.lookupManualModel))
+	s.handleManage(mux, "DELETE /api/admin/models/{id}", "providers", auth.ScopeDelete, http.HandlerFunc(s.deleteManualModel))
+	s.handleManage(mux, "GET /api/admin/models", "providers", auth.ScopeRead, http.HandlerFunc(s.listAllModels))
+	s.handleManage(mux, "GET /api/admin/virtual-groups", "virtual", auth.ScopeRead, http.HandlerFunc(s.listVirtualGroups))
+	s.handleManage(mux, "POST /api/admin/virtual-groups", "virtual", auth.ScopeWrite, http.HandlerFunc(s.createVirtualGroup))
+	s.handleManage(mux, "PATCH /api/admin/virtual-groups/{id}", "virtual", auth.ScopeWrite, http.HandlerFunc(s.updateVirtualGroup))
+	s.handleManage(mux, "DELETE /api/admin/virtual-groups/{id}", "virtual", auth.ScopeDelete, http.HandlerFunc(s.deleteVirtualGroup))
+	s.handleManage(mux, "GET /api/admin/virtual-models", "virtual", auth.ScopeRead, http.HandlerFunc(s.listVirtualModels))
+	s.handleManage(mux, "POST /api/admin/virtual-models", "virtual", auth.ScopeWrite, http.HandlerFunc(s.createVirtualModel))
+	s.handleManage(mux, "PATCH /api/admin/virtual-models/{id}", "virtual", auth.ScopeWrite, http.HandlerFunc(s.updateVirtualModel))
+	s.handleManage(mux, "DELETE /api/admin/virtual-models/{id}", "virtual", auth.ScopeDelete, http.HandlerFunc(s.deleteVirtualModel))
+	s.handleManage(mux, "GET /api/admin/client-keys", "client_keys", auth.ScopeRead, http.HandlerFunc(s.listClientKeys))
+	s.handleManage(mux, "POST /api/admin/client-keys", "client_keys", auth.ScopeWrite, http.HandlerFunc(s.createClientKey))
+	s.handleManage(mux, "PATCH /api/admin/client-keys/{id}", "client_keys", auth.ScopeWrite, http.HandlerFunc(s.updateClientKey))
+	s.handleManage(mux, "DELETE /api/admin/client-keys/{id}", "client_keys", auth.ScopeDelete, http.HandlerFunc(s.deleteClientKey))
+	s.handleManage(mux, "POST /api/admin/client-keys/{id}/rotate", "client_keys", auth.ScopeWrite, http.HandlerFunc(s.rotateClientKey))
+	s.handleManage(mux, "GET /api/admin/client-keys/{id}/permissions", "client_keys", auth.ScopeRead, http.HandlerFunc(s.getPermissions))
+	s.handleManage(mux, "PUT /api/admin/client-keys/{id}/permissions", "client_keys", auth.ScopeWrite, http.HandlerFunc(s.updatePermissions))
+	s.handleManage(mux, "GET /api/admin/catalogue-templates", "client_keys", auth.ScopeRead, http.HandlerFunc(s.listTemplates))
+	s.handleManage(mux, "POST /api/admin/catalogue-templates", "client_keys", auth.ScopeWrite, http.HandlerFunc(s.createTemplate))
+	s.handleManage(mux, "GET /api/admin/catalogue-templates/{id}", "client_keys", auth.ScopeRead, http.HandlerFunc(s.getTemplate))
+	s.handleManage(mux, "PATCH /api/admin/catalogue-templates/{id}", "client_keys", auth.ScopeWrite, http.HandlerFunc(s.updateTemplate))
+	s.handleManage(mux, "DELETE /api/admin/catalogue-templates/{id}", "client_keys", auth.ScopeDelete, http.HandlerFunc(s.deleteTemplate))
+	s.handleManage(mux, "GET /api/admin/catalogue-templates/{id}/permissions", "client_keys", auth.ScopeRead, http.HandlerFunc(s.getTemplatePermissions))
+	s.handleManage(mux, "PUT /api/admin/catalogue-templates/{id}/permissions", "client_keys", auth.ScopeWrite, http.HandlerFunc(s.updateTemplatePermissions))
+	s.handleManage(mux, "GET /api/admin/client-keys/{id}/activity", "monitoring", auth.ScopeRead, http.HandlerFunc(s.listActivity))
+	s.handleManage(mux, "GET /api/admin/client-keys/{id}/activity/export", "monitoring", auth.ScopeRead, http.HandlerFunc(s.exportClientActivityCSV))
+	s.handleManage(mux, "DELETE /api/admin/client-keys/{id}/activity", "monitoring", auth.ScopeDelete, http.HandlerFunc(s.clearActivity))
+	s.handleManage(mux, "GET /api/admin/virtual-models/{id}/activity", "monitoring", auth.ScopeRead, http.HandlerFunc(s.listVirtualActivity))
+	s.handleManage(mux, "GET /api/admin/virtual-models/{id}/activity/export", "monitoring", auth.ScopeRead, http.HandlerFunc(s.exportVirtualActivityCSV))
+	s.handleManage(mux, "GET /api/admin/models/{id}/activity", "monitoring", auth.ScopeRead, http.HandlerFunc(s.listRealModelActivity))
+	s.handleManage(mux, "GET /api/admin/models/{id}/activity/export", "monitoring", auth.ScopeRead, http.HandlerFunc(s.exportRealModelActivityCSV))
+	s.handleManage(mux, "GET /api/admin/settings", "settings", auth.ScopeRead, http.HandlerFunc(s.getSettings))
+	s.handleManage(mux, "PUT /api/admin/settings", "settings", auth.ScopeWrite, http.HandlerFunc(s.updateSettings))
+	s.handleManage(mux, "POST /api/admin/notifications/test", "settings", auth.ScopeWrite, http.HandlerFunc(s.sendTestNotification))
+	s.handleManage(mux, "GET /api/admin/usage", "monitoring", auth.ScopeRead, http.HandlerFunc(s.usage))
+	s.handleManage(mux, "GET /api/admin/quota", "monitoring", auth.ScopeRead, http.HandlerFunc(s.quotaEndpoint))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
 	mux.Handle("GET /api/admin/live/requests", s.requireAdmin(http.HandlerFunc(s.liveRequests)))
 	mux.Handle("POST /api/admin/live/requests/reconcile", s.requireAdmin(http.HandlerFunc(s.reconcileLiveRequests)))
-	mux.Handle("GET /api/admin/activity", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listGlobalActivity)))
-	mux.Handle("GET /api/admin/activity/export", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.exportGlobalActivityCSV)))
-	mux.Handle("GET /api/admin/activity/{id}/attempts", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.listRequestAttempts)))
-	mux.Handle("GET /api/admin/cooldown", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.cooldownStatus)))
-	mux.Handle("DELETE /api/admin/cooldown", s.requireManage("monitoring", auth.ScopeDelete, http.HandlerFunc(s.clearCooldown)))
-	mux.Handle("GET /api/admin/health", s.requireManage("monitoring", auth.ScopeRead, http.HandlerFunc(s.adminHealth)))
+	s.handleManage(mux, "GET /api/admin/activity", "monitoring", auth.ScopeRead, http.HandlerFunc(s.listGlobalActivity))
+	s.handleManage(mux, "GET /api/admin/activity/export", "monitoring", auth.ScopeRead, http.HandlerFunc(s.exportGlobalActivityCSV))
+	s.handleManage(mux, "GET /api/admin/activity/{id}/attempts", "monitoring", auth.ScopeRead, http.HandlerFunc(s.listRequestAttempts))
+	s.handleManage(mux, "GET /api/admin/cooldown", "monitoring", auth.ScopeRead, http.HandlerFunc(s.cooldownStatus))
+	s.handleManage(mux, "DELETE /api/admin/cooldown", "monitoring", auth.ScopeDelete, http.HandlerFunc(s.clearCooldown))
+	s.handleManage(mux, "GET /api/admin/health", "monitoring", auth.ScopeRead, http.HandlerFunc(s.adminHealth))
 	mux.Handle("GET /api/admin/debug/memory", s.requireDebugAdmin(http.HandlerFunc(s.debugMemory)))
 	if s.config.DebugPprof {
 		mux.Handle("GET "+debugPprofPrefix, s.requireDebugAdmin(http.HandlerFunc(s.debugPprof)))
