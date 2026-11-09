@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -317,7 +318,7 @@ func TestHostedTokensSurvivePasswordReset(t *testing.T) {
 func TestHostedTokenPerAccountRateLimit(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
-	app.managementAccountLimiter = newLoginLimiter(3, time.Minute, time.Minute)
+	app.managementAccountLimiter = newWindowLimiter(3, time.Minute)
 	_, tokenOne := hostedMintToken(t, api, "one", map[string]int{"client_keys": 1})
 	_, tokenTwo := hostedMintToken(t, api, "two", map[string]int{"client_keys": 1})
 	for i := 0; i < 3; i++ {
@@ -329,13 +330,70 @@ func TestHostedTokenPerAccountRateLimit(t *testing.T) {
 			t.Fatalf("request %d = %d, want 200", i, status)
 		}
 	}
-	status, _, header := bearerRequest(t, api.base, tokenOne, "GET", "/api/admin/client-keys", nil)
+	status, payload, header := bearerRequest(t, api.base, tokenOne, "GET", "/api/admin/client-keys", nil)
 	if status != 429 || header.Get("Retry-After") == "" {
 		t.Fatalf("over budget = %d retry-after %q, want 429 with Retry-After", status, header.Get("Retry-After"))
+	}
+	retry, err := strconv.Atoi(header.Get("Retry-After"))
+	if err != nil || retry < 1 || retry > 60 {
+		t.Fatalf("Retry-After = %q, want 1..60", header.Get("Retry-After"))
+	}
+	if header.Get("X-RateLimit-Limit") != "3" || header.Get("X-RateLimit-Remaining") != "0" || header.Get("X-RateLimit-Reset") != header.Get("Retry-After") {
+		t.Fatalf("429 rate-limit headers = %v", header)
+	}
+	body := payload["error"].(map[string]any)
+	if body["code"] != "rate_limited" || body["limit"] != float64(3) || body["window_seconds"] != float64(60) || body["retry_after"] != float64(retry) {
+		t.Fatalf("429 body = %v", body)
 	}
 	// The dashboard session is not charged to the token budget.
 	if status, _, _ := api.request("GET", "/api/admin/client-keys", nil); status != 200 {
 		t.Fatalf("session request while token budget spent = %d, want 200", status)
+	}
+}
+
+func TestHostedTokenRateLimitHeadersOnSuccess(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	app.managementAccountLimiter = newWindowLimiter(5, time.Minute)
+	_, token := hostedMintToken(t, api, "meter", map[string]int{"client_keys": 1})
+	for i, want := range []string{"4", "3"} {
+		status, _, header := bearerRequest(t, api.base, token, "GET", "/api/admin/client-keys", nil)
+		if status != 200 || header.Get("X-RateLimit-Limit") != "5" || header.Get("X-RateLimit-Remaining") != want {
+			t.Fatalf("request %d: %d limit=%q remaining=%q, want remaining %s", i, status, header.Get("X-RateLimit-Limit"), header.Get("X-RateLimit-Remaining"), want)
+		}
+		if reset, _ := strconv.Atoi(header.Get("X-RateLimit-Reset")); reset < 1 || reset > 60 {
+			t.Fatalf("X-RateLimit-Reset = %q", header.Get("X-RateLimit-Reset"))
+		}
+	}
+	// Headers also accompany scope refusals, since those requests are charged.
+	if status, _, header := bearerRequest(t, api.base, token, "POST", "/api/admin/client-keys", map[string]any{"name": "x"}); status != 403 || header.Get("X-RateLimit-Remaining") != "2" {
+		t.Fatalf("403 headers: %d remaining=%q", status, header.Get("X-RateLimit-Remaining"))
+	}
+}
+
+func TestWindowLimiterResetsAtWindowEnd(t *testing.T) {
+	t.Parallel()
+	clock := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	l := newWindowLimiter(2, time.Minute)
+	l.now = func() time.Time { return clock }
+	if q := l.take("a"); !q.Allowed || q.Remaining != 1 || q.ResetSeconds != 60 {
+		t.Fatalf("first = %+v", q)
+	}
+	clock = clock.Add(20 * time.Second)
+	if q := l.take("a"); !q.Allowed || q.Remaining != 0 || q.ResetSeconds != 40 {
+		t.Fatalf("second = %+v", q)
+	}
+	clock = clock.Add(10 * time.Second)
+	if q := l.take("a"); q.Allowed || q.ResetSeconds != 30 {
+		t.Fatalf("refused request = %+v, want refused with 30s left", q)
+	}
+	// Refusals do not extend the block: the window ends 60s after the first request.
+	clock = clock.Add(30 * time.Second)
+	if q := l.take("a"); !q.Allowed || q.Remaining != 1 {
+		t.Fatalf("after window = %+v, want a fresh budget", q)
+	}
+	if q := l.take("b"); !q.Allowed || q.Remaining != 1 {
+		t.Fatalf("other key = %+v", q)
 	}
 }
 

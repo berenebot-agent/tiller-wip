@@ -31,6 +31,14 @@ func (s *Server) managementOpenAPI(w http.ResponseWriter, _ *http.Request) {
 		}
 		return routes[i].Method < routes[j].Method
 	})
+	rateHeaders := map[string]any{}
+	if info.Hosted {
+		rateHeaders = map[string]any{
+			"X-RateLimit-Limit":     map[string]any{"description": "Requests allowed per window for the account.", "schema": map[string]string{"type": "integer"}},
+			"X-RateLimit-Remaining": map[string]any{"description": "Requests left in the current window.", "schema": map[string]string{"type": "integer"}},
+			"X-RateLimit-Reset":     map[string]any{"description": "Seconds until the window ends.", "schema": map[string]string{"type": "integer"}},
+		}
+	}
 	for _, r := range routes {
 		if info.Hosted && r.Tier > hostedMaxManagementScopeTier {
 			continue
@@ -43,10 +51,10 @@ func (s *Server) managementOpenAPI(w http.ResponseWriter, _ *http.Request) {
 			// Vendor extension naming the token grant this route requires.
 			"x-required-scope": r.Area + ":" + managementTierLabel(r.Tier),
 			"responses": map[string]any{
-				"200": map[string]any{"description": "Success (JSON, or CSV for export routes)."},
+				"200": map[string]any{"description": "Success (JSON, or CSV for export routes).", "headers": rateHeaders},
 				"401": map[string]any{"description": "Missing, invalid or expired token."},
 				"403": map[string]any{"description": "insufficient_scope: the token's ceiling is below the route's tier."},
-				"429": map[string]any{"description": "Rate limited; retry after Retry-After seconds."},
+				"429": map[string]any{"description": "Rate limited; retry after Retry-After seconds.", "headers": withRetryAfter(rateHeaders)},
 			},
 		}
 		var params []map[string]any
@@ -81,4 +89,13 @@ func (s *Server) managementOpenAPI(w http.ResponseWriter, _ *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(doc)
+}
+
+// withRetryAfter returns the rate headers plus Retry-After for 429 responses.
+func withRetryAfter(base map[string]any) map[string]any {
+	out := map[string]any{"Retry-After": map[string]any{"description": "Seconds to wait before retrying.", "schema": map[string]string{"type": "integer"}}}
+	for k, v := range base {
+		out[k] = v
+	}
+	return out
 }
