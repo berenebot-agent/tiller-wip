@@ -91,7 +91,7 @@ func TestManagementGuideServedInHosted(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("hosted guide = %d", resp.StatusCode)
 	}
-	for _, want := range []string{"Hosted accounts", "Paging and limits", "must be public", "60 requests per minute", "rate_limited", "/api/admin/catalogue-templates", "not available to hosted tokens"} {
+	for _, want := range []string{"Hosted accounts", "Paging and limits", "must be public", "X-RateLimit-Remaining", "60 requests per minute", "rate_limited", "/api/admin/catalogue-templates", "not available to hosted tokens"} {
 		if !strings.Contains(md, want) {
 			t.Fatalf("hosted guide missing %q", want)
 		}

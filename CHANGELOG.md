@@ -8,6 +8,11 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Hosted management API rate-limit headers.** Token responses carry
+  `X-RateLimit-Limit/Remaining/Reset`; a `429` sets an accurate `Retry-After`
+  (seconds until the window ends) and a body with `limit`, `window_seconds` and
+  `retry_after`. The per-account budget is now a fixed window, so refused
+  requests no longer extend the block.
 - **Self-documenting management API, on local and hosted.** `/api/admin`
   (guide), `/api.json` (discovery) and the new `/api/openapi.json` (OpenAPI 3.1)
   are generated from the routes the server registers, so they cannot drift —

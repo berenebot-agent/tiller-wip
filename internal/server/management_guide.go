@@ -79,6 +79,8 @@ func (s *Server) discoveryLimits() map[string]any {
 	if s.config.Mode == config.ModeHosted {
 		limits["requests_per_minute_per_account"] = hostedManagementRequestsPerMinute
 		limits["max_tokens_per_account"] = hostedMaxManagementTokens
+		limits["rate_limit_window_seconds"] = 60
+		limits["rate_limit_headers"] = []string{"X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"}
 	}
 	return limits
 }
@@ -233,6 +235,9 @@ func renderManagementGuideMarkdown(info managementGuideInfo) string {
 		b.WriteString("private or internal networks are rejected, and some provider types are not\n")
 		b.WriteString("offered. Token-creation notices are emailed only when the instance has mail\n")
 		b.WriteString("configured.\n\n")
+		b.WriteString("Every hosted token response carries `X-RateLimit-Limit` (60), `X-RateLimit-Remaining`\n")
+		b.WriteString("and `X-RateLimit-Reset` (seconds until the window ends); a `429` also sets\n")
+		b.WriteString("`Retry-After`. Pace requests with `Remaining` rather than waiting for a `429`.\n\n")
 	}
 	b.WriteString("## Errors\n\n")
 	b.WriteString("Failures use the envelope `{\"error\":{\"code\":\"...\",\"message\":\"...\"}}`:\n\n")
@@ -241,7 +246,7 @@ func renderManagementGuideMarkdown(info managementGuideInfo) string {
 	b.WriteString("- `403 insufficient_scope` — the token's ceiling is below the route's tier.\n")
 	b.WriteString("- `429 authentication_rate_limited` — too many failed attempts; retry after `Retry-After` seconds.\n")
 	if info.Hosted {
-		b.WriteString("- `429 rate_limited` — the account's 60 requests/minute management budget is spent; retry after `Retry-After` seconds.\n")
+		b.WriteString("- `429 rate_limited` — the account's 60 requests/minute management budget is spent. The body carries `limit`, `window_seconds` and `retry_after`; the budget refills when the one-minute window that began at the first request ends.\n")
 	}
 	b.WriteString("\n")
 	b.WriteString("## Examples\n\n")
@@ -307,12 +312,13 @@ func renderManagementGuideHTML(info managementGuideInfo) string {
 	b.WriteString("<p>List endpoints accept <code>limit</code> (default 50, maximum 200), <code>offset</code> (capped at 10000) and, where supported, <code>search</code>. To read further than that, narrow with <code>search</code> or use the CSV export routes. Admin request bodies are limited to 32 MiB.</p>\n")
 	if info.Hosted {
 		b.WriteString("<p>On hosted accounts, provider base URLs must be public: addresses that resolve to private or internal networks are rejected, and some provider types are not offered. Token-creation notices are emailed only when the instance has mail configured.</p>\n")
+		b.WriteString("<p>Every hosted token response carries <code>X-RateLimit-Limit</code> (60), <code>X-RateLimit-Remaining</code> and <code>X-RateLimit-Reset</code> (seconds until the window ends); a <code>429</code> also sets <code>Retry-After</code>. Pace requests with <code>Remaining</code> rather than waiting for a <code>429</code>.</p>\n")
 	}
 	b.WriteString("<h2>Errors</h2>\n")
 	b.WriteString("<p>Failures use the envelope <code>{\"error\":{\"code\":\"...\",\"message\":\"...\"}}</code>:</p>\n")
 	b.WriteString("<ul>\n<li><code>401 invalid_api_token</code> — missing, unknown, disabled, or malformed token.</li>\n<li><code>401 token_expired</code> — the token's expiry has passed.</li>\n<li><code>403 insufficient_scope</code> — the token's ceiling is below the route's tier.</li>\n<li><code>429 authentication_rate_limited</code> — too many failed attempts; retry after <code>Retry-After</code> seconds.</li>\n")
 	if info.Hosted {
-		b.WriteString("<li><code>429 rate_limited</code> — the account's 60 requests/minute management budget is spent; retry after <code>Retry-After</code> seconds.</li>\n")
+		b.WriteString("<li><code>429 rate_limited</code> — the account's 60 requests/minute management budget is spent. The body carries <code>limit</code>, <code>window_seconds</code> and <code>retry_after</code>; the budget refills when the one-minute window that began at the first request ends.</li>\n")
 	}
 	b.WriteString("</ul>\n")
 

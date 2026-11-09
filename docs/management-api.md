@@ -44,7 +44,7 @@ Hosted tokens follow the same model with extra guard rails:
 - Tokens are limited to `read` and `write`; destructive deletes stay in the
   dashboard.
 - Up to 10 tokens per account, sharing a budget of **60 requests per minute**
-  (`429 rate_limited` with `Retry-After`).
+  (see [Rate limits](#rate-limits-hosted)).
 - Suspending or deleting the account revokes tokens immediately. "Sign out
   everywhere" offers to revoke them too; a password reset leaves them in place.
 - Provider base URLs must be public: addresses that resolve to private or
@@ -98,6 +98,28 @@ List endpoints accept `limit` (default 50, maximum 200), `offset` (capped at
 32 MiB. `/api.json` reports these as `page_size_default`, `page_size_max`,
 `offset_max` and `admin_request_body_bytes`.
 
+## Rate limits (hosted)
+
+Hosted accounts share 60 management requests per minute across all their
+tokens, in fixed one-minute windows that start at the account's first request.
+Every token response carries:
+
+| Header | Meaning |
+|---|---|
+| `X-RateLimit-Limit` | requests allowed per window (60) |
+| `X-RateLimit-Remaining` | requests left in this window |
+| `X-RateLimit-Reset` | seconds until the window ends and the budget refills |
+
+When the budget is spent the API answers `429` with `Retry-After` (the same
+seconds-until-reset value) and a body such as:
+
+```json
+{"error":{"code":"rate_limited","message":"...","limit":60,"window_seconds":60,"retry_after":23}}
+```
+
+Refused requests are not counted and do not extend the wait. Local instances
+have no per-account budget (failed-authentication attempts are still throttled).
+
 ## Errors
 
 Failures use `{"error":{"code":"...","message":"..."}}`:
@@ -108,7 +130,7 @@ Failures use `{"error":{"code":"...","message":"..."}}`:
 | 401 | `token_expired` | the token's expiry has passed |
 | 403 | `insufficient_scope` | the token's ceiling is below the route's tier; `required` names the grant (e.g. `providers:write`) |
 | 429 | `authentication_rate_limited` | too many failed attempts; see `Retry-After` |
-| 429 | `rate_limited` | hosted only: the account's request budget is spent |
+| 429 | `rate_limited` | hosted only: the account's request budget is spent; body has `limit`, `window_seconds`, `retry_after` |
 
 ## What tokens cannot do
 
