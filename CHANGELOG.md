@@ -8,6 +8,12 @@ behavior may still change before a stable `1.0`.
 
 ### Added
 
+- **Self-documenting management API, on local and hosted.** `/api/admin`
+  (guide), `/api.json` (discovery) and the new `/api/openapi.json` (OpenAPI 3.1)
+  are generated from the routes the server registers, so they cannot drift —
+  catalogue-template routes, previously missing from the guide, are now listed.
+  Hosted instances serve them too, with the hosted limits. New
+  `docs/management-api.md` is the GitHub-facing guide.
 - **Management API tokens in hosted mode.** Hosted customers can now create
   `mt-tr-` tokens under Settings → Management API. Hosted tokens are stricter
   than local ones: creating, rotating, widening or re-enabling needs

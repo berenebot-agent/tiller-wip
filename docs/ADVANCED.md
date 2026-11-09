@@ -6,27 +6,15 @@ covered in the [README](../README.md).
 
 ## Management API
 
-The web interface is a pure client of a JSON REST API under `/api/admin/*`. You can drive that same API from scripts and agents (for example a Hermes agent) with a **management API token**: create one under **Settings → Management API**, and authenticate with `Authorization: Bearer mt-tr-…`. No cookie or CSRF token is involved.
+The web interface is a pure client of a JSON REST API under `/api/admin/*`, and
+you can drive it from scripts and agents with a **management API token**
+(Settings → Management API). Tokens, scopes, the hosted limits, errors and a
+curl quickstart are documented in **[management-api.md](management-api.md)**.
 
-Each token carries per-area access with three escalating levels — `read` ⊂ `write` ⊂ `delete`:
-
-| Area | read | write | delete |
-|---|---|---|---|
-| Providers | inspect providers, models, OAuth status | create/edit providers, swap credentials, refresh discovery, connect OAuth, add manual models | delete providers/models, disconnect OAuth |
-| Virtual models | inspect routes | create/edit groups and virtual models | delete groups and virtual models |
-| Client keys | list keys and permissions | create/edit/rotate keys, edit permissions | delete keys |
-| Settings | read settings | change logging, fallback, and notification settings, send a test notification | — |
-| Monitoring | usage, quota, activity (+CSV exports), cooldown status, health | — | clear activity, clear cooldown |
-
-Notes:
-
-- **Hosted accounts** get the same feature with limits: creating, rotating or widening a token asks for your password (or a fresh passkey/Google check); new tokens default to a 30-day expiry (you can choose never), access is limited to read and write, an account can hold 10, and all of them share 60 requests per minute. "Sign out everywhere" asks whether to revoke tokens too; password resets leave them in place. The `/api` usage guide is served by local installs only.
-- Tokens are shown **once** at creation; only a bcrypt hash is stored. Rotate or revoke at any time; expiry is optional (presets or a custom date).
-- Token management itself is browser-only: a token can never list, mint, or edit tokens. It can introspect itself (`GET /api/admin/api-tokens/self`).
-- Permanently out of reach for tokens: backup/account export, identity (password, passkeys, email, account deletion, sessions), onboarding, debug endpoints, and the live SSE stream.
-- Tokens survive admin credential changes; revoke compromised tokens explicitly in the Management API tab.
-- A built-in usage guide is served at `/api/admin` (and `/api`): open it in a browser for a rendered reference, or fetch it with `Accept: text/markdown` to hand an agent the entire guide as plain text.
-- A machine-readable discovery document is served at `/api.json` (or `/api` with `Accept: application/json`), so a host SDK can probe the instance — name, API base, auth scheme, key prefix, scopes, capabilities, and limits.
+Each running instance also documents itself: `/api/admin` (rendered guide, or
+markdown with `Accept: text/markdown`), `/api.json` (discovery) and
+`/api/openapi.json` (OpenAPI 3.1), all generated from the routes the instance
+enforces.
 
 ## Embedding Tiller
 

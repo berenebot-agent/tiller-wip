@@ -74,16 +74,105 @@ func TestManagementGuideServedLocally(t *testing.T) {
 	}
 }
 
-// TestManagementGuideAbsentInHosted proves the local-only feature leaves no
-// guide (or token surface) in hosted mode.
-func TestManagementGuideAbsentInHosted(t *testing.T) {
+// TestManagementGuideServedInHosted proves hosted serves the guide with the
+// hosted limits and without delete-tier endpoints.
+func TestManagementGuideServedInHosted(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
-	for _, path := range []string{"/api", "/api/admin"} {
-		status, _, _ := api.request("GET", path, nil)
-		if status != 404 {
-			t.Fatalf("hosted GET %s = %d, want 404", path, status)
+	req, _ := http.NewRequest("GET", api.base+"/api/admin", nil)
+	req.Header.Set("Accept", "text/markdown")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	md := string(body)
+	if resp.StatusCode != 200 {
+		t.Fatalf("hosted guide = %d", resp.StatusCode)
+	}
+	for _, want := range []string{"Hosted accounts", "60 requests per minute", "rate_limited", "/api/admin/catalogue-templates", "not available to hosted tokens"} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("hosted guide missing %q", want)
 		}
+	}
+	if strings.Contains(md, "| DELETE | `/api/admin/providers/{id}`") {
+		t.Fatal("hosted guide lists a delete-tier route")
+	}
+	for _, path := range []string{"/api", "/api.json", "/api/openapi.json"} {
+		if status, _, _ := api.request("GET", path, nil); status != 200 {
+			t.Fatalf("hosted GET %s = %d, want 200", path, status)
+		}
+	}
+	status, doc, _ := api.request("GET", "/api.json", nil)
+	limits, _ := doc["limits"].(map[string]any)
+	if status != 200 || doc["mode"] != "hosted" || doc["token_management"] != "dashboard-only" || limits["requests_per_minute_per_account"] != float64(hostedManagementRequestsPerMinute) {
+		t.Fatalf("hosted discovery = %v", doc)
+	}
+}
+
+// TestManagementReferenceMatchesRegisteredRoutes proves the generated guide
+// and OpenAPI file cover every token-reachable route (including catalogue
+// templates) and enforce what they advertise.
+func TestManagementReferenceMatchesRegisteredRoutes(t *testing.T) {
+	t.Parallel()
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	app := newTenantServer(t, db)
+	router := httptest.NewServer(app.Handler())
+	t.Cleanup(router.Close)
+
+	if len(app.managementRoutes) < 50 {
+		t.Fatalf("only %d management routes recorded", len(app.managementRoutes))
+	}
+	resp, err := http.Get(router.URL + "/api/openapi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		OpenAPI string                               `json:"openapi"`
+		Paths   map[string]map[string]map[string]any `json:"paths"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if doc.OpenAPI != "3.1.0" {
+		t.Fatalf("openapi version = %q", doc.OpenAPI)
+	}
+	md := renderManagementGuideMarkdown(app.managementGuideInfo())
+	for _, r := range app.managementRoutes {
+		op, ok := doc.Paths[r.Path][strings.ToLower(r.Method)]
+		if !ok {
+			t.Fatalf("openapi missing %s %s", r.Method, r.Path)
+		}
+		if want := r.Area + ":" + managementTierLabel(r.Tier); op["x-required-scope"] != want {
+			t.Fatalf("openapi %s %s scope = %v, want %s", r.Method, r.Path, op["x-required-scope"], want)
+		}
+		if !strings.Contains(md, "| "+r.Method+" | `"+r.Path+"` | "+managementTierLabel(r.Tier)+" |") {
+			t.Fatalf("guide missing %s %s", r.Method, r.Path)
+		}
+	}
+	// Every advertised route is genuinely token-reachable and scope-gated: a
+	// token with no grants is refused with the advertised requirement.
+	api := loginTestAPI(t, app)
+	_, empty := createManagementToken(t, api, "empty", map[string]int{}, "")
+	for _, r := range app.managementRoutes {
+		path := strings.ReplaceAll(strings.ReplaceAll(r.Path, "{id}", "x"), "{model...}", "x")
+		status, payload, _ := bearerRequest(t, router.URL, empty, r.Method, path, nil)
+		required := ""
+		if e, ok := payload["error"].(map[string]any); ok {
+			required, _ = e["required"].(string)
+		}
+		if status != 403 || required != r.Area+":"+managementTierLabel(r.Tier) {
+			t.Fatalf("%s %s with empty token = %d required=%q, want 403 %s:%s", r.Method, r.Path, status, required, r.Area, managementTierLabel(r.Tier))
+		}
+	}
+	if _, ok := doc.Paths["/api/admin/catalogue-templates/{id}/permissions"]["put"]; !ok {
+		t.Fatal("catalogue-template routes missing from the reference")
 	}
 }
 
@@ -144,13 +233,5 @@ func TestManagementDiscoveryDocument(t *testing.T) {
 	var neg map[string]any
 	if err := json.Unmarshal(body, &neg); err != nil || neg["name"] != "Tiller Router" {
 		t.Fatalf("negotiated discovery = %v err=%v", neg, err)
-	}
-}
-
-func TestManagementDiscoveryAbsentInHosted(t *testing.T) {
-	t.Parallel()
-	_, api, _ := hostedServerHarness(t, false)
-	if status, _, _ := api.request("GET", "/api.json", nil); status != 404 {
-		t.Fatalf("hosted GET /api.json = %d, want 404", status)
 	}
 }
