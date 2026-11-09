@@ -1245,7 +1245,10 @@ test('virtual-model target combobox: non-matching text still blocks submission',
   await expect(page.locator('#form-dialog')).toBeVisible();
 
   // Cancel and clean up the group so we leave the suite tidy.
-  await page.getByRole('button', { name: 'Cancel' }).click();
+  // Scope to the dialog: virtual-group rows are role=button after the UI
+  // restructure, so a page-wide name match can also hit a group named
+  // "cancel-route-vg" left behind by the inline-picker test.
+  await page.locator('#form-dialog').getByRole('button', { name: 'Cancel', exact: true }).click();
   const groupList = await (await page.request.get('/api/admin/virtual-groups?search=vm-nomatch-vg')).json();
   const group = groupList.data.find(g => g.name === 'vm-nomatch-vg');
   if (group) await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
