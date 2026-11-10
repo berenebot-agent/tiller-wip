@@ -599,6 +599,9 @@ func (s *Server) changeAccountStatus(w http.ResponseWriter, r *http.Request, sta
 	}
 	s.clients.InvalidateAccount(accountID)
 	s.tokens.InvalidateAccount(accountID)
+	if status == "suspended" {
+		s.cancelAccountStreams(accountID)
+	}
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_" + status, ActorType: "platform", TargetType: "account", TargetID: accountID})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -616,6 +619,7 @@ func (s *Server) revokeAccountSessions(w http.ResponseWriter, r *http.Request) {
 	s.identity.InvalidateAccount(accountID)
 	s.clients.InvalidateAccount(accountID)
 	s.tokens.InvalidateAccount(accountID)
+	s.cancelAccountStreams(accountID)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_sessions_revoked", ActorType: "platform", TargetType: "account", TargetID: accountID})
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -63,6 +63,7 @@ type Server struct {
 	authClient        *http.Client
 	googleVerifier    *hostedauth.GoogleVerifier
 	turnstileVerifier *hostedauth.TurnstileVerifier
+	streams           streamRegistry
 	googleFlows       *hostedauth.FlowStore
 	googlePending     *hostedauth.PendingSignupStore
 	googleReauthMu    sync.Mutex
@@ -1463,6 +1464,9 @@ func adminError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}})
 }
 func inferenceError(w http.ResponseWriter, status int, errType, code, message string, anthropic bool) {
+	if st, msg, ok := limitErrorDetail(code); ok {
+		status, message = st, msg
+	}
 	if anthropic {
 		writeJSON(w, status, map[string]any{"type": "error", "error": map[string]any{"type": errType, "message": message, "code": code}})
 		return

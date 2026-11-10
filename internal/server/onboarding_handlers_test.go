@@ -333,7 +333,8 @@ func keys(m map[string][]byte) []string {
 // injected, so the token ciphertext column holds the raw token verbatim.
 func signupAndReadVerificationToken(t *testing.T, app *Server, api *testAPI, email string) string {
 	t.Helper()
-	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": email, "accept_terms": true})
+	enableTestCaptcha(t, app)
+	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": email, "accept_terms": true, "captcha_token": "signup"})
 	if status != http.StatusAccepted {
 		t.Fatalf("signup: %d %v", status, payload)
 	}
@@ -369,9 +370,10 @@ func TestSignupRequiresTermsAcceptance(t *testing.T) {
 func TestSignupAttemptBudgetSurvivesSuccessfulSignup(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
+	enableTestCaptcha(t, api.server)
 	for i := 0; i < 5; i++ {
 		status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{
-			"email": fmt.Sprintf("signup-%d@example.com", i), "accept_terms": true,
+			"email": fmt.Sprintf("signup-%d@example.com", i), "accept_terms": true, "captcha_token": "signup",
 		})
 		if status != http.StatusAccepted {
 			t.Fatalf("signup %d: %d %v", i+1, status, payload)
@@ -546,5 +548,37 @@ func TestVerifyEmailMintsSessionAndRecordsAcceptance(t *testing.T) {
 	status, _, _ = api.request("POST", "/api/auth/verify-email", map[string]any{"token": token, "password": "correct horse battery staple"})
 	if status != http.StatusBadRequest {
 		t.Fatalf("replayed verification token status = %d, want 400", status)
+	}
+}
+
+func TestHostedSignupFailsClosedWithoutCaptcha(t *testing.T) {
+	_, api, _ := hostedServerHarness(t, false)
+	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": "a@example.com", "accept_terms": true})
+	if status != http.StatusServiceUnavailable || errorCode(payload) != "captcha_unavailable" {
+		t.Fatalf("signup without turnstile = %d %v, want 503 captcha_unavailable", status, payload)
+	}
+	enableTestCaptcha(t, api.server)
+	status, payload, _ = api.request("POST", "/api/auth/signup", map[string]any{"email": "a@example.com", "accept_terms": true})
+	if status != http.StatusForbidden || errorCode(payload) != "captcha_required" {
+		t.Fatalf("signup without token = %d %v, want 403 captcha_required", status, payload)
+	}
+}
+
+func TestHostedSignupCap(t *testing.T) {
+	app, api, _ := hostedServerHarness(t, false)
+	enableTestCaptcha(t, app)
+	counts, err := app.identity.PlatformCounts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.config.MaxSignups = int(counts.Accounts)
+	status, payload, _ := api.request("POST", "/api/auth/signup", map[string]any{"email": "a@example.com", "accept_terms": true, "captcha_token": "signup"})
+	if status != http.StatusServiceUnavailable || errorCode(payload) != "signup_unavailable" {
+		t.Fatalf("signup at cap = %d %v, want 503 signup_unavailable", status, payload)
+	}
+	app.config.MaxSignups = int(counts.Accounts) + 1
+	status, payload, _ = api.request("POST", "/api/auth/signup", map[string]any{"email": "a@example.com", "accept_terms": true, "captcha_token": "signup"})
+	if status != http.StatusAccepted {
+		t.Fatalf("signup under cap = %d %v, want 202", status, payload)
 	}
 }
