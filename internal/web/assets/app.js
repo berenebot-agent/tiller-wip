@@ -3034,7 +3034,7 @@ async function loadAccount() {
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     const costWindows = usage.client_cost ? Object.values(usage.client_cost) : [];
     const sumCost = windowKey => costWindows.reduce((total, w) => total + ((w?.[windowKey] ?? 0) || 0), 0);
-    const metric = (label, value, usd = false) => `<div class="metric${usd ? ' metric-usd' : ''}"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
+    const metric = (label, value, usd = false) => `<div class="metric${usd ? ' metric-usd' : ''}"><strong>${usd ? '$' + value : Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
     $('#account-usage').innerHTML = [
       metric('1h tokens', sum('1h')),
       metric('24h tokens', sum('24h')),
