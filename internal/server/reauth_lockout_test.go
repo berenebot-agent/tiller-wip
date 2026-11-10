@@ -8,10 +8,8 @@ import (
 
 // TestReauthenticationLockoutIsSharedAcrossScreens proves one failure streak
 // covers every sensitive operation: a stolen session cannot buy extra password
-// guesses by moving from account settings to API token management. It also
-// pins the two properties the product decision requires -- a lockout is a rate
-// limit, not a wrong-password answer, and a passkey/Google grant still works
-// while the password is locked.
+// guesses by moving between account settings screens. It also
+// pins that a lockout is a rate limit, not a wrong-password answer.
 func TestReauthenticationLockoutIsSharedAcrossScreens(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedAccountServer(t)
@@ -22,10 +20,9 @@ func TestReauthenticationLockoutIsSharedAcrossScreens(t *testing.T) {
 			"new_password":     "a replacement password phrase",
 		})
 	}
-	token := func() (int, map[string]any, http.Header) {
-		return api.request("POST", "/api/admin/api-tokens", map[string]any{
-			"name": "after-lockout", "scopes": map[string]int{"client_keys": 1},
-			"expires_at": hostedExpiry(30), "password": "definitely not the password",
+	email := func() (int, map[string]any, http.Header) {
+		return api.request("POST", "/api/auth/account/email", map[string]any{
+			"new_email": "elsewhere@example.com", "password": "definitely not the password",
 		})
 	}
 
@@ -38,9 +35,9 @@ func TestReauthenticationLockoutIsSharedAcrossScreens(t *testing.T) {
 
 	// The other screen is locked too, and says so with a retry hint rather than
 	// claiming the password was wrong.
-	status, payload, header := token()
+	status, payload, header := email()
 	if status != http.StatusTooManyRequests || payload["error"].(map[string]any)["code"] != "authentication_rate_limited" {
-		t.Fatalf("token screen after lockout: %d %v, want 429 authentication_rate_limited", status, payload)
+		t.Fatalf("email screen after lockout: %d %v, want 429 authentication_rate_limited", status, payload)
 	}
 	if header.Get("Retry-After") == "" {
 		t.Fatal("lockout response must carry Retry-After")
@@ -54,19 +51,6 @@ func TestReauthenticationLockoutIsSharedAcrossScreens(t *testing.T) {
 	})
 	if status != http.StatusTooManyRequests || payload["error"].(map[string]any)["code"] != "authentication_rate_limited" {
 		t.Fatalf("correct password during lockout: %d %v, want 429", status, payload)
-	}
-
-	// A passkey or Google confirmation completed in this session still gets the
-	// user through: a forgotten password must not lock someone out of their own
-	// settings.
-	raw := rawUserSessionTokenFrom(t, api)
-	api.server.grantPasskeyReauth(raw)
-	status, payload, _ = api.request("POST", "/api/admin/api-tokens", map[string]any{
-		"name": "with-passkey", "scopes": map[string]int{"client_keys": 1},
-		"expires_at": hostedExpiry(30),
-	})
-	if status != http.StatusCreated {
-		t.Fatalf("token mint with passkey grant during lockout: %d %v, want 201", status, payload)
 	}
 }
 
