@@ -515,6 +515,10 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
+	if s.signupCapReached(r.Context()) {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
+	}
 	terms, err := s.storeHandle().GetLegalDoc(r.Context(), "terms")
 	if err != nil {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")

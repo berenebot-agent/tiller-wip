@@ -669,14 +669,30 @@ func (s *Store) userByEmail(ctx context.Context, email string) (User, error) {
 	return u, nil
 }
 
+// verifyPasswordHash checks a password against a stored hash. When the hasher
+// supports a cancellable KDF wait, a caller whose request has ended stops
+// queueing for a slot instead of occupying it; available is then false and ok
+// is meaningless. Hashers without that support verify as before.
+func (s *Store) verifyPasswordHash(ctx context.Context, password, hash string) (ok, available bool) {
+	if verifier, is := s.passwordHasher.(interface {
+		VerifyContext(context.Context, string, string) (bool, bool)
+	}); is {
+		return verifier.VerifyContext(ctx, password, hash)
+	}
+	return s.passwordHasher.Verify(password, hash), true
+}
+
 // verifyDummy spends one password verification against a fixed hash so an
 // unknown or password-less account takes as long as a real one and response
-// time does not reveal which emails exist.
-func (s *Store) verifyDummy(password string) {
+// time does not reveal which emails exist. It reports false when ctx ended
+// before a KDF slot could be taken.
+func (s *Store) verifyDummy(ctx context.Context, password string) bool {
 	s.dummyOnce.Do(func() { s.dummyHash, _ = s.passwordHasher.Hash("tiller-dummy-password") })
-	if s.dummyHash != "" {
-		_ = s.passwordHasher.Verify(password, s.dummyHash)
+	if s.dummyHash == "" {
+		return true
 	}
+	_, available := s.verifyPasswordHash(ctx, password, s.dummyHash)
+	return available
 }
 
 // AuthenticatePassword verifies an email/password and returns an active,
@@ -684,18 +700,28 @@ func (s *Store) verifyDummy(password string) {
 func (s *Store) AuthenticatePassword(ctx context.Context, email, password string) (User, error) {
 	u, err := s.userByEmail(ctx, NormalizeEmail(email))
 	if err != nil {
-		s.verifyDummy(password)
+		if !s.verifyDummy(ctx, password) {
+			return User{}, ErrReauthenticationCancelled
+		}
 		return User{}, err
 	}
 	var passwordHash string
 	if !u.PasswordEnabled {
-		s.verifyDummy(password)
+		if !s.verifyDummy(ctx, password) {
+			return User{}, ErrReauthenticationCancelled
+		}
 		return User{}, ErrNotFound
 	}
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=? AND password_auth_enabled=1`, u.ID).Scan(&passwordHash); err != nil {
 		return User{}, err
 	}
-	if !s.passwordHasher.Verify(password, passwordHash) {
+	verified, available := s.verifyPasswordHash(ctx, password, passwordHash)
+	if !available {
+		// The caller went away while waiting for a KDF slot. This is not a
+		// wrong password and must not be counted against the account or IP.
+		return User{}, ErrReauthenticationCancelled
+	}
+	if !verified {
 		return User{}, ErrNotFound
 	}
 	if u.Status != "active" {
