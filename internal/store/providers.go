@@ -149,6 +149,10 @@ type UpdateProviderInput struct {
 	// provider disabled by another request.
 	EnabledSet bool
 	Protocols  string
+	// ClearCredential removes the stored API credential in the same statement
+	// as the update. It is set when the upstream host changes so a credential
+	// can never follow a provider to a host it was not issued for.
+	ClearCredential bool
 }
 
 func (s *Scope) UpdateProvider(ctx context.Context, in UpdateProviderInput) error {
@@ -160,6 +164,9 @@ func (s *Scope) UpdateProvider(ctx context.Context, in UpdateProviderInput) erro
 		// and the RowsAffected()==0 → not-found signal stays correct.
 		set := "name=?,base_url=?,protocols=?,updated_at=?"
 		args := []any{in.Name, in.BaseURL, in.Protocols, now()}
+		if in.ClearCredential {
+			set += ",credential_secret=NULL"
+		}
 		if in.EnabledSet {
 			set += ",enabled=?"
 			args = append(args, boolInt(in.Enabled))

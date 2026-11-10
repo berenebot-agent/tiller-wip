@@ -743,3 +743,35 @@ func TestMaxStreamDuration(t *testing.T) {
 		t.Errorf("hosted default = %v, want 10m", DefaultHostedMaxStreamDuration)
 	}
 }
+
+func TestPlatformPort(t *testing.T) {
+	t.Setenv("TILLER_USERNAME", "admin@example.com")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret-0123456789")
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://app.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.1")
+	t.Setenv("TILLER_LISTEN_ADDR", ":8080")
+
+	t.Setenv("TILLER_PLATFORM_PORT", "")
+	if c, err := Load(); err != nil || c.PlatformPort != 0 {
+		t.Fatalf("unset: port=%d err=%v, want 0 and no error", c.PlatformPort, err)
+	}
+	t.Setenv("TILLER_PLATFORM_PORT", "9443")
+	if c, err := Load(); err != nil || c.PlatformPort != 9443 {
+		t.Fatalf("9443: port=%d err=%v", c.PlatformPort, err)
+	}
+	for _, bad := range []string{"0", "70000", "abc", "8080"} {
+		t.Setenv("TILLER_PLATFORM_PORT", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("TILLER_PLATFORM_PORT=%q should fail", bad)
+		}
+	}
+	t.Setenv("TILLER_PLATFORM_PORT", "9443")
+	t.Setenv("TILLER_MODE", "local")
+	if _, err := Load(); err == nil {
+		t.Error("TILLER_PLATFORM_PORT in local mode should fail")
+	}
+}

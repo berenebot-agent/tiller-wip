@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -93,8 +94,12 @@ type Config struct {
 	// mode and unlimited otherwise. Set with TILLER_MAX_STREAM_DURATION
 	// (a Go duration such as "10m"; "0" disables).
 	MaxStreamDuration time.Duration
-	ModelsDevEnabled  bool
-	LogLevel          string
+	// PlatformPort, when non-zero (TILLER_PLATFORM_PORT), serves the platform
+	// console on its own listener on this port and removes it from the main
+	// listener. Zero keeps the console on the main port. Hosted mode only.
+	PlatformPort     int
+	ModelsDevEnabled bool
+	LogLevel         string
 	// DNSFallbackServers are tried after supplied DNS servers fail. A nil
 	// list disables failover; valid positive/negative replies never fall back.
 	DNSFallbackServers []string
@@ -311,6 +316,19 @@ func Load() (Config, error) {
 	}
 	if c.Mode == ModeHosted && len(c.TrustedProxies) == 0 {
 		return Config{}, errors.New("TILLER_TRUSTED_PROXY is required in hosted mode and must identify the direct reverse proxy")
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_PLATFORM_PORT")); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil || port < 1 || port > 65535 {
+			return Config{}, fmt.Errorf("TILLER_PLATFORM_PORT must be a port number between 1 and 65535, got %q", raw)
+		}
+		if c.Mode != ModeHosted {
+			return Config{}, errors.New("TILLER_PLATFORM_PORT only applies in hosted mode")
+		}
+		if _, mainPort, splitErr := net.SplitHostPort(c.ListenAddr); splitErr == nil && mainPort == strconv.Itoa(port) {
+			return Config{}, errors.New("TILLER_PLATFORM_PORT must differ from the port in TILLER_LISTEN_ADDR")
+		}
+		c.PlatformPort = port
 	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
 		v, err := strconv.ParseBool(raw)

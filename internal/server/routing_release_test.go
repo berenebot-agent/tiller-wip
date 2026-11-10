@@ -160,7 +160,7 @@ func TestOrderedFallbackCoversNetworkAndTLSFailures(t *testing.T) {
 					providerID = provider["id"].(string)
 				}
 			}
-			status, payload, _ := api.request(http.MethodPatch, "/api/admin/providers/"+providerID, map[string]any{"base_url": tc.baseURL(t)})
+			status, payload, _ := api.request(http.MethodPatch, "/api/admin/providers/"+providerID, map[string]any{"base_url": tc.baseURL(t), "confirm_credential_reset": true})
 			if status != http.StatusNoContent {
 				t.Fatalf("update provider: %d %v", status, payload)
 			}

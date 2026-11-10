@@ -689,6 +689,7 @@ function platformTabFromHash() {
   const tab = location.hash.replace(/^#\/?/, '').split('/')[0];
   return PLATFORM_TABS.includes(tab) ? tab : 'overview';
 }
+function showPlatformExposure(session) { const banner = $('#platform-exposed-banner'); if (banner) banner.hidden = !session?.platform_exposed; }
 async function selectPlatformTab(tab, { push = true } = {}) {
   if (!PLATFORM_TABS.includes(tab)) tab = 'overview';
   state.platformTab = tab;
@@ -916,6 +917,7 @@ function providerFields(provider) {
   const options = state.providerTypes.map(item => `<option value="${h(item.type)}" ${provider?.type === item.type ? 'selected' : ''}>${h(item.label)}</option>`).join('');
   const selectedProtocols = provider?.protocols || ['chat'];
   const isOAuthEdit = provider && ['codex-subscription','claude-subscription','github-copilot'].includes(provider.type);
+  const urlLocked = Boolean(provider && state.providerTypes.find(candidate => candidate.type === provider.type)?.base_url_locked);
   const authSearch = item => item.auth_mode === 'oauth' ? 'oauth' : item.credential_needed ? 'api key' : 'no credential';
   const COMMON_PROVIDERS = ['openai','anthropic','openrouter','gemini','deepseek','github-copilot','ollama-local','generic-openai'];
   const rank = item => { const index = COMMON_PROVIDERS.indexOf(item.type); return index < 0 ? COMMON_PROVIDERS.length : index; };
@@ -924,7 +926,7 @@ function providerFields(provider) {
     ? `<label>Provider type <select name="type" disabled required>${options}</select></label>`
     : `<div class="provider-type-picker" data-provider-picker><label for="provider-type-search">Search provider types</label><input id="provider-type-search" type="search" autocomplete="off" placeholder="Search by name, protocol, or auth method" aria-controls="provider-type-options"><div class="provider-type-options" id="provider-type-options" role="listbox" aria-label="Provider types">${catalogue.map(item => `<button type="button" class="provider-type-option" role="option" aria-selected="false" data-provider-type-option="${h(item.type)}" data-search="${h(`${item.label} ${item.type} ${authSearch(item)} ${(item.protocols || []).join(' ')}`.toLowerCase())}">${providerMark(item.type,item.label,'provider-type-mark')}<span class="provider-type-copy"><strong>${h(item.label)}</strong><small>${item.auth_mode === 'oauth' ? 'OAuth' : item.credential_needed ? 'API key' : 'No credential'} · ${(item.protocols || []).map(h).join(' / ') || 'provider default'}</small></span></button>`).join('')}</div><input type="hidden" name="type" value="" required></div>`;
   return `${typeField}<div class="provider-setup" data-provider-setup ${provider ? '' : 'hidden'}><div class="provider-setup-inner">${provider ? '' : '<button class="btn btn-small btn-secondary" type="button" data-provider-back>← Choose another provider</button>'}<div data-selected-provider></div><label>Provider name <input name="name" value="${h(provider?.name || '')}" placeholder="openai-main" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"><small>Lowercase namespace used in client-facing model IDs. Leave blank to use provider type (e.g. DeepSeek → deepseek).</small></label>
-    ${isOAuthEdit ? `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" disabled><small>Fixed by the OAuth provider. Reconnect to change the upstream.</small></label>` : `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" placeholder="https://api.example.com/v1" required></label>`}
+    ${isOAuthEdit ? `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" disabled><small>Fixed by the OAuth provider. Reconnect to change the upstream.</small></label>` : urlLocked ? `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" disabled><small>Fixed for this provider type so its credential cannot be sent to another host. Delete and recreate the provider to use a different endpoint.</small></label>` : `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" placeholder="https://api.example.com/v1" required>${provider ? '<small>Changing the host clears the stored credential.</small>' : ''}</label>${provider ? '<label class="confirm-check" data-confirm-host-wrap hidden><input name="confirm_credential_reset" type="checkbox"> <span>Confirm: the stored credential will be cleared. Enter the credential for the new host below.</span></label>' : ''}`}
     ${provider ? '' : '<div data-credential-create><label data-api-credential>API credential <input name="credential" type="password" autocomplete="new-password"><small>Write-only. Leave empty only when the provider permits unauthenticated access.</small></label></div>'}
     ${provider && !isOAuthEdit ? `<label data-credential-replace>Replacement credential <input name="credential" type="password" autocomplete="new-password" placeholder="•••••••• (set)"><small>A credential is configured. Type a new value to replace it.</small></label>` : ''}
     ${isOAuthEdit ? '<div data-provider-reconnect><label>OAuth connection <button type="button" class="btn btn-secondary" data-provider-reconnect-btn>Reconnect</button><small>Start a fresh OAuth sign-in. Replaces any saved token for this provider.</small></label></div><div data-provider-disconnect><button type="button" class="btn btn-danger" data-provider-disconnect-btn>Disconnect</button><small>Remove the OAuth connection. Provider configuration, models, and routing are preserved.</small></div>' : ''}
@@ -976,10 +978,12 @@ async function openProvider(provider = null, onSaved = null) {
       const reconnect = $('[data-provider-reconnect-btn]', form); if (reconnect) reconnect.onclick = () => { $('#form-dialog').close(); connectProviderOAuth(provider.id); };
       const disconnect = $('[data-provider-disconnect-btn]', form); if (disconnect) disconnect.onclick = () => { $('#form-dialog').close(); disconnectProviderOAuth(provider.id); };
       const name = $('[name="name"]', form), confirm = $('[data-confirm-wrap]', form); const sync = () => { confirm.hidden = name.value === provider.name; if (confirm.hidden) $('[name="confirm_breaking_change"]', form).checked = false; }; name.addEventListener('input', sync); sync();
+      const hostInput = $('[name="base_url"]', form), hostWrap = $('[data-confirm-host-wrap]', form), hostOf = value => { try { return new URL(value).host.toLowerCase() + '|' + new URL(value).protocol; } catch { return value; } };
+      if (hostInput && hostWrap && !hostInput.disabled) { const syncHost = () => { hostWrap.hidden = hostOf(hostInput.value) === hostOf(provider.base_url || ''); if (hostWrap.hidden) $('[name="confirm_credential_reset"]', form).checked = false; }; hostInput.addEventListener('input', syncHost); syncHost(); }
     }
   }, onSubmit: async form => {
     const values = new FormData(form), rawName = String(values.get('name') || '').trim(), payload = { name: rawName || String(values.get('type') || '').trim(), base_url: values.get('base_url'), enabled: values.get('enabled') === 'on', protocols: values.getAll('protocol') };
-    if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
+    if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; payload.confirm_credential_reset = values.get('confirm_credential_reset') === 'on' || Boolean(values.get('credential')); await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
     else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id, onSaved); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
     await loadProviders(); await loadClients(); if (!provider) refreshWizardButton(false); if (onSaved) await onSaved();
   }});
@@ -4010,6 +4014,7 @@ async function setupAnalyticsConsent() {
         hideBoot();
         $('#login-shell').hidden = true;
         $('#platform-shell').hidden = false;
+        showPlatformExposure(session);
         await selectPlatformTab(platformTabFromHash(), { push: false });
       } catch { showLogin(); }
       return;
