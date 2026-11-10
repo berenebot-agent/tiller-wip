@@ -47,7 +47,7 @@ func newHostedCallbackHarness(t *testing.T) (*Server, *database.DB, string) {
 		TillerPlatformAdminUser:     "platform-admin",
 		TillerPlatformAdminPassword: "correct horse",
 		PublicURL:                   "https://tiller.example.com",
-		TrustedProxy:                netip.MustParsePrefix("127.0.0.1/32"),
+		TrustedProxies:              []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
 		DataDir:                     t.TempDir(),
 	}, db)
 	now := database.Now()
@@ -75,6 +75,25 @@ func beginCallbackFlow(t *testing.T, app *Server, providerID string) (string, in
 	return flow.PKCE.State, generation
 }
 
+// oauthCallbackGet performs the browser side of a redirect callback, presenting
+// the flow cookie the start endpoint would have set. Pass an empty state to
+// omit the cookie.
+func oauthCallbackGet(t *testing.T, target, state string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != "" {
+		req.AddCookie(&http.Cookie{Name: oauthFlowCookie, Value: oauthStateCookieValue(state)})
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
 func TestHostedOAuthRedirectCallbackCompletesCodexFlow(t *testing.T) {
 	t.Parallel()
 	app, db, providerID := newHostedCallbackHarness(t)
@@ -96,10 +115,7 @@ func TestHostedOAuthRedirectCallbackCompletesCodexFlow(t *testing.T) {
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
-	resp, err := http.Get(router.URL + "/auth/callback?code=auth-code&state=" + url.QueryEscape(state))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := oauthCallbackGet(t, router.URL+"/auth/callback?code=auth-code&state="+url.QueryEscape(state), state)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "Connected") {
@@ -114,10 +130,7 @@ func TestHostedOAuthRedirectCallbackCompletesCodexFlow(t *testing.T) {
 	}
 
 	// The state is single-use: replaying the callback must fail, not re-exchange.
-	resp, err = http.Get(router.URL + "/auth/callback?code=auth-code&state=" + url.QueryEscape(state))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp = oauthCallbackGet(t, router.URL+"/auth/callback?code=auth-code&state="+url.QueryEscape(state), state)
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -134,10 +147,7 @@ func TestHostedOAuthRedirectCallbackRejectsBadState(t *testing.T) {
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
-	resp, err := http.Get(router.URL + "/auth/callback?code=auth-code&state=unknown")
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := oauthCallbackGet(t, router.URL+"/auth/callback?code=auth-code&state=unknown", "unknown")
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -169,10 +179,7 @@ func TestHostedOAuthRedirectCallbackProviderError(t *testing.T) {
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
-	resp, err := http.Get(router.URL + "/auth/callback?error=access_denied&state=" + url.QueryEscape(state))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := oauthCallbackGet(t, router.URL+"/auth/callback?error=access_denied&state="+url.QueryEscape(state), state)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "declined") {
@@ -199,13 +206,50 @@ func TestHostedOAuthRedirectCallbackDisconnectRace(t *testing.T) {
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 
-	resp, err := http.Get(router.URL + "/auth/callback?code=auth-code&state=" + url.QueryEscape(state))
-	if err != nil {
-		t.Fatal(err)
-	}
+	resp := oauthCallbackGet(t, router.URL+"/auth/callback?code=auth-code&state="+url.QueryEscape(state), state)
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(body), "disconnected") {
 		t.Fatalf("disconnect-race callback = %d %q, want 409 disconnected", resp.StatusCode, string(body))
+	}
+}
+
+func TestHostedOAuthRedirectCallbackRequiresFlowCookie(t *testing.T) {
+	t.Parallel()
+	app, _, providerID := newHostedCallbackHarness(t)
+	var grants atomic.Int32
+	oauthServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		grants.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "ck-access", "refresh_token": "ck-refresh", "token_type": "Bearer", "expires_in": 3600, "scope": "openid profile email offline_access"})
+	}))
+	t.Cleanup(oauthServer.Close)
+	app.providers.Registry().SetHTTPClient(&http.Client{Transport: &callbackTransport{oauthServer: oauthServer}})
+
+	state, _ := beginCallbackFlow(t, app, providerID)
+	router := httptest.NewServer(app.Handler())
+	t.Cleanup(router.Close)
+
+	// A leaked state URL presented by another browser must not complete the
+	// flow, and must not consume the state either.
+	resp := oauthCallbackGet(t, router.URL+"/auth/callback?code=auth-code&state="+url.QueryEscape(state), "")
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(body), "not started here") {
+		t.Fatalf("cookie-less callback = %d %q, want 400 not started here", resp.StatusCode, string(body))
+	}
+	if grants.Load() != 0 {
+		t.Fatalf("cookie-less callback exchanged a code: grants=%d", grants.Load())
+	}
+
+	// The browser that started the flow still completes it.
+	resp = oauthCallbackGet(t, router.URL+"/auth/callback?code=auth-code&state="+url.QueryEscape(state), state)
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bound callback = %d, want 200", resp.StatusCode)
+	}
+	if grants.Load() != 1 {
+		t.Fatalf("bound callback grants = %d, want 1", grants.Load())
 	}
 }

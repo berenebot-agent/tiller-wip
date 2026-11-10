@@ -18,18 +18,20 @@ import (
 
 func TestClientIPTrustBoundary(t *testing.T) {
 	t.Parallel()
-	trusted := netip.MustParsePrefix("172.18.0.0/16")
+	trusted := []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")}
+	cdnChain := []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16"), netip.MustParsePrefix("198.51.100.0/24")}
 	tests := []struct {
 		name, remote, forwarded string
-		trusted                 netip.Prefix
+		trusted                 []netip.Prefix
 		want                    string
 	}{
-		{name: "trust disabled ignores header", remote: "172.18.0.4:8080", forwarded: "198.51.100.7", trusted: netip.Prefix{}, want: "172.18.0.4"},
+		{name: "trust disabled ignores header", remote: "172.18.0.4:8080", forwarded: "198.51.100.7", trusted: nil, want: "172.18.0.4"},
 		{name: "untrusted peer ignores header", remote: "192.0.2.8:8080", forwarded: "198.51.100.7", trusted: trusted, want: "192.0.2.8"},
 		{name: "trusted proxy uses rightmost untrusted hop", remote: "172.18.0.4:8080", forwarded: "198.51.100.7, 172.18.0.9", trusted: trusted, want: "198.51.100.7"},
 		{name: "trusted chain walks right to left", remote: "172.18.0.4:8080", forwarded: "198.51.100.7, 172.18.0.9, 172.18.0.10", trusted: trusted, want: "198.51.100.7"},
 		{name: "malformed header falls back direct", remote: "172.18.0.4:8080", forwarded: "198.51.100.7, not-an-ip", trusted: trusted, want: "172.18.0.4"},
 		{name: "empty header falls back direct", remote: "172.18.0.4:8080", forwarded: "", trusted: trusted, want: "172.18.0.4"},
+		{name: "CDN edge and reverse proxy both skipped", remote: "172.18.0.4:8080", forwarded: "203.0.113.9, 198.51.100.20, 172.18.0.9", trusted: cdnChain, want: "203.0.113.9"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -45,14 +47,14 @@ func TestClientIPTrustBoundary(t *testing.T) {
 
 func TestRequestClientIPTrustBoundary(t *testing.T) {
 	t.Parallel()
-	trusted := netip.MustParsePrefix("172.18.0.0/16")
-	trustedV6 := netip.MustParsePrefix("2001:db8::/32")
+	trusted := []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")}
+	trustedV6 := []netip.Prefix{netip.MustParsePrefix("2001:db8::/32")}
 	tests := []struct {
 		name, remote, realIP, forwarded string
-		trusted                         netip.Prefix
+		trusted                         []netip.Prefix
 		want                            string
 	}{
-		{name: "trust disabled ignores headers", remote: "172.18.0.4:8080", forwarded: "198.51.100.7", realIP: "198.51.100.7", trusted: netip.Prefix{}, want: "172.18.0.4"},
+		{name: "trust disabled ignores headers", remote: "172.18.0.4:8080", forwarded: "198.51.100.7", realIP: "198.51.100.7", trusted: nil, want: "172.18.0.4"},
 		{name: "untrusted peer ignores fake XFF", remote: "192.0.2.8:8080", forwarded: "198.51.100.7", trusted: trusted, want: "192.0.2.8"},
 		{name: "untrusted peer ignores fake X-Real-IP", remote: "192.0.2.8:8080", realIP: "198.51.100.7", trusted: trusted, want: "192.0.2.8"},
 		{name: "trusted proxy IGNORES X-Real-IP in favour of the XFF walk", remote: "172.18.0.4:8080", realIP: "198.51.100.7", forwarded: "203.0.113.55", trusted: trusted, want: "203.0.113.55"},
@@ -66,7 +68,7 @@ func TestRequestClientIPTrustBoundary(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: tt.trusted})
+			app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxies: tt.trusted})
 			r := httptest.NewRequest(http.MethodPost, "http://router.test/v1/chat/completions", nil)
 			r.RemoteAddr = tt.remote
 			if tt.realIP != "" {
@@ -120,7 +122,7 @@ func TestPlatformStatsRequireAuthentication(t *testing.T) {
 	t.Parallel()
 	app, _ := newSecurityTestServer(t, config.Config{
 		Mode: config.ModeHosted, TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
-		DataDir: t.TempDir(), ListenAddr: ":8080", PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"),
+		DataDir: t.TempDir(), ListenAddr: ":8080", PublicURL: "https://tiller.example.com", TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")},
 	})
 	req := httptest.NewRequest(http.MethodGet, "/api/platform/stats", nil)
 	response := httptest.NewRecorder()
@@ -223,10 +225,10 @@ func TestAdminSessionCookieFlagsAndCSRF(t *testing.T) {
 	}
 }
 
-func TestSecureCookieTrustedProxyAndTLS(t *testing.T) {
+func TestSecureCookieTrustedProxiesAndTLS(t *testing.T) {
 	t.Parallel()
-	trusted := netip.MustParsePrefix("127.0.0.0/8")
-	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
+	trusted := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxies: trusted})
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 	req, _ := http.NewRequest(http.MethodPost, router.URL+"/api/admin/session", strings.NewReader(`{"username":"admin","password":"correct horse"}`))
@@ -260,8 +262,8 @@ func TestSecureCookieTrustedProxyAndTLS(t *testing.T) {
 
 func TestSpoofedForwardedProtoFromUntrustedPeerDoesNotSetSecureCookie(t *testing.T) {
 	t.Parallel()
-	trusted := netip.MustParsePrefix("172.18.0.0/16")
-	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxy: trusted})
+	trusted := []netip.Prefix{netip.MustParsePrefix("172.18.0.0/16")}
+	app, _ := newSecurityTestServer(t, config.Config{TillerUser: "admin", TillerUserPassword: "correct horse", DataDir: t.TempDir(), ListenAddr: ":8080", TrustedProxies: trusted})
 	router := httptest.NewServer(app.Handler())
 	t.Cleanup(router.Close)
 

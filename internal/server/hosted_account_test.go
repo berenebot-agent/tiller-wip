@@ -36,7 +36,7 @@ func hostedAccountServer(t *testing.T) (*Server, *testAPI, string) {
 	app, err := New(config.Config{
 		Mode: config.ModeHosted, TillerUser: "owner@example.com", TillerUserPassword: "correct horse battery staple",
 		TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
-		PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"), DataDir: t.TempDir(),
+		PublicURL: "https://tiller.example.com", TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}, DataDir: t.TempDir(),
 	}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if err != nil {
 		t.Fatal(err)

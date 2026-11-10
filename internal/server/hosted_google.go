@@ -43,7 +43,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.oauthStartLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
@@ -65,7 +65,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
-	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxy)) {
+	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxies)) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
 	}
@@ -92,7 +92,7 @@ func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startGoogleReauth(w http.ResponseWriter, r *http.Request) {
-	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxy)) {
+	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxies)) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
 	}
@@ -138,7 +138,7 @@ func (s *Server) beginGoogleFlow(w http.ResponseWriter, r *http.Request, intent 
 }
 
 func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
-	if !s.oauthCallbackLimiter.allowAttempt(clientIP(r, s.config.TrustedProxy)) {
+	if !s.oauthCallbackLimiter.allowAttempt(clientIP(r, s.config.TrustedProxies)) {
 		s.googleCallbackError(w, r, "google_failed")
 		return
 	}
@@ -252,7 +252,7 @@ func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.oauthStartLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
@@ -417,7 +417,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
@@ -525,7 +525,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
-	acceptance := identity.SignupAcceptance{TermsUpdatedAt: terms.UpdatedAt, PrivacyUpdatedAt: privacy.UpdatedAt, IP: clientIP(r, s.config.TrustedProxy), UserAgent: r.UserAgent()}
+	acceptance := identity.SignupAcceptance{TermsUpdatedAt: terms.UpdatedAt, PrivacyUpdatedAt: privacy.UpdatedAt, IP: clientIP(r, s.config.TrustedProxies), UserAgent: r.UserAgent()}
 	u, err := s.identity.CreateGoogleSignup(r.Context(), claims.Email, claims.Subject, acceptance)
 	if err != nil {
 		if _, lookupErr := s.identity.UserByEmail(r.Context(), claims.Email); lookupErr == nil || errors.Is(err, identity.ErrGoogleIdentityTaken) {

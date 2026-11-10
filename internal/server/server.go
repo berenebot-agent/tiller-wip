@@ -336,7 +336,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 	for _, opt := range opts {
 		opt(&options)
 	}
-	if cfg.Mode == config.ModeHosted && !cfg.TrustedProxy.IsValid() {
+	if cfg.Mode == config.ModeHosted && len(cfg.TrustedProxies) == 0 {
 		return nil, errors.New("TILLER_TRUSTED_PROXY is required in hosted mode and must identify the direct reverse proxy")
 	}
 	var authRateLimitHashKey [32]byte
@@ -844,7 +844,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 		return
@@ -883,7 +883,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
 	username := s.adminUsername()
-	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", username, clientIP(r, s.config.TrustedProxy)))
+	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", username, clientIP(r, s.config.TrustedProxies)))
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "username": username, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()})
 }
 
@@ -940,7 +940,7 @@ func (s *Server) adminUsername() string {
 // standalone/local-mode authentication boundary, and plain-HTTP LAN
 // deployments are deliberately supported, so Secure=true unconditionally would
 // break login there. Secure is set when the request is actually secure —
-// direct TLS, or X-Forwarded-Proto=https from a configured TrustedProxy peer
+// direct TLS, or X-Forwarded-Proto=https from a configured TrustedProxies peer
 // (see secureRequest) — or when TILLER_ADMIN_COOKIE_SECURE=true forces it.
 // Hosted authentication does not use this cookie: __Host-tiller_session,
 // __Host-tiller_platform_session and the hosted Google cookies always set
@@ -1212,7 +1212,7 @@ func (s *Server) secureRequest(r *http.Request) bool {
 	if r.TLS != nil {
 		return true
 	}
-	if !s.config.TrustedProxy.IsValid() {
+	if len(s.config.TrustedProxies) == 0 {
 		return false
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -1220,7 +1220,7 @@ func (s *Server) secureRequest(r *http.Request) bool {
 		host = r.RemoteAddr
 	}
 	addr, err := netip.ParseAddr(host)
-	if err != nil || !s.config.TrustedProxy.Contains(addr) {
+	if err != nil || !trustedProxyContains(s.config.TrustedProxies, addr) {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]), "https")
@@ -1305,10 +1305,10 @@ func (s *Server) requestClientIP(r *http.Request) string {
 		return ""
 	}
 	peer, err := netip.ParseAddr(host)
-	if err != nil || !s.config.TrustedProxy.IsValid() || !s.config.TrustedProxy.Contains(peer) {
+	if err != nil || !trustedProxyContains(s.config.TrustedProxies, peer) {
 		return host
 	}
-	return clientIP(r, s.config.TrustedProxy)
+	return clientIP(r, s.config.TrustedProxies)
 }
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {

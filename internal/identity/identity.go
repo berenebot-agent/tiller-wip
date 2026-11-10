@@ -161,11 +161,21 @@ type Store struct {
 	authMethodsMu sync.Mutex
 	userCache     map[string]userSessionCacheEntry
 	platformCache map[string]platformSessionCacheEntry
-	rev           uint64
-	platformRev   uint64
-	maxEntries    int
-	renewHook     func()
-	mailQueue     MailQueue
+	// Session mutation fencing. A verification captures seq before it reads
+	// the database and fails closed only when its own selector (or, for a
+	// whole-user revocation, its user) was marked after that point. Comparing
+	// one process-wide counter from every load -- the earlier design -- failed
+	// an unrelated user's session closed whenever anyone logged out.
+	seq             uint64
+	revoked         map[string]mutationMark
+	userMutated     map[string]userMutation
+	accountMutated  map[string]userMutation
+	platformSeq     uint64
+	platformRevoked map[string]mutationMark
+	platformAllAt   uint64
+	maxEntries      int
+	renewHook       func()
+	mailQueue       MailQueue
 	// webauthn and challenges implement passkeys. Both are nil until
 	// ConfigureWebAuthn installs relying-party configuration, so deployments
 	// without a public origin (and tests) simply have no passkey endpoints.
@@ -177,6 +187,24 @@ type userSessionCacheEntry struct {
 	session    UserSession
 	secretHash [32]byte
 	expires    time.Time
+}
+
+// mutationMark records when (in monotonic sequence terms) one selector was
+// revoked. mutationMarkTTL outlives any session load (one queue wait plus a
+// hash), so a load that started before the revocation always sees the mark.
+type mutationMark struct {
+	seq uint64
+	at  time.Time
+}
+
+const mutationMarkTTL = time.Hour
+
+// userMutation marks every session of one user as invalid at seq, optionally
+// exempting the selector the caller deliberately kept.
+type userMutation struct {
+	seq  uint64
+	at   time.Time
+	keep string
 }
 
 type platformSessionCacheEntry struct {
@@ -210,6 +238,9 @@ func New(db *sql.DB, passwordHasher, tokenHasher, credentialHasher auth.SecretHa
 		platformSessionTTL: userSessionTTL, userCacheTTL: defaultCacheTTL,
 		platformCacheTTL: defaultCacheTTL, userCache: make(map[string]userSessionCacheEntry),
 		platformCache: make(map[string]platformSessionCacheEntry), maxEntries: maxSessionCacheEntries,
+		revoked: make(map[string]mutationMark), userMutated: make(map[string]userMutation),
+		accountMutated:  make(map[string]userMutation),
+		platformRevoked: make(map[string]mutationMark),
 	}, nil
 }
 
@@ -957,10 +988,13 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 		return UserSession{}, false
 	}
 	now := time.Now()
+	// Capture the mutation sequence before reading anything. A logout that
+	// lands after this point marks its own selector; another user's logout
+	// does not affect this load.
+	start := atomic.LoadUint64(&s.seq)
 	s.mu.Lock()
 	if entry, found := s.userCache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) && constantSecret(secret, entry.secretHash) {
-			generation := atomic.LoadUint64(&s.rev)
 			s.mu.Unlock()
 			if now.Add(s.userSessionTTL / 2).After(entry.session.ExpiresAt) {
 				expires := now.Add(s.userSessionTTL)
@@ -968,33 +1002,30 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 					s.renewHook()
 				}
 				result, err := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(expires), formatTime(now), selector, formatTime(entry.session.ExpiresAt))
-				if err != nil {
-					return UserSession{}, false
-				}
-				affected, err := result.RowsAffected()
-				if err != nil {
-					return UserSession{}, false
-				}
-				if affected == 1 {
-					entry.session.ExpiresAt = expires
-				} else {
-					current, ok := s.loadUserSession(ctx, selector, secret, now)
-					if !ok {
-						return UserSession{}, false
+				// A renewal failure is not an authentication failure: the
+				// cached session stays valid until its current expiry, so keep
+				// serving it rather than signing the user out over a transient
+				// database error.
+				if err == nil {
+					if affected, rowsErr := result.RowsAffected(); rowsErr == nil {
+						if affected == 1 {
+							entry.session.ExpiresAt = expires
+						} else {
+							current, ok := s.loadUserSession(ctx, selector, secret, now)
+							if !ok {
+								return UserSession{}, false
+							}
+							entry.session = current
+						}
 					}
-					entry.session = current
 				}
 			}
-			if atomic.LoadUint64(&s.rev) != generation {
-				return UserSession{}, false
-			}
-			return s.publishUserSession(selector, entry.session, secret, now, generation)
+			return s.publishUserSession(selector, entry.session, secret, now, start)
 		}
 		delete(s.userCache, selector)
 	}
 	s.mu.Unlock()
 
-	generation := atomic.LoadUint64(&s.rev)
 	session, ok := s.loadUserSession(ctx, selector, secret, now)
 	if !ok {
 		return UserSession{}, false
@@ -1006,22 +1037,20 @@ func (s *Store) GetUserSession(ctx context.Context, raw string) (UserSession, bo
 			s.renewHook()
 		}
 		result, updateErr := s.db.ExecContext(ctx, `UPDATE user_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
-		if updateErr != nil {
-			return UserSession{}, false
-		}
-		if affected, err := result.RowsAffected(); err != nil {
-			return UserSession{}, false
-		} else if affected != 1 {
-			session, ok = s.loadUserSession(ctx, selector, secret, now)
-			if !ok {
-				return UserSession{}, false
+		if updateErr == nil {
+			if affected, err := result.RowsAffected(); err == nil {
+				if affected != 1 {
+					session, ok = s.loadUserSession(ctx, selector, secret, now)
+					if !ok {
+						return UserSession{}, false
+					}
+				} else {
+					session.ExpiresAt = next
+				}
 			}
-		} else {
-			exp = next
-			session.ExpiresAt = next
 		}
 	}
-	return s.publishUserSession(selector, session, secret, now, generation)
+	return s.publishUserSession(selector, session, secret, now, start)
 }
 
 func (s *Store) loadUserSession(ctx context.Context, selector, secret string, now time.Time) (UserSession, bool) {
@@ -1046,7 +1075,7 @@ func (s *Store) loadUserSession(ctx context.Context, selector, secret string, no
 func (s *Store) publishUserSession(selector string, session UserSession, secret string, now time.Time, generation uint64) (UserSession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if atomic.LoadUint64(&s.rev) != generation {
+	if s.invalidatedLocked(selector, session.User.ID, session.User.AccountID, generation) {
 		return UserSession{}, false
 	}
 	if current, ok := s.userCache[selector]; ok && current.session.ExpiresAt.After(session.ExpiresAt) {
@@ -1064,9 +1093,34 @@ func (s *Store) DeleteUserSession(raw string) {
 	}
 	_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE id=?`, selector)
 	s.mu.Lock()
-	atomic.AddUint64(&s.rev, 1)
+	s.markRevokedLocked(selector)
 	delete(s.userCache, selector)
 	s.mu.Unlock()
+}
+
+// markRevokedLocked records one selector's revocation so a load that started
+// before it cannot publish it back into the cache. Called with s.mu held.
+func (s *Store) markRevokedLocked(selector string) {
+	seq := atomic.AddUint64(&s.seq, 1)
+	s.revoked[selector] = mutationMark{seq: seq, at: time.Now()}
+}
+
+// invalidatedLocked reports whether this session was invalidated after a load
+// captured seq: by selector, by its user (whole-user revocation), or by its
+// account (suspension/deletion). Called with s.mu held.
+func (s *Store) invalidatedLocked(selector, userID, accountID string, seq uint64) bool {
+	if mark, ok := s.revoked[selector]; ok && mark.seq > seq {
+		return true
+	}
+	if mark, ok := s.userMutated[userID]; ok && mark.seq > seq && selector != mark.keep {
+		return true
+	}
+	if accountID != "" {
+		if mark, ok := s.accountMutated[accountID]; ok && mark.seq > seq {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Store) CheckUserCSRF(session UserSession, token string) bool {
@@ -1078,7 +1132,7 @@ func (s *Store) CheckUserCSRF(session UserSession, token string) bool {
 func (s *Store) InvalidateUser(userID string) {
 	_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE user_id=?`, userID)
 	s.mu.Lock()
-	atomic.AddUint64(&s.rev, 1)
+	s.userMutated[userID] = userMutation{seq: atomic.AddUint64(&s.seq, 1), at: time.Now()}
 	for selector, entry := range s.userCache {
 		if entry.session.User.ID == userID {
 			delete(s.userCache, selector)
@@ -1090,7 +1144,7 @@ func (s *Store) InvalidateUser(userID string) {
 func (s *Store) InvalidateAccount(accountID string) {
 	_, _ = s.db.Exec(`DELETE FROM user_sessions WHERE account_id=?`, accountID)
 	s.mu.Lock()
-	atomic.AddUint64(&s.rev, 1)
+	s.accountMutated[accountID] = userMutation{seq: atomic.AddUint64(&s.seq, 1), at: time.Now()}
 	for selector, entry := range s.userCache {
 		if entry.session.User.AccountID == accountID {
 			delete(s.userCache, selector)
@@ -1126,6 +1180,26 @@ func (s *Store) SweepExpired() {
 	for selector, entry := range s.platformCache {
 		if !now.Before(entry.expires) || !now.Before(entry.session.ExpiresAt) {
 			delete(s.platformCache, selector)
+		}
+	}
+	for selector, mark := range s.revoked {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(s.revoked, selector)
+		}
+	}
+	for userID, mark := range s.userMutated {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(s.userMutated, userID)
+		}
+	}
+	for accountID, mark := range s.accountMutated {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(s.accountMutated, accountID)
+		}
+	}
+	for selector, mark := range s.platformRevoked {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(s.platformRevoked, selector)
 		}
 	}
 	s.mu.Unlock()
@@ -1209,10 +1283,10 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 		return PlatformSession{}, false
 	}
 	now := time.Now()
+	start := atomic.LoadUint64(&s.platformSeq)
 	s.mu.Lock()
 	if entry, found := s.platformCache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) && constantSecret(secret, entry.secretHash) {
-			generation := atomic.LoadUint64(&s.platformRev)
 			s.mu.Unlock()
 			if now.Add(s.platformSessionTTL / 2).After(entry.session.ExpiresAt) {
 				expires := now.Add(s.platformSessionTTL)
@@ -1220,33 +1294,28 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 					s.renewHook()
 				}
 				result, err := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(expires), formatTime(now), selector, formatTime(entry.session.ExpiresAt))
-				if err != nil {
-					return PlatformSession{}, false
-				}
-				affected, err := result.RowsAffected()
-				if err != nil {
-					return PlatformSession{}, false
-				}
-				if affected == 1 {
-					entry.session.ExpiresAt = expires
-				} else {
-					current, ok := s.loadPlatformSession(ctx, selector, secret, now)
-					if !ok {
-						return PlatformSession{}, false
+				// A renewal failure is not an authentication failure; keep
+				// serving the cached session until its current expiry.
+				if err == nil {
+					if affected, rowsErr := result.RowsAffected(); rowsErr == nil {
+						if affected == 1 {
+							entry.session.ExpiresAt = expires
+						} else {
+							current, ok := s.loadPlatformSession(ctx, selector, secret, now)
+							if !ok {
+								return PlatformSession{}, false
+							}
+							entry.session = current
+						}
 					}
-					entry.session = current
 				}
 			}
-			if atomic.LoadUint64(&s.platformRev) != generation {
-				return PlatformSession{}, false
-			}
-			return s.publishPlatformSession(selector, entry.session, secret, now, generation)
+			return s.publishPlatformSession(selector, entry.session, secret, now, start)
 		}
 		delete(s.platformCache, selector)
 	}
 	s.mu.Unlock()
 
-	generation := atomic.LoadUint64(&s.platformRev)
 	session, ok := s.loadPlatformSession(ctx, selector, secret, now)
 	if !ok {
 		return PlatformSession{}, false
@@ -1258,22 +1327,20 @@ func (s *Store) GetPlatformSession(ctx context.Context, raw string) (PlatformSes
 			s.renewHook()
 		}
 		result, updateErr := s.db.ExecContext(ctx, `UPDATE platform_admin_sessions SET expires_at=?,last_used_at=? WHERE id=? AND expires_at=?`, formatTime(next), formatTime(now), selector, formatTime(exp))
-		if updateErr != nil {
-			return PlatformSession{}, false
-		}
-		if affected, err := result.RowsAffected(); err != nil {
-			return PlatformSession{}, false
-		} else if affected != 1 {
-			session, ok = s.loadPlatformSession(ctx, selector, secret, now)
-			if !ok {
-				return PlatformSession{}, false
+		if updateErr == nil {
+			if affected, err := result.RowsAffected(); err == nil {
+				if affected != 1 {
+					session, ok = s.loadPlatformSession(ctx, selector, secret, now)
+					if !ok {
+						return PlatformSession{}, false
+					}
+				} else {
+					session.ExpiresAt = next
+				}
 			}
-		} else {
-			exp = next
-			session.ExpiresAt = next
 		}
 	}
-	return s.publishPlatformSession(selector, session, secret, now, generation)
+	return s.publishPlatformSession(selector, session, secret, now, start)
 }
 
 func (s *Store) loadPlatformSession(ctx context.Context, selector, secret string, now time.Time) (PlatformSession, bool) {
@@ -1293,7 +1360,7 @@ func (s *Store) loadPlatformSession(ctx context.Context, selector, secret string
 func (s *Store) publishPlatformSession(selector string, session PlatformSession, secret string, now time.Time, generation uint64) (PlatformSession, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if atomic.LoadUint64(&s.platformRev) != generation {
+	if s.platformInvalidatedLocked(selector, generation) {
 		return PlatformSession{}, false
 	}
 	if current, ok := s.platformCache[selector]; ok && current.session.ExpiresAt.After(session.ExpiresAt) {
@@ -1311,9 +1378,22 @@ func (s *Store) DeletePlatformSession(raw string) {
 	}
 	_, _ = s.db.Exec(`DELETE FROM platform_admin_sessions WHERE id=?`, selector)
 	s.mu.Lock()
-	atomic.AddUint64(&s.platformRev, 1)
+	seq := atomic.AddUint64(&s.platformSeq, 1)
+	s.platformRevoked[selector] = mutationMark{seq: seq, at: time.Now()}
 	delete(s.platformCache, selector)
 	s.mu.Unlock()
+}
+
+// platformInvalidatedLocked reports whether this platform session was revoked,
+// or every platform session was invalidated, after a load captured seq.
+func (s *Store) platformInvalidatedLocked(selector string, seq uint64) bool {
+	if atomic.LoadUint64(&s.platformAllAt) > seq {
+		return true
+	}
+	if mark, ok := s.platformRevoked[selector]; ok && mark.seq > seq {
+		return true
+	}
+	return false
 }
 
 func (s *Store) CheckPlatformCSRF(session PlatformSession, token string) bool {
@@ -1324,7 +1404,7 @@ func (s *Store) InvalidatePlatformAll() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`DELETE FROM platform_admin_sessions`)
-	atomic.AddUint64(&s.platformRev, 1)
+	atomic.StoreUint64(&s.platformAllAt, atomic.AddUint64(&s.platformSeq, 1))
 	s.platformCache = make(map[string]platformSessionCacheEntry)
 	return err
 }

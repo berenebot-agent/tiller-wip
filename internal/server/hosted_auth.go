@@ -136,7 +136,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
@@ -186,7 +186,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	acceptance := identity.SignupAcceptance{
 		TermsUpdatedAt:   terms.UpdatedAt,
 		PrivacyUpdatedAt: privacy.UpdatedAt,
-		IP:               clientIP(r, s.config.TrustedProxy),
+		IP:               clientIP(r, s.config.TrustedProxies),
 		UserAgent:        r.UserAgent(),
 	}
 	result, err := s.identity.CreateSignup(r.Context(), input.Email, acceptance)
@@ -202,7 +202,7 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if s.userLoginIPLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
 		return
@@ -374,7 +374,7 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 		return
@@ -404,7 +404,7 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
 		return

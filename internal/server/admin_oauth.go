@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"html"
 	"io"
@@ -23,7 +26,55 @@ const (
 	// oauthDiscoveryWait bounds how long an OAuth completion response waits for
 	// the post-connect catalogue discovery.
 	oauthDiscoveryWait = 10 * time.Second
+	// oauthFlowCookie binds a redirect callback to the browser that started the
+	// flow. The state is a bearer value in a URL (browser history, proxy logs,
+	// referrer), so presenting it is not proof the request came from the user
+	// who started the flow; the cookie is.
+	oauthFlowCookie     = "tiller_oauth_flow"
+	oauthFlowCookiePath = "/auth/callback"
+	oauthFlowCookieTTL  = 10 * time.Minute
 )
+
+// oauthStateCookieValue is the cookie value bound to one flow state. It is a
+// digest, not the state itself, so the cookie cannot be replayed as a state.
+func oauthStateCookieValue(state string) string {
+	sum := sha256.Sum256([]byte(state))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func setOAuthFlowCookie(w http.ResponseWriter, state string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthFlowCookie,
+		Value:    oauthStateCookieValue(state),
+		Path:     oauthFlowCookiePath,
+		MaxAge:   int(oauthFlowCookieTTL / time.Second),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func clearOAuthFlowCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     oauthFlowCookie,
+		Value:    "",
+		Path:     oauthFlowCookiePath,
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// oauthFlowCookieMatches reports whether this browser presented the cookie set
+// when the flow that owns state was started.
+func oauthFlowCookieMatches(r *http.Request, state string) bool {
+	cookie, err := r.Cookie(oauthFlowCookie)
+	if err != nil || cookie.Value == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(oauthStateCookieValue(state))) == 1
+}
 
 // markOAuthPending records that a hosted redirect-callback flow has started, so
 // status polling reports "pending" rather than a stale pre-existing token.
@@ -76,7 +127,7 @@ func writeDeviceCodeResponse(w http.ResponseWriter, prompt devicePrompt) {
 }
 
 func (s *Server) oauthRateLimited(w http.ResponseWriter, r *http.Request, limiter *loginLimiter) bool {
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if limiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
 		return true
@@ -85,7 +136,7 @@ func (s *Server) oauthRateLimited(w http.ResponseWriter, r *http.Request, limite
 }
 
 func (s *Server) recordOAuthFailure(r *http.Request, limiter *loginLimiter) bool {
-	return limiter.recordFailure(clientIP(r, s.config.TrustedProxy))
+	return limiter.recordFailure(clientIP(r, s.config.TrustedProxies))
 }
 
 // devicePrompt is the provider-neutral subset of a device authorization that
@@ -183,6 +234,7 @@ func (s *Server) startProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	if s.config.Mode == config.ModeHosted && oauthRedirectCallback(providerType) {
 		callbackMode = "redirect"
 		s.markOAuthPending(scope.AccountID(), id)
+		setOAuthFlowCookie(w, flow.PKCE.State)
 	}
 	writeJSON(w, 200, map[string]any{"authorization_url": authURL, "redirect_uri": redirectURI, "callback_mode": callbackMode, "expires_in": int((10 * time.Minute) / time.Second)})
 }
@@ -275,7 +327,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not save OAuth connection.")
 		return
 	}
-	s.oauthCallbackLimiter.success(clientIP(r, s.config.TrustedProxy))
+	s.oauthCallbackLimiter.success(clientIP(r, s.config.TrustedProxies))
 	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
 		Event:      "provider.oauth_connected",
 		TargetType: "provider",
@@ -291,7 +343,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 // server-side flow that already binds the account and provider — the browser
 // never supplies either. This mirrors the Google sign-in callback.
 func (s *Server) completeProviderOAuthRedirect(w http.ResponseWriter, r *http.Request) {
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.oauthCallbackLimiter.allowAttempt(key) {
 		s.writeOAuthCallbackPage(w, http.StatusTooManyRequests, "Too many attempts", "Too many OAuth attempts. Return to Tiller and try again later.")
 		return
@@ -299,11 +351,24 @@ func (s *Server) completeProviderOAuthRedirect(w http.ResponseWriter, r *http.Re
 	query := r.URL.Query()
 	state := strings.TrimSpace(query.Get("state"))
 	providerError := strings.TrimSpace(query.Get("error"))
+	// The callback is unauthenticated by necessity (the returning navigation is
+	// cross-site, so the SameSite=Strict session cookie is absent), and the
+	// state is a bearer value that can leak through history, logs or a referrer.
+	// Requiring the cookie set when the flow started binds the completion to
+	// this browser. Evaluate it before consuming the state, and clear it on
+	// every outcome so it cannot be reused.
+	stateBoundToBrowser := state != "" && oauthFlowCookieMatches(r, state)
+	clearOAuthFlowCookie(w)
 	if state == "" && providerError == "" {
 		// No observable authorization code. A provider that returns the code for
 		// manual copy (or a stray visit) lands here. The flow is untouched, so
 		// guide the user back to the paste-back dialog.
 		s.writeOAuthCallbackPage(w, http.StatusOK, "Finish connecting Tiller", "If you are connecting a provider to Tiller, copy this page's full URL from your browser address bar and paste it into the Tiller connection dialog.")
+		return
+	}
+	if !stateBoundToBrowser {
+		s.recordOAuthFailure(r, s.oauthCallbackLimiter)
+		s.writeOAuthCallbackPage(w, http.StatusBadRequest, "Connection not started here", "Start the connection from Tiller in this browser, then follow the provider's sign-in link.")
 		return
 	}
 	flow, err := s.oauthFlows.TakeByState(state)
