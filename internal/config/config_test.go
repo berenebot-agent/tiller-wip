@@ -714,3 +714,32 @@ func TestHostedPlatformPasswordMinimumLength(t *testing.T) {
 		t.Fatalf("16-character platform password rejected: %v", err)
 	}
 }
+
+func TestMaxStreamDuration(t *testing.T) {
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxStreamDuration != 0 {
+		t.Errorf("local default = %v, want 0 (no limit)", c.MaxStreamDuration)
+	}
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "90s")
+	if c, err = Load(); err != nil || c.MaxStreamDuration != 90*time.Second {
+		t.Errorf("override = %v, %v, want 90s", c.MaxStreamDuration, err)
+	}
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "-1s")
+	if _, err = Load(); err == nil {
+		t.Error("negative duration should be rejected")
+	}
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "0")
+	if c, err = Load(); err != nil || c.MaxStreamDuration != 0 {
+		t.Errorf("0 = %v, %v, want disabled", c.MaxStreamDuration, err)
+	}
+	if DefaultHostedMaxStreamDuration != 10*time.Minute {
+		t.Errorf("hosted default = %v, want 10m", DefaultHostedMaxStreamDuration)
+	}
+}

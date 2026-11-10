@@ -257,6 +257,7 @@ func (s *Server) purgeAccount(ctx context.Context, accountID string) error {
 	s.identity.InvalidateAccount(accountID)
 	s.clients.InvalidateAccount(accountID)
 	s.tokens.InvalidateAccount(accountID)
+	s.cancelAccountStreams(accountID)
 	if err := s.storeHandle().BeginActivityCleanup(accountID, ""); err != nil {
 		return err
 	}

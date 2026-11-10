@@ -617,6 +617,10 @@ func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
+	// Bound the whole request and make it cancellable when the account is
+	// suspended. Every later r.Context() use inherits both.
+	r, endRequest := s.limitRequest(r, identity.AccountID)
+	defer endRequest()
 	// maxInferenceBodyBytes bounds one request body. 8 MiB is roughly two
 	// million tokens of text — beyond every model's context window — so no
 	// legitimate request is lost, while the process-wide product of the
@@ -841,10 +845,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			row.liveAttempt = &requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID}
 			s.publishLiveRequest(row, false)
 			if ctxErr := r.Context().Err(); ctxErr != nil {
-				class := "client_cancelled"
-				if errors.Is(ctxErr, context.DeadlineExceeded) {
-					class = "client_timeout"
-				}
+				class := clientFailureClass(r.Context(), "client_cancelled")
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
 				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1103,11 +1104,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				nonTranslationFailure = true
 				if r.Context().Err() != nil {
-					if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
-						class = "client_timeout"
-					} else {
-						class = "client_cancelled"
-					}
+					class = clientFailureClass(r.Context(), "client_cancelled")
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.fallbackReason = strPtr(class)
@@ -2247,6 +2244,13 @@ func ctxErrString(err error) string {
 // upstream_timeout.
 func clientFailureClass(ctx context.Context, fallback string) string {
 	if err := ctx.Err(); err != nil {
+		cause := context.Cause(ctx)
+		if errors.Is(cause, errStreamTimeLimit) {
+			return codeStreamTimeLimit
+		}
+		if errors.Is(cause, errAccountSuspended) {
+			return codeAccountSuspended
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "client_timeout"
 		}

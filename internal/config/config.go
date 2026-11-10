@@ -45,6 +45,9 @@ func (m MailBootstrap) Configured() bool {
 	return m.Provider != "" || m.From != "" || m.SMTPHost != ""
 }
 
+// DefaultHostedMaxStreamDuration is the per-request time limit in hosted mode.
+const DefaultHostedMaxStreamDuration = 10 * time.Minute
+
 type Config struct {
 	// Mode selects local (default) or hosted. An unset/empty TILLER_MODE is
 	// local, so existing deployments keep their behaviour unchanged.
@@ -82,8 +85,16 @@ type Config struct {
 	DataDir                     string
 	ListenAddr                  string
 	TrustedProxies              []netip.Prefix
-	ModelsDevEnabled            bool
-	LogLevel                    string
+	// MaxSignups caps the number of hosted accounts that self-service signup
+	// can create. 0 means no cap. Set with TILLER_MAX_SIGNUPS.
+	MaxSignups int
+	// MaxStreamDuration bounds one inference request end to end, including a
+	// streaming response. 0 means no limit. Defaults to 10 minutes in hosted
+	// mode and unlimited otherwise. Set with TILLER_MAX_STREAM_DURATION
+	// (a Go duration such as "10m"; "0" disables).
+	MaxStreamDuration time.Duration
+	ModelsDevEnabled  bool
+	LogLevel          string
 	// DNSFallbackServers are tried after supplied DNS servers fail. A nil
 	// list disables failover; valid positive/negative replies never fall back.
 	DNSFallbackServers []string
@@ -324,6 +335,29 @@ func Load() (Config, error) {
 	}
 	if c.Mode == ModeHosted && c.DebugPprof && (strings.TrimSpace(c.TillerPlatformAdminUser) == "" || c.TillerPlatformAdminPassword == "") {
 		return Config{}, errors.New("TILLER_DEBUG_PPROF=true requires TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD in hosted mode")
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_MAX_SIGNUPS")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return Config{}, errors.New("TILLER_MAX_SIGNUPS must be a non-negative integer")
+		}
+		c.MaxSignups = n
+	}
+	if c.Mode == ModeHosted {
+		c.MaxStreamDuration = DefaultHostedMaxStreamDuration
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_MAX_STREAM_DURATION")); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil && raw == "0" {
+			v, err = 0, nil
+		}
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_MAX_STREAM_DURATION: %w", err)
+		}
+		if v < 0 {
+			return Config{}, fmt.Errorf("TILLER_MAX_STREAM_DURATION must not be negative, got %q", raw)
+		}
+		c.MaxStreamDuration = v
 	}
 	if raw := os.Getenv("TILLER_BACKUP_INTERVAL"); raw != "" {
 		v, err := time.ParseDuration(raw)

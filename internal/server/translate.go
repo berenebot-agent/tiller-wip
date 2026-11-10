@@ -1549,6 +1549,9 @@ func translateSSEObserved(w http.ResponseWriter, keepalive *sseKeepaliveWriter, 
 
 func writeStreamFailure(w io.Writer, protocol providers.Protocol, code, id, model string) {
 	message := "The upstream stream could not be completed."
+	if _, msg, ok := limitErrorDetail(code); ok {
+		message = msg
+	}
 	switch protocol {
 	case providers.ProtocolMessages:
 		writeSSE(w, "error", map[string]any{"type": "error", "error": map[string]any{"type": "api_error", "message": message}})

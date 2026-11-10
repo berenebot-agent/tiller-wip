@@ -105,6 +105,12 @@ func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token
 		return false
 	}
 	if !settings.TurnstileEnabled {
+		// Hosted mode fails closed for flows that create accounts: free signup
+		// without a captcha is an open relay for abuse.
+		if s.config.Mode == config.ModeHosted && (action == "signup" || action == "google_signin") {
+			adminError(w, http.StatusServiceUnavailable, "captcha_unavailable", "Security verification is temporarily unavailable.")
+			return false
+		}
 		return true
 	}
 	if settings.TurnstileSiteKey == "" || settings.TurnstileSecret == "" {
@@ -145,6 +151,13 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !enabled {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
+	}
+	if s.config.MaxSignups > 0 {
+		counts, err := s.identity.PlatformCounts(r.Context())
+		if err != nil || counts.Accounts >= int64(s.config.MaxSignups) {
+			adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+			return
+		}
 	}
 	var input struct {
 		Email        string `json:"email"`

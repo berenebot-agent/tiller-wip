@@ -9,6 +9,9 @@ import (
 
 func fixedUpstreamErrorMessage(class string) string {
 	switch class {
+	case codeStreamTimeLimit, codeAccountSuspended:
+		_, msg, _ := limitErrorDetail(class)
+		return msg
 	case "upstream_timeout":
 		return "Upstream request timed out"
 	case "upstream_unreachable":
