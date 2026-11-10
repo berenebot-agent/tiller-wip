@@ -684,6 +684,9 @@ func (s *Server) Handler() http.Handler {
 	if s.config.Mode == config.ModeHosted {
 		mux.HandleFunc("GET /api/auth/options", s.authOptions)
 		mux.HandleFunc("GET /api/analytics/options", s.analyticsOptions)
+		// The isolated analytics document. Registered outside the embedded-
+		// asset handler so its frame-specific CSP is authoritative.
+		mux.HandleFunc("GET "+analyticsFramePath, s.analyticsFrame)
 		mux.HandleFunc("POST /api/auth/signup", s.signup)
 		mux.HandleFunc("POST /api/auth/login", s.userLogin)
 		mux.HandleFunc("POST /api/auth/passkey/begin", s.passkeyLoginBegin)
@@ -1381,14 +1384,13 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 				w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 			}
 			csp = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com https://accounts.google.com; style-src 'self' 'unsafe-inline' https://accounts.google.com; img-src 'self' data: https://*.googleusercontent.com; connect-src 'self' https://challenges.cloudflare.com https://accounts.google.com; frame-src https://challenges.cloudflare.com https://accounts.google.com; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-			// The analytics origin is operator-configured and only extends the
-			// hosted policy. Its presence in the header does not load a script;
-			// the consent-gated frontend decides whether to request it.
-			if origin, ok := s.analyticsScriptOrigin(); ok {
-				csp = strings.Replace(csp, "script-src 'self'", "script-src 'self' "+origin, 1)
-				csp = strings.Replace(csp, "connect-src 'self'", "connect-src 'self' "+origin, 1)
-				csp = strings.Replace(csp, "img-src 'self' data:", "img-src 'self' data: "+origin, 1)
-			}
+			// The operator's analytics origin is deliberately NOT added to this
+			// document's policy. Third-party analytics runs in the
+			// /analytics-frame.html sandboxed iframe, which receives its own
+			// policy (see analyticsFrameCSP). Widening this document instead
+			// would give any code running here -- including a compromised vendor
+			// script -- a credential-bearing connect-src to the API, which is the
+			// entire point of isolating it in a frame.
 		}
 		w.Header().Set("Content-Security-Policy", csp)
 		next.ServeHTTP(w, r)

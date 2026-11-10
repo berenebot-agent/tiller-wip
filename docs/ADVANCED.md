@@ -190,6 +190,23 @@ The browser receives neither secret. If you rotate a secret, enter the new
 value and save; leave it blank to keep the stored value. Use the explicit
 “Clear saved … secret” checkbox to remove one.
 
+## Analytics isolation
+
+Optional web analytics are configured from the platform console and are loaded
+only after a visitor accepts the consent banner. The vendor script never runs in
+the console document: it is mounted in `/analytics-frame.html`, embedded as a
+sandboxed iframe with `allow-scripts` only. Without `allow-same-origin` the frame
+has an opaque origin, so the script cannot read the console's DOM or cookies and
+its `/api/...` requests are cross-origin and uncredentialed. The configured
+analytics origin is added only to that frame's Content-Security-Policy; the
+console keeps `script-src 'self'` and `connect-src 'self'`. A compromised
+analytics vendor therefore cannot act as a signed-in user.
+
+One visible consequence of the frame boundary: the vendor sees the frame URL
+(`/analytics-frame.html`) rather than the console route. Providers that derive
+the page path from the script's own URL will report that path; set the path
+explicitly in the vendor's site settings if you need per-view breakdowns.
+
 ## DNS recovery after restarts
 
 Tiller uses system/Docker DNS first. If those servers fail (for example, Docker
