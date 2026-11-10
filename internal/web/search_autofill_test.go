@@ -7,29 +7,52 @@ import (
 	"testing"
 )
 
-// Search and filter boxes must opt out of browser autofill. Otherwise password
+// Free-text fields must opt out of browser autofill. Otherwise password
 // managers and address autofill treat them as login fields and offer the
 // signed-in username.
 var inputTagPattern = regexp.MustCompile(`<input\b[^>]*>`)
 
-func TestSearchAndTextInputsDisableAutofill(t *testing.T) {
+// fieldTagPattern matches every text-entry control. Checkboxes, radios, hidden
+// inputs, file pickers and sliders are never autofilled.
+var (
+	fieldTagPattern         = regexp.MustCompile(`<(?:input|textarea)\b[^>]*>`)
+	exemptFromAutofillCheck = regexp.MustCompile(`type="(?:checkbox|radio|hidden|file|range)"`)
+)
+
+func TestFreeTextFieldsDisableAutofill(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{"assets/index.html", "assets/app.js"} {
 		body, err := fs.ReadFile(files, name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, tag := range inputTagPattern.FindAllString(string(body), -1) {
-			if !strings.Contains(tag, `type="search"`) && !strings.Contains(tag, `type="text"`) {
+		for _, tag := range fieldTagPattern.FindAllString(string(body), -1) {
+			if exemptFromAutofillCheck.MatchString(tag) {
 				continue
 			}
-			if strings.Contains(tag, `name="title"`) {
-				continue // legal document title, not a search or filter box
+			if !strings.Contains(tag, "autocomplete=") {
+				t.Errorf("%s: field has no autocomplete attribute: %s", name, tag)
 			}
-			if !strings.Contains(tag, `autocomplete="off"`) {
-				t.Errorf("%s: input lacks autocomplete=\"off\": %s", name, tag)
+			if strings.Contains(tag, `autocomplete="current-password"`) || strings.Contains(tag, `autocomplete="new-password"`) {
+				continue
+			}
+			if strings.Contains(tag, `type="password"`) {
+				t.Errorf("%s: password field needs current-password or new-password: %s", name, tag)
 			}
 		}
+	}
+}
+
+// API token dialogs must not carry a password field: browsers would treat the
+// preceding Name input as a username and offer saved credentials.
+func TestAPITokenFormsHaveNoPasswordField(t *testing.T) {
+	t.Parallel()
+	body, err := fs.ReadFile(files, "assets/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "token_password") {
+		t.Error("app.js: API token forms must not include a password field")
 	}
 }
 
