@@ -138,6 +138,17 @@ func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token
 	return true
 }
 
+// signupCapReached reports whether self-service signup must refuse because the
+// TILLER_MAX_SIGNUPS cap is met. It fails closed when the count cannot be read.
+// Every path that creates a hosted account (email and Google) must check it.
+func (s *Server) signupCapReached(ctx context.Context) bool {
+	if s.config.MaxSignups <= 0 {
+		return false
+	}
+	counts, err := s.identity.PlatformCounts(ctx)
+	return err != nil || counts.Accounts >= int64(s.config.MaxSignups)
+}
+
 func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
@@ -152,12 +163,9 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
-	if s.config.MaxSignups > 0 {
-		counts, err := s.identity.PlatformCounts(r.Context())
-		if err != nil || counts.Accounts >= int64(s.config.MaxSignups) {
-			adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
-			return
-		}
+	if s.signupCapReached(r.Context()) {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
 	}
 	var input struct {
 		Email        string `json:"email"`
@@ -240,6 +248,12 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := s.identity.AuthenticatePassword(r.Context(), input.Email, input.Password)
+	if errors.Is(err, identity.ErrReauthenticationCancelled) || (err != nil && r.Context().Err() != nil) {
+		// The client went away while queued for a KDF slot. Not a wrong
+		// password: do not charge the IP or email limiters.
+		adminError(w, http.StatusRequestTimeout, "request_cancelled", "The sign-in did not complete. Try again.")
+		return
+	}
 	if err != nil {
 		s.userLoginIPLimiter.recordFailure(key)
 		s.userLoginEmailLimiter.recordFailure(emailKey)
