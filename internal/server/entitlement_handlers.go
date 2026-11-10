@@ -66,7 +66,31 @@ func (s *Server) writePlatformPlans(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not list plans.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": plans})
+	defaultPlan, err := s.storeHandle().SignupPlan(r.Context())
+	if err != nil {
+		adminError(w, http.StatusInternalServerError, "database_error", "Could not load the signup plan.")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": plans, "signup_default_plan": defaultPlan})
+}
+
+func (s *Server) writeSignupPlan(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Plan string `json:"plan"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
+		return
+	}
+	name := strings.TrimSpace(input.Plan)
+	if err := s.storeHandle().SetSignupPlan(r.Context(), name); err != nil {
+		if !writePlanError(w, err) {
+			adminError(w, http.StatusInternalServerError, "database_error", "Could not update the signup plan.")
+		}
+		return
+	}
+	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.signup_plan_changed", ActorType: "platform", TargetType: "plan", TargetID: name, Metadata: map[string]string{"plan": name}})
+	writeJSON(w, http.StatusOK, map[string]any{"plan": name})
 }
 
 // planRequest is the shared body for plan create/update. Name is optional on
@@ -104,7 +128,9 @@ func writePlanError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, store.ErrPlanExists):
 		adminError(w, http.StatusConflict, "plan_exists", "A plan with that name already exists.")
 	case errors.Is(err, store.ErrPlanReserved):
-		adminError(w, http.StatusConflict, "plan_reserved", "The default plan cannot be renamed or deleted.")
+		adminError(w, http.StatusConflict, "plan_reserved", "The free plan cannot be renamed or deleted.")
+	case errors.Is(err, store.ErrSignupPlan):
+		adminError(w, http.StatusConflict, "signup_plan_in_use", "Choose another signup plan before deleting this plan.")
 	case errors.Is(err, store.ErrInvalidPlanName):
 		adminError(w, http.StatusBadRequest, "invalid_plan_name", "Plan names must be lowercase letters, digits, dashes or underscores (max 64).")
 	case errors.Is(err, store.ErrInvalidLimits):

@@ -626,6 +626,7 @@ func (s *Server) registerPlatformRoutes(mux *http.ServeMux) {
 	mux.Handle("GET /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.platformSettings)))
 	mux.Handle("PUT /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.updatePlatformSettings)))
 	mux.Handle("GET /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlans)))
+	mux.Handle("PUT /api/platform/signup-plan", s.requirePlatform(http.HandlerFunc(s.writeSignupPlan)))
 	mux.Handle("POST /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanCreate)))
 	mux.Handle("PUT /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanUpdate)))
 	mux.Handle("DELETE /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanDelete)))
