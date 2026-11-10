@@ -38,8 +38,6 @@ Access is per area with escalating levels — `read` ⊂ `write` ⊂ `delete`:
 
 Hosted tokens follow the same model with extra guard rails:
 
-- Creating, rotating, widening, or extending a token asks for your password
-  (or a fresh passkey / Google check).
 - New tokens default to a 30-day expiry (you may choose no expiry).
 - Tokens are limited to `read` and `write`; destructive deletes stay in the
   dashboard.

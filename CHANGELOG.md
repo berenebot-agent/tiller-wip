@@ -53,8 +53,7 @@ behavior may still change before a stable `1.0`.
   admin JSON requests), and `offset_max` is added.
 - **Management API tokens in hosted mode.** Hosted customers can now create
   `mt-tr-` tokens under Settings → Management API. Hosted tokens are stricter
-  than local ones: creating, rotating, widening or re-enabling needs
-  re-authentication, new tokens default to a 30-day expiry (no expiry is
+  than local ones: new tokens default to a 30-day expiry (no expiry is
   allowed), access is capped at read/write, each account may hold 10, and all of
   an account's tokens share a 60 requests/minute budget. Suspending or deleting
   the account revokes tokens immediately; "sign out everywhere" asks whether to

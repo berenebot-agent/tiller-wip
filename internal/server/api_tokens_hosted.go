@@ -2,8 +2,6 @@ package server
 
 import (
 	"context"
-	"errors"
-	"net/http"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
@@ -13,8 +11,7 @@ import (
 
 // Hosted management-token policy. Local installs keep the unrestricted
 // behaviour; a hosted account shares infrastructure with other tenants, so
-// tokens are tighter: capped in number, tier and lifetime, minted and widened
-// only after re-authentication, and rate-limited per account. See
+// tokens are tighter: capped in number, tier and lifetime, and rate-limited per account. See
 // docs/hosted_decisions.md ("Hosted management API tokens").
 const (
 	// hostedMaxManagementTokens caps browser-managed tokens per account.
@@ -35,54 +32,6 @@ func hostedTokenScopeError(scopes map[string]int) string {
 	}
 	return ""
 }
-
-// widensManagementScopes reports whether next grants anything beyond current.
-func widensManagementScopes(current, next map[string]int) bool {
-	for area, tier := range next {
-		if tier > current[area] {
-			return true
-		}
-	}
-	return false
-}
-
-// hostedTokenStepUp requires a fresh proof of identity for sensitive token
-// operations (mint, rotate, widen). It accepts the password, or a passkey or
-// Google re-authentication already completed in this session. Failures are
-// charged to the same per-user throttle as every other sensitive operation, so
-// switching between token management and account settings cannot buy extra
-// password guesses. It writes the error response and returns false on failure.
-func (s *Server) hostedTokenStepUp(w http.ResponseWriter, r *http.Request, password string) bool {
-	session, ok := r.Context().Value(userSessionKey).(identity.UserSession)
-	if !ok {
-		adminError(w, http.StatusUnauthorized, "unauthorized", "User authentication required.")
-		return false
-	}
-	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
-	if err != nil {
-		adminError(w, http.StatusInternalServerError, "database_error", "Could not verify your account details.")
-		return false
-	}
-	var authErr error
-	if profile.GoogleLinked && !profile.PasswordEnabled {
-		if !s.consumeGoogleReauth(rawUserSessionToken(r)) && !s.consumePasskeyReauth(rawUserSessionToken(r)) {
-			authErr = errReauthRequired
-		}
-	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, password); err != nil {
-		authErr = err
-	}
-	if authErr != nil {
-		if errors.Is(authErr, errReauthRequired) {
-			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google to manage API tokens.")
-			return false
-		}
-		s.writeReauthFailure(w, authErr, "Confirm your identity with your password, passkey, or Google to manage API tokens.")
-		return false
-	}
-	return true
-}
-
-var errReauthRequired = errors.New("reauthentication required")
 
 // notifyManagementTokenCreated queues a security notice to the account owner.
 // It is best-effort: a mail failure never blocks or fails token creation.
