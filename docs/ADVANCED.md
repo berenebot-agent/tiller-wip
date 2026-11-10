@@ -103,6 +103,52 @@ destination validation and SSRF protection. Docker network isolation is only
 defense in depth; it is not a substitute for the application policy or an
 optional VPS firewall hardening rule.
 
+## Front-door request limits
+
+Tiller meters a logged-in account's console traffic (dashboard and API tokens
+share one budget) and throttles repeated failed password confirmations. It does
+**not** meter per source IP: behind a reverse proxy the app only knows the
+address the proxy forwards, so a per-IP allowance belongs at the proxy, where
+the real peer is known and a flood can be rejected before it reaches Go.
+
+nginx:
+
+```nginx
+# http block
+limit_req_zone $binary_remote_addr zone=tiller_general:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=tiller_auth:10m    rate=2r/s;
+
+# server block
+limit_req zone=tiller_general burst=40 nodelay;
+location /api/auth/ {
+    limit_req zone=tiller_auth burst=5 nodelay;
+    proxy_pass http://tiller-router:8080;
+}
+```
+
+Caddy:
+
+```caddy
+app.example.com {
+    # caddy-ratelimit plugin (github.com/mholt/caddy-ratelimit)
+    rate_limit {
+        zone general {
+            key {remote_host}
+            events 20
+            window 1s
+        }
+    }
+    reverse_proxy tiller-router:8080
+}
+```
+
+The app's own budgets are intentionally generous so ordinary use never touches
+them; the proxy limit is the layer that keeps one noisy source from consuming
+the connection pool. Two proxy settings are required for the dashboard to work
+regardless of the limits above: disable response buffering for
+`/api/admin/live` (nginx `proxy_buffering off;`), and keep the proxy's read
+timeout above the stream's 5s heartbeat.
+
 ## Hosted Google sign-in and Turnstile
 
 Configure customer sign-in from **`/platform` → Signup and mail** after the

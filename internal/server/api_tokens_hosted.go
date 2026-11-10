@@ -22,9 +22,6 @@ const (
 	// hostedMaxManagementScopeTier is the highest tier a hosted token may hold.
 	// Destructive (delete) operations stay with the interactive session.
 	hostedMaxManagementScopeTier = auth.ScopeWrite
-	// hostedManagementRequestsPerMinute is the per-account management API
-	// request budget, shared by all of the account's tokens.
-	hostedManagementRequestsPerMinute = 60
 )
 
 func (s *Server) hostedTokens() bool { return s.config.Mode == config.ModeHosted }
@@ -51,18 +48,14 @@ func widensManagementScopes(current, next map[string]int) bool {
 
 // hostedTokenStepUp requires a fresh proof of identity for sensitive token
 // operations (mint, rotate, widen). It accepts the password, or a passkey or
-// Google re-authentication already completed in this session, and throttles
-// failures per user. It writes the error response and returns false on failure.
+// Google re-authentication already completed in this session. Failures are
+// charged to the same per-user throttle as every other sensitive operation, so
+// switching between token management and account settings cannot buy extra
+// password guesses. It writes the error response and returns false on failure.
 func (s *Server) hostedTokenStepUp(w http.ResponseWriter, r *http.Request, password string) bool {
 	session, ok := r.Context().Value(userSessionKey).(identity.UserSession)
 	if !ok {
 		adminError(w, http.StatusUnauthorized, "unauthorized", "User authentication required.")
-		return false
-	}
-	key := session.User.ID
-	if s.tokenStepUpLimiter.locked(key) {
-		w.Header().Set("Retry-After", "900")
-		adminError(w, http.StatusTooManyRequests, "authentication_rate_limited", "Too many failed attempts. Try again later.")
 		return false
 	}
 	profile, err := s.identity.AccountProfile(r.Context(), session.User.ID)
@@ -79,11 +72,13 @@ func (s *Server) hostedTokenStepUp(w http.ResponseWriter, r *http.Request, passw
 		authErr = err
 	}
 	if authErr != nil {
-		s.tokenStepUpLimiter.recordFailure(key)
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google to manage API tokens.")
+		if errors.Is(authErr, errReauthRequired) {
+			adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google to manage API tokens.")
+			return false
+		}
+		s.writeReauthFailure(w, authErr, "Confirm your identity with your password, passkey, or Google to manage API tokens.")
 		return false
 	}
-	s.tokenStepUpLimiter.success(key)
 	return true
 }
 

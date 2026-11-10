@@ -335,26 +335,27 @@ func (a *ManagementTokenAuthenticator) InvalidateWith(tokenID string, publish fu
 	return nil
 }
 
-// InvalidateAccount immediately drops every cached token for an account.
-// Account suspension, deletion and credential-reset events use it so
+// InvalidateAccount immediately drops every cached token for one account.
+// Account suspension, deletion, credential reset and revoke-all use it so
 // containment does not wait for the cache TTL.
+//
+// It deliberately does NOT advance the global publication fence (a.rev) the way
+// invalidateLocked does. That fence exists to reject a verification that began
+// against stale row contents (rotate, re-scope, revoke of one token) and would
+// otherwise republish them. Dropping a whole account's cache needs no fence: the
+// caller has already deleted or disabled those rows, so a racing verification
+// can only republish an identity that fails on its next look-up. Bumping the
+// global counter here would instead fail closed on *other* tenants' concurrent
+// verifications, turning one tenant's revoke into a spurious 401 for everyone
+// else (../docs/back_compat.md notes no compat shim is added for this).
 func (a *ManagementTokenAuthenticator) InvalidateAccount(accountID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	atomic.AddUint64(&a.rev, 1)
 	for key, entry := range a.entries {
 		if entry.identity.AccountID == accountID {
 			delete(a.entries, key)
 		}
 	}
-}
-
-// InvalidateAll drops the entire cache, e.g. after revoke-all.
-func (a *ManagementTokenAuthenticator) InvalidateAll() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	atomic.AddUint64(&a.rev, 1)
-	a.entries = make(map[[32]byte]managementCacheEntry)
 }
 
 func (a *ManagementTokenAuthenticator) invalidateLocked(tokenID string) {

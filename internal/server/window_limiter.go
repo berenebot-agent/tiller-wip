@@ -21,6 +21,82 @@ type windowLimiter struct {
 type windowEntry struct {
 	count int
 	start time.Time
+	// live holds requests of this window that are still being served, or whose
+	// response is a long-lived stream (Server-Sent Events). An entry with a
+	// stream attached is never expired while the stream is open, however long
+	// that is.
+	live int
+}
+
+// takeLive is take for endpoints a connected client holds open (the live
+// activity stream). A streamed response stays "in use" for its whole life, so
+// charging it against a per-minute request budget would throttle a dashboard
+// that is merely sitting there with a tab open. It is instead bounded as a
+// concurrency limit: at most max streams per key at once.
+//
+// The first stream of a key reuses that key's existing window entry -- keeping
+// the request counter it already holds from the request that opened the stream
+// -- and pins it for the duration. Once the last stream closes, the entry
+// resumes normal expiry.
+func (l *windowLimiter) takeLive(key string) windowQuota {
+	key = limiterKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	e, ok := l.entries[key]
+	if !ok {
+		if len(l.entries) >= maxLimiterEntries {
+			l.purge(now)
+			if len(l.entries) >= maxLimiterEntries {
+				for k := range l.entries {
+					delete(l.entries, k)
+					break
+				}
+			}
+		}
+		e = &windowEntry{start: now, count: 1}
+		l.entries[key] = e
+	}
+	q := windowQuota{Limit: l.max, Remaining: max(l.max-e.live, 0)}
+	if e.count >= l.max && e.live == 0 {
+		q.ResetSeconds = resetSeconds(now, e.start.Add(l.window))
+		return q
+	}
+	if e.live >= l.max {
+		q.ResetSeconds = 1
+		return q
+	}
+	e.live++
+	if e.live >= l.max {
+		q.Remaining = 0
+	}
+	q.Allowed = true
+	q.ResetSeconds = resetSeconds(now, e.start.Add(l.window))
+	return q
+}
+
+// releaseLive closes a stream previously admitted by takeLive.
+func (l *windowLimiter) releaseLive(key string) {
+	key = limiterKey(key)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.entries[key]
+	if !ok || e.live == 0 {
+		return
+	}
+	e.live--
+	if e.live == 0 && !l.now().Before(e.start.Add(l.window)) {
+		delete(l.entries, key)
+	}
+}
+
+// resetSeconds rounds the remaining window up to whole seconds, at least 1.
+func resetSeconds(now, end time.Time) int {
+	seconds := int((end.Sub(now) + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	return seconds
 }
 
 // windowQuota is the state after charging one request.
@@ -64,11 +140,7 @@ func (l *windowLimiter) take(key string) windowQuota {
 		e = &windowEntry{start: now}
 		l.entries[key] = e
 	}
-	reset := int((e.start.Add(l.window).Sub(now) + time.Second - 1) / time.Second)
-	if reset < 1 {
-		reset = 1
-	}
-	q := windowQuota{Limit: l.max, ResetSeconds: reset}
+	q := windowQuota{Limit: l.max, ResetSeconds: resetSeconds(now, e.start.Add(l.window))}
 	if e.count >= l.max {
 		return q
 	}
@@ -80,6 +152,9 @@ func (l *windowLimiter) take(key string) windowQuota {
 
 func (l *windowLimiter) purge(now time.Time) {
 	for k, e := range l.entries {
+		if e.live > 0 {
+			continue
+		}
 		if !now.Before(e.start.Add(l.window)) {
 			delete(l.entries, k)
 		}

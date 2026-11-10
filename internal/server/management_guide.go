@@ -77,7 +77,7 @@ func (s *Server) discoveryLimits() map[string]any {
 		"activity_retention_days_default": 30,
 	}
 	if s.config.Mode == config.ModeHosted {
-		limits["requests_per_minute_per_account"] = hostedManagementRequestsPerMinute
+		limits["requests_per_minute_per_account"] = dashboardRequestsPerMinute
 		limits["max_tokens_per_account"] = hostedMaxManagementTokens
 		limits["rate_limit_window_seconds"] = 60
 		limits["rate_limit_headers"] = []string{"X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After"}
@@ -192,7 +192,8 @@ func renderManagementGuideMarkdown(info managementGuideInfo) string {
 		b.WriteString("password (or a fresh passkey/Google check); new tokens default to a 30-day\n")
 		b.WriteString("expiry; tokens are limited to `read` and `write` (destructive deletes stay in\n")
 		b.WriteString("the dashboard); an account can hold up to 10 tokens; and all of an account's\n")
-		b.WriteString("tokens share a budget of 60 requests per minute.\n\n")
+		b.WriteString("tokens draw on a shared budget of 60 requests per minute (10 per minute for\n")
+		b.WriteString("whole-table reports such as CSV exports).\n\n")
 	}
 	b.WriteString("## Scopes\n\n")
 	b.WriteString("Each token grants per-area access with three escalating levels:\n")
@@ -244,9 +245,10 @@ func renderManagementGuideMarkdown(info managementGuideInfo) string {
 	b.WriteString("- `401 invalid_api_token` — missing, unknown, disabled, or malformed token.\n")
 	b.WriteString("- `401 token_expired` — the token's expiry has passed.\n")
 	b.WriteString("- `403 insufficient_scope` — the token's ceiling is below the route's tier.\n")
-	b.WriteString("- `429 authentication_rate_limited` — too many failed attempts; retry after `Retry-After` seconds.\n")
+	b.WriteString("- `429 authentication_rate_limited` — too many failed password confirmations for this user; retry after `Retry-After` seconds.\n")
+	b.WriteString("- `408 request_cancelled` — the confirmation did not complete (the request ended first). Nothing was changed and the attempt is not counted against you.\n")
 	if info.Hosted {
-		b.WriteString("- `429 rate_limited` — the account's 60 requests/minute management budget is spent. The body carries `limit`, `window_seconds` and `retry_after`; the budget refills when the one-minute window that began at the first request ends.\n")
+		b.WriteString("- `429 rate_limited` — the account's shared dashboard/management budget is spent. The body carries `limit`, `window_seconds` and `retry_after`; the budget refills when the one-minute window that began at the first request ends.\n")
 	}
 	b.WriteString("\n")
 	b.WriteString("## Examples\n\n")
@@ -283,7 +285,7 @@ func renderManagementGuideHTML(info managementGuideInfo) string {
 	b.WriteString("<pre><code>Authorization: Bearer mt-tr-&lt;selector&gt;.&lt;secret&gt;</code></pre>\n")
 	b.WriteString("<p>Tokens are shown once at creation and stored only as a hash. They may carry an expiry, and can be rotated or revoked at any time. A token can introspect itself at <code>GET /api/admin/api-tokens/self</code> (name, scopes, expiry, last use).</p>\n")
 	if info.Hosted {
-		b.WriteString("<p><strong>Hosted accounts:</strong> creating, rotating or widening a token asks for your password (or a fresh passkey/Google check); new tokens default to a 30-day expiry; tokens are limited to <code>read</code> and <code>write</code> (destructive deletes stay in the dashboard); an account can hold up to 10 tokens; and all of an account's tokens share a budget of 60 requests per minute.</p>\n")
+		b.WriteString("<p><strong>Hosted accounts:</strong> creating, rotating or widening a token asks for your password (or a fresh passkey/Google check); new tokens default to a 30-day expiry; tokens are limited to <code>read</code> and <code>write</code> (destructive deletes stay in the dashboard); an account can hold up to 10 tokens; and all of an account's tokens draw on a shared budget of 60 requests per minute (10 per minute for whole-table reports such as CSV exports).</p>\n")
 	}
 
 	b.WriteString("<h2>Scopes</h2>\n")
@@ -316,10 +318,7 @@ func renderManagementGuideHTML(info managementGuideInfo) string {
 	}
 	b.WriteString("<h2>Errors</h2>\n")
 	b.WriteString("<p>Failures use the envelope <code>{\"error\":{\"code\":\"...\",\"message\":\"...\"}}</code>:</p>\n")
-	b.WriteString("<ul>\n<li><code>401 invalid_api_token</code> — missing, unknown, disabled, or malformed token.</li>\n<li><code>401 token_expired</code> — the token's expiry has passed.</li>\n<li><code>403 insufficient_scope</code> — the token's ceiling is below the route's tier.</li>\n<li><code>429 authentication_rate_limited</code> — too many failed attempts; retry after <code>Retry-After</code> seconds.</li>\n")
-	if info.Hosted {
-		b.WriteString("<li><code>429 rate_limited</code> — the account's 60 requests/minute management budget is spent. The body carries <code>limit</code>, <code>window_seconds</code> and <code>retry_after</code>; the budget refills when the one-minute window that began at the first request ends.</li>\n")
-	}
+	b.WriteString("<ul>\n<li><code>401 invalid_api_token</code> — missing, unknown, disabled, or malformed token.</li>\n<li><code>401 token_expired</code> — the token's expiry has passed.</li>\n<li><code>403 insufficient_scope</code> — the token's ceiling is below the route's tier.</li>\n<li><code>429 authentication_rate_limited</code> — too many failed password confirmations for this user; retry after <code>Retry-After</code> seconds.</li>\n<li><code>408 request_cancelled</code> — the confirmation did not complete (the request ended first). Nothing was changed and the attempt is not counted against you.</li>\n<li><code>429 rate_limited</code> — the account's shared dashboard/management budget is spent. The body carries <code>limit</code>, <code>window_seconds</code> and <code>retry_after</code>; the budget refills when the one-minute window that began at the first request ends.</li>\n")
 	b.WriteString("</ul>\n")
 
 	b.WriteString("<h2>Examples</h2>\n")
