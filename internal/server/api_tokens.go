@@ -197,7 +197,6 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		Description string         `json:"description"`
 		Scopes      map[string]int `json:"scopes"`
 		ExpiresAt   string         `json:"expires_at"`
-		Password    string         `json:"password"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -237,9 +236,6 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		}
 		if count >= hostedMaxManagementTokens {
 			adminError(w, 409, "token_limit_reached", fmt.Sprintf("Accounts can hold at most %d API tokens. Delete one first.", hostedMaxManagementTokens))
-			return
-		}
-		if !s.hostedTokenStepUp(w, r, input.Password) {
 			return
 		}
 	}
@@ -305,7 +301,6 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 		Scopes      *map[string]int `json:"scopes"`
 		Enabled     *bool           `json:"enabled"`
 		ExpiresAt   *string         `json:"expires_at"`
-		Password    string          `json:"password"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -372,14 +367,6 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// Widening access or extending lifetime is equivalent to minting a
-		// stronger token, so it needs the same re-authentication.
-		widened := input.Scopes != nil && widensManagementScopes(auth.ParseManagementScopes(current.Scopes), *input.Scopes)
-		extended := input.ExpiresAt != nil && current.ExpiresAt.Valid && (!update.ExpiresAt.Valid || update.ExpiresAt.String > current.ExpiresAt.String)
-		reenabled := input.Enabled != nil && *input.Enabled && !current.Enabled
-		if (widened || extended || reenabled) && !s.hostedTokenStepUp(w, r, input.Password) {
-			return
-		}
 	}
 	// The mutation and cache invalidation publish together so a token whose
 	// scopes were just narrowed cannot authorize from a stale cache entry.
@@ -417,20 +404,8 @@ func (s *Server) rotateManagementToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tokenID := r.PathValue("id")
 	if s.hostedTokens() {
-		var input struct {
-			Password string `json:"password"`
-		}
-		if r.ContentLength != 0 {
-			if err := decodeJSON(w, r, &input); err != nil {
-				adminError(w, 400, "invalid_request", err.Error())
-				return
-			}
-		}
 		if _, err := s.scope(r).GetManagementToken(r.Context(), tokenID); errors.Is(err, store.ErrManagementTokenNotFound) {
 			adminError(w, 404, "not_found", "API token not found.")
-			return
-		}
-		if !s.hostedTokenStepUp(w, r, input.Password) {
 			return
 		}
 	}

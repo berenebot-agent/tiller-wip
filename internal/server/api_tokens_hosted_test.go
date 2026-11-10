@@ -20,24 +20,17 @@ func hostedExpiry(days int) string {
 	return time.Now().Add(time.Duration(days) * 24 * time.Hour).UTC().Format(time.RFC3339)
 }
 
-// hostedMintToken creates a token through the cookie session with step-up.
+// hostedMintToken creates a token through the cookie session.
 func hostedMintToken(t *testing.T, api *testAPI, name string, scopes map[string]int) (id, token string) {
 	t.Helper()
-	return hostedMintTokenWithPassword(t, api, name, scopes, hostedTestPassword)
-}
-
-// hostedMintTokenWithPassword is hostedMintToken for an account whose password
-// differs from the primary test tenant's.
-func hostedMintTokenWithPassword(t *testing.T, api *testAPI, name string, scopes map[string]int, password string) (id, token string) {
-	t.Helper()
-	status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": name, "scopes": scopes, "expires_at": hostedExpiry(30), "password": password})
+	status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": name, "scopes": scopes, "expires_at": hostedExpiry(30)})
 	if status != 201 {
 		t.Fatalf("mint hosted token %q: %d %v", name, status, payload)
 	}
 	return payload["id"].(string), payload["token"].(string)
 }
 
-func TestHostedTokenCreateRequiresStepUpAndPolicy(t *testing.T) {
+func TestHostedTokenCreatePolicy(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedAccountServer(t)
 	good := map[string]any{"name": "ci", "scopes": map[string]int{"client_keys": 2}, "expires_at": hostedExpiry(30)}
@@ -52,14 +45,6 @@ func TestHostedTokenCreateRequiresStepUpAndPolicy(t *testing.T) {
 		return out
 	}
 
-	for name, body := range map[string]map[string]any{
-		"no password":    with(nil),
-		"wrong password": with(map[string]any{"password": "wrong wrong wrong"}),
-	} {
-		if status, payload, _ := api.request("POST", "/api/admin/api-tokens", body); status != 401 || payload["error"].(map[string]any)["code"] != "reauth_required" {
-			t.Fatalf("%s: %d %v, want 401 reauth_required", name, status, payload)
-		}
-	}
 	cases := []struct {
 		name  string
 		extra map[string]any
@@ -68,36 +53,18 @@ func TestHostedTokenCreateRequiresStepUpAndPolicy(t *testing.T) {
 		{"delete tier", map[string]any{"scopes": map[string]int{"providers": 3}}, "invalid_scopes"},
 	}
 	for _, tc := range cases {
-		tc.extra["password"] = hostedTestPassword
 		status, payload, _ := api.request("POST", "/api/admin/api-tokens", with(tc.extra))
 		if status != 400 || payload["error"].(map[string]any)["code"] != tc.code {
 			t.Fatalf("%s: %d %v, want 400 %s", tc.name, status, payload, tc.code)
 		}
 	}
-	if status, payload, _ := api.request("POST", "/api/admin/api-tokens", with(map[string]any{"password": hostedTestPassword})); status != 201 {
+	if status, payload, _ := api.request("POST", "/api/admin/api-tokens", with(nil)); status != 201 {
 		t.Fatalf("valid create: %d %v", status, payload)
 	}
 	// A token without an expiry is allowed in hosted mode.
-	status, payload, _ := api.request("POST", "/api/admin/api-tokens", with(map[string]any{"name": "forever", "expires_at": "", "password": hostedTestPassword}))
+	status, payload, _ := api.request("POST", "/api/admin/api-tokens", with(map[string]any{"name": "forever", "expires_at": ""}))
 	if status != 201 || payload["expires_at"] != nil {
 		t.Fatalf("no-expiry create: %d %v, want 201 with null expiry", status, payload)
-	}
-}
-
-func TestHostedTokenStepUpLockout(t *testing.T) {
-	t.Parallel()
-	_, api, _ := hostedAccountServer(t)
-	body := map[string]any{"name": "x", "scopes": map[string]int{}, "expires_at": hostedExpiry(1), "password": "wrong wrong wrong"}
-	var last int
-	for i := 0; i < 8; i++ {
-		last, _, _ = api.request("POST", "/api/admin/api-tokens", body)
-	}
-	if last != 429 {
-		t.Fatalf("repeated bad step-up = %d, want 429", last)
-	}
-	body["password"] = hostedTestPassword
-	if status, _, _ := api.request("POST", "/api/admin/api-tokens", body); status != 429 {
-		t.Fatalf("locked user with correct password = %d, want 429", status)
 	}
 }
 
@@ -107,7 +74,7 @@ func TestHostedTokenCountCap(t *testing.T) {
 	for i := 0; i < hostedMaxManagementTokens; i++ {
 		hostedMintToken(t, api, fmt.Sprintf("t%d", i), map[string]int{})
 	}
-	status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": "one-too-many", "scopes": map[string]int{}, "expires_at": hostedExpiry(1), "password": hostedTestPassword})
+	status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": "one-too-many", "scopes": map[string]int{}, "expires_at": hostedExpiry(1)})
 	if status != 409 || payload["error"].(map[string]any)["code"] != "token_limit_reached" {
 		t.Fatalf("over cap: %d %v", status, payload)
 	}
@@ -154,44 +121,26 @@ func TestHostedTokenUseAndBoundaries(t *testing.T) {
 	}
 }
 
-func TestHostedTokenWideningAndRotateNeedStepUp(t *testing.T) {
+func TestHostedTokenEditAndRotateNeedNoPassword(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedAccountServer(t)
 	id, token := hostedMintToken(t, api, "grow", map[string]int{"client_keys": 1})
 
-	// Widening without proof is refused; with proof it succeeds.
-	widen := map[string]any{"scopes": map[string]int{"client_keys": 2}}
-	if status, _, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, widen); status != 401 {
-		t.Fatalf("widen without step-up = %d, want 401", status)
+	if status, payload, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"scopes": map[string]int{"client_keys": 2}}); status != 200 {
+		t.Fatalf("widen: %d %v", status, payload)
 	}
-	widen["password"] = hostedTestPassword
-	if status, payload, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, widen); status != 200 {
-		t.Fatalf("widen with step-up: %d %v", status, payload)
-	}
-	// Narrowing and disabling never need it.
 	if status, payload, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"scopes": map[string]int{"client_keys": 1}, "enabled": false}); status != 200 {
 		t.Fatalf("narrow/disable: %d %v", status, payload)
 	}
-	// Re-enabling counts as minting.
-	if status, _, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"enabled": true}); status != 401 {
-		t.Fatalf("re-enable without step-up = %d, want 401", status)
+	if status, payload, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"enabled": true}); status != 200 {
+		t.Fatalf("re-enable: %d %v", status, payload)
 	}
-	// Extending the lifetime (including clearing the expiry) needs proof too.
-	if status, _, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"expires_at": ""}); status != 401 {
-		t.Fatalf("clear expiry without step-up = %d, want 401", status)
-	}
-	if status, payload, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"expires_at": "", "password": hostedTestPassword}); status != 200 || payload["expires_at"] != nil {
-		t.Fatalf("clear expiry with step-up: %d %v", status, payload)
+	if status, payload, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"expires_at": ""}); status != 200 || payload["expires_at"] != nil {
+		t.Fatalf("clear expiry: %d %v", status, payload)
 	}
 
-	// Rotation needs proof and the old secret dies immediately.
-	if status, _, _ := api.request("POST", "/api/admin/api-tokens/"+id+"/rotate", nil); status != 401 {
-		t.Fatalf("rotate without step-up = %d, want 401", status)
-	}
-	if status, _, _ := api.request("PATCH", "/api/admin/api-tokens/"+id, map[string]any{"enabled": true, "password": hostedTestPassword}); status != 200 {
-		t.Fatal("could not re-enable")
-	}
-	status, payload, _ := api.request("POST", "/api/admin/api-tokens/"+id+"/rotate", map[string]any{"password": hostedTestPassword})
+	// Rotation kills the old secret immediately.
+	status, payload, _ := api.request("POST", "/api/admin/api-tokens/"+id+"/rotate", nil)
 	if status != 200 {
 		t.Fatalf("rotate: %d %v", status, payload)
 	}
@@ -502,7 +451,7 @@ func TestRevokeAllIsTenantScoped(t *testing.T) {
 
 	const tenantBPassword = "another correct horse"
 	apiB := hostedSecondTenant(t, apiA, "tenant-b@example.com", tenantBPassword)
-	_, tokenB := hostedMintTokenWithPassword(t, apiB, "tenant-b", map[string]int{"client_keys": 1}, tenantBPassword)
+	_, tokenB := hostedMintToken(t, apiB, "tenant-b", map[string]int{"client_keys": 1})
 
 	useB := func() int {
 		status, _, _ := bearerRequest(t, apiB.base, tokenB, "GET", "/api/admin/client-keys", nil)
