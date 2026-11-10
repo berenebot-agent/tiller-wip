@@ -4362,6 +4362,9 @@ async function loadPlatformPlans() {
     const plans = result.data || [];
     state.platformPlans = plans.map(plan => plan.name);
     state.platformPlanData = plans;
+    const select = $('#platform-signup-plan');
+    select.innerHTML = plans.map(plan => `<option value="${h(plan.name)}">${h(plan.name)}</option>`).join('');
+    select.value = result.signup_default_plan;
     list.innerHTML = plans.map(plan => `<div class="platform-list-item platform-plan-row" data-plan="${h(plan.name)}" role="button" tabindex="0"><div><strong>${h(plan.name)}</strong><small>${planSummary(plan)}</small></div><div class="platform-list-actions"><button class="btn btn-small btn-secondary" type="button" data-plan-edit="${h(plan.name)}">Edit</button><button class="btn btn-small btn-danger" type="button" data-plan-delete="${h(plan.name)}">Delete</button></div></div>`).join('') || '<p class="meta-line">No plans.</p>';
     $('#platform-plans-error').textContent = '';
   } catch (error) {
@@ -4383,6 +4386,14 @@ async function loadPlatformLegal() {
 
 function planForRow(el) { return state.platformPlanData.find(plan => plan.name === el.dataset.plan) || null; }
 $('#platform-plan-add').addEventListener('click', () => openPlanEditor(null));
+$('#platform-signup-plan-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/api/platform/signup-plan', { method: 'PUT', body: JSON.stringify({ plan: $('#platform-signup-plan').value }) });
+    flash('Default signup plan saved.');
+    await loadPlatformPlans();
+  } catch (error) { $('#platform-plans-error').textContent = errorMessage(error, 'Could not save the default plan.'); }
+});
 $('#platform-plans-list').addEventListener('click', async event => {
   const edit = event.target.closest('[data-plan-edit]');
   const del = event.target.closest('[data-plan-delete]');
