@@ -3956,18 +3956,35 @@ function setStoredAnalyticsConsent(choice) {
   try { localStorage.setItem(ANALYTICS_CONSENT_KEY, choice); } catch { /* storage unavailable */ }
 }
 
-function loadAnalyticsScript(options) {
+// Third-party analytics runs in an isolated document, never in this one.
+//
+// The vendor script is mounted inside /analytics-frame.html as a sandboxed
+// iframe. The sandbox carries no `allow-same-origin`, so the frame gets an
+// opaque origin: it cannot read this document, cannot read cookies, and its
+// requests to /api/... are cross-origin and uncredentialed. The analytics
+// origin is also absent from this document's Content-Security-Policy, so even
+// a compromised vendor script has no reachable credential or API surface here.
+// See analyticsFrameCSP in internal/server/analytics.go.
+const ANALYTICS_FRAME_PATH = '/analytics-frame.html';
+
+function mountAnalyticsFrame(options) {
   if (!options || !options.script_url) return;
-  if (document.querySelector('script[data-tiller-analytics]')) return;
-  const script = document.createElement('script');
-  script.src = options.script_url;
-  script.async = true;
-  script.defer = true;
-  script.dataset.tillerAnalytics = '1';
-  const siteID = String(options.site_id || '').trim();
-  if (options.provider === 'umami' && siteID) script.setAttribute('data-website-id', siteID);
-  else if (options.provider === 'plausible' && siteID) script.setAttribute('data-domain', siteID);
-  document.head.appendChild(script);
+  if (document.querySelector('iframe[data-tiller-analytics]')) return;
+  const params = new URLSearchParams();
+  params.set('src', options.script_url);
+  if (options.provider) params.set('provider', options.provider);
+  if (options.site_id) params.set('site', options.site_id);
+  const frame = document.createElement('iframe');
+  // allow-scripts only: no allow-same-origin, no allow-popups, no
+  // allow-top-navigation, no allow-forms, no allow-modals.
+  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.setAttribute('tabindex', '-1');
+  frame.dataset.tillerAnalytics = '1';
+  frame.hidden = true;
+  frame.src = `${ANALYTICS_FRAME_PATH}?${params.toString()}`;
+  document.body.appendChild(frame);
 }
 
 async function setupAnalyticsConsent() {
@@ -3975,12 +3992,12 @@ async function setupAnalyticsConsent() {
   try { options = await api('/api/analytics/options'); } catch { return; }
   if (!options || !options.enabled) return;
   const decision = storedAnalyticsConsent();
-  if (decision === 'accepted') { loadAnalyticsScript(options); return; }
+  if (decision === 'accepted') { mountAnalyticsFrame(options); return; }
   if (decision === 'declined') return;
   const banner = $('#analytics-consent');
   if (!banner) return;
   banner.hidden = false;
-  $('#analytics-accept').onclick = () => { setStoredAnalyticsConsent('accepted'); banner.hidden = true; loadAnalyticsScript(options); };
+  $('#analytics-accept').onclick = () => { setStoredAnalyticsConsent('accepted'); banner.hidden = true; mountAnalyticsFrame(options); };
   $('#analytics-decline').onclick = () => { setStoredAnalyticsConsent('declined'); banner.hidden = true; };
 }
 

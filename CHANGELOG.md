@@ -8,6 +8,19 @@ behavior may still change before a stable `1.0`.
 
 ### Security
 
+- **Third-party analytics runs in an isolated frame.** The vendor script is no
+  longer injected into the console document. It loads in
+  `/analytics-frame.html`, embedded as a sandboxed iframe (`allow-scripts` only,
+  so no `allow-same-origin`), which gives it an opaque origin: it cannot read
+  the console's DOM or cookies, and its `/api/...` requests are cross-origin and
+  uncredentialed. The operator's analytics origin is also removed from the
+  console's own Content-Security-Policy — that policy keeps
+  `script-src 'self'` and `connect-src 'self'` — and appears only in the frame's
+  dedicated policy. Previously a compromised analytics script shared the
+  dashboard document and could call the API with the user's session. Behaviour
+  is unchanged for operators: analytics remains consent-gated and still
+  measures signed-in console traffic.
+
 - **Provider upstream URLs are locked for fixed-vendor and OAuth types.** Their
   Base URL is read-only (API: `base_url_locked`), so a stored credential cannot
   be redirected to another host. Types whose URL is the point of the type
