@@ -27,6 +27,38 @@ func newTestStore(t *testing.T) (*Store, *sql.DB) {
 	return st, db.SQL
 }
 
+func TestSignupUsesConfiguredPlan(t *testing.T) {
+	st, db := newTestStore(t)
+	ctx := context.Background()
+	if _, err := db.Exec(`INSERT INTO plans(name,max_providers,max_client_keys,max_virtual_models,max_concurrent_streams,activity_retention_days,monthly_requests,updated_at) VALUES('pro',1,1,1,1,1,1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.CreateSignup(ctx, "first-plan@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO platform_settings(key,value,updated_at) VALUES('signup_default_plan','pro','now')`); err != nil {
+		t.Fatal(err)
+	}
+	second, err := st.CreateSignup(ctx, "second-plan@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	google, err := st.CreateGoogleSignup(ctx, "google-plan@example.com", "google-plan", SignupAcceptance{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for account, want := range map[string]string{first.User.AccountID: "free", second.User.AccountID: "pro", google.AccountID: "pro"} {
+		var got string
+		if err := db.QueryRow(`SELECT plan FROM accounts WHERE id=?`, account).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Fatalf("account plan = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestSignupVerifySessionAndReset(t *testing.T) {
 	t.Parallel()
 	st, db := newTestStore(t)

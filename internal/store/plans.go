@@ -13,9 +13,31 @@ import (
 // of -1 means the account is not limited on that dimension.
 const Unlimited = -1
 
-// DefaultPlan is the plan every account starts on. It is referenced by
-// accounts.plan's default and can never be deleted.
+// DefaultPlan is the fallback plan, referenced by accounts.plan's default.
 const DefaultPlan = "free"
+
+const signupPlanKey = "signup_default_plan"
+
+var ErrSignupPlan = errors.New("store: the signup plan cannot be deleted")
+
+// SignupPlan returns the plan assigned to newly created hosted accounts.
+func (s *Store) SignupPlan(ctx context.Context) (string, error) {
+	var name string
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT value FROM platform_settings WHERE key=?),?)`, signupPlanKey, DefaultPlan).Scan(&name)
+	return name, err
+}
+
+// SetSignupPlan validates and updates the selection in one statement.
+func (s *Store) SetSignupPlan(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `INSERT INTO platform_settings(key,value,updated_at) SELECT ?,name,? FROM plans WHERE name=? ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`, signupPlanKey, now(), name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrPlanNotFound
+	}
+	return nil
+}
 
 // ErrPlanNotFound is returned when a plan name does not exist.
 var ErrPlanNotFound = errors.New("store: plan not found")
@@ -222,6 +244,9 @@ func (s *Store) RenamePlan(ctx context.Context, oldName string, p Plan) error {
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET plan=?,updated_at=? WHERE plan=?`, p.Name, ts, oldName); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE platform_settings SET value=?,updated_at=? WHERE key=? AND value=?`, p.Name, ts, signupPlanKey, oldName); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM plans WHERE name=?`, oldName); err != nil {
 		return err
 	}
@@ -252,8 +277,14 @@ func (s *Store) DeletePlan(ctx context.Context, name string) error {
 	if inUse > 0 {
 		return &PlanInUseError{Plan: name, Accounts: inUse}
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM plans WHERE name=?`, name)
-	return err
+	res, err := s.db.ExecContext(ctx, `DELETE FROM plans WHERE name=? AND NOT EXISTS (SELECT 1 FROM platform_settings WHERE key=? AND value=?)`, name, signupPlanKey, name)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrSignupPlan
+	}
+	return nil
 }
 
 // SetAccountPlan moves an account onto an existing plan.

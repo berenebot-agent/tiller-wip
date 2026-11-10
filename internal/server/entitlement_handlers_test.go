@@ -159,6 +159,30 @@ func TestPlatformPlansListUpdateAndValidation(t *testing.T) {
 	}
 }
 
+func TestPlatformSignupPlan(t *testing.T) {
+	app, _, _ := hostedServerHarness(t, false)
+	papi := hostedPlatformAPI(t, app)
+	status, payload, _ := papi.request("GET", "/api/platform/plans", nil)
+	if status != 200 || payload["signup_default_plan"] != "free" {
+		t.Fatalf("default plan: %d %v", status, payload)
+	}
+	status, payload, _ = papi.request("PUT", "/api/platform/signup-plan", map[string]any{"plan": "missing"})
+	if status != 404 {
+		t.Fatalf("unknown plan: %d %v", status, payload)
+	}
+	if err := app.storeHandle().CreatePlan(context.Background(), store.Plan{Name: "pro"}); err != nil {
+		t.Fatal(err)
+	}
+	status, payload, _ = papi.request("PUT", "/api/platform/signup-plan", map[string]any{"plan": "pro"})
+	if status != 200 || payload["plan"] != "pro" {
+		t.Fatalf("set signup plan: %d %v", status, payload)
+	}
+	status, payload, _ = papi.request("GET", "/api/platform/audit", nil)
+	if status != 200 || !auditContains(payload, "platform.signup_plan_changed") {
+		t.Fatalf("audit: %d %v", status, payload)
+	}
+}
+
 func TestAccountPlanEndpointShowsCapsAndUsage(t *testing.T) {
 	t.Parallel()
 	app, api, accountID := hostedServerHarness(t, false)

@@ -609,7 +609,7 @@ func (s *Store) CreateSignup(ctx context.Context, email string, acceptance ...Si
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,password_auth_enabled,status,created_at,updated_at) VALUES(?,?,'',0,'active',?,?)`, userID, email, formatTime(now), formatTime(now)); err != nil {
 		return SignupResult{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,plan,status,owner_user_id,created_at,updated_at) VALUES(?,'free','pending',?,?,?)`, accountID, userID, formatTime(now), formatTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,plan,status,owner_user_id,created_at,updated_at) VALUES(?,COALESCE((SELECT value FROM platform_settings WHERE key='signup_default_plan'),'free'),'pending',?,?,?)`, accountID, userID, formatTime(now), formatTime(now)); err != nil {
 		return SignupResult{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO email_verification_tokens(id,user_id,token_hash,created_at,expires_at) VALUES(?,?,?,?,?)`, selector, userID, tokenHash, formatTime(now), formatTime(now.Add(verificationTTL))); err != nil {
