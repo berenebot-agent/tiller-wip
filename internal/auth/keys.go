@@ -35,9 +35,48 @@ const (
 // the alternative -- unbounded concurrency -- lets a burst of login attempts
 // park gigabytes. The SecretHasher interface is deliberately left unchanged:
 // callers acquire this slot inside the hasher implementation.
+//
+// A slot is only held once the KDF actually runs, and the wait for one is
+// cancellable: a request whose client has gone away releases its place in the
+// queue instead of occupying a slot nothing is waiting for. That is what stops
+// one account from parking every slot with abandoned work and stalling other
+// people's sign-in.
+//
+// The capacity is a variable so tests can shrink it; production never changes
+// it after start-up.
 var argonAdmission = make(chan struct{}, 4)
 
+// setArgonCapacity replaces the gate with an empty one of the given capacity and
+// returns a function restoring the previous gate. It exists only for tests: a
+// test that needs to observe the gate saturated shrinks it, rather than filling
+// the production gate, because every other test in the package queues behind the
+// same slots. Production code never calls it.
+func setArgonCapacity(n int) (restore func()) {
+	previous := argonAdmission
+	argonAdmission = make(chan struct{}, n)
+	return func() { argonAdmission = previous }
+}
+
+// acquireArgonSlot blocks until a slot is free. It is the context-free form,
+// used where no request is involved (bootstrap, CLI, credential sync).
 func acquireArgonSlot() { argonAdmission <- struct{}{} }
+
+// acquireArgonSlotContext blocks until a slot is free or ctx is done, reporting
+// whether a slot was obtained. A cancelled or expired caller is never parked:
+// it gives up its place, so a burst of abandoned requests cannot starve live
+// ones. A nil ctx behaves like context.Background().
+func acquireArgonSlotContext(ctx context.Context) bool {
+	if ctx == nil {
+		acquireArgonSlot()
+		return true
+	}
+	select {
+	case argonAdmission <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
 
 func releaseArgonSlot() { <-argonAdmission }
 
@@ -98,6 +137,18 @@ func VerifySecret(secret, encoded string) bool {
 	acquireArgonSlot()
 	defer releaseArgonSlot()
 	return argon2idVerify(secret, encoded)
+}
+
+// VerifySecretContext verifies a secret without parking on a saturated
+// admission gate for a caller that has gone away. It reports (ok, available):
+// available is false when ctx ended before a KDF slot could be taken, in which
+// case ok is meaningless and the caller must not treat it as a failed match.
+func VerifySecretContext(ctx context.Context, secret, encoded string) (ok, available bool) {
+	if !acquireArgonSlotContext(ctx) {
+		return false, false
+	}
+	defer releaseArgonSlot()
+	return argon2idVerify(secret, encoded), true
 }
 
 // argon2idHash is the canonical Argon2id implementation. Both Argon2Hasher and

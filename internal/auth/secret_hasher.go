@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -46,6 +47,12 @@ func (Argon2Hasher) Verify(secret, encoded string) bool {
 	acquireArgonSlot()
 	defer releaseArgonSlot()
 	return argon2idVerify(secret, encoded)
+}
+
+// VerifyContext is Verify with a cancellable wait for a KDF slot, for callers
+// acting on behalf of a request. available is false when ctx ended first.
+func (Argon2Hasher) VerifyContext(ctx context.Context, secret, encoded string) (ok, available bool) {
+	return VerifySecretContext(ctx, secret, encoded)
 }
 
 // NeedsRehash reports whether encoded was produced by different Argon2id
@@ -116,14 +123,21 @@ func (h BcryptHasher) NeedsRehash(encoded string) bool {
 // Sessions are NOT argon2id anymore (the boot upgrade revokes legacy ones), so
 // this branch exists for client keys alone.
 func VerifyEncoded(secret, encoded string) bool {
+	ok, _ := VerifyEncodedContext(context.Background(), secret, encoded)
+	return ok
+}
+
+// VerifyEncodedContext is VerifyEncoded for callers that must not park on a
+// saturated Argon admission gate for a request that has already gone away.
+// available is false when ctx ended before the KDF slot could be taken, which
+// is not a verification failure.
+func VerifyEncodedContext(ctx context.Context, secret, encoded string) (ok, available bool) {
 	switch {
 	case strings.HasPrefix(encoded, "$argon2id$"):
-		acquireArgonSlot()
-		defer releaseArgonSlot()
-		return argon2idVerify(secret, encoded)
+		return VerifySecretContext(ctx, secret, encoded)
 	case strings.HasPrefix(encoded, "$2a$"), strings.HasPrefix(encoded, "$2b$"), strings.HasPrefix(encoded, "$2y$"):
-		return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(secret)) == nil
+		return bcrypt.CompareHashAndPassword([]byte(encoded), []byte(secret)) == nil, true
 	default:
-		return false
+		return false, true
 	}
 }

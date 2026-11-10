@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/cookiejar"
 	"strconv"
 	"testing"
 	"time"
@@ -21,7 +23,14 @@ func hostedExpiry(days int) string {
 // hostedMintToken creates a token through the cookie session with step-up.
 func hostedMintToken(t *testing.T, api *testAPI, name string, scopes map[string]int) (id, token string) {
 	t.Helper()
-	status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": name, "scopes": scopes, "expires_at": hostedExpiry(30), "password": hostedTestPassword})
+	return hostedMintTokenWithPassword(t, api, name, scopes, hostedTestPassword)
+}
+
+// hostedMintTokenWithPassword is hostedMintToken for an account whose password
+// differs from the primary test tenant's.
+func hostedMintTokenWithPassword(t *testing.T, api *testAPI, name string, scopes map[string]int, password string) (id, token string) {
+	t.Helper()
+	status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": name, "scopes": scopes, "expires_at": hostedExpiry(30), "password": password})
 	if status != 201 {
 		t.Fatalf("mint hosted token %q: %d %v", name, status, payload)
 	}
@@ -354,7 +363,7 @@ func TestHostedTokensSurvivePasswordReset(t *testing.T) {
 func TestHostedTokenPerAccountRateLimit(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
-	app.managementAccountLimiter = newWindowLimiter(3, time.Minute)
+	app.dashboardLimiter = newWindowLimiter(3, time.Minute)
 	_, tokenOne := hostedMintToken(t, api, "one", map[string]int{"client_keys": 1})
 	_, tokenTwo := hostedMintToken(t, api, "two", map[string]int{"client_keys": 1})
 	for i := 0; i < 3; i++ {
@@ -381,16 +390,18 @@ func TestHostedTokenPerAccountRateLimit(t *testing.T) {
 	if body["code"] != "rate_limited" || body["limit"] != float64(3) || body["window_seconds"] != float64(60) || body["retry_after"] != float64(retry) {
 		t.Fatalf("429 body = %v", body)
 	}
-	// The dashboard session is not charged to the token budget.
-	if status, _, _ := api.request("GET", "/api/admin/client-keys", nil); status != 200 {
-		t.Fatalf("session request while token budget spent = %d, want 200", status)
+	// The browser session shares the account's budget: an account cannot get a
+	// second allowance by switching credential, and a dashboard script driving
+	// the same routes is throttled too.
+	if status, _, _ := api.request("GET", "/api/admin/client-keys", nil); status != 429 {
+		t.Fatalf("session request while the account budget is spent = %d, want 429", status)
 	}
 }
 
 func TestHostedTokenRateLimitHeadersOnSuccess(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
-	app.managementAccountLimiter = newWindowLimiter(5, time.Minute)
+	app.dashboardLimiter = newWindowLimiter(5, time.Minute)
 	_, token := hostedMintToken(t, api, "meter", map[string]int{"client_keys": 1})
 	for i, want := range []string{"4", "3"} {
 		status, _, header := bearerRequest(t, api.base, token, "GET", "/api/admin/client-keys", nil)
@@ -454,4 +465,64 @@ func TestHostedSeedKeyStillRejected(t *testing.T) {
 
 func storeCreateToken(id, name string, g auth.GeneratedKey, scopes string) store.CreateManagementTokenInput {
 	return store.CreateManagementTokenInput{ID: id, Name: name, Selector: g.Selector, Hash: g.Hash, Fingerprint: g.Fingerprint, Scopes: scopes}
+}
+
+// hostedSecondTenant creates an independent verified account on the same
+// server and logs it in, returning a cookie session for it.
+func hostedSecondTenant(t *testing.T, api *testAPI, email, password string) *testAPI {
+	t.Helper()
+	ctx := context.Background()
+	result, err := api.server.identity.CreateSignup(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.server.identity.ConsumeVerification(ctx, result.VerificationToken, password); err != nil {
+		t.Fatal(err)
+	}
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := &testAPI{t: t, base: api.base, client: &http.Client{Jar: jar}, server: api.server}
+	status, payload, _ := other.request("POST", "/api/auth/login", map[string]any{"email": email, "password": password})
+	if status != 200 {
+		t.Fatalf("second tenant login: %d %v", status, payload)
+	}
+	other.csrf = payload["csrf_token"].(string)
+	return other
+}
+
+// TestRevokeAllIsTenantScoped proves one tenant's revoke-all leaves another
+// tenant's API tokens authenticating exactly as before. The per-account cache
+// drop must not wipe (or fail closed on) anyone else's verified tokens.
+func TestRevokeAllIsTenantScoped(t *testing.T) {
+	t.Parallel()
+	_, apiA, _ := hostedAccountServer(t)
+	_, tokenA := hostedMintToken(t, apiA, "tenant-a", map[string]int{"client_keys": 1})
+
+	const tenantBPassword = "another correct horse"
+	apiB := hostedSecondTenant(t, apiA, "tenant-b@example.com", tenantBPassword)
+	_, tokenB := hostedMintTokenWithPassword(t, apiB, "tenant-b", map[string]int{"client_keys": 1}, tenantBPassword)
+
+	useB := func() int {
+		status, _, _ := bearerRequest(t, apiB.base, tokenB, "GET", "/api/admin/client-keys", nil)
+		return status
+	}
+	// Twice, so tenant B's entry is warm in the verification cache: the defect
+	// this guards against is a global cache wipe, which only hurts a cached
+	// token.
+	if useB() != 200 || useB() != 200 {
+		t.Fatal("tenant B token should work before tenant A revokes")
+	}
+
+	if status, payload, _ := apiA.request("POST", "/api/admin/api-tokens/revoke-all", map[string]any{}); status != 200 {
+		t.Fatalf("tenant A revoke-all: %d %v", status, payload)
+	}
+
+	if status, _, _ := bearerRequest(t, apiA.base, tokenA, "GET", "/api/admin/client-keys", nil); status != 401 {
+		t.Fatalf("tenant A token after revoke-all = %d, want 401", status)
+	}
+	if got := useB(); got != 200 {
+		t.Fatalf("tenant B token after tenant A revoke-all = %d, want 200", got)
+	}
 }

@@ -106,7 +106,7 @@ func TestManagementGuideServedInHosted(t *testing.T) {
 	}
 	status, doc, _ := api.request("GET", "/api.json", nil)
 	limits, _ := doc["limits"].(map[string]any)
-	if status != 200 || doc["mode"] != "hosted" || doc["token_management"] != "dashboard-only" || limits["requests_per_minute_per_account"] != float64(hostedManagementRequestsPerMinute) {
+	if status != 200 || doc["mode"] != "hosted" || doc["token_management"] != "dashboard-only" || limits["requests_per_minute_per_account"] != float64(dashboardRequestsPerMinute) {
 		t.Fatalf("hosted discovery = %v", doc)
 	}
 }

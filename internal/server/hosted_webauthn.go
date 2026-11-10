@@ -184,7 +184,7 @@ func (s *Server) requireSignInReauth(w http.ResponseWriter, r *http.Request, use
 		err = s.verifyLocalOperatorPassword(r.Context(), user, password)
 	}
 	if err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing sign-in methods.")
+		s.writeReauthFailure(w, err, "Confirm your identity with your password, passkey, or Google before changing sign-in methods.")
 		return false
 	}
 	return true

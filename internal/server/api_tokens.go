@@ -503,13 +503,17 @@ func (s *Server) deleteManagementToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revokeAllManagementTokens(w http.ResponseWriter, r *http.Request) {
+	accountID := s.scope(r).AccountID()
 	count, err := s.scope(r).RevokeAllManagementTokens(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not revoke API tokens.")
 		return
 	}
-	s.tokens.InvalidateAll()
-	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+	// Tenant-scoped: only this account's cached tokens are dropped. A global
+	// cache wipe here would evict every other tenant's verified tokens and could
+	// fail their concurrent verifications closed.
+	s.tokens.InvalidateAccount(accountID)
+	s.recordResourceAudit(r, accountID, store.AuditEvent{
 		Event:      "api_token.revoked_all",
 		TargetType: "api_token",
 		Metadata:   map[string]string{"count": strconv.FormatInt(count, 10)},

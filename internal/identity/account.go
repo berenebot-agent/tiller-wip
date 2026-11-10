@@ -24,6 +24,11 @@ var (
 	// ErrInvalidSession is returned when a raw session token cannot be parsed.
 	ErrInvalidSession   = errors.New("identity: invalid session token")
 	ErrPasswordDisabled = errors.New("identity: password authentication is disabled")
+	// ErrReauthenticationCancelled reports that a password check gave up waiting
+	// for KDF capacity because the caller's request ended. It is not a failed
+	// password, must not count toward a lockout, and must never be reported to
+	// the client as "wrong password".
+	ErrReauthenticationCancelled = errors.New("identity: reauthentication abandoned by the caller")
 	// ErrMailUnavailable is returned when a queued message cannot be encrypted
 	// because the master key is locked.
 	ErrMailUnavailable = errors.New("identity: mail unavailable while the master key is locked")
@@ -73,6 +78,14 @@ func sessionSelector(raw string) (string, error) {
 // VerifyPassword re-authenticates an already-authenticated user. It is used
 // before sensitive account changes (password, email, delete).
 func (s *Store) VerifyPassword(ctx context.Context, userID, password string) error {
+	return s.VerifyPasswordContext(ctx, userID, password)
+}
+
+// VerifyPasswordContext is VerifyPassword for a live request: it stops waiting
+// for a KDF slot once ctx is done instead of parking behind other work. A
+// caller that went away sees ErrReauthenticationCancelled, which is not a
+// failed password and must never be counted against the account.
+func (s *Store) VerifyPasswordContext(ctx context.Context, userID, password string) error {
 	var hash string
 	var enabled bool
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash,password_auth_enabled FROM users WHERE id=?`, userID).Scan(&hash, &enabled); err != nil {
@@ -83,6 +96,18 @@ func (s *Store) VerifyPassword(ctx context.Context, userID, password string) err
 	}
 	if !enabled {
 		return ErrPasswordDisabled
+	}
+	if verifier, ok := s.passwordHasher.(interface {
+		VerifyContext(context.Context, string, string) (bool, bool)
+	}); ok {
+		verified, available := verifier.VerifyContext(ctx, password, hash)
+		if !available {
+			return ErrReauthenticationCancelled
+		}
+		if !verified {
+			return ErrNotFound
+		}
+		return nil
 	}
 	if !s.passwordHasher.Verify(password, hash) {
 		return ErrNotFound
