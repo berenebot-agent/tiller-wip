@@ -16,6 +16,40 @@ import (
 
 const planTestAccount = "acct-plan-b"
 
+func TestSignupPlanLifecycle(t *testing.T) {
+	_, st := openPlanStore(t)
+	ctx := context.Background()
+	if got, err := st.SignupPlan(ctx); err != nil || got != "free" {
+		t.Fatalf("initial plan = %q, %v", got, err)
+	}
+	if err := st.SetSignupPlan(ctx, "missing"); !errors.Is(err, store.ErrPlanNotFound) {
+		t.Fatalf("missing plan: %v", err)
+	}
+	plan := store.Plan{Name: "pro"}
+	if err := st.CreatePlan(ctx, plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSignupPlan(ctx, "pro"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeletePlan(ctx, "pro"); !errors.Is(err, store.ErrSignupPlan) {
+		t.Fatalf("delete selected plan: %v", err)
+	}
+	plan.Name = "plus"
+	if err := st.RenamePlan(ctx, "pro", plan); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := st.SignupPlan(ctx); err != nil || got != "plus" {
+		t.Fatalf("renamed plan = %q, %v", got, err)
+	}
+	if err := st.SetSignupPlan(ctx, "free"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeletePlan(ctx, "plus"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // openPlanStore opens a fresh database, seeds a second account on the free
 // plan, and returns a Store with limit enforcement enabled (the hosted-mode
 // posture). The local account is seeded by migration 042.
