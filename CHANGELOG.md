@@ -70,6 +70,31 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Cache invalidation no longer signs other tenants out.** Client-key,
+  management-token and customer/platform session caches fenced every
+  verification with one process-wide counter, so rotating a key or logging out
+  in one account failed a concurrent cache miss in another closed as a 401
+  (and charged that account's brute-force limiter). Mutations now mark only
+  the credential, user or account they touch; a verification fails closed only
+  when its own principal changed after it began. A transient database error
+  during sliding renewal keeps the existing session expiry instead of signing
+  the user out. `TILLER_TRUSTED_PROXY` accepts a comma-separated list, so a CDN
+  in front of the reverse proxy no longer collapses per-IP limits onto edge
+  addresses.
+- **Transactions retry SQLite snapshot contention.** A read-then-write
+  transaction that loses its WAL snapshot to a concurrent commit fails with
+  `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` does not retry. `RunTx` and the
+  Activity write transaction now retry that class of error a few times with
+  jittered backoff instead of surfacing an immediate failure on the request
+  path.
+- **OAuth redirect callbacks are bound to the starting browser.** `/auth/callback`
+  accepted a leaked `state` from any client; the flow start now sets an
+  `HttpOnly` cookie scoped to the callback path and the callback requires it
+  before consuming the state. Dormant for now (`claude.RedirectCallbackSupported`
+  is false) but safe to enable.
+- **Provider-terms record ships with the source tree.**
+  `docs/provider_terms_review.md` is now under `repo/docs/`, matching the code
+  comments that reference it.
 - **Prompt-cache percentage across provider accounting conventions.** Stored
   `input_tokens` now always means the whole prompt: Anthropic's uncached
   Messages count has its cache read/write tokens folded in at ingestion, while

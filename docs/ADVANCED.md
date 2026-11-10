@@ -97,7 +97,12 @@ TILLER_INGRESS_NETWORK_EXTERNAL=true
 
 The hosted deployment requires `TILLER_PUBLIC_URL` and
 `TILLER_TRUSTED_PROXY`, set to the direct reverse proxy's IP/CIDR so client IP
-rate limits and audit records use the real client address. It still uses the
+rate limits and audit records use the real client address. When a CDN sits in
+front of the proxy, list every edge range as well, comma-separated
+(`TILLER_TRUSTED_PROXY=172.20.0.2/32,198.51.100.0/24,2001:db8::/32`): the
+`X-Forwarded-For` walk skips every trusted hop, so a range omitted here
+collapses all users onto the nearest edge address and makes the per-IP limits
+lock out unrelated people. It still uses the
 application-level `SafeTransport` for public HTTPS
 destination validation and SSRF protection. Docker network isolation is only
 defense in depth; it is not a substitute for the application policy or an

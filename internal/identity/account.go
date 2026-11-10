@@ -369,7 +369,7 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, rawToken string) (User, 
 // changed directly (email-change confirm) rather than revoked wholesale.
 func (s *Store) invalidateUserCache(userID string) {
 	s.mu.Lock()
-	atomic.AddUint64(&s.rev, 1)
+	s.userMutated[userID] = userMutation{seq: atomic.AddUint64(&s.seq, 1), at: time.Now()}
 	for selector, entry := range s.userCache {
 		if entry.session.User.ID == userID {
 			delete(s.userCache, selector)
@@ -401,10 +401,13 @@ func (s *Store) nudgeMail() {
 }
 
 // invalidateOtherUserSessions drops cached sessions for the user except the
-// retained selector and bumps the generation so concurrent readers fail closed.
+// retained selector and marks that user's sessions invalid, so concurrent
+// readers for this user fail closed.
 func (s *Store) invalidateOtherUserSessions(userID, keepSelector string) {
 	s.mu.Lock()
-	atomic.AddUint64(&s.rev, 1)
+	// The retained selector is exempt, so its own in-flight load can publish;
+	// every other session of this user fails closed. Other users are untouched.
+	s.userMutated[userID] = userMutation{seq: atomic.AddUint64(&s.seq, 1), at: time.Now(), keep: keepSelector}
 	for selector, entry := range s.userCache {
 		if entry.session.User.ID == userID && selector != keepSelector {
 			delete(s.userCache, selector)

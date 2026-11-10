@@ -81,7 +81,7 @@ type Config struct {
 	AdminSessionTTL             time.Duration
 	DataDir                     string
 	ListenAddr                  string
-	TrustedProxy                netip.Prefix
+	TrustedProxies              []netip.Prefix
 	ModelsDevEnabled            bool
 	LogLevel                    string
 	// DNSFallbackServers are tried after supplied DNS servers fail. A nil
@@ -268,29 +268,37 @@ func Load() (Config, error) {
 		}
 		c.SessionCacheTTL = clampCacheTTL(v)
 	}
-	// Setting TILLER_TRUSTED_PROXY to a CIDR is the switch that enables
-	// proxy-header trust: forwarded headers are only honoured when the direct
-	// peer is inside that CIDR, so a spoofable header can never be trusted
-	// from an untrusted peer. Hosted mode requires this setting; local mode may
-	// leave it unset to disable proxy-header trust.
+	// TILLER_TRUSTED_PROXY lists the reverse proxies whose forwarded headers
+	// are trusted, comma-separated. Each entry is a CIDR or a bare address
+	// (treated as a single-host prefix). Forwarded headers are honoured only
+	// when the direct peer is inside the list, so a spoofable header can never
+	// be trusted from an untrusted peer. Multiple entries matter when a CDN
+	// sits in front of the proxy: every edge range must be listed or the
+	// X-Forwarded-For walk stops at the edge address and collapses all users
+	// onto it. Hosted mode requires at least one; local mode may leave it unset
+	// to disable proxy-header trust.
 	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
-		var v netip.Prefix
-		if strings.Contains(raw, "/") {
-			parsed, err := netip.ParsePrefix(raw)
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if strings.Contains(part, "/") {
+				parsed, err := netip.ParsePrefix(part)
+				if err != nil {
+					return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+				}
+				c.TrustedProxies = append(c.TrustedProxies, parsed.Masked())
+				continue
+			}
+			addr, err := netip.ParseAddr(part)
 			if err != nil {
 				return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
 			}
-			v = parsed
-		} else {
-			addr, err := netip.ParseAddr(raw)
-			if err != nil {
-				return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
-			}
-			v = netip.PrefixFrom(addr, addr.BitLen())
+			c.TrustedProxies = append(c.TrustedProxies, netip.PrefixFrom(addr, addr.BitLen()))
 		}
-		c.TrustedProxy = v
 	}
-	if c.Mode == ModeHosted && !c.TrustedProxy.IsValid() {
+	if c.Mode == ModeHosted && len(c.TrustedProxies) == 0 {
 		return Config{}, errors.New("TILLER_TRUSTED_PROXY is required in hosted mode and must identify the direct reverse proxy")
 	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {

@@ -92,7 +92,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", input.Username, clientIP(r, s.config.TrustedProxy)))
+	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", input.Username, clientIP(r, s.config.TrustedProxies)))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
 		"username":      input.Username,

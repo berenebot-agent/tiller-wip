@@ -484,7 +484,7 @@ func TestLogLevel(t *testing.T) {
 	}
 }
 
-func TestTrustedProxy(t *testing.T) {
+func TestTrustedProxies(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_USERNAME", "admin")
 	t.Setenv("TILLER_PASSWORD", "secret")
@@ -496,8 +496,8 @@ func TestTrustedProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no trusted proxy should load: %v", err)
 	}
-	if c.TrustedProxy.IsValid() {
-		t.Error("TrustedProxy should be invalid when unset")
+	if len(c.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies should be empty when unset, got %v", c.TrustedProxies)
 	}
 
 	// A valid CIDR enables proxy-header trust.
@@ -506,31 +506,18 @@ func TestTrustedProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid trusted proxy should load: %v", err)
 	}
-	if !c.TrustedProxy.IsValid() {
-		t.Error("TrustedProxy should be set")
-	}
-	if c.TrustedProxy != netip.MustParsePrefix("172.18.0.0/16") {
-		t.Errorf("TrustedProxy = %s, want 172.18.0.0/16", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0] != netip.MustParsePrefix("172.18.0.0/16") {
+		t.Errorf("TrustedProxies = %v, want [172.18.0.0/16]", c.TrustedProxies)
 	}
 
-	// A bare proxy address is treated as a single-address CIDR.
+	// A bare proxy address is treated as a single-address prefix.
 	t.Setenv("TILLER_TRUSTED_PROXY", "10.1.1.18")
 	c, err = Load()
 	if err != nil {
 		t.Fatalf("bare trusted proxy address should load: %v", err)
 	}
-	if c.TrustedProxy != netip.MustParsePrefix("10.1.1.18/32") {
-		t.Errorf("TrustedProxy = %s, want 10.1.1.18/32", c.TrustedProxy)
-	}
-
-	// A bare IP (no /prefix) is treated as /32.
-	t.Setenv("TILLER_TRUSTED_PROXY", "10.1.1.18")
-	c, err = Load()
-	if err != nil {
-		t.Fatalf("bare IP for TILLER_TRUSTED_PROXY should load as /32: %v", err)
-	}
-	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "10.1.1.18/32" {
-		t.Errorf("TrustedProxy should be 10.1.1.18/32, got %v", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0].String() != "10.1.1.18/32" {
+		t.Errorf("TrustedProxies should be [10.1.1.18/32], got %v", c.TrustedProxies)
 	}
 
 	// A bare IPv6 address is treated as /128, not widened to /32.
@@ -539,24 +526,46 @@ func TestTrustedProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bare IPv6 for TILLER_TRUSTED_PROXY should load as /128: %v", err)
 	}
-	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "2001:db8::1234/128" {
-		t.Errorf("TrustedProxy should be 2001:db8::1234/128, got %v", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0].String() != "2001:db8::1234/128" {
+		t.Errorf("TrustedProxies should be [2001:db8::1234/128], got %v", c.TrustedProxies)
 	}
 
-	// An explicit IPv6 CIDR is preserved verbatim.
+	// An explicit IPv6 CIDR is preserved.
 	t.Setenv("TILLER_TRUSTED_PROXY", "2001:db8::/32")
 	c, err = Load()
 	if err != nil {
 		t.Fatalf("IPv6 CIDR for TILLER_TRUSTED_PROXY should load: %v", err)
 	}
-	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "2001:db8::/32" {
-		t.Errorf("TrustedProxy should be 2001:db8::/32, got %v", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0].String() != "2001:db8::/32" {
+		t.Errorf("TrustedProxies should be [2001:db8::/32], got %v", c.TrustedProxies)
 	}
 
-	// An invalid trusted proxy is a hard error.
+	// A comma-separated list covers a CDN in front of the reverse proxy. Every
+	// entry is kept, in order, so the X-Forwarded-For walk can skip all of them.
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.0/16, 2001:db8::/32,10.1.1.18")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("multiple trusted proxies should load: %v", err)
+	}
+	want := []string{"172.18.0.0/16", "2001:db8::/32", "10.1.1.18/32"}
+	if len(c.TrustedProxies) != len(want) {
+		t.Fatalf("TrustedProxies = %v, want %v", c.TrustedProxies, want)
+	}
+	for i, w := range want {
+		if c.TrustedProxies[i].String() != w {
+			t.Errorf("TrustedProxies[%d] = %s, want %s", i, c.TrustedProxies[i], w)
+		}
+	}
+
+	// An invalid trusted proxy is a hard error, including one bad entry in an
+	// otherwise valid list (never silently skipped).
 	t.Setenv("TILLER_TRUSTED_PROXY", "not-a-cidr")
 	if _, err := Load(); err == nil {
 		t.Error("TILLER_TRUSTED_PROXY=not-a-cidr should fail to load")
+	}
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.0/16,not-a-cidr")
+	if _, err := Load(); err == nil {
+		t.Error("a malformed entry in TILLER_TRUSTED_PROXY should fail to load")
 	}
 }
 
