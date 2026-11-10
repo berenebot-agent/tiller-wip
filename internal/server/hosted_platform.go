@@ -56,14 +56,14 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "internal_error", "Could not create session.")
 		return
 	}
-	s.setPlatformSessionCookie(w, session.Token, session.ExpiresAt)
+	s.setPlatformSessionCookie(w, r, session.Token, session.ExpiresAt)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.login", ActorType: "platform"})
-	writeJSON(w, http.StatusOK, platformSessionPayload(session))
+	writeJSON(w, http.StatusOK, s.platformSessionPayload(session))
 }
 
 func (s *Server) requirePlatform(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(platformSessionCookie)
+		cookie, err := r.Cookie(s.platformCookieName(r))
 		if err != nil {
 			adminError(w, http.StatusUnauthorized, "unauthorized", "Platform authentication required.")
 			return
@@ -73,7 +73,7 @@ func (s *Server) requirePlatform(next http.Handler) http.Handler {
 			adminError(w, http.StatusUnauthorized, "unauthorized", "Platform authentication required.")
 			return
 		}
-		s.setPlatformSessionCookie(w, cookie.Value, session.ExpiresAt)
+		s.setPlatformSessionCookie(w, r, cookie.Value, session.ExpiresAt)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.identity.CheckPlatformCSRF(session, r.Header.Get("X-CSRF-Token")) {
 			adminError(w, http.StatusForbidden, "csrf_failed", "A valid CSRF token is required.")
 			return
@@ -90,7 +90,7 @@ func contextWithPlatformSession(ctx context.Context, session identity.PlatformSe
 
 func (s *Server) platformSessionStatus(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(platformSessionKey).(identity.PlatformSession)
-	writeJSON(w, http.StatusOK, platformSessionPayload(session))
+	writeJSON(w, http.StatusOK, s.platformSessionPayload(session))
 }
 
 func (s *Server) platformStats(w http.ResponseWriter, r *http.Request) {
@@ -125,20 +125,40 @@ func (s *Server) platformUsageTotals(ctx context.Context, current time.Time) (st
 }
 
 func (s *Server) platformLogout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(platformSessionCookie); err == nil {
+	name := s.platformCookieName(r)
+	if cookie, err := r.Cookie(name); err == nil {
 		s.identity.DeletePlatformSession(cookie.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: platformSessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, Secure: name == platformSessionCookie, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.logout", ActorType: "platform"})
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) setPlatformSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
-	http.SetCookie(w, &http.Cookie{Name: platformSessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: maxAge(expires)})
+// platformInsecureSessionCookie is used only on the dedicated platform
+// listener when it is reached over plain HTTP (for example across a VPN):
+// browsers refuse the Secure-only __Host- cookie there. The listener is meant
+// to be network-restricted, and the public listener never uses this name.
+const platformInsecureSessionCookie = "tiller_platform_session"
+
+// platformCookieName picks the cookie shape for a
+// request: the hardened __Host- cookie everywhere, except plain HTTP on the
+// dedicated platform listener.
+func (s *Server) platformCookieName(r *http.Request) string {
+	if onPlatformListener(r) && !s.secureRequest(r) {
+		return platformInsecureSessionCookie
+	}
+	return platformSessionCookie
 }
 
-func platformSessionPayload(session identity.PlatformSession) map[string]any {
-	return map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()}
+func (s *Server) setPlatformSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	name := s.platformCookieName(r)
+	http.SetCookie(w, &http.Cookie{Name: name, Value: token, Path: "/", HttpOnly: true, Secure: name == platformSessionCookie, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: maxAge(expires)})
+}
+
+// platformSessionPayload also reports whether the console is reachable on the
+// main (public) listener, so the console can warn the operator.
+func (s *Server) platformSessionPayload(session identity.PlatformSession) map[string]any {
+	return map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC(), "platform_exposed": s.config.PlatformPort == 0}
 }
 
 func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {

@@ -239,6 +239,9 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		Enabled         *bool                `json:"enabled"`
 		Protocols       []providers.Protocol `json:"protocols"`
 		ConfirmBreaking bool                 `json:"confirm_breaking_change"`
+		// ConfirmCredentialReset acknowledges that moving an editable provider
+		// to a different upstream host clears its stored credential.
+		ConfirmCredentialReset bool `json:"confirm_credential_reset"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		adminError(w, 400, "invalid_request", err.Error())
@@ -260,6 +263,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		current.Name = strings.TrimSpace(*input.Name)
 	}
+	clearCredential := false
 	if input.BaseURL != nil {
 		base := strings.TrimRight(*input.BaseURL, "/")
 		if providers.ValidateBaseURL(base) != nil {
@@ -270,7 +274,21 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 400, "hosted_outbound_url_required", "Hosted provider URLs must use validated public HTTPS on port 443.")
 			return
 		}
-		current.BaseURL = base
+		if base != strings.TrimRight(current.BaseURL, "/") {
+			descriptor, known := providers.Lookup(current.Type)
+			if known && descriptor.BaseURLLocked {
+				adminError(w, 400, "base_url_locked", "The upstream URL of this provider type is fixed. Delete and recreate the provider to use a different endpoint.")
+				return
+			}
+			if !providers.SameUpstreamHost(base, current.BaseURL) {
+				if !input.ConfirmCredentialReset {
+					adminError(w, 409, "credential_reset_confirmation_required", "Changing the upstream host clears the stored credential. Confirm and enter the credential for the new host.")
+					return
+				}
+				clearCredential = true
+			}
+			current.BaseURL = base
+		}
 	}
 	if input.Enabled != nil {
 		current.Enabled = *input.Enabled
@@ -285,6 +303,8 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		Enabled:    current.Enabled,
 		EnabledSet: input.Enabled != nil,
 		Protocols:  current.Protocols,
+
+		ClearCredential: clearCredential,
 	})
 	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
@@ -304,6 +324,9 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.BaseURL != nil {
 		changed = append(changed, "base_url")
+	}
+	if clearCredential {
+		changed = append(changed, "credential_cleared")
 	}
 	if input.Enabled != nil {
 		changed = append(changed, "enabled")

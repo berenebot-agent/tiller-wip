@@ -951,3 +951,4 @@ input.switch:checked{background:var(--blue)}
 .client-route-picker input[type="text"],.client-route-button strong{font:500 var(--fs) var(--sans)}
 /* Virtual-model rows are clickable as a whole (opens settings). */
 .rows-clickable tr[data-virtual-id]{cursor:pointer}
+.platform-exposed-banner{margin:0 0 16px;padding:11px 14px;border:1px solid var(--red);background:var(--red-bg);color:var(--red);font-size:13px;line-height:1.45}.platform-exposed-banner[hidden]{display:none}.platform-exposed-banner code{font-family:var(--mono)}

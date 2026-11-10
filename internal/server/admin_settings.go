@@ -9,6 +9,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostednet"
+	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -115,6 +116,21 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if input.NotificationsCooldownSeconds != nil && *input.NotificationsCooldownSeconds < 0 {
 		adminError(w, 400, "invalid_cooldown", "Notification cooldown must be 0 or more seconds.")
 		return
+	}
+	// The stored Authorization header was issued for the current webhook host.
+	// When the URL moves to a different host and the request does not supply a
+	// replacement header, drop the stored one so it cannot be sent to the new
+	// destination.
+	if input.NotificationsWebhookURL != nil && input.NotificationsAuthHeader == nil {
+		current, err := sc.GetNotificationSettings(r.Context())
+		if err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+		if current.AuthHeader != "" && !providers.SameUpstreamHost(current.WebhookURL, *input.NotificationsWebhookURL) {
+			cleared := ""
+			input.NotificationsAuthHeader = &cleared
+		}
 	}
 	// Hosted-mode policy: the cooldown is pinned at 60s and the admin-
 	// login event never applies (hosted accounts have no admin login).

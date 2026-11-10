@@ -12,6 +12,10 @@ services:
       TILLER_TRUSTED_PROXY: ${TILLER_TRUSTED_PROXY:?set TILLER_TRUSTED_PROXY to the reverse proxy IP or CIDR}
       TILLER_PLATFORM_ADMIN_USERNAME: ${TILLER_PLATFORM_ADMIN_USERNAME:?set TILLER_PLATFORM_ADMIN_USERNAME}
       TILLER_PLATFORM_ADMIN_PASSWORD: ${TILLER_PLATFORM_ADMIN_PASSWORD:?set TILLER_PLATFORM_ADMIN_PASSWORD}
+      # Serve /platform on its own port instead of the public one. Publish it
+      # only to a private interface, e.g. add under `ports:` below:
+      #   - "10.8.0.1:9443:9443"   # VPN address (or 127.0.0.1 for an SSH tunnel)
+      TILLER_PLATFORM_PORT: ${TILLER_PLATFORM_PORT:-}
       # Set these only when converting an existing local deployment. They are
       # consumed once to create the first hosted customer and then ignored.
       # TILLER_USERNAME / TILLER_PASSWORD are the current names; the legacy

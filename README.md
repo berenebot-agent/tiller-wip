@@ -201,6 +201,7 @@ there when converting an existing local installation:
 TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
 TILLER_PLATFORM_ADMIN_PASSWORD=replace-with-a-long-random-password
 TILLER_TRUSTED_PROXY=172.20.0.2/32                   # required hosted: direct reverse proxy IP/CIDR
+TILLER_PLATFORM_PORT=9443                            # recommended hosted: serve /platform on its own port (see below)
 TILLER_USERNAME=owner@example.com                     # optional one-time migration input
 TILLER_PASSWORD=existing-local-password               # optional one-time migration input
 TILLER_PORT=8080                                     # host port (default 8080)

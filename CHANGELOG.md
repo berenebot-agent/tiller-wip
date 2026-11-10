@@ -6,6 +6,23 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+### Security
+
+- **Provider upstream URLs are locked for fixed-vendor and OAuth types.** Their
+  Base URL is read-only (API: `base_url_locked`), so a stored credential cannot
+  be redirected to another host. Types whose URL is the point of the type
+  (`generic-openai`, `vllm`, Azure OpenAI, Bedrock, Cloudflare) stay editable,
+  but moving to a different host now requires `confirm_credential_reset` and
+  clears the stored credential in the same update; the edit form accepts a
+  replacement credential in the same save. The notification webhook's stored
+  Authorization header is likewise dropped when the webhook host changes
+  without a replacement header.
+- **Platform console on its own port.** Hosted deployments can set
+  `TILLER_PLATFORM_PORT` to serve `/platform` and `/api/platform/*` on a
+  separate listener (published to a VPN or loopback only); the main listener
+  returns 404 for them. When unset the console stays on the main port with a
+  startup warning and an in-console banner.
+
 ### Added
 
 - **Hosted management API rate-limit headers.** Token responses carry

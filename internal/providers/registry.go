@@ -47,7 +47,11 @@ type Descriptor struct {
 	AuthFlow         string     `json:"auth_flow,omitempty"`
 	Protocols        []Protocol `json:"protocols"`
 	MinOutputTokens  int        `json:"min_output_tokens,omitempty"`
-	Discovery        string     `json:"-"`
+	// BaseURLLocked reports that the upstream URL of an existing provider of
+	// this type cannot be edited. Computed by Descriptors/Lookup; see
+	// baseURLLocked.
+	BaseURLLocked bool   `json:"base_url_locked"`
+	Discovery     string `json:"-"`
 	// HostedDisabled marks a provider type that hosted Tiller's admin UI must
 	// not offer when adding a provider. It is a presentation-level policy flag
 	// only; see docs/provider_terms_review.md. Existing providers of this type
@@ -91,12 +95,38 @@ var descriptors = []Descriptor{
 	{Type: "llama-cpp", Label: "llama.cpp", DefaultBaseURL: "http://host.docker.internal:8080/v1", Protocols: []Protocol{ProtocolChat}, Discovery: "openai"},
 }
 
+// baseURLLocked reports whether a provider type's upstream URL is fixed. A
+// type is locked when it holds a credential and its vendor URL is known (a
+// DefaultBaseURL, or an OAuth connection): repointing it could only ever send
+// that credential to a different host. Types whose URL is the point of the
+// type (BaseURLRequired: self-hosted, Azure, Bedrock, Cloudflare) and types
+// that hold no credential stay editable; for the former, changing the host
+// clears the stored credential instead.
+func baseURLLocked(d Descriptor) bool {
+	if d.AuthMode == AuthModeOAuth {
+		return true
+	}
+	return d.DefaultBaseURL != "" && d.CredentialNeeded && !d.BaseURLRequired
+}
+
+// SameUpstreamHost reports whether two base URLs share scheme, host and port
+// (case-insensitively). A path-only change is the same upstream host.
+func SameUpstreamHost(a, b string) bool {
+	ua, errA := url.Parse(a)
+	ub, errB := url.Parse(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
+}
+
 func Descriptors() []Descriptor {
 	out := append([]Descriptor(nil), descriptors...)
 	for i := range out {
 		if out[i].AuthMode == "" {
 			out[i].AuthMode = AuthModeAPIKey
 		}
+		out[i].BaseURLLocked = baseURLLocked(out[i])
 	}
 	return out
 }
@@ -107,6 +137,7 @@ func Lookup(providerType string) (Descriptor, bool) {
 			if descriptor.AuthMode == "" {
 				descriptor.AuthMode = AuthModeAPIKey
 			}
+			descriptor.BaseURLLocked = baseURLLocked(descriptor)
 			return descriptor, true
 		}
 	}

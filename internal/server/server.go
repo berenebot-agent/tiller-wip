@@ -615,6 +615,63 @@ func (s *Server) startLogPruner(ctx context.Context) {
 	}
 }
 
+// registerPlatformRoutes mounts the platform console API. With
+// TILLER_PLATFORM_PORT unset it lives on the main handler; with it set, only
+// PlatformHandler mounts it and the main listener answers 404.
+func (s *Server) registerPlatformRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("POST /api/platform/session", s.platformLogin)
+	mux.Handle("GET /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformSessionStatus)))
+	mux.Handle("DELETE /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformLogout)))
+	mux.Handle("GET /api/platform/stats", s.requirePlatform(http.HandlerFunc(s.platformStats)))
+	mux.Handle("GET /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.platformSettings)))
+	mux.Handle("PUT /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.updatePlatformSettings)))
+	mux.Handle("GET /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlans)))
+	mux.Handle("POST /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanCreate)))
+	mux.Handle("PUT /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanUpdate)))
+	mux.Handle("DELETE /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanDelete)))
+	mux.Handle("POST /api/platform/accounts/{id}/plan", s.requirePlatform(http.HandlerFunc(s.writeAccountPlanAssign)))
+	mux.Handle("GET /api/platform/legal", s.requirePlatform(http.HandlerFunc(s.writePlatformLegalDocs)))
+	mux.Handle("PUT /api/platform/legal/{slug}", s.requirePlatform(http.HandlerFunc(s.writePlatformLegalUpdate)))
+	mux.Handle("GET /api/platform/users", s.requirePlatform(http.HandlerFunc(s.platformUsers)))
+	mux.Handle("GET /api/platform/audit", s.requirePlatform(http.HandlerFunc(s.platformAudit)))
+	mux.Handle("GET /api/platform/mail/queue", s.requirePlatform(http.HandlerFunc(s.platformMailQueue)))
+	mux.Handle("POST /api/platform/accounts/{id}/suspend", s.requirePlatform(http.HandlerFunc(s.suspendAccount)))
+	mux.Handle("POST /api/platform/accounts/{id}/unsuspend", s.requirePlatform(http.HandlerFunc(s.unsuspendAccount)))
+	mux.Handle("POST /api/platform/accounts/{id}/sessions/revoke", s.requirePlatform(http.HandlerFunc(s.revokeAccountSessions)))
+	mux.Handle("DELETE /api/platform/accounts/{id}", s.requirePlatform(http.HandlerFunc(s.deleteAccount)))
+}
+
+type platformListenerContextKey struct{}
+
+// onPlatformListener reports whether the request arrived on the dedicated
+// platform listener rather than the main one.
+func onPlatformListener(r *http.Request) bool {
+	v, _ := r.Context().Value(platformListenerContextKey{}).(bool)
+	return v
+}
+
+func isPlatformPath(path string) bool {
+	return path == "/platform" || strings.HasPrefix(path, "/platform/") || path == "/api/platform" || strings.HasPrefix(path, "/api/platform/")
+}
+
+// PlatformHandler serves the platform console for the dedicated listener
+// (TILLER_PLATFORM_PORT). It carries only the console API, the shared SPA
+// assets, and the runtime and health probes; every request is tagged so
+// origin and cookie handling can follow the address the operator actually
+// used instead of the public URL.
+func (s *Server) PlatformHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/runtime", s.runtime)
+	mux.HandleFunc("GET /health/live", s.liveHealth)
+	mux.HandleFunc("GET /health/ready", s.ready)
+	s.registerPlatformRoutes(mux)
+	mux.Handle("/", s.assets)
+	tagged := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), platformListenerContextKey{}, true)))
+	})
+	return s.securityHeaders(s.requestLog(tagged))
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.managementRoutes = nil
@@ -664,26 +721,9 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("DELETE /api/auth/account/google", s.requireUser(http.HandlerFunc(s.unlinkGoogle)))
 		mux.Handle("POST /api/auth/account/sessions/revoke-all", s.requireUser(http.HandlerFunc(s.revokeOwnSessions)))
 		mux.Handle("DELETE /api/auth/account", s.requireUser(http.HandlerFunc(s.deleteOwnAccount)))
-		mux.HandleFunc("POST /api/platform/session", s.platformLogin)
-		mux.Handle("GET /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformSessionStatus)))
-		mux.Handle("DELETE /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformLogout)))
-		mux.Handle("GET /api/platform/stats", s.requirePlatform(http.HandlerFunc(s.platformStats)))
-		mux.Handle("GET /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.platformSettings)))
-		mux.Handle("PUT /api/platform/settings", s.requirePlatform(http.HandlerFunc(s.updatePlatformSettings)))
-		mux.Handle("GET /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlans)))
-		mux.Handle("POST /api/platform/plans", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanCreate)))
-		mux.Handle("PUT /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanUpdate)))
-		mux.Handle("DELETE /api/platform/plans/{name}", s.requirePlatform(http.HandlerFunc(s.writePlatformPlanDelete)))
-		mux.Handle("POST /api/platform/accounts/{id}/plan", s.requirePlatform(http.HandlerFunc(s.writeAccountPlanAssign)))
-		mux.Handle("GET /api/platform/legal", s.requirePlatform(http.HandlerFunc(s.writePlatformLegalDocs)))
-		mux.Handle("PUT /api/platform/legal/{slug}", s.requirePlatform(http.HandlerFunc(s.writePlatformLegalUpdate)))
-		mux.Handle("GET /api/platform/users", s.requirePlatform(http.HandlerFunc(s.platformUsers)))
-		mux.Handle("GET /api/platform/audit", s.requirePlatform(http.HandlerFunc(s.platformAudit)))
-		mux.Handle("GET /api/platform/mail/queue", s.requirePlatform(http.HandlerFunc(s.platformMailQueue)))
-		mux.Handle("POST /api/platform/accounts/{id}/suspend", s.requirePlatform(http.HandlerFunc(s.suspendAccount)))
-		mux.Handle("POST /api/platform/accounts/{id}/unsuspend", s.requirePlatform(http.HandlerFunc(s.unsuspendAccount)))
-		mux.Handle("POST /api/platform/accounts/{id}/sessions/revoke", s.requirePlatform(http.HandlerFunc(s.revokeAccountSessions)))
-		mux.Handle("DELETE /api/platform/accounts/{id}", s.requirePlatform(http.HandlerFunc(s.deleteAccount)))
+		if s.config.PlatformPort == 0 {
+			s.registerPlatformRoutes(mux)
+		}
 	} else {
 		mux.HandleFunc("POST /api/admin/session", s.login)
 		mux.Handle("GET /api/admin/session", s.requireAdmin(http.HandlerFunc(s.sessionStatus)))
@@ -821,7 +861,19 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/responses", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolResponses) }), false))
 	mux.Handle("POST /v1/messages", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolMessages) }), true))
 	mux.Handle("/", s.assets)
-	return s.securityHeaders(s.requestLog(mux))
+	var handler http.Handler = mux
+	if s.config.Mode == config.ModeHosted && s.config.PlatformPort != 0 {
+		// The console has its own listener; make sure the SPA route and any
+		// stray platform path cannot be served here.
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if isPlatformPath(r.URL.Path) {
+				http.NotFound(w, r)
+				return
+			}
+			mux.ServeHTTP(w, r)
+		})
+	}
+	return s.securityHeaders(s.requestLog(handler))
 }
 
 func (s *Server) liveHealth(w http.ResponseWriter, _ *http.Request) {
@@ -1248,7 +1300,7 @@ func (s *Server) sameOriginRequest(r *http.Request) bool {
 	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
 		return false
 	}
-	if s.config.Mode == config.ModeHosted {
+	if s.config.Mode == config.ModeHosted && !onPlatformListener(r) {
 		publicURL, err := url.Parse(s.config.PublicURL)
 		if err != nil || publicURL.Host == "" {
 			return false
