@@ -129,6 +129,8 @@ type Config struct {
 	// BackupRetention is how long snapshots are kept before pruning. Off-host
 	// copies are the operator's responsibility (see docs/backup_restore_runbook.md).
 	BackupRetention time.Duration
+	// BackupIncludeActivity includes the separate Activity database in restore points.
+	BackupIncludeActivity bool
 	// MasterKey is the raw TILLER_MASTER_KEY value (base64 of 32 random
 	// bytes). MasterKeyFile is the raw TILLER_MASTER_KEY_FILE path. The file
 	// takes precedence. When both are empty, the key is loaded from
@@ -386,6 +388,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_BACKUP_INTERVAL must not be negative, got %q", raw)
 		}
 		c.BackupInterval = v
+	}
+	if raw := os.Getenv("TILLER_BACKUP_INCLUDE_ACTIVITY"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_INCLUDE_ACTIVITY: %w", err)
+		}
+		c.BackupIncludeActivity = v
 	}
 	if raw := os.Getenv("TILLER_BACKUP_RETENTION"); raw != "" {
 		v, err := time.ParseDuration(raw)

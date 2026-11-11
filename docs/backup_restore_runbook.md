@@ -16,15 +16,14 @@ database because it is low-volume durable control-plane history; account audit
 rows carry `account_id` as historical attribution with no foreign key, so they
 survive account deletion.
 
-**Activity is not backed up.** `request_logs` and `request_attempts` live in a
+**Activity is excluded by default.** `request_logs` and `request_attempts` live in a
 separate SQLite file, `<data dir>/activity.db`. It is disposable telemetry with
-its own retention windows, so a restore brings the service back without
+its own retention windows, so a core-only restore starts without
 historical Activity. It is account-scoped (`account_id` on both tables) and
 shared across accounts. If `activity.db` is lost, the service still starts and
 serves; Activity history is simply empty (and the admin UI reports Activity as
 unavailable while it cannot be opened). An operator who wants Activity history
-can back up `activity.db` separately (for example with `VACUUM INTO` while the
-service runs), but it is not part of the core restore contract.
+can set `TILLER_BACKUP_INCLUDE_ACTIVITY=true` to include it in scheduled restore points. Docker stdout logs are not included.
 
 ## Master key (back up separately)
 
@@ -78,7 +77,8 @@ ciphertext decrypts before serving credentials.
 | Setting | Default | Meaning |
 |---|---|---|
 | `TILLER_BACKUP_INTERVAL` | `6h` | Maintenance-pass cadence: snapshot, verify, prune, then compact. `0` disables the whole pass, including compaction. |
-| `TILLER_BACKUP_RETENTION` | `168h` (1 week) | Snapshots older than this are pruned locally. |
+| `TILLER_BACKUP_RETENTION` | `168h` (1 week) | Snapshots older than this are pruned locally; `0` disables pruning. |
+| `TILLER_BACKUP_INCLUDE_ACTIVITY` | `false` | Publish a verified pair containing core and Activity databases. |
 | `TILLER_BACKUP_DIR` | `<data dir>/backups` | Snapshot directory. |
 
 The global backup export is a local-mode administrator operation. Hosted
@@ -88,10 +88,14 @@ reconciliation and security-audit pruning run on independent maintenance loops;
 setting `TILLER_BACKUP_INTERVAL=0` disables snapshots and database compaction,
 but does not disable those cleanup and retention operations.
 
+With Activity enabled, each pass flushes queued Activity and writes a pair into a temporary directory. Both files are verified before the directory is published as `restore-point-<timestamp>-<id>`; a failed pair is not published and prior restore points remain. Retention removes each pair together. With the option disabled, core-only snapshots continue as before. Activity snapshots can be large and retain records beyond live Activity retention.
+
+The two live databases are captured sequentially, not atomically: concurrent writes or deletions can fall between snapshots. The pair is not a transactionally consistent point-in-time image. Activity is also best effort and can already have dropped records before backup. A six-hour schedule cannot recover changes after the latest successful snapshot; copy backups off-host.
+
 Each scheduled snapshot is written with SQLite `VACUUM INTO`, then verified
 (`PRAGMA integrity_check` + `PRAGMA foreign_key_check`) before the older
 snapshots are pruned. After the snapshot, both databases are compacted in place
-(SQLite `VACUUM`): the core database reclaims churn from sessions and audit, and
+(incremental vacuum, with a one-time conversion for older databases): the core database reclaims churn from sessions and audit, and
 `activity.db` reclaims the pages freed by the hourly request-log prune. A failed
 backup is logged but does not skip the vacuum. Core snapshots are named
 `tiller-router-<UTC timestamp>.db` and are `0600`. A single one-time rollback
@@ -108,8 +112,7 @@ retention never removes it.
 
 - **RPO (recovery point objective): 6 hours** with defaults — the maximum
   control-plane data loss if the host is destroyed between snapshots. Lower it
-  by shortening `TILLER_BACKUP_INTERVAL`. (Activity RPO is effectively N/A; it
-  is not part of the recovery contract.)
+  by shortening `TILLER_BACKUP_INTERVAL`. (Activity is included only when opted in and remains best effort.)
 - **RTO (recovery time objective): ~15 minutes** for a single-node deployment —
   provision the host, restore the snapshot (~1–2 min for a beta-scale DB), start
   the Compose stack, verify health. Actual time depends on host provisioning and
@@ -146,8 +149,8 @@ different failure domain from the router host.
        /opt/tiller-router/data/tiller-router.db
     ```
     The core snapshot includes the audit history, so no separate audit file is
-    needed. `activity.db` is not part of the backup and is created
-    automatically; the service starts with empty Activity if it is absent.
+    needed. `activity.db` is absent from a core-only backup and is created
+    automatically; the service starts with empty Activity if it is absent. For an opt-in restore point, copy both `tiller-router.db` and `activity.db` from the same `restore-point-*` directory while Tiller is stopped. Restore the matching master key separately and retain deployment configuration, including hosted mode and public URL, external secrets, and any custom `data/site` files.
 3. Start the stack:
    ```sh
    cd /opt/tiller-router && docker compose up -d
@@ -199,8 +202,8 @@ does not understand the account-tenancy schema and will misbehave.
 - **Snapshot fails**: logged as `scheduled backup failed`; the next interval
   retries. Repeated failures mean the disk is full or the data dir is not
   writable.
-- **Verification fails**: the snapshot is left on disk for diagnosis but should
-  not be trusted; investigate disk/hardware and take a fresh snapshot.
+- **Verification fails**: the scheduler attempts to remove the failed snapshot;
+  investigate disk/hardware and take a fresh snapshot.
 - **`activity.db` lost**: service starts normally with empty Activity and the
   admin UI reports Activity as unavailable; no restore action required unless
   Activity history matters.
