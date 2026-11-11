@@ -461,6 +461,74 @@ func (d *DB) Backup(ctx context.Context, dir string) (string, error) {
 	return BackupNamed(ctx, d.SQL, dir, "tiller-router-")
 }
 
+// BackupWithActivity publishes a verified pair only after both snapshots succeed.
+// The snapshots are sequential; concurrent changes can fall between them.
+func (d *DB) BackupWithActivity(ctx context.Context, dir string) (string, error) {
+	if d.Activity == nil {
+		return "", errors.New("activity database unavailable")
+	}
+	d.maintenanceMu.Lock()
+	defer d.maintenanceMu.Unlock()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	tmp, err := os.MkdirTemp(dir, ".restore-point-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(tmp)
+	for _, item := range []struct {
+		source *sql.DB
+		name   string
+	}{{d.SQL, "tiller-router.db"}, {d.Activity, "activity.db"}} {
+		path, err := BackupNamed(ctx, item.source, tmp, "snapshot-")
+		if err != nil {
+			return "", err
+		}
+		if err := Verify(ctx, path); err != nil {
+			return "", err
+		}
+		if err := os.Rename(path, filepath.Join(tmp, item.name)); err != nil {
+			return "", err
+		}
+	}
+	name := "restore-point-" + time.Now().UTC().Format("20060102T150405.000000000Z") + "-" + strings.TrimPrefix(filepath.Base(tmp), ".restore-point-")
+	path := filepath.Join(dir, name)
+	if err := os.Rename(tmp, path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// PruneRestorePoints removes complete paired snapshots older than retention.
+func PruneRestorePoints(dir string, retention time.Duration, now time.Time) error {
+	if retention <= 0 {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "restore-point-") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().Before(now.Add(-retention)) {
+			if err := os.RemoveAll(filepath.Join(dir, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // BackupNamed creates a consistent SQLite snapshot with a caller-supplied
 // filename prefix. It is used for the core and separate audit databases.
 func BackupNamed(ctx context.Context, source *sql.DB, dir, prefix string) (string, error) {
