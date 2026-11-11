@@ -29,9 +29,8 @@ const mailOutboxRetention = 30 * 24 * time.Hour
 //
 // The core database includes durable control-plane state and the security audit
 // tables, so a single snapshot restores both. Activity lives in the separate
-// activity.db and is deliberately excluded from snapshots (see
-// docs/backup_restore_runbook.md for RPO/RTO and off-host copy guidance), but
-// it is compacted in place here.
+// activity.db and can optionally be included in snapshots. See the backup
+// runbook for restore limitations and off-host copy guidance.
 func (s *Server) startActivityMaintenance(ctx context.Context) {
 	interval := activityMaintenanceInterval
 	reconcile := func() {
@@ -122,19 +121,34 @@ func (s *Server) startMaintenanceScheduler(ctx context.Context) {
 	}
 	run := func(compact bool) {
 		started := time.Now()
-		path, err := s.db.Backup(ctx, dir)
-		if err != nil {
-			s.warnBackup("scheduled backup failed", err)
-		} else if err := database.Verify(ctx, path); err != nil {
-			s.warnBackup("scheduled backup verification failed", err)
-			// A snapshot that fails its check must not sit under the normal name
-			// where a restore of "the newest snapshot" would pick it.
-			if rmErr := os.Remove(path); rmErr != nil {
-				s.warnBackup("could not remove failed backup snapshot", rmErr)
+		var path string
+		var err error
+		if s.config.BackupIncludeActivity {
+			if err = s.flushActivity(ctx); err == nil {
+				path, err = s.db.BackupWithActivity(ctx, dir)
 			}
 		} else {
+			path, err = s.db.Backup(ctx, dir)
+		}
+		if err != nil {
+			s.warnBackup("scheduled backup failed", err)
+		} else if !s.config.BackupIncludeActivity {
+			if err := database.Verify(ctx, path); err != nil {
+				s.warnBackup("scheduled backup verification failed", err)
+				// A snapshot that fails its check must not sit under the normal name
+				// where a restore of "the newest snapshot" would pick it.
+				if rmErr := os.Remove(path); rmErr != nil {
+					s.warnBackup("could not remove failed backup snapshot", rmErr)
+				}
+				path = ""
+			}
+		}
+		if err == nil && path != "" {
 			if _, err := database.PruneBackups(dir, s.config.BackupRetention, time.Now()); err != nil {
 				s.warnBackup("scheduled backup prune failed", err)
+			}
+			if err := database.PruneRestorePoints(dir, s.config.BackupRetention, time.Now()); err != nil {
+				s.warnBackup("scheduled restore point prune failed", err)
 			}
 			s.logBackupSnapshot(started, path)
 		}
