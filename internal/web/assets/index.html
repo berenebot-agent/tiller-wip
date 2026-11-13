@@ -58,7 +58,7 @@
       <form id="signup-form" class="stack-form" hidden>
         <h2>Create an account</h2>
         <label>Email <input name="email" type="email" autocomplete="email" required></label>
-        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms">Terms of Service</a> and acknowledge the <a href="/legal/privacy">Privacy Policy</a>.</label>
+        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> <span class="legal-consent-copy"><span>I agree to the following:</span><a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a><a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a></span></label>
         <p class="form-error" id="signup-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Create account</button>
         <button class="btn-link" id="show-login-from-signup" type="button">Back to sign in</button>
@@ -75,7 +75,7 @@
         
         <h2>Review and accept</h2>
         <p>Your verified Google email will be used for this Tiller account.</p>
-        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> I agree to the <a href="/legal/terms">Terms of Service</a> and acknowledge the <a href="/legal/privacy">Privacy Policy</a>.</label>
+        <label class="check-label legal-consent"><input type="checkbox" name="accept_terms" required> <span class="legal-consent-copy"><span>I agree to the following:</span><a href="/legal/terms" target="_blank" rel="noopener">Terms of Service</a><a href="/legal/privacy" target="_blank" rel="noopener">Privacy Policy</a></span></label>
         <p class="form-error" id="google-consent-error" role="alert"></p>
         <button class="btn btn-primary btn-wide" type="submit">Accept and create account</button>
         <button class="btn-link" id="google-consent-cancel" type="button">Back to sign in</button>
