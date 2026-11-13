@@ -276,7 +276,7 @@ func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		RedirectedURL string `json:"redirected_url"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := s.decodeJSON(w, r, &input); err != nil {
 		if s.recordOAuthFailure(r, s.oauthCallbackLimiter) {
 			adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many OAuth requests. Try again later.")
 			return

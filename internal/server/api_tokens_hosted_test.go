@@ -1,11 +1,14 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -312,9 +315,11 @@ func TestHostedTokensSurvivePasswordReset(t *testing.T) {
 func TestHostedTokenPerAccountRateLimit(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
-	app.dashboardLimiter = newWindowLimiter(3, time.Minute)
 	_, tokenOne := hostedMintToken(t, api, "one", map[string]int{"client_keys": 1})
 	_, tokenTwo := hostedMintToken(t, api, "two", map[string]int{"client_keys": 1})
+	// Tighten the budget only after minting: the token lifecycle routes are
+	// charged like every other console route, so minting would spend it.
+	app.dashboardLimiter = newWindowLimiter(3, time.Minute)
 	for i := 0; i < 3; i++ {
 		tok := tokenOne
 		if i%2 == 1 {
@@ -350,8 +355,9 @@ func TestHostedTokenPerAccountRateLimit(t *testing.T) {
 func TestHostedTokenRateLimitHeadersOnSuccess(t *testing.T) {
 	t.Parallel()
 	app, api, _ := hostedAccountServer(t)
-	app.dashboardLimiter = newWindowLimiter(5, time.Minute)
 	_, token := hostedMintToken(t, api, "meter", map[string]int{"client_keys": 1})
+	// Minting is budgeted too, so the meter starts after it.
+	app.dashboardLimiter = newWindowLimiter(5, time.Minute)
 	for i, want := range []string{"4", "3"} {
 		status, _, header := bearerRequest(t, api.base, token, "GET", "/api/admin/client-keys", nil)
 		if status != 200 || header.Get("X-RateLimit-Limit") != "5" || header.Get("X-RateLimit-Remaining") != want {
@@ -473,5 +479,72 @@ func TestRevokeAllIsTenantScoped(t *testing.T) {
 	}
 	if got := useB(); got != 200 {
 		t.Fatalf("tenant B token after tenant A revoke-all = %d, want 200", got)
+	}
+}
+
+// TestHostedTokenCapIsAtomicUnderConcurrency proves the per-account cap is exact
+// when requests arrive together. It is one of the compensating controls for the
+// deliberate no-step-up decision on token lifecycle, so a check-then-act pair
+// that lets a burst overshoot hands a stolen session an unbounded family of
+// long-lived write-scope tokens.
+func TestHostedTokenCapIsAtomicUnderConcurrency(t *testing.T) {
+	t.Parallel()
+	_, api, _ := hostedAccountServer(t)
+
+	// Leave two free slots at the cap.
+	free := 2
+	for i := 0; i < hostedMaxManagementTokens-free; i++ {
+		hostedMintToken(t, api, fmt.Sprintf("seed%d", i), map[string]int{})
+	}
+
+	const burst = 12
+	statuses := make([]int, burst)
+	var wg sync.WaitGroup
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body, err := json.Marshal(map[string]any{
+				"name": fmt.Sprintf("burst%d", i), "scopes": map[string]int{}, "expires_at": hostedExpiry(1),
+			})
+			if err != nil {
+				return
+			}
+			req, err := http.NewRequest("POST", api.base+"/api/admin/api-tokens", bytes.NewReader(body))
+			if err != nil {
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-CSRF-Token", api.csrf)
+			resp, err := api.client.Do(req)
+			if err != nil {
+				return
+			}
+			resp.Body.Close()
+			statuses[i] = resp.StatusCode
+		}(i)
+	}
+	wg.Wait()
+
+	created := 0
+	for i, status := range statuses {
+		switch status {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+		default:
+			t.Fatalf("burst request %d = %d, want 201 or 409", i, status)
+		}
+	}
+	if created > free {
+		t.Fatalf("burst created %d tokens with %d slots free", created, free)
+	}
+	// The listing is the authority: the account never exceeds the cap.
+	status, payload, _ := api.request("GET", "/api/admin/api-tokens", nil)
+	if status != http.StatusOK {
+		t.Fatalf("list tokens = %d %v", status, payload)
+	}
+	if n := len(payload["data"].([]any)); n != hostedMaxManagementTokens {
+		t.Fatalf("account holds %d tokens after the burst, want the cap of %d", n, hostedMaxManagementTokens)
 	}
 }

@@ -22,7 +22,22 @@ import (
 const platformGlobalKey = "platform"
 
 func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSameOrigin(w, r) {
+	if !s.sameOriginRequest(r) {
+		// A console login rejected here is almost always a transport
+		// misconfiguration, not an attack: the browser used https, the request
+		// arrived without a trusted X-Forwarded-Proto header, and the expected
+		// origin scheme fell back to http. Say so once in the log, because the
+		// browser only ever sees a bare 400.
+		if s.logger != nil {
+			expected := "http"
+			if s.secureRequest(r) {
+				expected = "https"
+			}
+			s.logger.Warn("platform console login rejected by the same-origin check: the expected origin scheme follows the transport, so check that the console is served over HTTPS or that the proxy sends X-Forwarded-Proto: https and is listed in TILLER_TRUSTED_PROXY",
+				"origin", r.Header.Get("Origin"), "host", r.Host, "expected_scheme", expected,
+				"trusted_proxies", len(s.config.TrustedProxies))
+		}
+		adminError(w, http.StatusBadRequest, "invalid_request", "Request did not originate from this site.")
 		return
 	}
 	key := clientIP(r, s.config.TrustedProxies)
@@ -58,7 +73,7 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setPlatformSessionCookie(w, r, session.Token, session.ExpiresAt)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.login", ActorType: "platform"})
-	writeJSON(w, http.StatusOK, s.platformSessionPayload(session))
+	writeJSON(w, http.StatusOK, s.platformSessionPayload(r, session))
 }
 
 func (s *Server) requirePlatform(next http.Handler) http.Handler {
@@ -90,7 +105,7 @@ func contextWithPlatformSession(ctx context.Context, session identity.PlatformSe
 
 func (s *Server) platformSessionStatus(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(platformSessionKey).(identity.PlatformSession)
-	writeJSON(w, http.StatusOK, s.platformSessionPayload(session))
+	writeJSON(w, http.StatusOK, s.platformSessionPayload(r, session))
 }
 
 func (s *Server) platformStats(w http.ResponseWriter, r *http.Request) {
@@ -138,6 +153,13 @@ func (s *Server) platformLogout(w http.ResponseWriter, r *http.Request) {
 // listener when it is reached over plain HTTP (for example across a VPN):
 // browsers refuse the Secure-only __Host- cookie there. The listener is meant
 // to be network-restricted, and the public listener never uses this name.
+//
+// This downgrade is an accepted risk, not a fallback to rely on silently. The
+// operator is warned in the console and in the log every time it happens, and
+// SECURITY.md documents the residual: a cookie without Secure can be replayed
+// by anyone who can observe the console connection. Fix the transport (TLS, or
+// X-Forwarded-Proto: https from a TILLER_TRUSTED_PROXY peer) rather than
+// exposing the console beyond a restricted network.
 const platformInsecureSessionCookie = "tiller_platform_session"
 
 // platformCookieName picks the cookie shape for a
@@ -152,13 +174,27 @@ func (s *Server) platformCookieName(r *http.Request) string {
 
 func (s *Server) setPlatformSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
 	name := s.platformCookieName(r)
+	if name != platformSessionCookie && s.logger != nil {
+		// Never log the token. The peer address is what identifies the proxy or
+		// VPN hop whose configuration made this happen.
+		s.logger.Warn("platform console issued a non-Secure session cookie: console transport is not HTTPS and no trusted proxy reported X-Forwarded-Proto: https",
+			"remote", clientIP(r, s.config.TrustedProxies))
+	}
 	http.SetCookie(w, &http.Cookie{Name: name, Value: token, Path: "/", HttpOnly: true, Secure: name == platformSessionCookie, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: maxAge(expires)})
 }
 
-// platformSessionPayload also reports whether the console is reachable on the
-// main (public) listener, so the console can warn the operator.
-func (s *Server) platformSessionPayload(session identity.PlatformSession) map[string]any {
-	return map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC(), "platform_exposed": s.config.PlatformPort == 0}
+// platformSessionPayload reports the two console deployment warnings: whether
+// the console shares the public listener, and whether this session's cookie had
+// to fall back to the non-Secure shape because the transport could not be proven
+// HTTPS. The console renders both so the downgrade is visible, never implicit.
+func (s *Server) platformSessionPayload(r *http.Request, session identity.PlatformSession) map[string]any {
+	return map[string]any{
+		"authenticated":    true,
+		"csrf_token":       session.CSRFToken,
+		"expires_at":       session.ExpiresAt.UTC(),
+		"platform_exposed": s.config.PlatformPort == 0,
+		"console_insecure": s.platformCookieName(r) != platformSessionCookie,
+	}
 }
 
 func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
@@ -649,7 +685,7 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Confirm string `json:"confirm"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil || strings.TrimSpace(input.Confirm) != accountID {
+	if err := s.decodeJSON(w, r, &input); err != nil || strings.TrimSpace(input.Confirm) != accountID {
 		adminError(w, http.StatusBadRequest, "confirmation_required", "Type the account ID to confirm deletion.")
 		return
 	}

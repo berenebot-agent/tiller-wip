@@ -125,3 +125,45 @@ func rawUserSessionTokenFrom(t *testing.T, api *testAPI) string {
 	t.Fatal("no user session cookie found")
 	return ""
 }
+
+// TestStartGoogleLinkSharesTheReauthenticationLockout proves the account-link
+// start route is not a private password oracle. It used to call VerifyPassword
+// directly, so a stolen session could guess the account password at full
+// request rate and tell a correct answer from a wrong one by the response,
+// while every other screen was locked out. The route now inherits the shared
+// counter, so the threshold locks it and a correct password is refused exactly
+// like a wrong one.
+func TestStartGoogleLinkSharesTheReauthenticationLockout(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	seedGooglePlatformSettings(t, app)
+
+	link := func(password string) (int, map[string]any, http.Header) {
+		return api.request("POST", "/api/auth/google/link/start", map[string]any{"current_password": password})
+	}
+	code := func(payload map[string]any) any {
+		errObj, _ := payload["error"].(map[string]any)
+		return errObj["code"]
+	}
+
+	for i := 0; i < reauthMaxFailures; i++ {
+		if status, payload, _ := link("definitely not the password"); status != http.StatusUnauthorized || code(payload) != "reauth_required" {
+			t.Fatalf("attempt %d: %d %v, want 401 reauth_required", i, status, payload)
+		}
+	}
+
+	status, payload, header := link("definitely not the password")
+	if status != http.StatusTooManyRequests || code(payload) != "authentication_rate_limited" {
+		t.Fatalf("attempt past the threshold: %d %v, want 429 authentication_rate_limited", status, payload)
+	}
+	if header.Get("Retry-After") == "" {
+		t.Fatal("the lockout response must carry Retry-After")
+	}
+
+	// A correct password is refused identically while locked, so the endpoint
+	// cannot be used to confirm a guess.
+	status, payload, _ = link(hostedTestPassword)
+	if status != http.StatusTooManyRequests || code(payload) != "authentication_rate_limited" {
+		t.Fatalf("correct password during lockout: %d %v, want 429", status, payload)
+	}
+}

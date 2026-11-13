@@ -8,6 +8,57 @@ behavior may still change before a stable `1.0`.
 
 ### Security
 
+- **Account-link start is no longer a password oracle.**
+  `POST /api/auth/google/link/start` called `identity.VerifyPassword` directly
+  instead of the shared `reauthenticateSensitive` helper, so a session cookie
+  could confirm the account password at full request rate with a distinct
+  correct/incorrect answer, while every other password prompt was locked out
+  after five failures. It now inherits the shared 5-failure, 15-minute lockout,
+  and a correct password is refused exactly like a wrong one while locked. A
+  guessed password was worth more than the guess itself: it authorised this same
+  route to attach an attacker-controlled identity, which disables password
+  sign-in and survives session revocation.
+
+- **The per-account console budget now covers every console route.** It was
+  charged at each `handleManage` registration, so the token lifecycle routes,
+  the account export, password change and the audit view — all registered with
+  the plain authentication wrapper — could be called in a loop for free while
+  doing bcrypt and full-table work. The charge now happens in
+  `requireAdmin`/`requireUser`, and the `requireManage` cookie path no longer
+  charges a second time. The numbers are unchanged (60/min per account, 10/min
+  for whole-table reports).
+
+- **Console write bodies are bounded and admitted.** Management writes applied a
+  32 MiB cap but never acquired the request-body admission gate, so a modest
+  burst of large admin bodies was held in memory with no admission check. Writes
+  now pass through the per-account inference gate and the cap is 4 MiB.
+
+- **The 10-token-per-account cap is atomic.** The count was read and the row
+  inserted as separate statements, so a concurrent burst overshot the cap. The
+  count is now part of the `INSERT`; the cap is one of the compensating controls
+  for minting tokens without step-up, so it has to be exact.
+
+- **Operator diagnostics are registered only on the listener that issues the
+  operator credential.** `/api/admin/debug/memory` (and the pprof prefix when
+  `TILLER_DEBUG_PPROF` is set) sat on the public mux behind
+  `requirePlatform`, so a console cookie authenticated a customer-origin request
+  and enabling pprof would have published heap dumps there. They now live with
+  the platform routes, and 404 on the customer origin.
+
+- **The console's non-Secure cookie is an accepted, visible downgrade.** When
+  the dedicated console listener is reached without TLS or a trusted
+  `X-Forwarded-Proto: https`, its session cookie cannot be `Secure`. That is kept
+  deliberately (refusing it would turn a proxy misconfiguration into a console
+  outage for a VPN-only deployment), but it is no longer silent: the console
+  shows a banner, the server logs the peer, and `GET /api/platform/session`
+  reports `console_insecure`. `SECURITY.md` records the residual. A same-origin
+  rejection on console login now logs the cause instead of only returning 400.
+
+- **Outbound block list covers the remaining special-use ranges.**
+  `192.88.99.0/24` (deprecated 6to4 relay anycast), `2001:2::/48` (IPv6
+  benchmarking) and `3fff::/20` (documentation) are global-unicast and were
+  dialable.
+
 - **Third-party analytics runs in an isolated frame.** The vendor script is no
   longer injected into the console document. It loads in
   `/analytics-frame.html`, embedded as a sandboxed iframe (`allow-scripts` only,

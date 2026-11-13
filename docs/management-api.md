@@ -93,14 +93,16 @@ payloads.
 List endpoints accept `limit` (default 50, maximum 200), `offset` (capped at
 10000) and, where supported, `search`. To read further than that, narrow with
 `search` or use the CSV export routes. Admin request bodies are limited to
-32 MiB. `/api.json` reports these as `page_size_default`, `page_size_max`,
+4 MiB. `/api.json` reports these as `page_size_default`, `page_size_max`,
 `offset_max` and `admin_request_body_bytes`.
 
 ## Rate limits (hosted)
 
 Hosted accounts share 60 management requests per minute across all their
-tokens, in fixed one-minute windows that start at the account's first request.
-Every token response carries:
+tokens **and their console session**, in fixed one-minute windows that start at
+the account's first request. The budget covers every console route, including
+the token lifecycle routes and the account export, so an account cannot dodge it
+by switching credential or screen. Every response on a budgeted route carries:
 
 | Header | Meaning |
 |---|---|
@@ -115,8 +117,9 @@ seconds-until-reset value) and a body such as:
 {"error":{"code":"rate_limited","message":"...","limit":60,"window_seconds":60,"retry_after":23}}
 ```
 
-Refused requests are not counted and do not extend the wait. Local instances
-have no per-account budget (failed-authentication attempts are still throttled).
+Refused requests are not counted and do not extend the wait. A local instance
+has a single operator account, which draws on the same console budget;
+failed-authentication attempts are throttled separately.
 
 ## Errors
 

@@ -65,8 +65,8 @@ func (s *Server) createTemplate(w http.ResponseWriter, r *http.Request) {
 		StartFrom      string `json:"start_from"`
 		SourceClientID string `json:"source_client_id"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
@@ -119,8 +119,8 @@ func (s *Server) updateTemplate(w http.ResponseWriter, r *http.Request) {
 		Name        *string `json:"name"`
 		Description *string `json:"description"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	if input.Name != nil {
@@ -188,7 +188,7 @@ func (s *Server) getTemplatePermissions(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) updateTemplatePermissions(w http.ResponseWriter, r *http.Request) {
-	defaults, permissions, ok := decodePermissionUpdates(w, r)
+	defaults, permissions, ok := s.decodePermissionUpdates(w, r)
 	if !ok {
 		return
 	}

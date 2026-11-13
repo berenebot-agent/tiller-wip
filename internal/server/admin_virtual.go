@@ -83,8 +83,8 @@ func (s *Server) createVirtualGroup(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name string `json:"name"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	groupID, err := id.New()
@@ -115,8 +115,8 @@ func (s *Server) updateVirtualGroup(w http.ResponseWriter, r *http.Request) {
 		Name            string `json:"name"`
 		ConfirmBreaking bool   `json:"confirm_breaking_change"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	groupID := r.PathValue("id")
@@ -316,8 +316,8 @@ func (s *Server) createVirtualModel(w http.ResponseWriter, r *http.Request) {
 		RoutingMode      string               `json:"routing_mode"`
 		Targets          []virtualTargetInput `json:"targets"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	if len(input.Targets) == 0 && input.TargetModelID != "" {
@@ -397,8 +397,8 @@ func (s *Server) updateVirtualModel(w http.ResponseWriter, r *http.Request) {
 		Targets          []virtualTargetInput `json:"targets"`
 		FixedTargetID    string               `json:"fixed_target_id"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	modelID := r.PathValue("id")

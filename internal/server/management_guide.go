@@ -72,7 +72,7 @@ func (s *Server) discoveryLimits() map[string]any {
 	limits := map[string]any{
 		"page_size_default":               50,
 		"page_size_max":                   200,
-		"admin_request_body_bytes":        32 << 20,
+		"admin_request_body_bytes":        adminRequestMaxBytes,
 		"offset_max":                      10000,
 		"activity_retention_days_default": 30,
 	}

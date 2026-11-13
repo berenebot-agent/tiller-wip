@@ -642,6 +642,22 @@ func (s *Server) registerPlatformRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/platform/accounts/{id}/unsuspend", s.requirePlatform(http.HandlerFunc(s.unsuspendAccount)))
 	mux.Handle("POST /api/platform/accounts/{id}/sessions/revoke", s.requirePlatform(http.HandlerFunc(s.revokeAccountSessions)))
 	mux.Handle("DELETE /api/platform/accounts/{id}", s.requirePlatform(http.HandlerFunc(s.deleteAccount)))
+	// The operator diagnostics are gated by the platform credential, so they are
+	// registered only on a mux that serves it. Registering them on the public
+	// mux let a console cookie authenticate a customer-origin request, and would
+	// have published heap and goroutine dumps on the public listener as soon as
+	// DebugPprof was enabled.
+	s.registerDebugRoutes(mux)
+}
+
+// registerDebugRoutes adds the operator-only diagnostics to the mux that issues
+// the credential that opens them: the console listener (or the main mux when
+// the console shares it) in hosted mode, and the admin mux in local mode.
+func (s *Server) registerDebugRoutes(mux *http.ServeMux) {
+	mux.Handle("GET /api/admin/debug/memory", s.requireDebugAdmin(http.HandlerFunc(s.debugMemory)))
+	if s.config.DebugPprof {
+		mux.Handle("GET "+debugPprofPrefix, s.requireDebugAdmin(http.HandlerFunc(s.debugPprof)))
+	}
 }
 
 type platformListenerContextKey struct{}
@@ -760,6 +776,9 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("POST /api/auth/account/passkeys/password-signin", s.requireAdminUser(http.HandlerFunc(s.setPasswordSignIn)))
 		mux.Handle("POST /api/auth/account/passkeys/reauth/begin", s.requireAdminUser(http.HandlerFunc(s.passkeyReauthBegin)))
 		mux.Handle("POST /api/auth/account/passkeys/reauth/finish", s.requireAdminUser(http.HandlerFunc(s.passkeyReauthFinish)))
+		// Local mode has no separate console listener, so the operator-only
+		// diagnostics live on the admin mux.
+		s.registerDebugRoutes(mux)
 	}
 	if s.config.Mode == config.ModeHosted {
 		mux.Handle("GET /api/admin/audit", s.requireUser(http.HandlerFunc(s.accountAudit)))
@@ -857,10 +876,6 @@ func (s *Server) Handler() http.Handler {
 	s.handleManage(mux, "GET /api/admin/cooldown", "monitoring", auth.ScopeRead, http.HandlerFunc(s.cooldownStatus))
 	s.handleManage(mux, "DELETE /api/admin/cooldown", "monitoring", auth.ScopeDelete, http.HandlerFunc(s.clearCooldown))
 	s.handleManage(mux, "GET /api/admin/health", "monitoring", auth.ScopeRead, http.HandlerFunc(s.adminHealth))
-	mux.Handle("GET /api/admin/debug/memory", s.requireDebugAdmin(http.HandlerFunc(s.debugMemory)))
-	if s.config.DebugPprof {
-		mux.Handle("GET "+debugPprofPrefix, s.requireDebugAdmin(http.HandlerFunc(s.debugPprof)))
-	}
 	mux.Handle("GET /v1/models", s.requireClient(http.HandlerFunc(s.clientModels), false))
 	mux.Handle("GET /v1/models/{model...}", s.requireClient(http.HandlerFunc(s.clientModel), false))
 	mux.Handle("POST /v1/chat/completions", s.requireClient(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { s.proxy(w, r, providers.ProtocolChat) }), false))
@@ -1054,6 +1069,9 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), adminSessionKey, session)
 		ctx = context.WithValue(ctx, accountKey, accountID)
 		stampRequestPrincipal(r, "admin", accountID)
+		if !s.chargeDashboardBudget(w, r, accountID) {
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1082,12 +1100,10 @@ func (s *Server) requireManage(area string, tier int, next http.Handler) http.Ha
 		// Any Authorization header selects the token path, even a non-Bearer
 		// one: a request must never silently downgrade to cookie auth.
 		if _, present := r.Header["Authorization"]; !present {
-			s.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if !s.chargeDashboardBudget(w, r, s.scope(r).AccountID()) {
-					return
-				}
-				next.ServeHTTP(w, r)
-			})).ServeHTTP(w, r)
+			// The cookie path is requireAdmin, which already charges the account
+			// budget. Charging here as well would silently halve the allowance for
+			// every management route.
+			s.requireAdmin(next).ServeHTTP(w, r)
 			return
 		}
 		s.requireManagementToken(w, r, area, tier, next)
@@ -1455,8 +1471,36 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 	})
 }
 
-func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	return decodeJSONBody(w, r, target, 32<<20, false)
+// adminRequestMaxBytes bounds a console write body. These endpoints carry
+// configuration documents (a provider, a virtual model, a legal page), so 4 MiB
+// is generous; it is deliberately far below the old 32 MiB, which let a modest
+// burst of admin requests hold hundreds of megabytes of unread bodies.
+const adminRequestMaxBytes = 4 << 20
+
+// decodeJSON decodes a console write body under the inbound admission gate.
+//
+// Every JSON endpoint that can carry a large body funnels through here, which is
+// where the gate belongs: applying it per route is what left the management
+// writes outside it. The gate is the same inference gate, keyed per account, so
+// a tenant's body reads are bounded without touching another tenant's or the
+// inference path's capacity.
+func (s *Server) decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	key := bodyGateKey(r)
+	if !s.bodyReads.acquire(key) {
+		return errBodyReadBusy
+	}
+	defer s.bodyReads.release(key)
+	return decodeJSONBody(w, r, target, adminRequestMaxBytes, false)
+}
+
+// bodyGateKey is the admission key for one request body: the account when the
+// request is authenticated, otherwise one shared key for console and platform
+// writes, which are not account-scoped.
+func bodyGateKey(r *http.Request) string {
+	if accountID, _ := r.Context().Value(accountKey).(string); accountID != "" {
+		return accountID
+	}
+	return "console"
 }
 
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {

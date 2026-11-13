@@ -336,6 +336,9 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, userKey, session.User)
 		ctx = context.WithValue(ctx, accountKey, session.User.AccountID)
 		stampRequestPrincipal(r, "user", session.User.AccountID)
+		if !s.chargeDashboardBudget(w, r, session.User.AccountID) {
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

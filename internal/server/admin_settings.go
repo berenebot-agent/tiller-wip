@@ -78,8 +78,8 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		NotificationsEventAdminLogin       *bool   `json:"notifications_event_admin_login"`
 		NotificationsAuthHeader            *string `json:"notifications_auth_header"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	sc := s.scope(r)

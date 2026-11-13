@@ -714,7 +714,14 @@ function platformTabFromHash() {
   const tab = location.hash.replace(/^#\/?/, '').split('/')[0];
   return PLATFORM_TABS.includes(tab) ? tab : 'overview';
 }
-function showPlatformExposure(session) { const banner = $('#platform-exposed-banner'); if (banner) banner.hidden = !session?.platform_exposed; }
+function showPlatformExposure(session) {
+  const exposed = $('#platform-exposed-banner');
+  if (exposed) exposed.hidden = !session?.platform_exposed;
+  // A non-Secure console cookie means the transport could not be proven HTTPS.
+  // Accepted for a VPN-restricted console (SECURITY.md), never silent.
+  const insecure = $('#platform-insecure-banner');
+  if (insecure) insecure.hidden = !session?.console_insecure;
+}
 async function selectPlatformTab(tab, { push = true } = {}) {
   if (!PLATFORM_TABS.includes(tab)) tab = 'overview';
   state.platformTab = tab;
