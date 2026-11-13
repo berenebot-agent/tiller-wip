@@ -122,18 +122,19 @@ hosted accounts with a tighter policy. A token row belongs to exactly one
 account and authority comes from that row, never from request input; the
 authenticator joins the account and accepts only `active` accounts, and
 suspension, deletion and "revoke sessions" drop the account's cached tokens
-immediately (deletion also removes the rows). Creating a token, rotating one,
-widening its scopes, extending its expiry or re-enabling it requires a fresh
-re-authentication (password, or a just-completed passkey/Google check) and is
-throttled per user; the account owner is emailed when a token is created.
-Hosted tokens default to a 30-day expiry in the UI (no-expiry is allowed; clearing
-or extending an expiry needs re-authentication), are limited to read/write tiers
-(destructive deletes stay with the interactive session), are capped at 10 per
-account, and share a 60 requests/minute per-account budget. Password reset does
-not revoke tokens; "sign out everywhere" asks whether to revoke them too. Lifecycle, identity, account export,
-audit, passkeys and billing-style surfaces stay cookie-only. The
-`TILLER_ADMIN_API_KEY` seed is rejected at startup in hosted mode. See
-`docs/hosted_decisions.md` §13.
+immediately (deletion also removes the rows). Minting, rotating, widening,
+extending or re-enabling a token requires only the signed-in session: there is
+deliberately **no password or passkey step-up** (decision of 2026-11-10 — the
+password field made browsers autofill saved credentials into the token's name
+field). The accepted trade-off is that a stolen session cookie can mint a
+long-lived write-scope token; the compensating controls are the 10-token cap, the
+write-tier ceiling (no delete tier), the shared 60 requests/minute per-account
+budget, an `api_token_created` email to the account owner, and audit events.
+Hosted tokens default to a 30-day expiry in the UI and no expiry is allowed.
+Password reset does not revoke tokens; "sign out everywhere" asks whether to
+revoke them too. Lifecycle, identity, account export, audit, passkeys and
+billing-style surfaces stay cookie-only. The `TILLER_ADMIN_API_KEY` seed is
+rejected at startup in hosted mode. See `docs/hosted_decisions.md` §13.
 
 **Headless embedding seed.** Setting `TILLER_ADMIN_API_KEY` /
 `TILLER_ADMIN_API_KEY_FILE` (local mode only) seeds a single full-power
