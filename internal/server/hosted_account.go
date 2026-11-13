@@ -123,6 +123,10 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusBadRequest, "invalid_request", "Enter a valid email address.")
 		return
 	}
+	if !s.emailChangeLimiter.allowAttempt(session.User.AccountID) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many email-change requests. Try again later.")
+		return
+	}
 	if _, err := s.identity.RequestEmailChange(r.Context(), session.User.ID, rawUserSessionToken(r), input.NewEmail); err != nil {
 		switch {
 		case errors.Is(err, identity.ErrEmailUnchanged):
