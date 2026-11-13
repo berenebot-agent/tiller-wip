@@ -42,6 +42,26 @@ use the forwarded client address. It is defense in depth only: hosted outbound
 requests remain subject to the application `SafeTransport`, and operators may
 add provider-specific VPS firewall rules separately.
 
+**The dedicated console listener may run without TLS inside a restricted
+network, and that is an accepted downgrade.** With `TILLER_PLATFORM_PORT` set,
+the console is meant to be reachable only from a VPN or a private management
+network. When it is reached over plain HTTP the session cookie cannot carry the
+`__Host-` prefix or `Secure`, so it is issued as `tiller_platform_session`
+without `Secure`. That is deliberate — refusing the session instead would turn a
+proxy misconfiguration into a console outage — but it is never silent: the
+console shows a warning banner, the server logs a warning naming the peer, and
+`GET /api/platform/session` reports `console_insecure: true`. The residual risk
+is that anyone who can observe the console connection can replay the cookie;
+restrict that path (VPN, firewall, or TLS) accordingly. Prefer terminating TLS
+in front of the console and sending `X-Forwarded-Proto: https` from a proxy
+listed in `TILLER_TRUSTED_PROXY`; that restores the hardened cookie. A console
+login answered with `400 invalid_request` while the browser used HTTPS almost
+always means that header or the trusted-proxy list is misconfigured, and the
+server log now says so. The console's operator diagnostics
+(`/api/admin/debug/memory`, and the pprof prefix when `TILLER_DEBUG_PPROF` is
+set) are registered on the listener that issues the platform credential, so an
+operator session can never authenticate them on the customer origin.
+
 **Recoverable provider credentials are encrypted at rest (always on).**
 Provider API credentials, OAuth access/refresh/id tokens and `provider_data`, the
 notification auth header, and hosted mail credentials are sealed with AES-256-GCM (versioned `enc:v1:`

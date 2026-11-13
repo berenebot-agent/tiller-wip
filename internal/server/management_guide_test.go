@@ -218,7 +218,7 @@ func TestManagementDiscoveryDocument(t *testing.T) {
 	if !ok {
 		t.Fatalf("limits missing: %v", doc["limits"])
 	}
-	if limits["page_size_max"] != float64(200) || limits["offset_max"] != float64(10000) || limits["admin_request_body_bytes"] != float64(32<<20) {
+	if limits["page_size_max"] != float64(200) || limits["offset_max"] != float64(10000) || limits["admin_request_body_bytes"] != float64(adminRequestMaxBytes) {
 		t.Fatalf("limits = %v", limits)
 	}
 

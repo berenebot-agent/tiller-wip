@@ -44,6 +44,11 @@ func TestAllowedAddressRejectsSpecialUseRanges(t *testing.T) {
 		"169.254.169.254", "172.16.0.1", "192.168.1.1", "224.0.0.1",
 		"240.0.0.1", "::1", "fc00::1", "fe80::1", "ff02::1",
 		"64:ff9b::c000:0201", "64:ff9b:1::1", "2001::1", "2002::1", "fec0::1",
+		// The IPv4 6to4 relay anycast prefix, and the IPv6 benchmarking and
+		// documentation ranges. Each is global-unicast and would otherwise be
+		// dialable, so they are blocked for intent consistency with the 6to4,
+		// 198.18.0.0/15 and 2001:db8::/32 entries.
+		"192.88.99.1", "2001:2::1", "3fff::1",
 	} {
 		address, err := netip.ParseAddr(raw)
 		if err != nil {

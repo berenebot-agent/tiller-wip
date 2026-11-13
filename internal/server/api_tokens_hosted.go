@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/config"
@@ -22,6 +24,21 @@ const (
 )
 
 func (s *Server) hostedTokens() bool { return s.config.Mode == config.ModeHosted }
+
+// managementTokenLimit is the per-account token cap enforced at insert time.
+// Zero means no cap, which is the local-mode behaviour.
+func (s *Server) managementTokenLimit() int {
+	if s.hostedTokens() {
+		return hostedMaxManagementTokens
+	}
+	return 0
+}
+
+// writeManagementTokenLimit answers a refused token creation, whether the cap
+// was detected by the handler's pre-check or by the insert itself.
+func writeManagementTokenLimit(w http.ResponseWriter) {
+	adminError(w, http.StatusConflict, "token_limit_reached", fmt.Sprintf("Accounts can hold at most %d API tokens. Delete one first.", hostedMaxManagementTokens))
+}
 
 // hostedTokenScopeError reports a scope set above the hosted tier ceiling.
 func hostedTokenScopeError(scopes map[string]int) string {

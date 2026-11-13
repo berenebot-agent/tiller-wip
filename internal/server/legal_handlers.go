@@ -77,7 +77,7 @@ func (s *Server) writePlatformLegalUpdate(w http.ResponseWriter, r *http.Request
 		Title string `json:"title"`
 		Body  string `json:"body"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := s.decodeJSON(w, r, &input); err != nil {
 		respondDecodeError(w, err)
 		return
 	}

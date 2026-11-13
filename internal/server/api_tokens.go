@@ -198,8 +198,8 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		Scopes      map[string]int `json:"scopes"`
 		ExpiresAt   string         `json:"expires_at"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
@@ -229,13 +229,15 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 400, "invalid_scopes", msg)
 			return
 		}
+		// Cheap pre-check so a refused request does not generate key material;
+		// the insert enforces the same cap atomically.
 		count, err := s.scope(r).CountManagementTokens(r.Context())
 		if err != nil {
 			adminError(w, 500, "database_error", "Could not create API token.")
 			return
 		}
 		if count >= hostedMaxManagementTokens {
-			adminError(w, 409, "token_limit_reached", fmt.Sprintf("Accounts can hold at most %d API tokens. Delete one first.", hostedMaxManagementTokens))
+			writeManagementTokenLimit(w)
 			return
 		}
 	}
@@ -258,8 +260,13 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		Fingerprint: generated.Fingerprint,
 		Scopes:      scopesJSON,
 		ExpiresAt:   expiresAt,
+		Limit:       s.managementTokenLimit(),
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrManagementTokenLimit) {
+			writeManagementTokenLimit(w)
+			return
+		}
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "An API token with that name already exists.")
 			return
@@ -302,8 +309,8 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 		Enabled     *bool           `json:"enabled"`
 		ExpiresAt   *string         `json:"expires_at"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	tokenID := r.PathValue("id")
