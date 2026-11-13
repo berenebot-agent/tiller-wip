@@ -337,6 +337,7 @@ function authView(name) {
   const passkeySignIn = name === 'login-form' && passkeyAvailable && !!window.__passkeySupported;
   const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
   const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) { passkeyStatus.textContent = ''; passkeyStatus.className = 'setting-tip'; }
+  clearResendCooldowns();
   if (googleSignIn) setupGoogleSignIn();
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
@@ -546,7 +547,31 @@ async function resendVerification(email, target) {
 }
 function exposeResend(target, emailInput, messageTarget) {
   const button = $(target); if (!button) return;
-  button.hidden = false; showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : ''); button.onclick = async () => { button.disabled = true; try { await resendVerification($(emailInput).value, messageTarget); } catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+  button.hidden = false; showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : ''); button.onclick = async () => { button.disabled = true; try { await resendVerification($(emailInput).value, messageTarget); startResendCooldown(button); } catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); button.disabled = false; } };
+}
+// startResendCooldown holds a resend button for 60s after a successful send so the
+// address is not hammered by repeat clicks. The server independently caps resends
+// at 5/hour per IP and per email, so this is purely a UX guard. authView() clears
+// any live timer and restores the button's original label when the view changes.
+const resendCooldowns = new Map();
+function startResendCooldown(button, seconds = 60) {
+  if (!button) return;
+  clearInterval(resendCooldowns.get(button));
+  const label = button.dataset.resendLabel || button.textContent;
+  button.dataset.resendLabel = label;
+  let left = seconds;
+  button.disabled = true;
+  button.textContent = `Send again in ${left}s`;
+  const timer = setInterval(() => {
+    left -= 1;
+    if (left <= 0) { clearInterval(timer); resendCooldowns.delete(button); button.textContent = label; button.disabled = false; return; }
+    button.textContent = `Send again in ${left}s`;
+  }, 1000);
+  resendCooldowns.set(button, timer);
+}
+function clearResendCooldowns() {
+  resendCooldowns.forEach((timer, button) => { clearInterval(timer); if (button.dataset.resendLabel) button.textContent = button.dataset.resendLabel; button.disabled = false; });
+  resendCooldowns.clear();
 }
 $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
@@ -560,7 +585,7 @@ $('#forgot-done-login').onclick = () => authView('login-form');
 function exposeSignupResend() {
   const button = $('#resend-signup-verification'); if (!button) return;
   button.hidden = false;
-  button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+  button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); startResendCooldown(button); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); button.disabled = false; } };
 }
 $('#signup-form').addEventListener('submit', async event => {
   event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement);
