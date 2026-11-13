@@ -29,6 +29,9 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("192.0.0.0/24"),
 	netip.MustParsePrefix("192.0.2.0/24"),
 	netip.MustParsePrefix("192.168.0.0/16"),
+	// 192.88.99.0/24 is the deprecated 6to4 relay anycast prefix: the IPv4 half
+	// of the 2002::/16 entry below, and no more a public destination than it is.
+	netip.MustParsePrefix("192.88.99.0/24"),
 	netip.MustParsePrefix("198.18.0.0/15"),
 	netip.MustParsePrefix("198.51.100.0/24"),
 	netip.MustParsePrefix("203.0.113.0/24"),
@@ -42,7 +45,12 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("::1/128"),
 	netip.MustParsePrefix("fc00::/7"),
 	netip.MustParsePrefix("fe80::/10"),
+	// 2001:2::/48 is the IPv6 benchmarking range (the sibling of 198.18.0.0/15
+	// above) and 3fff::/20 is the current documentation range, added for the same
+	// reason as the older 2001:db8::/32.
+	netip.MustParsePrefix("2001:2::/48"),
 	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("3fff::/20"),
 	netip.MustParsePrefix("ff00::/8"),
 	// IPv6 translation and transition ranges are not directly allocated public
 	// destinations. In particular, NAT64 can embed a prohibited IPv4 address in
