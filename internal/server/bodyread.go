@@ -52,6 +52,10 @@ var preAuthBodyReadDeadline = 15 * time.Second
 // malformed content.
 var errBodyReadTimeout = errors.New("request body was not received in time")
 
+// errBodyReadBusy reports that the admission gate refused a body read because
+// too many are already in progress. It is a capacity answer, not a bad request.
+var errBodyReadBusy = errors.New("too many request bodies in progress")
+
 // bodyReadGate bounds concurrent request-body reads, in aggregate and
 // optionally per key (account). A nil gate (constructed only in tests that
 // bypass the server) admits everything. A zero max means
@@ -160,6 +164,11 @@ func isTimeoutError(err error) bool {
 func respondDecodeError(w http.ResponseWriter, err error) {
 	if errors.Is(err, errBodyReadTimeout) {
 		adminError(w, http.StatusRequestTimeout, "request_timeout", "The request body was not received in time.")
+		return
+	}
+	if errors.Is(err, errBodyReadBusy) {
+		w.Header().Set("Retry-After", "1")
+		adminError(w, http.StatusServiceUnavailable, "body_read_busy", "Too many requests are being received at once. Try again.")
 		return
 	}
 	adminError(w, http.StatusBadRequest, "invalid_request", err.Error())

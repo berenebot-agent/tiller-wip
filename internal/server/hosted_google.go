@@ -80,9 +80,14 @@ func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
 	// A password is the normal proof. A short-lived link grant replaces it when
 	// the user has just authenticated with their password and accepted the
 	// link prompt, so the factor is not demanded twice.
+	//
+	// The check goes through reauthenticateSensitive, not identity.VerifyPassword
+	// directly: every password prompt for an authenticated principal must share
+	// one failure counter, or a stolen session gets a private unlimited budget
+	// here while every other screen locks out.
 	if !s.hasLinkAuth(rawUserSessionToken(r)) {
-		if err := s.identity.VerifyPassword(r.Context(), session.User.ID, input.CurrentPassword); err != nil {
-			adminError(w, http.StatusUnauthorized, "invalid_credentials", "Your current password is incorrect.")
+		if _, err := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword); err != nil {
+			s.writeReauthFailure(w, err, "Your current password is incorrect.")
 			return
 		}
 	}

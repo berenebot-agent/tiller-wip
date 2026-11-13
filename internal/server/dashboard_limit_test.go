@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -123,4 +124,46 @@ func mustRequest(t *testing.T, path string) *http.Request {
 		t.Fatal(err)
 	}
 	return req
+}
+
+// TestDashboardBudgetChargesEveryConsoleRouteOnce proves the budget is applied
+// at the principal, not per registration: a cookie route, a session-identity
+// route and a token-lifecycle route each spend exactly one unit. It fails if a
+// route is missed (remaining does not drop) or charged twice (remaining drops
+// by two, silently halving the account's allowance).
+func TestDashboardBudgetChargesEveryConsoleRouteOnce(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	app.dashboardLimiter = newWindowLimiter(10, time.Minute)
+
+	for i, path := range []string{
+		"/api/admin/client-keys", // requireManage -> requireAdmin
+		"/api/auth/account",      // requireUser
+		"/api/admin/api-tokens",  // requireAdmin
+		"/api/auth/account/plan", // requireUser
+	} {
+		status, payload, header := api.request("GET", path, nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s = %d %v, want 200", path, status, payload)
+		}
+		if got, want := header.Get("X-RateLimit-Remaining"), strconv.Itoa(10-i-1); got != want {
+			t.Fatalf("%s remaining = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// TestDashboardBudgetCoversAccountExport proves the whole-account export is
+// budgeted. It is named in the heavy list but was registered outside the wrapper
+// that charges, so it could be called in a loop for free.
+func TestDashboardBudgetCoversAccountExport(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	app.dashboardHeavyLimiter = newWindowLimiter(1, time.Minute)
+	if status, payload, _ := api.request("GET", "/api/auth/account/export", nil); status != http.StatusOK {
+		t.Fatalf("first export = %d %v, want 200", status, payload)
+	}
+	status, payload, _ := api.request("GET", "/api/auth/account/export", nil)
+	if status != http.StatusTooManyRequests || payload["error"].(map[string]any)["code"] != "rate_limited" {
+		t.Fatalf("second export = %d %v, want 429 rate_limited", status, payload)
+	}
 }

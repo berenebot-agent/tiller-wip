@@ -78,7 +78,7 @@ func (s *Server) writeSignupPlan(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Plan string `json:"plan"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := s.decodeJSON(w, r, &input); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -146,7 +146,7 @@ func writePlanError(w http.ResponseWriter, err error) bool {
 // writePlatformPlanCreate adds a plan to the catalogue (platform operator).
 func (s *Server) writePlatformPlanCreate(w http.ResponseWriter, r *http.Request) {
 	var input planRequest
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := s.decodeJSON(w, r, &input); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -181,7 +181,7 @@ func (s *Server) writePlatformPlanUpdate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var input planRequest
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := s.decodeJSON(w, r, &input); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -295,7 +295,7 @@ func (s *Server) writeAccountPlanAssign(w http.ResponseWriter, r *http.Request) 
 	var input struct {
 		Plan string `json:"plan"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
+	if err := s.decodeJSON(w, r, &input); err != nil {
 		respondDecodeError(w, err)
 		return
 	}

@@ -86,8 +86,8 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		Enabled    *bool                `json:"enabled"`
 		Protocols  []providers.Protocol `json:"protocols"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
@@ -243,8 +243,8 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		// to a different upstream host clears its stored credential.
 		ConfirmCredentialReset bool `json:"confirm_credential_reset"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	sc := s.scope(r)
@@ -360,7 +360,11 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 	var input struct {
 		Credential string `json:"credential"`
 	}
-	if decodeJSON(w, r, &input) != nil || input.Credential == "" {
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
+		return
+	}
+	if input.Credential == "" {
 		adminError(w, 400, "credential_required", "A non-empty credential is required.")
 		return
 	}
@@ -540,8 +544,8 @@ func (in *manualModelInput) normalizeAndValidate(w http.ResponseWriter) bool {
 
 func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
 	var input manualModelInput
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	if !input.normalizeAndValidate(w) {

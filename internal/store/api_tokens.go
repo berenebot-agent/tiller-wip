@@ -130,14 +130,35 @@ type CreateManagementTokenInput struct {
 	Fingerprint string
 	Scopes      string
 	ExpiresAt   sql.NullString
+	// Limit caps how many browser-managed tokens the account may hold. Zero
+	// means no cap (local mode).
+	Limit int
 }
 
+// ErrManagementTokenLimit reports that the account already holds Limit tokens,
+// so the insert was refused.
+var ErrManagementTokenLimit = errors.New("management token limit reached")
+
 // CreateManagementToken persists a management token for the scope's account.
+//
+// The count is part of the insert rather than a separate read: a check-then-act
+// pair lets concurrent requests all pass the same stale count and overshoot the
+// cap by the number of requests in flight. The cap is one of the compensating
+// controls for minting tokens without step-up, so it has to be exact.
 func (s *Scope) CreateManagementToken(ctx context.Context, in CreateManagementTokenInput) error {
 	now := now()
-	_, err := s.q.ExecContext(ctx, `INSERT INTO api_tokens(id,account_id,name,description,selector,secret_hash,secret_fingerprint,scopes,enabled,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)`,
-		in.ID, s.accountID, in.Name, in.Description, in.Selector, in.Hash, in.Fingerprint, in.Scopes, in.ExpiresAt, now, now)
-	return err
+	res, err := s.q.ExecContext(ctx, `INSERT INTO api_tokens(id,account_id,name,description,selector,secret_hash,secret_fingerprint,scopes,enabled,expires_at,created_at,updated_at)
+		SELECT ?,?,?,?,?,?,?,?,1,?,?,?
+		WHERE ?=0 OR (SELECT COUNT(*) FROM api_tokens WHERE account_id=? AND id<>?) < ?`,
+		in.ID, s.accountID, in.Name, in.Description, in.Selector, in.Hash, in.Fingerprint, in.Scopes, in.ExpiresAt, now, now,
+		in.Limit, s.accountID, EnvironmentManagementTokenID, in.Limit)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrManagementTokenLimit
+	}
+	return nil
 }
 
 // UpdateManagementTokenInput is the merged, fully-validated field set for an

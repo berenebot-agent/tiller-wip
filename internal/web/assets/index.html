@@ -188,6 +188,7 @@
   <div class="platform-shell" id="platform-shell" hidden>
     <section class="platform-card">
       <div class="platform-exposed-banner" id="platform-exposed-banner" role="alert" hidden><strong>Platform console is on the public port.</strong> It is reachable by anyone who can reach this site. Set <code>TILLER_PLATFORM_PORT</code> to serve it on a separate, network-restricted port.</div>
+      <div class="platform-exposed-banner" id="platform-insecure-banner" role="alert" hidden><strong>Console session cookie is not Secure.</strong> This console is being served over plain HTTP, so the session cookie cannot be marked <code>Secure</code>. Keep the listener on a restricted network or a VPN, or terminate TLS in front of it with <code>X-Forwarded-Proto: https</code> from a proxy listed in <code>TILLER_TRUSTED_PROXY</code>.</div>
       <header class="platform-header"><div><h1>Hosted operations</h1></div><button class="btn-link" id="platform-logout" type="button">Sign out</button></header>
       <nav class="platform-tabs" id="platform-tabs" role="tablist" aria-label="Platform sections" aria-orientation="horizontal" tabindex="-1">
         <button class="platform-tab active" id="platform-tab-overview" type="button" role="tab" aria-selected="true" aria-controls="platform-panel-overview" data-platform-tab="overview" tabindex="0">Overview</button>

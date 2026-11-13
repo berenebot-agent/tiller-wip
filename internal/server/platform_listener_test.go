@@ -92,6 +92,20 @@ func TestPlatformConsoleMovesToDedicatedListener(t *testing.T) {
 	if resp, _ := platformLoginRequest(t, http.DefaultClient, public.URL, ""); resp.StatusCode != 404 {
 		t.Fatalf("public platform login = %d, want 404", resp.StatusCode)
 	}
+	// The operator diagnostics are gated by the platform credential, so they are
+	// served only by the listener that issues it. Anonymous and authenticated
+	// requests both find nothing here: an operator cookie must never
+	// authenticate a customer-origin request.
+	for _, path := range []string{"/api/admin/debug/memory", debugPprofPrefix + "heap"} {
+		resp, err := http.Get(public.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 404 {
+			t.Errorf("public GET %s = %d, want 404", path, resp.StatusCode)
+		}
+	}
 	// Customer routes are unaffected on the main listener.
 	if resp, err := http.Get(public.URL + "/api/auth/options"); err != nil || resp.StatusCode != 200 {
 		t.Fatalf("public /api/auth/options broke: %v %v", resp, err)
@@ -120,6 +134,21 @@ func TestPlatformConsoleMovesToDedicatedListener(t *testing.T) {
 	}
 	if cookie == nil || cookie.Name != platformInsecureSessionCookie || cookie.Secure || !cookie.HttpOnly || cookie.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("plain-HTTP platform cookie = %+v, want HttpOnly SameSite=Strict %s without Secure", cookie, platformInsecureSessionCookie)
+	}
+	// The downgrade is accepted, not silent: the session status says so, so the
+	// console can warn the operator.
+	if insecure, _ := payload["console_insecure"].(bool); !insecure {
+		t.Fatalf("console_insecure = %v, want true for a non-Secure console cookie", payload["console_insecure"])
+	}
+	// The operator diagnostics are served by the listener that issues the
+	// credential that opens them.
+	if resp, err := client.Get(private.URL + "/api/admin/debug/memory"); err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		t.Fatalf("console debug memory = %v %v, want 200", resp, err)
+	} else {
+		resp.Body.Close()
 	}
 	statusResp, err := client.Get(private.URL + "/api/platform/session")
 	if err != nil {
