@@ -404,7 +404,27 @@ function finishGoogleLinkPrompt() {
   if (session) showApp(session);
   else showLogin();
 }
-function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
+// flash shows a transient status message. The operator console is a separate
+// shell from the customer app, so it carries its own banner: pick whichever one
+// is currently mounted, otherwise a platform save reports success into a
+// hidden container and the operator sees nothing.
+function flashTarget() {
+  const platform = $('#platform-shell');
+  if (platform && !platform.hidden) {
+    const box = $('#platform-flash');
+    if (box) return box;
+  }
+  return $('#flash');
+}
+function flash(message, kind = 'success') {
+  const box = flashTarget();
+  if (!box) return;
+  box.textContent = message;
+  box.className = `flash flash-${kind}`;
+  box.hidden = false;
+  clearTimeout(flash.timer);
+  flash.timer = setTimeout(() => box.hidden = true, 5000);
+}
 function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
 
 function loadTurnstileScript() {
@@ -771,7 +791,7 @@ async function selectPlatformTab(tab, { push = true } = {}) {
   try { await loadPlatformDashboard(tab); }
   catch (error) {
     if (tab === 'overview') setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'));
-    const errorEl = $(`#platform-${tab === 'overview' ? 'overview' : tab === 'logs' ? 'audit' : tab}-error`);
+    const errorEl = $(platformErrorElementID(tab));
     if (errorEl) errorEl.textContent = errorMessage(error, `Could not load ${tab}.`);
   }
 }
@@ -4215,6 +4235,22 @@ function googleAuthErrorMessage(code) {
   return messages[code] || 'Google sign-in could not be completed. Try again.';
 }
 
+// platformErrorElementID maps a platform tab to the element that renders its
+// load error. The ids are not uniform (overview/audit/mail differ from the tab
+// name), and a wrong guess silently swallows the failure, so keep them here.
+function platformErrorElementID(tab) {
+  const map = {
+    overview: '#platform-overview-error',
+    users: '#platform-users-error',
+    plans: '#platform-plans-error',
+    mail: '#platform-mail-settings-error',
+    logs: '#platform-audit-error',
+    legal: '#platform-legal-error',
+    settings: '#platform-settings-error',
+  };
+  return map[tab] || '';
+}
+
 async function loadPlatformDashboard(tab = state.platformTab) {
   if (tab === 'overview') {
     $('#platform-overview-error').textContent = '';
@@ -4343,8 +4379,20 @@ function applyAnalyticsProviderVisibility(provider) {
 }
 
 async function loadPlatformMail() {
-  const settings = await api('/api/platform/settings');
+  const errorEl = $('#platform-mail-settings-error');
   const form = $('#platform-mail-settings-form');
+  // Load the settings first and populate the form before touching anything
+  // cosmetic. If this throws, the caller reports it and the form keeps its
+  // existing values; never hide the From fields on a failed read.
+  const settings = await api('/api/platform/settings');
+  if (errorEl) { errorEl.textContent = ''; errorEl.style.color = ''; }
+  const locked = $('#platform-mail-secrets-locked');
+  if (locked) {
+    locked.hidden = !settings.mail?.secrets_locked;
+    locked.textContent = settings.mail?.secrets_locked
+      ? 'Mail secrets could not be decrypted. Check TILLER_MASTER_KEY or TILLER_MASTER_KEY_FILE. Sender fields below are unaffected.'
+      : '';
+  }
   form.elements.mail_provider.value = settings.mail?.provider || '';
   applyMailProviderVisibility(settings.mail?.provider || '');
   form.elements.mail_from.value = settings.mail?.from || '';
@@ -4357,7 +4405,22 @@ async function loadPlatformMail() {
   form.elements.mail_brevo_api_key.value = '';
   form.elements.mail_smtp_password.value = '';
   $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
-  const queue = await api('/api/platform/mail/queue');
+  // The queue card is independent of the settings form: a queue failure must
+  // not abort the field population above or hide it behind an error.
+  let queue;
+  try {
+    queue = await api('/api/platform/mail/queue');
+  } catch (queueError) {
+    $('#platform-mail-queued').textContent = '—';
+    $('#platform-mail-sent').textContent = '—';
+    $('#platform-mail-dead').textContent = '—';
+    $('#platform-mail-log').innerHTML = '';
+    const queueEl = $('#platform-mail-error');
+    if (queueEl) queueEl.textContent = errorMessage(queueError, 'Could not load the mail queue.');
+    return;
+  }
+  const queueEl = $('#platform-mail-error');
+  if (queueEl) queueEl.textContent = '';
   $('#platform-mail-queued').textContent = queue.queued;
   $('#platform-mail-sent').textContent = queue.sent_recent;
   $('#platform-mail-dead').textContent = queue.dead_recent;
@@ -4501,7 +4564,7 @@ $('#platform-plans-list').addEventListener('keydown', event => {
 $('#platform-legal-list').addEventListener('submit', async event => {
   const form = event.target.closest('.platform-legal-form'); if (!form) return;
   event.preventDefault(); const data = new FormData(form);
-  try { await api(`/api/platform/legal/${encodeURIComponent(form.dataset.slug)}`, { method: 'PUT', body: JSON.stringify({ title: data.get('title'), body: data.get('body') }) }); $('#platform-legal-error').textContent = 'Published.'; $('#platform-legal-error').style.color = 'var(--green)'; }
+  try { await api(`/api/platform/legal/${encodeURIComponent(form.dataset.slug)}`, { method: 'PUT', body: JSON.stringify({ title: data.get('title'), body: data.get('body') }) }); flash('Legal document published.'); }
   catch (error) { $('#platform-legal-error').style.color = ''; $('#platform-legal-error').textContent = errorMessage(error, 'Could not publish the document.'); }
 });
 function applyMailProviderVisibility(provider) {
@@ -4530,8 +4593,7 @@ document.querySelector('#platform-settings-form').addEventListener('submit', asy
   if (turnstileSecret) payload.turnstile_secret = turnstileSecret;
   try {
     await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    $('#platform-settings-error').textContent = 'Saved.';
-    $('#platform-settings-error').style.color = 'var(--green)';
+    flash('Platform settings saved.');
     await loadPlatformSettings();
   } catch (error) {
     $('#platform-settings-error').style.color = '';
@@ -4556,8 +4618,7 @@ $('#platform-mail-settings-form').addEventListener('submit', async event => {
   }
   try {
     await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    $('#platform-mail-settings-error').textContent = 'Saved.';
-    $('#platform-mail-settings-error').style.color = 'var(--green)';
+    flash('Mail settings saved.');
     await loadPlatformMail();
   } catch (error) {
     $('#platform-mail-settings-error').style.color = '';
@@ -4578,8 +4639,7 @@ $('#platform-analytics-form').addEventListener('submit', async event => {
   };
   try {
     await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    $('#platform-analytics-error').textContent = 'Saved.';
-    $('#platform-analytics-error').style.color = 'var(--green)';
+    flash('Analytics settings saved.');
     await loadPlatformAnalytics();
   } catch (error) {
     $('#platform-analytics-error').style.color = '';
