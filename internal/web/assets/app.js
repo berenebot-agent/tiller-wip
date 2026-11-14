@@ -57,7 +57,10 @@ const CAPTCHA_GATED_CONTROLS = {
 };
 // runtimePasskeysEnabled is true on a local install that has WebAuthn
 // configured (TILLER_PUBLIC_URL set). It gates the passkey sign-in button and
-// the Account passkeys card, mirroring hosted's auth-options payload.
+// the Account passkeys card, mirroring hosted's auth-options payload. It is
+// refreshed whenever the login card is painted (see refreshAuthOptions), not
+// just at boot: logout returns to the login card in-session with no reload, so
+// a boot-only flag would hide the button until the user refreshed.
 let runtimePasskeysEnabled = false;
 // accountEmailForDelete holds the signed-in email for the delete confirmation
 // modal (the modal requires it to be typed exactly). googleReauthConfirmedAt is
@@ -344,7 +347,7 @@ function authView(name) {
   $('#google-signin-button').hidden = !googleSignIn;
   const passkeyAvailable = hosted ? !!hostedAuthOptions.passkeys_enabled : !!runtimePasskeysEnabled;
   const passkeySignIn = name === 'login-form' && passkeyAvailable && !!window.__passkeySupported;
-  const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
+  const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) { passkeyBtn.hidden = !passkeySignIn; passkeyBtn.disabled = false; }
   const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) { passkeyStatus.textContent = ''; passkeyStatus.className = 'setting-tip'; }
   stopResendTicks();
   if (googleSignIn) setupGoogleSignIn();
@@ -362,7 +365,44 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); refreshAuthOptions(); }
+// refreshAuthOptions re-reads what the login card greys in or out (passkey and
+// Google sign-in, signup, Turnstile) and repaints it. The flags it refreshes
+// come from /api/runtime and /api/auth/options, which used to be fetched once in
+// initialise(). Logout returns to the login card without a reload, so that
+// boot-only fetch left the passkey button hidden (it is gated on
+// runtimePasskeysEnabled) until the page was refreshed. Runs after showLogin()
+// has painted, then repaints authView in place if the login card is on screen.
+// Declarations only — showLogin() calls this before they scroll past.
+let runtimeProbeDone = false;
+let authOptionsRefreshing = false;
+async function refreshAuthOptions() {
+  if (!runtimeProbeDone || authOptionsRefreshing) return;
+  authOptionsRefreshing = true;
+  try {
+    if (runtimeMode === 'hosted') {
+      // The platform console has its own sign-in form; /api/auth/options is a
+      // customer-app route and 404s there.
+      if (location.pathname.startsWith('/platform')) return;
+      try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+    } else {
+      let runtime;
+      try { runtime = await fetch('/api/runtime', { credentials: 'same-origin' }).then(res => res.json()); } catch { return; }
+      runtimeSetupRequired = Boolean(runtime.setup_required);
+      runtimeWizardEnabled = Boolean(runtime.wizard_enabled);
+      runtimePasskeysEnabled = Boolean(runtime.passkeys_enabled);
+    }
+    applyAccountTabVisibility();
+  } finally {
+    authOptionsRefreshing = false;
+  }
+  // Repaint only if the login card is still the visible surface: a user who
+  // typed their password and signed in while the probe was in flight must not
+  // have authView() yank the app off screen.
+  if ($('#login-shell').hidden || !$('#app').hidden || !$('#platform-shell').hidden) return;
+  const name = ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form','google-link-confirm-form'].find(id => { const el = $('#' + id); return el && !el.hidden; });
+  if (name) authView(name);
+}
 // The signed-in identity in the top bar is the shortcut into Settings →
 // Account. Account is hosted-only, so in self-hosted mode the control stays
 // disabled and renders as plain text rather than as a dead link.
@@ -4163,6 +4203,8 @@ async function setupAnalyticsConsent() {
       $('#login-submit').textContent = 'Sign in';
       // The platform console has its own sign-in form and its own session
       // endpoint; /api/auth/options is a customer-app route and 404s here.
+      // runtimeProbeDone is set below, after the probe resolves: showLogin()
+      // must not re-probe on top of boot.
       if (!location.pathname.startsWith('/platform')) {
         try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
       }
@@ -4172,6 +4214,7 @@ async function setupAnalyticsConsent() {
       runtimeWizardEnabled = Boolean(runtime.wizard_enabled);
       runtimePasskeysEnabled = Boolean(runtime.passkeys_enabled);
     }
+    runtimeProbeDone = true;
     applyAccountTabVisibility();
     // A first-run local instance shows the credential page instead of login;
     // skip the session probe entirely so a stale cookie cannot bounce to login.
