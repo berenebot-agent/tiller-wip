@@ -73,3 +73,34 @@ func TestRenderEncodesTokenInLink(t *testing.T) {
 		t.Fatalf("token was not URL-encoded in link:\n%s", rendered.HTML)
 	}
 }
+
+// TestRenderFooterIsNotSelfHosted guards the shared email footer. The outbox is
+// only constructed in hosted mode (see internal/server/server.go), so no
+// message it sends may describe the recipient as running a self-hosted
+// installation.
+func TestRenderFooterIsNotSelfHosted(t *testing.T) {
+	t.Parallel()
+	for _, msgType := range []string{
+		TypeVerifyEmail,
+		TypePasswordReset,
+		TypeEmailChangeConfirm,
+		TypeEmailChangeWarning,
+		TypeAPITokenCreated,
+	} {
+		t.Run(msgType, func(t *testing.T) {
+			rendered, ok := render(msgType, "https://router.example", "tok", map[string]string{
+				"new_email":  "new@example.com",
+				"token_name": "ci",
+			})
+			if !ok {
+				t.Fatalf("render reported unknown type %q", msgType)
+			}
+			if strings.Contains(strings.ToLower(rendered.HTML), "self-host") {
+				t.Fatalf("html footer describes a self-hosted product:\n%s", rendered.HTML)
+			}
+			if strings.Contains(strings.ToLower(rendered.Text), "self-host") {
+				t.Fatalf("text body describes a self-hosted product:\n%s", rendered.Text)
+			}
+		})
+	}
+}
