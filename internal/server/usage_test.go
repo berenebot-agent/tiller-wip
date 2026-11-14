@@ -193,100 +193,70 @@ func TestUsageTargetLastOutcome(t *testing.T) {
 	}
 }
 
-// TestRecordLastOutcomeNoAttempts verifies that a log row with no attempted
-// targets (e.g. model-not-found, translation error, client cancellation) does
-// not touch the in-memory outcome map.
-func TestRecordLastOutcomeNoAttempts(t *testing.T) {
+// TestRecordLastOutcomeTruthTable covers the per-target outcome map that drives
+// the Activity graph. Outcomes are keyed by provider model ID and record one
+// entry per *attempted* target: a failed attempt degrades that target, a
+// skipped target (never actually called) leaves it alone, and a row that
+// attempted nothing writes no entries at all.
+func TestRecordLastOutcomeTruthTable(t *testing.T) {
 	t.Parallel()
-	s := &Server{}
-	row := &logRow{httpStatus: 404, errorText: strPtr("model_not_found")}
-	s.recordLastOutcome(row)
-	s.lastOutcomeMu.RLock()
-	defer s.lastOutcomeMu.RUnlock()
-	if len(s.lastOutcome) != 0 {
-		t.Fatalf("recordLastOutcome wrote an outcome without any attempted target: %v", s.lastOutcome)
-	}
-}
-
-// TestRecordLastOutcomeFailedAttempt records a red outcome for the target that
-// was actually attempted and failed, even though no resolved target was set on
-// the row. This is the case where the original implementation silently dropped
-// the failure and left the dot grey.
-func TestRecordLastOutcomeFailedAttempt(t *testing.T) {
-	t.Parallel()
-	s := &Server{}
-	row := &logRow{
-		httpStatus: 502,
-		createdAt:  "2026-09-02T12:00:00Z",
-		attempts: []requestAttempt{
-			{providerModelID: "pm-failed", provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 502, failureClass: "upstream_unreachable"},
+	cases := []struct {
+		name string
+		row  *logRow
+		want map[string]lastOutcome
+	}{
+		{
+			name: "no attempts writes nothing",
+			row:  &logRow{httpStatus: 404, errorText: strPtr("model_not_found")},
+			want: map[string]lastOutcome{},
+		},
+		{
+			name: "failed attempt is recorded red",
+			row: &logRow{httpStatus: 502, createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{
+				{providerModelID: "pm-failed", provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 502, failureClass: "upstream_unreachable"},
+			}},
+			want: map[string]lastOutcome{"pm-failed": {Status: 502, IsSuccess: false}},
+		},
+		{
+			name: "skipped attempt is not recorded",
+			row: &logRow{httpStatus: 503, createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{
+				{providerModelID: "pm-skipped", provider: "main", model: "argus-5.3-codex-spark", result: "skipped", failureClass: "unavailable"},
+			}},
+			want: map[string]lastOutcome{},
+		},
+		{
+			name: "ordered fallback records every target",
+			row: &logRow{httpStatus: 200, createdAt: "2026-09-02T12:00:00Z", attempts: []requestAttempt{
+				{providerModelID: "pm-primary", provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 503, failureClass: "http_503"},
+				{providerModelID: "pm-backup", provider: "main", model: "backup-model", result: "success", httpStatus: 200},
+			}},
+			want: map[string]lastOutcome{"pm-primary": {Status: 503, IsSuccess: false}, "pm-backup": {Status: 200, IsSuccess: true}},
 		},
 	}
-	s.recordLastOutcome(row)
-	s.lastOutcomeMu.RLock()
-	defer s.lastOutcomeMu.RUnlock()
-	out, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-failed"]
-	if !ok {
-		t.Fatalf("expected failed target to be recorded: %v", s.lastOutcome)
-	}
-	if out.At == "" {
-		t.Fatal("expected a completion timestamp")
-	}
-	if out.Status != 502 {
-		t.Fatalf("status = %d, want 502", out.Status)
-	}
-	if out.IsSuccess {
-		t.Fatal("expected is_success=false for a failed attempt")
-	}
-}
-
-// TestRecordLastOutcomeSkippedAttempt verifies that a target that was skipped
-// (never actually called — unavailable or protocol mismatch) does not force a
-// red dot.
-func TestRecordLastOutcomeSkippedAttempt(t *testing.T) {
-	t.Parallel()
-	s := &Server{}
-	row := &logRow{
-		httpStatus: 503,
-		createdAt:  "2026-09-02T12:00:00Z",
-		attempts: []requestAttempt{
-			{providerModelID: "pm-skipped", provider: "main", model: "argus-5.3-codex-spark", result: "skipped", failureClass: "unavailable"},
-		},
-	}
-	s.recordLastOutcome(row)
-	s.lastOutcomeMu.RLock()
-	defer s.lastOutcomeMu.RUnlock()
-	if _, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-skipped"]; ok {
-		t.Fatalf("skipped target should not be recorded: %v", s.lastOutcome)
-	}
-}
-
-// TestRecordLastOutcomeOrderedFallback records per-target outcomes across an
-// ordered fallback chain. Target health is per-target: the failed primary is
-// recorded unhealthy even though the logical request succeeded via the
-// backup. Request health is a separate concept. The graph receives both
-// outcomes.
-func TestRecordLastOutcomeOrderedFallback(t *testing.T) {
-	t.Parallel()
-	s := &Server{}
-	row := &logRow{
-		httpStatus: 200,
-		createdAt:  "2026-09-02T12:00:00Z",
-		attempts: []requestAttempt{
-			{providerModelID: "pm-primary", provider: "main", model: "argus-5.3-codex-spark", result: "failed", httpStatus: 503, failureClass: "http_503"},
-			{providerModelID: "pm-backup", provider: "main", model: "backup-model", result: "success", httpStatus: 200},
-		},
-	}
-	s.recordLastOutcome(row)
-	s.lastOutcomeMu.RLock()
-	defer s.lastOutcomeMu.RUnlock()
-	failed, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-primary"]
-	if !ok || failed.IsSuccess || failed.Status != 503 {
-		t.Fatalf("failed primary must degrade target health: %v", s.lastOutcome)
-	}
-	success, ok := s.lastOutcomeSnapshot(database.LocalAccountID)["pm-backup"]
-	if !ok || !success.IsSuccess {
-		t.Fatalf("expected succeeding target green: %v", s.lastOutcome)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := &Server{}
+			s.recordLastOutcome(tc.row)
+			s.lastOutcomeMu.RLock()
+			defer s.lastOutcomeMu.RUnlock()
+			snap := s.lastOutcomeSnapshot(database.LocalAccountID)
+			if len(snap) != len(tc.want) {
+				t.Fatalf("recorded %d outcomes, want %d: %+v", len(snap), len(tc.want), snap)
+			}
+			for id, want := range tc.want {
+				got, ok := snap[id]
+				if !ok {
+					t.Fatalf("target %s was not recorded: %+v", id, snap)
+				}
+				if got.Status != want.Status || got.IsSuccess != want.IsSuccess {
+					t.Fatalf("%s = status %d success %v, want status %d success %v", id, got.Status, got.IsSuccess, want.Status, want.IsSuccess)
+				}
+				if got.At == "" {
+					t.Fatalf("%s has no completion timestamp", id)
+				}
+			}
+		})
 	}
 }
 

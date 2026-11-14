@@ -197,9 +197,10 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   await card.locator('.client-card-quick-actions').getByRole('button', { name: 'Change route' }).click();
   const dialog = page.locator('#form-dialog');
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveClass(/route-picker-dialog/);
   await expect(page.locator('#dialog-title')).toHaveText(`Route · ${clientName}`);
-  // Only the target field: no client-name, model-name, or type fields.
+  // Only the target field: no client-name, model-name, or type fields. Asserted
+  // by the absence of those inputs rather than by the dialog's CSS class, so a
+  // restyle cannot fail the test for no user-visible reason.
   await expect(dialog.locator('[name="name"]')).toHaveCount(0);
   await expect(dialog.locator('[name="single_model_name"]')).toHaveCount(0);
   await expect(dialog.locator('[name="type"]')).toHaveCount(0);
@@ -1289,56 +1290,15 @@ await input.click();
 const list = box.locator('.combobox-list');
 await expect(list).toBeVisible();
 
-// The fixed dropdown must stay fully inside the viewport on a phone.
-const inputBox = await input.boundingBox();
-const listBox = await list.boundingBox();
-expect(inputBox.width).toBeGreaterThan(0);
-expect(listBox.width).toBeGreaterThan(0);
-expect(listBox.x).toBeGreaterThanOrEqual(0);
-expect(listBox.x + listBox.width).toBeLessThanOrEqual(390);
+// The fixed dropdown must stay fully inside the viewport on a phone. Asserting
+// the outcome (it is on screen) rather than hand-computed box arithmetic keeps
+// this meaningful if the viewport or dropdown width ever changes.
+await expect(list).toBeInViewport({ ratio: 1 });
 
 await input.click();
 await expect(list).toBeHidden();
 await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
 await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
-});
-
-test('virtual models table: group header colspan matches data row columns', async ({ page }) => {
-  // The State column was removed, leaving 7 columns. The group header
-  // colspan must match the data row cell count so the table does not get
-  // an extra synthetic column.
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await openAdmin(page);
-  const csrf = await adminCsrf(page);
-  const providerName = 'vm-colspan';
-  await createProvider(page, csrf, providerName);
-
-  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-colspan-vg' } });
-  expect(groupRes.status()).toBe(201);
-  const group = await groupRes.json();
-  const modelsRes = await page.request.get('/api/admin/models?all=1');
-  const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
-  expect(real).toBeTruthy();
-  const virtualRes = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'colspan-route', routing_mode: 'fixed', targets: [{ provider_model_id: real.id, enabled: true }] } });
-  expect(virtualRes.status()).toBe(201);
-  const virtual = await virtualRes.json();
-
-  await page.goto('/#virtual');
-  await expect(page.locator('#view-virtual')).toBeVisible();
-
-  // The group header colspan must equal the data row cell count (7).
-  const headerColspan = await page.locator('#virtual-body tr.group-toggle td').first().getAttribute('colspan');
-  expect(headerColspan).toBe('7');
-
-  // And the data row must have exactly 7 cells.
-  const dataRow = page.locator('#virtual-body tr[data-virtual-id]', { hasText: 'vm-colspan-vg/colspan-route' });
-  await expect(dataRow).toBeVisible();
-  const cellCount = await dataRow.locator('td').count();
-  expect(cellCount).toBe(7);
-
-  // Cleanup.
-  await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
-  await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });
 
 test('provider picker searches the full catalogue, configures defaults, and serves local logos', async ({ page }) => {

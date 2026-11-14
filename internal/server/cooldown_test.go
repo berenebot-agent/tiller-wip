@@ -697,122 +697,112 @@ func TestCooldownRestartClearsState(t *testing.T) {
 	}
 }
 
-// TestCooldownDoesNotApplyToFixedVirtualRoute verifies that a failure through a
-// FIXED virtual model does not populate the shared cooldown state for the real
-// target, so a subsequent ordered-fallback route over the same target is not
-// skipped.
-func TestCooldownDoesNotApplyToFixedVirtualRoute(t *testing.T) {
+// TestCooldownOnlyAppliesToOrderedFallbackRoutes covers the scope rule for the
+// shared cooldown store: only an ordered-fallback virtual route may populate it.
+// A failure through a FIXED virtual route or a direct real-model route must
+// leave the target uncooled, so an ordered-fallback route over that same target
+// is still attempted.
+//
+// The second half is the part with teeth. Asserting "A was called twice" alone
+// would still pass if the cooldown gate were widened, because the cooldown store
+// is only *read* before a candidate on ordered-fallback routes. Routing the same
+// target through an ordered-fallback model afterwards is what actually observes
+// an incorrectly-populated store: if A were cooled, the harness client (which
+// reaches A via virtual/coding) would be served by B alone.
+func TestCooldownOnlyAppliesToOrderedFallbackRoutes(t *testing.T) {
 	t.Parallel()
-	var aCalls atomic.Int32
-	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
-			return
-		}
-		aCalls.Add(1)
-		http.Error(w, "fail", 500)
-	})
-	okB := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-b"}}})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
-	})
-	api, secret, _, app := cooldownTestHarness(t, failA, okB)
+	cases := []struct {
+		name       string
+		permission string // "virtual" (fixed routing) or "real" (direct route)
+		model      string
+		wantStatus int
+	}{
+		{name: "fixed virtual route", permission: "virtual", model: "fixed/single", wantStatus: 503},
+		{name: "direct real route", permission: "real", model: "provider-a/model-a", wantStatus: 500},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var aCalls int32
+			failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/models" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
+					return
+				}
+				atomic.AddInt32(&aCalls, 1)
+				http.Error(w, "fail", 500)
+			})
+			okB := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/v1/models" {
+					_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-b"}}})
+					return
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
+			})
+			api, harnessSecret, _, app := cooldownTestHarness(t, failA, okB)
 
-	// Create a FIXED virtual model over provider-a/model-a only.
-	var modelA string
-	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
-		t.Fatal(err)
-	}
-	status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "fixed"})
-	if status != 201 {
-		t.Fatalf("group: %d %v", status, payload)
-	}
-	groupID := payload["id"].(string)
-	status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": groupID, "name": "single", "routing_mode": "fixed", "targets": []any{map[string]any{"provider_model_id": modelA, "enabled": true}}})
-	if status != 201 {
-		t.Fatalf("fixed virtual: %d %v", status, payload)
-	}
-	fixedVirtualID := payload["id"].(string)
-	// The harness's client key id is not returned; look it up.
-	var clientKeyID string
-	if err := app.db.SQL.QueryRow(`SELECT id FROM client_keys WHERE name='cooldown client'`).Scan(&clientKeyID); err != nil {
-		t.Fatal(err)
-	}
-	status, payload, _ = api.request("PUT", "/api/admin/client-keys/"+clientKeyID+"/permissions", map[string]any{"defaults": []any{}, "permissions": []any{map[string]any{"kind": "virtual", "model_id": fixedVirtualID, "enabled": true}}})
-	if status != 204 {
-		t.Fatalf("permissions: %d %v", status, payload)
-	}
+			var realModelA string
+			if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&realModelA); err != nil {
+				t.Fatal(err)
+			}
 
-	// First fixed call fails (5xx upstream, surfaced as 503 since a fixed
-	// route has no fallback). It must NOT record cooldown for model-a.
-	resp, _ := clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "fixed/single", "messages": []any{}})
-	if resp.StatusCode != 503 {
-		t.Fatalf("fixed call should fail with 503, got %d", resp.StatusCode)
-	}
-	// Second fixed call must still hit A (no cooldown).
-	resp, _ = clientCall(t, api.base, secret, "/v1/chat/completions", map[string]any{"model": "fixed/single", "messages": []any{}})
-	if resp.StatusCode != 503 {
-		t.Fatalf("second fixed call should fail with 503, got %d", resp.StatusCode)
-	}
-	if aCalls.Load() != 2 {
-		t.Fatalf("fixed virtual should not be affected by cooldown, got %d calls to A", aCalls.Load())
-	}
-}
+			var clientID, clientSecret, permittedID string
+			if tc.permission == "virtual" {
+				// Reuse the harness client key and point it at a FIXED route.
+				if err := app.db.SQL.QueryRow(`SELECT id FROM client_keys WHERE name='cooldown client'`).Scan(&clientID); err != nil {
+					t.Fatal(err)
+				}
+				clientSecret = harnessSecret
+				status, payload, _ := api.request("POST", "/api/admin/virtual-groups", map[string]any{"name": "fixed"})
+				if status != 201 {
+					t.Fatalf("group: %d %v", status, payload)
+				}
+				status, payload, _ = api.request("POST", "/api/admin/virtual-models", map[string]any{"group_id": payload["id"].(string), "name": "single", "routing_mode": "fixed", "targets": []any{map[string]any{"provider_model_id": realModelA, "enabled": true}}})
+				if status != 201 {
+					t.Fatalf("fixed virtual: %d %v", status, payload)
+				}
+				permittedID = payload["id"].(string)
+			} else {
+				status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "direct", "type": "catalogue"})
+				if status != 201 {
+					t.Fatalf("create key: %d %v", status, payload)
+				}
+				clientID = payload["id"].(string)
+				clientSecret = payload["secret"].(string)
+				permittedID = realModelA
+			}
 
-// TestCooldownDoesNotApplyToDirectRealRoute verifies that a direct real-model
-// route never populates cooldown, so the same target used by an ordered-fallback
-// route is not skipped.
-func TestCooldownDoesNotApplyToDirectRealRoute(t *testing.T) {
-	t.Parallel()
-	var aCalls atomic.Int32
-	failA := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-a"}}})
-			return
-		}
-		aCalls.Add(1)
-		http.Error(w, "fail", 500)
-	})
-	okB := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/models" {
-			_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": []any{map[string]any{"id": "model-b"}}})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": "ok", "object": "chat.completion", "model": "model-b", "choices": []any{}})
-	})
-	api, secret, _, app := cooldownTestHarness(t, failA, okB)
+			status, payload, _ := api.request("PUT", "/api/admin/client-keys/"+clientID+"/permissions", map[string]any{
+				"defaults":    []any{},
+				"permissions": []any{map[string]any{"kind": tc.permission, "model_id": permittedID, "enabled": true}},
+			})
+			if status != 204 {
+				t.Fatalf("permissions: %d %v", status, payload)
+			}
 
-	var modelA string
-	if err := app.db.SQL.QueryRow(`SELECT id FROM provider_models WHERE upstream_model_id='model-a'`).Scan(&modelA); err != nil {
-		t.Fatal(err)
-	}
-	// Direct real-model client key.
-	status, payload, _ := api.request("POST", "/api/admin/client-keys", map[string]any{"name": "direct", "type": "catalogue"})
-	if status != 201 {
-		t.Fatalf("create key: %d %v", status, payload)
-	}
-	directID := payload["id"].(string)
-	directSecret := payload["secret"].(string)
-	status, payload, _ = api.request("PUT", "/api/admin/client-keys/"+directID+"/permissions", map[string]any{"defaults": []any{}, "permissions": []any{map[string]any{"kind": "real", "model_id": modelA, "enabled": true}}})
-	if status != 204 {
-		t.Fatalf("permissions: %d %v", status, payload)
-	}
+			// Both calls must reach A: a non-ordered-fallback route never cools.
+			for i := 0; i < 2; i++ {
+				resp, _ := clientCall(t, api.base, clientSecret, "/v1/chat/completions", map[string]any{"model": tc.model, "messages": []any{}})
+				if resp.StatusCode != tc.wantStatus {
+					t.Fatalf("call %d status = %d, want %d", i+1, resp.StatusCode, tc.wantStatus)
+				}
+			}
+			if got := atomic.LoadInt32(&aCalls); got != 2 {
+				t.Fatalf("non-ordered-fallback route must not populate cooldown, got %d calls to A", got)
+			}
 
-	resp, _ := clientCall(t, api.base, directSecret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{}})
-	if resp.StatusCode != 500 {
-		t.Fatalf("direct call should fail with 500, got %d", resp.StatusCode)
+			// Decisive check: the harness client reaches A through the
+			// ordered-fallback virtual/coding route. If the failure above had
+			// wrongly registered a cooldown, A would be skipped and only B hit.
+			resp, _ := clientCall(t, api.base, harnessSecret, "/v1/chat/completions", map[string]any{"model": "virtual/coding", "messages": []any{}})
+			if resp.StatusCode != 200 {
+				t.Fatalf("ordered-fallback request should be served, got %d", resp.StatusCode)
+			}
+			if got := atomic.LoadInt32(&aCalls); got != 3 {
+				t.Fatalf("ordered-fallback route must still attempt the uncooled target A, got %d calls to A", got)
+			}
+		})
 	}
-	resp, _ = clientCall(t, api.base, directSecret, "/v1/chat/completions", map[string]any{"model": "provider-a/model-a", "messages": []any{}})
-	if resp.StatusCode != 500 {
-		t.Fatalf("second direct call should fail with 500, got %d", resp.StatusCode)
-	}
-	if aCalls.Load() != 2 {
-		t.Fatalf("direct real route should not be affected by cooldown, got %d calls to A", aCalls.Load())
-	}
-	_ = secret
 }
 
 // TestCooldownNameLookupIgnoresExpiredDuplicate ensures an expired row with
