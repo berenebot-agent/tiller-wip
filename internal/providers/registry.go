@@ -306,6 +306,7 @@ type Model struct {
 	NativeProtocol  Protocol
 	// Tri-state capability flags: nil = unknown, non-nil = supported/unsupported.
 	SupportsTools, SupportsVision, SupportsReasoning, SupportsStructuredOutput *bool
+	SupportsTemperature                                                        *bool
 	// ReasoningCapabilities holds normalized selector metadata. nil means
 	// unknown; a non-nil struct describes the advertised selectors.
 	ReasoningCapabilities             *ReasoningCapabilities
@@ -605,6 +606,7 @@ func (r *Registry) discoverCommandCode(ctx context.Context, provider Instance) (
 			SupportsTools:            triBool(len(sp) > 0, slices.Contains(sp, "tools")),
 			SupportsVision:           triBool(len(item.Architecture.InputModalities) > 0, slices.Contains(item.Architecture.InputModalities, "image")),
 			SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")),
+			SupportsTemperature:      triBool(sp != nil, slices.Contains(sp, "temperature")),
 			InputModalities:          item.Architecture.InputModalities,
 			OutputModalities:         item.Architecture.OutputModalities,
 		})
@@ -1238,6 +1240,7 @@ func (r *Registry) discoverPaged(ctx context.Context, provider Instance, anthrop
 				SupportsVision:           triBool(len(arch.InputModalities) > 0, slices.Contains(arch.InputModalities, "image")),
 				SupportsReasoning:        triBool(len(sp) > 0, slices.Contains(sp, "reasoning")),
 				SupportsStructuredOutput: triBool(len(sp) > 0, slices.Contains(sp, "structured_outputs")),
+				SupportsTemperature:      triBool(sp != nil, slices.Contains(sp, "temperature")),
 				ReasoningCapabilities:    reasoningCaps,
 				InputModalities:          arch.InputModalities,
 				OutputModalities:         arch.OutputModalities,

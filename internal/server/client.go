@@ -430,6 +430,7 @@ type resolvedRoute struct {
 	// real target. nil when unknown.
 	ReasoningCapabilities *providers.ReasoningCapabilities
 	MaxOutputTokens       sql.NullInt64
+	SupportsTemperature   sql.NullInt64
 }
 
 func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requested string) (resolvedRoute, error) {
@@ -529,6 +530,7 @@ func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requeste
 		route.UpstreamModelID = resolved.UpstreamModelID
 		route.NativeProtocol = resolved.NativeProtocol
 		route.ReasoningCapabilities = resolved.ReasoningCapabilities
+		route.SupportsTemperature = resolved.SupportsTemperature
 		route.RequestedModel = clientModel
 		route.Virtual = false
 		route.Available = resolved.Available
@@ -577,6 +579,7 @@ func routeTargetToResolved(t store.RouteTarget) resolvedRoute {
 	target.Available = t.Available
 	target.CredentialsLocked = t.Locked
 	target.MaxOutputTokens = t.MaxOutputTokens
+	target.SupportsTemperature = t.SupportsTemperature
 	target.UpstreamModelID = t.UpstreamModelID
 	return target
 }
@@ -1018,6 +1021,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					s.recordSkippedAttempt(row, route, requestAttempt{providerModelID: candidate.ProviderModelID, provider: candidate.Provider.Name, model: candidate.UpstreamModelID, failureClass: "unsupported_feature", errorMessage: strPtrIfNonEmpty(fixedUpstreamErrorMessage("unsupported_feature")), latencyMs: time.Since(attemptStart).Milliseconds()}, i < len(candidates)-1)
 					continue
 				}
+			}
+			if candidate.SupportsTemperature.Valid && candidate.SupportsTemperature.Int64 == 0 {
+				attemptBody = omitTemperature(attemptBody)
 			}
 			endpoint, e := providers.Endpoint(candidate.Provider, target)
 			if e != nil {
