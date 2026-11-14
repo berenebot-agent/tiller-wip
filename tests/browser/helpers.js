@@ -111,7 +111,9 @@ function seedProvider(name, opts = {}) {
   const models = opts.models || ['mock-model'];
   const args = ['provider', '--db', db, '--name', name, '--models', models.join(',')];
   if (opts.type) args.push('--type', opts.type);
-  if (opts.baseURL) args.push('--base-url', opts.baseURL);
+  // Default to the mock upstream, as createProvider does: tests that send real
+  // traffic through a seeded provider must reach something.
+  args.push('--base-url', opts.baseURL || MOCK_BASE);
   if (opts.origin) args.push('--origin', opts.origin);
   const out = execFileSync(bin, args, { stdio: 'pipe' });
   return JSON.parse(out.toString('utf8'));
