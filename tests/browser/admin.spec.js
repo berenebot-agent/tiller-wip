@@ -1358,13 +1358,22 @@ test('provider picker searches the full catalogue, configures defaults, and serv
   await expect(dialog.locator('[data-credential-create]')).toBeHidden();
 
   // An OAuth subscription's upstream is not the operator's choice, so the
-  // wizard never shows a base URL field for one.
-  await expect(dialog.locator('[name="base_url"]')).toHaveCount(0);
-  await expect(dialog.getByLabel('Base URL')).toHaveCount(0);
+  // wizard never shows a base URL field for one. The input stays in the DOM
+  // (it carries the type's default upstream into the create request) but must
+  // not be visible or editable.
+  await expect(dialog.getByLabel('Base URL')).toBeHidden();
+  await expect(dialog.locator('[name="base_url"]')).not.toBeVisible();
 
+  await back();
+  await pickType('claude-subscription');
+  await expect(dialog.getByLabel('Base URL')).toBeHidden();
+  await expect(dialog.locator('#dialog-submit')).toHaveText('Connect with Claude Code Subscription');
+
+  // Picking a non-OAuth type afterwards brings the field back for real use.
   // Custom-endpoint type: base URL required and native-protocol controls exposed.
   await back();
   await pickType('generic-openai');
+  await expect(dialog.getByLabel('Base URL')).toBeVisible();
   await expect(dialog.locator('[name="base_url"]')).toHaveJSProperty('required', true);
   await expect(dialog.locator('[data-protocol-config]')).toBeVisible();
   await expect(dialog.locator('[data-protocol-config]')).not.toHaveAttribute('hidden');
