@@ -209,8 +209,12 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := s.mailer.Status()
+	// A locked secret cipher must not hide the public mail fields (provider,
+	// from address, from name, SMTP endpoint). Those are plaintext settings and
+	// are always returned; only secret_configured degrades.
 	mail, err := s.storeHandle().GetPlatformMailSettings(r.Context())
-	if err != nil {
+	mailSecretsLocked := errors.Is(err, store.ErrSecretsLocked)
+	if err != nil && !mailSecretsLocked {
 		adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
 		return
 	}
@@ -233,7 +237,7 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"hosted_signup_enabled": signup, "audit_retention_days": retention,
 		"prevent_search_indexing": preventSearchIndexing,
-		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "from_name": mail.FromName, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
+		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "from_name": mail.FromName, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured, "secrets_locked": mailSecretsLocked},
 		"google":                  map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
 		"turnstile":               map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
 		"analytics":               map[string]any{"enabled": analytics.Enabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
@@ -323,11 +327,12 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	defer s.platformSettingsMu.Unlock()
 	st := s.storeHandle()
 	currentMail, err := st.GetPlatformMailSettings(r.Context())
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, store.ErrSecretsLocked) {
 		adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
 		return
 	}
-	if err != nil {
+	mailSecretsLocked := errors.Is(err, store.ErrSecretsLocked)
+	if errors.Is(err, sql.ErrNoRows) {
 		currentMail = store.PlatformMailSettings{SMTPMode: "starttls"}
 	}
 	if input.MailProvider != nil {
@@ -462,6 +467,21 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	if hasPreventSearchIndexing && input.PreventSearchIndexing != nil {
 		preventSearchIndexing = *input.PreventSearchIndexing
+	}
+	// Secrets could not be decrypted, so currentMail carries empty secret fields.
+	// Writing them back would silently erase the stored API key or SMTP password.
+	// Public fields are plaintext and unaffected, so only the secret writes are
+	// suppressed, and the stored values are left untouched.
+	if mailSecretsLocked {
+		if input.MailResendAPIKey != nil {
+			currentMail.ResendAPIKey = store.SecretUnchanged
+		}
+		if input.MailBrevoAPIKey != nil {
+			currentMail.BrevoAPIKey = store.SecretUnchanged
+		}
+		if input.MailSMTPPassword != nil {
+			currentMail.SMTPPassword = store.SecretUnchanged
+		}
 	}
 	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, FromName: currentMail.FromName, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
 	if err := mailer.Validate(cfg); err != nil {
