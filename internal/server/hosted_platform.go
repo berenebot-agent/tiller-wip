@@ -387,7 +387,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	// The dashboard renders these as empty inputs with a "leave blank to keep
 	// current" hint, so any save of the form (changing only the sender name,
 	// say) would otherwise wipe the API key and report the secret as missing.
-	// An explicit clear remains possible by switching provider.
+	// Mail secrets are never cleared by a blank value; the store keeps them.
 	if input.MailSMTPPassword != nil && *input.MailSMTPPassword != "" {
 		currentMail.SMTPPassword = *input.MailSMTPPassword
 	}

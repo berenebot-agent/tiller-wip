@@ -368,8 +368,8 @@ func (m *smtpMailer) Send(ctx context.Context, message Message) (SendResult, err
 // fromAddress renders the From header value for a bare address plus an
 // optional display name. Resend accepts the full RFC 5322 `Name <addr>` string
 // in its from field, and SMTP needs it in the header. With an empty name the
-// bare address is returned unchanged. A name supplied by the operator that
-// already carries a display name ("Name <addr>") is honoured as given.
+// bare address is returned unchanged. The name is always quoted/encoded as a
+// display name by net/mail, never interpreted as an address.
 func fromAddress(addr, name string) string {
 	if name == "" {
 		return addr
