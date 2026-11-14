@@ -36,10 +36,16 @@ func (s *Server) passkeyUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// passkeyFinishBody bounds the body, admits it through the dedicated pre-auth
-// gate (never the inference gate) with a short absolute deadline, buffering the body so the WebAuthn library can
-// still parse it from a fresh reader. Without this the library reads
-// request.Body directly with no cap, deadline, or admission gate.
+// passkeyFinishBody bounds the body, admits it through an admission gate with a
+// short absolute deadline, and buffers the body so the WebAuthn library can still
+// parse it from a fresh reader. Without this the library reads request.Body
+// directly with no cap, deadline, or admission gate.
+//
+// The gate follows the principal: sign-in finish is anonymous and charges the
+// dedicated 8-slot pre-auth pool, while passkey registration and re-auth are
+// authenticated and charge that account's share of the inference gate. Charging
+// both to the pre-auth pool let an anonymous flood on the sign-in route refuse a
+// signed-in tenant's registration and re-auth (2026-11-14 review).
 func (s *Server) passkeyFinishBody(w http.ResponseWriter, r *http.Request) bool {
 	// The body is a JSON PublicKeyCredential. Requiring the JSON content type
 	// closes the same cross-site-form "JSON CSRF" surface decodeAuthJSON
@@ -48,11 +54,15 @@ func (s *Server) passkeyFinishBody(w http.ResponseWriter, r *http.Request) bool 
 		adminError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON.")
 		return false
 	}
-	if !s.preAuthBodyReads.acquire("") {
+	gate, key := &s.preAuthBodyReads, ""
+	if accountID, _ := r.Context().Value(accountKey).(string); accountID != "" {
+		gate, key = &s.bodyReads, accountID
+	}
+	if !gate.acquire(key) {
 		adminError(w, http.StatusServiceUnavailable, "body_read_busy", "The router is busy reading request bodies. Retry shortly.")
 		return false
 	}
-	defer s.preAuthBodyReads.release("")
+	defer gate.release(key)
 	r.Body = http.MaxBytesReader(w, r.Body, webauthnFinishMaxBytes)
 	var body []byte
 	if err := withBodyReadDeadlineFor(w, preAuthBodyReadDeadline, func() error {

@@ -13,6 +13,62 @@ import (
 	"github.com/tiller-router/tiller-router/internal/database"
 )
 
+// TestPasskeyFinishBodySelectsGateByPrincipal pins the 2026-11-14 review's last
+// finding: passkeyFinishBody charged the anonymous pre-auth pool for every
+// caller, so an unauthenticated flood on the sign-in finish route refused a
+// signed-in tenant's passkey registration and re-authentication. The gate now
+// follows the principal.
+func TestPasskeyFinishBodySelectsGateByPrincipal(t *testing.T) {
+	t.Parallel()
+	app, _ := newSecurityTestServer(t, config.Config{
+		TillerUser: "admin", TillerUserPassword: "correct horse",
+		DataDir: t.TempDir(), ListenAddr: ":8080",
+	})
+	finish := func(accountID string) (*httptest.ResponseRecorder, bool) {
+		rec := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "http://router.test/api/auth/account/passkeys/register/finish",
+			strings.NewReader(`{"id":"x"}`))
+		r.Header.Set("Content-Type", "application/json")
+		if accountID != "" {
+			r = r.WithContext(context.WithValue(r.Context(), accountKey, accountID))
+		}
+		return rec, app.passkeyFinishBody(rec, r)
+	}
+
+	// Saturate the anonymous pre-auth pool: an anonymous finish is refused, an
+	// authenticated one is still admitted.
+	for i := 0; i < maxConcurrentPreAuthBodyReads; i++ {
+		if !app.preAuthBodyReads.acquire("") {
+			t.Fatalf("pre-auth pool refused at %d", i)
+		}
+	}
+	if rec, ok := finish(""); ok || rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("anonymous finish with the pre-auth pool full = ok:%v code:%d, want refused 503", ok, rec.Code)
+	}
+	if _, ok := finish(database.LocalAccountID); !ok {
+		t.Fatal("authenticated finish was refused while only the anonymous pool was full")
+	}
+	for i := 0; i < maxConcurrentPreAuthBodyReads; i++ {
+		app.preAuthBodyReads.release("")
+	}
+
+	// Saturate the account's inference share: the authenticated finish is now
+	// refused, and the anonymous one is admitted again.
+	key := database.LocalAccountID
+	for i := 0; i < maxConcurrentBodyReadsPerAccount; i++ {
+		app.bodyReads.acquire(key)
+	}
+	if rec, ok := finish(key); ok || rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("authenticated finish with the account share full = ok:%v code:%d, want refused 503", ok, rec.Code)
+	}
+	if _, ok := finish(""); !ok {
+		t.Fatal("anonymous finish was refused while only an account's share was full")
+	}
+	for i := 0; i < maxConcurrentBodyReadsPerAccount; i++ {
+		app.bodyReads.release(key)
+	}
+}
+
 // TestAuthSurfaceDecoderTakesBodyGate pins the fix for the 2026-11-14 retest's
 // finding: the auth-surface decoder family (decodeJSONLimit) took no slot in
 // any admission gate, so authenticated account/passkey handlers — and the
