@@ -51,10 +51,20 @@ let runtimeWizardEnabled = false;
 // released again the moment a token arrives; expired/error callbacks re-lock
 // them. Views without a mounted widget are never affected, so deployments
 // without Turnstile keep their exact current behaviour.
+//
+// The platform console is "optional": its challenge is mounted from the
+// /api/platform/session 401 payload (the operator console never reads
+// /api/auth/options), so mountOptionalAuthCaptcha turns it on only when the
+// server reports it. Once mounted it behaves like any other gated view.
 const CAPTCHA_GATED_CONTROLS = {
   'signup-form': { action: 'signup', buttons: ['#signup-form button[type="submit"]', '#show-login-from-signup'] },
   'forgot-form': { action: 'recovery', buttons: ['#forgot-form button[type="submit"]', '#show-login-from-forgot'] },
+  'platform-login-form': { action: 'platform_login', optional: true, buttons: ['#platform-login-form button[type="submit"]'] },
 };
+// platformCaptcha holds the challenge settings the console's session probe
+// reports. Kept separate from hostedAuthOptions because the console does not
+// load (and must not assume) the customer-app auth-options payload.
+let platformCaptcha = { enabled: false, site_key: '' };
 // runtimePasskeysEnabled is true on a local install that has WebAuthn
 // configured (TILLER_PUBLIC_URL set). It gates the passkey sign-in button and
 // the Account passkeys card, mirroring hosted's auth-options payload. It is
@@ -353,7 +363,24 @@ function authView(name) {
   if (googleSignIn) setupGoogleSignIn();
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
-  showAuthCaptcha(action);
+  // Only the customer auth views own the challenge mount: clear it for them and
+  // leave the console's challenge alone (showAuthCaptcha('') would tear down a
+  // widget the console session probe just mounted).
+  if (!CAPTCHA_GATED_CONTROLS[name]?.optional) showAuthCaptcha(action);
+  syncAuthCaptchaGate();
+}
+// mountOptionalAuthCaptcha mounts the challenge for a view whose settings are
+// reported by the server (the platform console) rather than by
+// /api/auth/options. A session probe that reports nothing configured leaves the
+// view exactly as it was, so an installation without Turnstile is unaffected.
+function mountOptionalAuthCaptcha(name, settings) {
+  const config = CAPTCHA_GATED_CONTROLS[name];
+  if (!config?.optional) return;
+  const enabled = !!settings?.turnstile_enabled && !!settings?.turnstile_site_key;
+  platformCaptcha = { enabled, site_key: enabled ? String(settings.turnstile_site_key) : '' };
+  showAuthCaptcha(enabled ? config.action : '');
+  // The probe resolved after the view painted, so apply the gate now rather
+  // than waiting for the next submit to discover it.
   syncAuthCaptchaGate();
 }
 // UI_SESSION_HINT is a purely presentational, client-side flag: when set, the
@@ -500,10 +527,22 @@ function loadTurnstileScript() {
 }
 
 const AUTH_CAPTCHA_PENDING_HINT = 'Complete the security check to continue.';
+// captchaSettingsFor is the Turnstile configuration for an action: the customer
+// auth views read /api/auth/options, the platform console reads its session
+// probe. Synchronous, so a mount is decided before showAuthCaptcha yields.
+function captchaSettingsFor(action) {
+  if (action === 'platform_login') return platformCaptcha.enabled ? platformCaptcha : null;
+  return hostedAuthOptions.turnstile_enabled ? { enabled: true, site_key: hostedAuthOptions.turnstile_site_key } : null;
+}
+const captchaConfiguredFor = action => !!captchaSettingsFor(action);
 async function showAuthCaptcha(action) {
   const wrap = $('#auth-captcha-wrap');
   if (!wrap) return;
-  if (!hostedAuthOptions.turnstile_enabled || !action) {
+  const settings = action ? captchaSettingsFor(action) : null;
+  // Bumped before any await so a later mount invalidates an earlier one: a
+  // slow teardown must not wipe a widget mounted while it was awaiting.
+  const generation = ++captchaGeneration;
+  if (!settings || !action) {
     captchaGeneration++; captchaToken = ''; captchaAction = '';
     if (captchaWidgetID !== null && window.turnstile) window.turnstile.remove(captchaWidgetID);
     captchaWidgetID = null; $('#auth-captcha').replaceChildren(); wrap.hidden = true;
@@ -511,7 +550,6 @@ async function showAuthCaptcha(action) {
     return;
   }
   if (captchaAction === action && captchaWidgetID !== null) { wrap.hidden = false; syncAuthCaptchaGate(); return; }
-  const generation = ++captchaGeneration;
   captchaAction = action; captchaToken = ''; captchaWidgetID = null;
   if (window.turnstile && $('#auth-captcha').dataset.widget) window.turnstile.remove($('#auth-captcha').dataset.widget);
   $('#auth-captcha').replaceChildren(); delete $('#auth-captcha').dataset.widget;
@@ -523,7 +561,7 @@ async function showAuthCaptcha(action) {
     await loadTurnstileScript();
     if (generation !== captchaGeneration) return;
     captchaWidgetID = window.turnstile.render('#auth-captcha', {
-      sitekey: hostedAuthOptions.turnstile_site_key, action,
+      sitekey: settings.site_key, action,
       callback: token => { captchaToken = token; captchaAction = action; syncAuthCaptchaGate(); },
       'expired-callback': () => { captchaToken = ''; syncAuthCaptchaGate(); },
       'error-callback': () => { captchaToken = ''; syncAuthCaptchaGate(); },
@@ -572,7 +610,7 @@ function syncAuthCaptchaGate({ failed = false } = {}) {
 }
 
 function authCaptchaToken(action) {
-  if (!hostedAuthOptions.turnstile_enabled) return '';
+  if (!captchaConfiguredFor(action)) return '';
   if (captchaAction !== action || !captchaToken) {
     showAuthCaptcha(action);
     throw new Error('Complete the security check, then try again.');
@@ -581,7 +619,7 @@ function authCaptchaToken(action) {
 }
 
 function resetAuthCaptcha(action) {
-  if (!hostedAuthOptions.turnstile_enabled || captchaAction !== action) return;
+  if (!captchaConfiguredFor(action) || captchaAction !== action) return;
   captchaToken = '';
   if (captchaWidgetID !== null && window.turnstile) window.turnstile.reset(captchaWidgetID);
   syncAuthCaptchaGate();
@@ -838,23 +876,36 @@ $('#reset-form').addEventListener('submit', async event => { event.preventDefaul
 $('#platform-login-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
-  const hadChallenge = captchaAction === 'platform_login';
   try {
     const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({
       username: form.get('username'), password: form.get('password'),
-      captcha_token: hadChallenge ? authCaptchaToken('platform_login') : '',
+      // Mounted challenge ⇒ the gate holds this button until it is solved, so the
+      // token is present here; a failed submit is re-challenged in the catch.
+      captcha_token: authCaptchaToken('platform_login'),
     }) });
     state.csrf = session.csrf_token; setSessionHint(true); hideBoot();
     $('#login-shell').hidden = true; $('#platform-shell').hidden = false;
+    showPlatformExposure(session);
     await selectPlatformTab(platformTabFromHash(), { push: false });
   } catch (error) {
     showAuthError('platform-login-error', error, 'Platform login failed.');
-    if (error.code === 'captcha_required') await showAuthCaptcha('platform_login');
-  } finally {
-    if (hadChallenge) resetAuthCaptcha('platform_login');
+    if (error.code === 'captcha_required') await mountOptionalAuthCaptcha('platform-login-form', { turnstile_enabled: true, turnstile_site_key: platformCaptcha.site_key });
+    else if (error.code === 'captcha_rejected') resetAuthCaptcha('platform_login');
   }
 });
-$('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
+$('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); probePlatformLogin(); } };
+// probePlatformLogin asks the console what its login card needs to mount. The
+// probe always answers 401 by design, so this is the one place where a 401 is
+// expected; it never surfaces an error and never disturbs a challenge that is
+// already mounted (mountOptionalAuthCaptcha keeps an existing widget).
+async function probePlatformLogin() {
+  try {
+    const settings = await api('/api/platform/session/probe');
+    mountOptionalAuthCaptcha('platform-login-form', settings);
+  } catch (error) {
+    if (error?.data?.turnstile_enabled || error?.data?.turnstile_site_key) mountOptionalAuthCaptcha('platform-login-form', error.data);
+  }
+}
 
 const PLATFORM_TABS = ['overview', 'users', 'plans', 'mail', 'logs', 'legal', 'settings'];
 function platformTabFromHash() {
@@ -4213,6 +4264,10 @@ async function setupAnalyticsConsent() {
       // must not re-probe on top of boot.
       if (!location.pathname.startsWith('/platform')) {
         try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      } else {
+        // The console's challenge settings come from its own probe; the session
+        // probe below only reports them on the 401 path.
+        await probePlatformLogin();
       }
       await setupAnalyticsConsent();
     } else {
@@ -4238,7 +4293,12 @@ async function setupAnalyticsConsent() {
         $('#platform-shell').hidden = false;
         showPlatformExposure(session);
         await selectPlatformTab(platformTabFromHash(), { push: false });
-      } catch { showLogin(); }
+      } catch (error) {
+        showLogin();
+        // The console cannot read /api/auth/options, so the 401 probe is where
+        // it learns whether this deployment challenges console logins.
+        if (error.data?.turnstile_enabled) mountOptionalAuthCaptcha('platform-login-form', error.data);
+      }
       return;
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {

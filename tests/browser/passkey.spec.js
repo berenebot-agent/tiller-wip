@@ -465,31 +465,73 @@ test('Google-only user confirms with Google then adds their first passkey', asyn
 });
 
 
-test('platform login escalates to Turnstile only when the server requests it', async ({ page }) => {
+// The operator console is a separate shell: it never reads /api/auth/options
+// (that is a customer-app route), so its Turnstile widget is mounted from
+// /api/platform/session/probe. The gate is optional — with the probe reporting
+// nothing configured the console sign-in behaves exactly as before.
+async function mockPlatformLogin(page, { turnstile = true, submitStatus = 403, submitCode = 'captcha_required', submitOk = false } = {}) {
   await page.addInitScript(() => {
     window.__captchaActions = [];
+    window.__captchaSites = [];
     window.turnstile = {
-      render: (_selector, options) => { window.__captchaActions.push(options.action); options.callback('captcha-proof'); return 'widget'; },
+      render: (selector, options) => { window.__captchaActions.push(options.action); window.__captchaSites.push(options.sitekey); options.callback('captcha-proof'); return 'widget'; },
       reset: () => {}, remove: () => {},
     };
   });
   await page.route('**/api/runtime', route => route.fulfill({ json: { mode: 'hosted' } }));
-  await page.route('**/api/auth/options', route => route.fulfill({ json: { turnstile_enabled: true, turnstile_site_key: 'site-key' } }));
+  await page.route('**/api/platform/session/probe', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ authenticated: false, turnstile_enabled: turnstile, turnstile_site_key: turnstile ? 'console-site-key' : '' }),
+  }));
+  const attempts = [];
   await page.route('**/api/platform/session', async route => {
     if (route.request().method() === 'GET') return route.fulfill({ status: 401, json: { error: { code: 'unauthorized' } } });
-    const body = route.request().postDataJSON();
-    attempts.push(body);
-    return route.fulfill({ status: 403, json: { error: { code: 'captcha_required', message: 'Complete the security check.' } } });
+    attempts.push(route.request().postDataJSON());
+    if (submitOk) return route.fulfill({ status: 200, json: { authenticated: true, csrf_token: 'platform-csrf', platform_exposed: false, console_insecure: false } });
+    return route.fulfill({ status: submitStatus, json: { error: { code: submitCode, message: 'Rejected.' } } });
   });
-  const attempts = [];
+  return attempts;
+}
+
+test('platform login mounts the security check from the console probe and sends its token', async ({ page }) => {
+  const attempts = await mockPlatformLogin(page);
   await page.goto('/platform');
+  await expect(page.locator('#auth-captcha-wrap')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__captchaActions)).toEqual(['platform_login']);
+  // The console must use the site key the probe reported, not a customer key.
+  expect(await page.evaluate(() => window.__captchaSites)).toEqual(['console-site-key']);
+  await page.locator('#platform-login-form input[name=username]').fill('operator');
+  await page.locator('#platform-login-form input[name=password]').fill('test-password');
+  await page.locator('#platform-login-form button[type=submit]').click();
+  await expect.poll(() => attempts.length).toBe(1);
+  expect(attempts[0].captcha_token).toBe('captcha-proof');
+});
+
+test('platform login sends no token when the server reports no challenge', async ({ page }) => {
+  const attempts = await mockPlatformLogin(page, { turnstile: false, submitStatus: 401, submitCode: 'invalid_credentials' });
+  await page.goto('/platform');
+  await expect(page.locator('#platform-login-form')).toBeVisible();
+  await expect(page.locator('#auth-captcha-wrap')).toBeHidden();
+  expect(await page.evaluate(() => window.__captchaActions)).toEqual([]);
   await page.locator('#platform-login-form input[name=username]').fill('operator');
   await page.locator('#platform-login-form input[name=password]').fill('test-password');
   await page.locator('#platform-login-form button[type=submit]').click();
   await expect.poll(() => attempts.length).toBe(1);
   expect(attempts[0].captcha_token).toBe('');
+});
+
+test('a solved platform challenge is reused for the retry', async ({ page }) => {
+  const attempts = await mockPlatformLogin(page, { submitOk: true });
+  await page.goto('/platform');
+  await expect(page.locator('#platform-login-form')).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__captchaActions)).toEqual(['platform_login']);
+  await page.locator('#platform-login-form input[name=username]').fill('operator');
+  await page.locator('#platform-login-form input[name=password]').fill('test-password');
   await page.locator('#platform-login-form button[type=submit]').click();
-  await expect.poll(() => attempts.length).toBe(2);
-  expect(attempts[1].captcha_token).toBe('captcha-proof');
+  await expect.poll(() => attempts.length).toBe(1);
+  // The token is not burnt on success: the console must not re-mount the widget
+  // (or clear it) on the way into the dashboard.
+  expect(attempts[0].captcha_token).toBe('captcha-proof');
+  expect(await page.evaluate(() => window.__captchaActions)).toEqual(['platform_login']);
 });
