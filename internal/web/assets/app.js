@@ -2982,7 +2982,7 @@ function renderManagementTokens() {
     const status = !row.enabled ? 'Disabled' : row.expired ? 'Expired' : 'Active';
     const expires = !row.expires_at ? 'Never' : row.expired ? `Expired ${date(row.expires_at)}` : date(row.expires_at);
     const actions = row.environment_managed ? '<span class="meta-line">Environment-managed</span>' : `<div class="actions"><button class="btn btn-small btn-secondary" data-api-token-edit="${h(row.id)}">Edit</button><button class="btn btn-small btn-secondary" data-api-token-rotate="${h(row.id)}">Rotate</button><button class="btn btn-small btn-danger" data-api-token-delete="${h(row.id)}">Delete</button></div>`;
-    return `<tr><td><strong>${h(row.name)}</strong>${row.description ? `<span class="meta-line">${h(row.description)}</span>` : ''}</td><td>${managementScopeBadges(row.scopes)}</td><td><code class="secret-fingerprint">mt-tr-••••••••.${h(row.fingerprint)}</code></td><td><span class="meta-line">${date(row.created_at)}</span></td><td><span class="meta-line">${expires}</span></td><td><span class="meta-line">${row.last_used_at ? date(row.last_used_at) : 'Never'}</span></td><td><span class="meta-line">${status}</span></td><td>${actions}</td></tr>`;
+    return `<tr><td><strong class="token-name">${h(row.name)}</strong>${row.description ? `<span class="meta-line token-description">${h(row.description)}</span>` : ''}</td><td><div class="scope-chips">${managementScopeBadges(row.scopes)}</div></td><td><code class="secret-fingerprint">mt-tr-••••••••.${h(row.fingerprint)}</code></td><td><span class="meta-line">${date(row.created_at)}</span></td><td><span class="meta-line">${expires}</span></td><td><span class="meta-line">${row.last_used_at ? date(row.last_used_at) : 'Never'}</span></td><td><span class="token-status${status === 'Active' ? '' : ' token-status-off'}">${status}</span></td><td>${actions}</td></tr>`;
   }).join('');
 }
 
@@ -4768,8 +4768,8 @@ $('#platform-users-list').addEventListener('click', async event => {
     const passkeys = profile.passkeys || [];
     const list = $('#account-passkeys-list');
     list.innerHTML = passkeys.length
-      ? passkeys.map(p => `<div class="setting-row" data-passkey="${h(p.id)}"><span class="setting-label">${h(p.name)}<small class="meta-line">Added ${h(fmtPasskeyDate(p.created_at))} · Last used ${h(fmtPasskeyDate(p.last_used_at))}</small></span><div class="setting-control"><button class="btn btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button> <button class="btn btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
-      : '<p class="meta-line">No passkeys yet.</p>';
+      ? passkeys.map(p => `<div class="passkey-row" data-passkey="${h(p.id)}"><div class="passkey-row-main"><span class="passkey-row-name">${h(p.name)}</span><span class="passkey-row-meta">Added ${h(fmtPasskeyDate(p.created_at))} · Last used ${h(fmtPasskeyDate(p.last_used_at))}</span></div><div class="passkey-row-actions"><button class="btn btn-small btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button><button class="btn btn-small btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
+      : '<p class="passkey-empty">No passkeys yet.</p>';
     list.querySelectorAll('[data-passkey-rename]').forEach(btn => btn.addEventListener('click', async () => {
       const name = prompt('Name this passkey', btn.dataset.passkeyName || 'Passkey');
       if (name == null) return;
