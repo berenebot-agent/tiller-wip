@@ -180,8 +180,9 @@ passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
 single-use, short-lived, and hash-only at rest. Customer sessions and platform
 operator sessions use separate host-only Secure/HttpOnly/SameSite cookies and
 CSRF tokens. Account suspension immediately revokes customer sessions and
-blocks client-key traffic. Hosted detailed body logging is unavailable even if
-the account settings request attempts to enable it. Customer login and recovery
+blocks client-key traffic. Hosted detailed body logging is off by default and
+only ever captures when the account operator opts in (see *Detailed error
+logging* below). Customer login and recovery
 requests have in-memory per-IP budgets; login and recovery also use normalized-
 email keyed throttles. The per-email login failure lockout can temporarily block
 an account after repeated failed attempts regardless of source IP; this targeted
@@ -246,8 +247,17 @@ default — follow the account setting), **always** (capture bodies even when th
 account setting is off) or **never** (never capture them, even when the account
 setting is on). Both switches are off by default, so bodies are stored only
 where an administrator explicitly asked for them. A client set to *always* keeps
-capturing bodies after the account setting is turned off; hosted mode rejects
-*always* outright and captures no bodies at all.
+capturing bodies after the account setting is turned off.
+
+Both switches behave identically in local and hosted mode; hosted previously
+refused to capture bodies at all, which made a provider error with a terse
+message undebuggable for its own operator. Capture in hosted therefore requires
+an explicit opt-in from that account, and the privacy consequences are the
+operator's to accept: stored bodies contain prompt content, appear in the
+Activity detail views and CSV exports, and are retained under the client key's
+retention window. Turning the setting off stops new captures; it does not purge
+bodies already stored. Deleting the account removes them along with the rest of
+its Activity history.
 
 **Hosted quota and onboarding controls.** Hosted accounts are subject to plan
 entitlements (provider/client-key/virtual-model creation, concurrent streams,

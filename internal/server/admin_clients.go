@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
-	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -237,10 +236,6 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		bodyLogMode = strings.TrimSpace(*input.LogErrorBodies)
 		if !store.ValidBodyLogMode(bodyLogMode) {
 			adminError(w, 400, "invalid_body_log_mode", "Detailed error body logging must be inherit, always or never.")
-			return
-		}
-		if s.config.Mode == config.ModeHosted && bodyLogMode == store.BodyLogAlways {
-			adminError(w, http.StatusForbidden, "hosted_body_logging_disabled", "Detailed error logging is unavailable in hosted mode.")
 			return
 		}
 	}
