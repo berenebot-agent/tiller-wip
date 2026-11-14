@@ -3067,6 +3067,9 @@ async function loadAccount() {
     const googleOnlyDelete = noPassword && googleLinked;
     const hasPasskey = (profile.passkeys || []).length > 0 && !!profile.passkeys_enabled;
     const passkeyOnly = noPassword && hasPasskey && !googleLinked;
+    // A previous successful change collapses the password card to its
+    // confirmation; reopening the tab restores the editable form.
+    resetPasswordCard();
     $('#account-password-card').hidden = googleLinked;
     $('#account-password-auth-hint').textContent = '';
     $('#account-current-password-row').hidden = passkeyOnly;
@@ -3387,16 +3390,38 @@ $('#close-wizard').addEventListener('click', () => $('#wizard-dialog').close());
 $('#open-wizard').addEventListener('click', openWizard);
 $('#legal-back').addEventListener('click', () => { history.replaceState(null, '', '/login'); showLogin(); });
 
+// resetPasswordCard restores the editable change-password form. After a
+// successful change the card collapses to a green confirmation plus a
+// sign-in button, so the fields and the submit action have nothing left to do.
+function resetPasswordCard() {
+  const form = $('#account-password-form'); if (!form) return;
+  ['account-current-password-row', 'account-new-password-row'].forEach(id => { const el = $('#' + id); if (el) el.hidden = false; });
+  const submit = form.querySelector('button[type="submit"]'); if (submit) submit.hidden = false;
+  $('#account-password-signin').hidden = true;
+  const note = $('#account-password-error'); if (note) { note.textContent = ''; note.style.color = ''; }
+}
 $('#account-password-form').addEventListener('submit', async event => {
-  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); $('#account-password-error').textContent = '';
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const note = $('#account-password-error'); note.textContent = ''; note.style.color = '';
   try {
     // A passkey-only account confirms with an assertion instead of a password;
     // the one-use grant is spent by the password endpoint server-side.
     const currentPassword = $('#account-current-password-row').hidden ? '' : form.get('current_password');
     if ($('#account-current-password-row').hidden) await window.__confirmWithPasskey();
-    await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: form.get('new_password') }) }); formElement.reset(); flash('Password updated. Other sessions were signed out.');
+    await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: form.get('new_password') }) });
+    formElement.reset();
+    $('#account-current-password-row').hidden = true;
+    $('#account-passkey-reauth-row').hidden = true;
+    $('#account-new-password-row').hidden = true;
+    const submit = formElement.querySelector('button[type="submit"]'); if (submit) submit.hidden = true;
+    $('#account-password-signin').hidden = false;
+    note.style.color = 'var(--green)'; note.textContent = 'Password changed. You can sign in now.';
   }
-  catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
+  catch (error) { note.textContent = errorMessage(error, 'Could not update the password.'); }
+});
+// Signing in again is the point of a password change (other sessions were
+// signed out), so the confirmation's action button returns to the login card.
+$('#account-password-signin').addEventListener('click', async () => {
+  try { await api(runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session', { method: 'DELETE' }); } catch { /* already signed out */ } finally { showLogin(); }
 });
 $('#account-google-unlink').addEventListener('click', async () => {
   $('#account-google-error').textContent = '';
