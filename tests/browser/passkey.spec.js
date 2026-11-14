@@ -352,6 +352,44 @@ for (const enabled of [true, false]) {
   });
 }
 
+test('local passkey sign-in button survives an in-session logout', async ({ page }) => {
+  // Regression: the button is gated on a flag read from /api/runtime at boot.
+  // Logout returns to the login card without a reload, so a boot-only flag left
+  // the button hidden until the user refreshed the page. Sign in with a
+  // password, log out, and the button must still be there.
+  await installCredentialStub(page);
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: true }) }));
+  let signedIn = false;
+  const session = JSON.stringify({ authenticated: true, username: 'admin', csrf_token: 'local-csrf' });
+  await page.route('**/api/admin/session', route => {
+    if (route.request().method() === 'DELETE') { signedIn = false; return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }); }
+    if (route.request().method() === 'POST') { signedIn = true; return route.fulfill({ status: 200, contentType: 'application/json', body: session }); }
+    if (signedIn) return route.fulfill({ status: 200, contentType: 'application/json', body: session });
+    return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) });
+  });
+  await page.route('**/api/auth/onboarding', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ needs_onboarding: false }) }));
+  await page.route('**/api/admin/providers**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/client-keys**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/virtual-models**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/usage', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) }));
+  await page.route('**/api/admin/live', route => route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }));
+
+  await page.goto('/');
+  await expect(page.locator('#passkey-signin')).toBeVisible();
+  await page.locator('#login-form').getByLabel('Tiller username').fill('admin');
+  await page.locator('#login-form').getByLabel('Password').fill('correct horse');
+  // Not getByRole('button', { name: 'Sign in' }): the passkey button on this card
+  // is "Sign in with a passkey", so the loose name matches both.
+  await page.locator('#login-submit').click();
+  await expect(page.locator('#app')).toBeVisible();
+
+  await page.locator('#logout').click();
+  await expect(page.locator('#login-form')).toBeVisible();
+  // Repainted by the logout path itself, with no reload in between.
+  await expect(page.locator('#passkey-signin')).toBeVisible();
+  await expect(page.locator('#passkey-signin')).toBeEnabled();
+});
+
 test('local passkey sign-in performs the ceremony and enters the app', async ({ page }) => {
   await installCredentialStub(page);
   await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: true }) }));
