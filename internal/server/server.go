@@ -870,6 +870,7 @@ func (s *Server) Handler() http.Handler {
 	s.handleManage(mux, "POST /api/admin/notifications/test", "settings", auth.ScopeWrite, http.HandlerFunc(s.sendTestNotification))
 	s.handleManage(mux, "GET /api/admin/usage", "monitoring", auth.ScopeRead, http.HandlerFunc(s.usage))
 	s.handleManage(mux, "GET /api/admin/quota", "monitoring", auth.ScopeRead, http.HandlerFunc(s.quotaEndpoint))
+	mux.Handle("GET /api/admin/clients-view", s.requireAdmin(http.HandlerFunc(s.clientsView)))
 	mux.Handle("GET /api/admin/live", s.requireAdmin(http.HandlerFunc(s.live)))
 	mux.Handle("GET /api/admin/live/requests", s.requireAdmin(http.HandlerFunc(s.liveRequests)))
 	mux.Handle("POST /api/admin/live/requests/reconcile", s.requireAdmin(http.HandlerFunc(s.reconcileLiveRequests)))
