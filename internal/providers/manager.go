@@ -262,6 +262,7 @@ func toCatalogueModels(models []Model) []store.CatalogueModel {
 			SupportsVision:           m.SupportsVision,
 			SupportsReasoning:        m.SupportsReasoning,
 			SupportsStructuredOutput: m.SupportsStructuredOutput,
+			SupportsTemperature:      m.SupportsTemperature,
 			InputModalities:          m.InputModalities,
 			OutputModalities:         m.OutputModalities,
 		}
