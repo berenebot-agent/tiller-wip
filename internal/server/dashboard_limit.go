@@ -86,14 +86,19 @@ func isDashboardSessionProbe(r *http.Request) bool {
 // request and reports whether it may proceed, writing the refusal itself. The
 // live stream is admitted and released around the handler instead of being
 // counted, so an open tab does not spend the account's budget.
-func (s *Server) chargeDashboardBudget(w http.ResponseWriter, r *http.Request, accountID string) bool {
+//
+// The returned release func must be deferred by the caller around the downstream
+// handler: for the live stream it frees the concurrency slot, so it has to run
+// when the stream ends, not when admission returns. It is never nil.
+func (s *Server) chargeDashboardBudget(w http.ResponseWriter, r *http.Request, accountID string) (release func(), ok bool) {
+	noop := func() {}
 	if accountID == "" {
-		return true
+		return noop, true
 	}
 	// An identity probe must answer even with the budget spent: refusing it makes
 	// the console look signed out. See dashboardSessionProbes.
 	if isDashboardSessionProbe(r) {
-		return true
+		return noop, true
 	}
 	if isDashboardLive(r) {
 		key := "live\x00" + accountID
@@ -102,20 +107,19 @@ func (s *Server) chargeDashboardBudget(w http.ResponseWriter, r *http.Request, a
 		if !quota.Allowed {
 			w.Header().Set("Retry-After", "1")
 			writeRateLimited(w, "Too many live connections for this account.")
-			return false
+			return noop, false
 		}
-		defer s.dashboardLiveLimiter.releaseLive(key)
-		return true
+		return func() { s.dashboardLiveLimiter.releaseLive(key) }, true
 	}
 	quota := s.dashboardLimiter.take(accountID)
 	setRateLimitHeaders(w, quota)
 	if !quota.Allowed {
 		w.Header().Set("Retry-After", strconv.Itoa(quota.ResetSeconds))
 		writeBudgetExceeded(w, quota, "Too many requests for this account. Wait for the window to reset.")
-		return false
+		return noop, false
 	}
 	if !isDashboardHeavy(r) {
-		return true
+		return noop, true
 	}
 	// Heavy routes draw on a second, much tighter budget, so one runaway client
 	// cannot spend the account's whole allowance on table dumps alone.
@@ -123,9 +127,9 @@ func (s *Server) chargeDashboardBudget(w http.ResponseWriter, r *http.Request, a
 	if !heavy.Allowed {
 		w.Header().Set("Retry-After", strconv.Itoa(heavy.ResetSeconds))
 		writeBudgetExceeded(w, heavy, "This report was requested too often. Wait a moment and try again.")
-		return false
+		return noop, false
 	}
-	return true
+	return noop, true
 }
 
 func setRateLimitHeaders(w http.ResponseWriter, q windowQuota) {

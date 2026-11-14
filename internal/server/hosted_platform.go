@@ -500,22 +500,22 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		preventSearchIndexing = *input.PreventSearchIndexing
 	}
 	// Secrets could not be decrypted, so currentMail carries empty secret fields.
-	// Writing them back would silently erase the stored API key or SMTP password.
-	// Only the secrets actually being written are suppressed; the stored values
-	// are left untouched. Public fields are plaintext and unaffected.
-	if mailSecretsLocked {
-		if input.MailResendAPIKey != nil && *input.MailResendAPIKey != "" {
-			currentMail.ResendAPIKey = store.SecretUnchanged
-		}
-		if input.MailBrevoAPIKey != nil && *input.MailBrevoAPIKey != "" {
-			currentMail.BrevoAPIKey = store.SecretUnchanged
-		}
-		if input.MailSMTPPassword != nil && *input.MailSMTPPassword != "" {
-			currentMail.SMTPPassword = store.SecretUnchanged
-		}
+	// A new secret cannot be accepted safely in that state (it would sit beside
+	// credentials that cannot be read), so refuse it outright. Non-secret fields
+	// are still saved: blank mail secrets are never written (see
+	// SavePlatformSettings), so the stored ciphertext is left untouched.
+	if mailSecretsLocked && (nonEmptyString(input.MailResendAPIKey) || nonEmptyString(input.MailBrevoAPIKey) || nonEmptyString(input.MailSMTPPassword)) {
+		adminError(w, http.StatusConflict, "secrets_locked", "Mail credentials are locked because the master key is missing or does not match. Restore the key before changing mail secrets.")
+		return
 	}
 	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, FromName: currentMail.FromName, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
-	if err := mailer.Validate(cfg); err != nil {
+	validateCfg := cfg
+	if mailSecretsLocked {
+		// The real secrets are unreadable, so validate only the public fields.
+		// This stand-in is never stored or used to build a mailer.
+		validateCfg.ResendAPIKey, validateCfg.BrevoAPIKey = "locked", "locked"
+	}
+	if err := mailer.Validate(validateCfg); err != nil {
 		adminErrorDetail(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.", mailValidationReason(err))
 		return
 	}
@@ -530,7 +530,10 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	s.setPlatformAnalytics(analytics)
 	s.setPlatformPreventSearchIndexing(preventSearchIndexing)
-	if cfg.Provider == "" {
+	if mailSecretsLocked {
+		// cfg carries empty secrets; activating it would replace a working mailer
+		// with a credential-less one. Leave the running mailer as it is.
+	} else if cfg.Provider == "" {
 		s.mailer.Clear()
 	} else if err := s.mailer.Update(cfg); err != nil {
 		adminError(w, http.StatusInternalServerError, "internal_error", "Mail settings could not be activated.")
@@ -756,3 +759,5 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_deleted", ActorType: "platform", TargetType: "account", TargetID: accountID})
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func nonEmptyString(p *string) bool { return p != nil && *p != "" }
