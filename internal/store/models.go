@@ -31,16 +31,17 @@ type CatalogueModel struct {
 	SupportsVision           *bool
 	SupportsReasoning        *bool
 	SupportsStructuredOutput *bool
+	SupportsTemperature      *bool
 	InputModalities          []string
 	OutputModalities         []string
 	ReasoningCapabilities    json.RawMessage
 }
 
-const providerModelInsertColumns = "id,account_id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,origin,available,first_seen_at,last_seen_at,created_at,updated_at"
+const providerModelInsertColumns = "id,account_id,provider_id,upstream_model_id,display_name,context_length,max_output_tokens,native_protocol,supports_tools,supports_vision,supports_reasoning,supports_structured_output,input_modalities,output_modalities,reasoning_capabilities,supports_temperature,origin,available,first_seen_at,last_seen_at,created_at,updated_at"
 
-const providerModelInsertPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)"
+const providerModelInsertPlaceholders = "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)"
 
-const providerModelInsertArgs = 20
+const providerModelInsertArgs = 21
 
 // permissionBatchRows bounds the per-statement VALUES list when seeding
 // client_model_permissions for newly discovered models.
@@ -54,7 +55,7 @@ func providerModelArgs(modelID, accountID, providerID string, model CatalogueMod
 		nullableBool(model.SupportsTools), nullableBool(model.SupportsVision),
 		nullableBool(model.SupportsReasoning), nullableBool(model.SupportsStructuredOutput),
 		nullableJSON(model.InputModalities), nullableJSON(model.OutputModalities),
-		nullableRawJSON(model.ReasoningCapabilities),
+		nullableRawJSON(model.ReasoningCapabilities), nullableBool(model.SupportsTemperature),
 		origin, now, now, now, now,
 	}
 }
@@ -132,6 +133,7 @@ supports_tools=excluded.supports_tools,
 supports_vision=excluded.supports_vision,
 supports_reasoning=excluded.supports_reasoning,
 supports_structured_output=excluded.supports_structured_output,
+supports_temperature=excluded.supports_temperature,
 input_modalities=excluded.input_modalities,
 output_modalities=excluded.output_modalities,
 reasoning_capabilities=excluded.reasoning_capabilities,
