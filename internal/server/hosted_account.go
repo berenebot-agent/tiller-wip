@@ -79,7 +79,7 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.identity.ChangePasswordAfterReauthentication(r.Context(), session.User.ID, rawUserSessionToken(r), input.NewPassword); err != nil {
 		switch {
 		case errors.Is(err, identity.ErrWeakPassword), errors.Is(err, identity.ErrPasswordTooLong):
-			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
+			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 8 and 1024 bytes.")
 		case errors.Is(err, identity.ErrInvalidSession):
 			adminError(w, http.StatusUnauthorized, "unauthorized", "User authentication required.")
 		default:
