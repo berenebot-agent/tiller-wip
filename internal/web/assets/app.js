@@ -1998,7 +1998,9 @@ async function deleteVirtualModel(id) { const model = state.virtualModels.find(i
 async function loadClients() {
   const token = ++state.loadToken;
   const search = $('#client-search').value, group = $('#client-group-filter').value;
-  const [result, models, virtual, providers, templates] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200'), api('/api/admin/catalogue-templates')]);
+  // One request (one unit of the account's console budget) instead of five.
+  const view = await api(`/api/admin/clients-view?search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`);
+  const result = view.client_keys, models = view.models, virtual = view.virtual_models, providers = view.providers, templates = view.templates;
   if (token !== state.loadToken) return;
   state.clients = result.data; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data; state.templates = templates.data;
   renderClientGroupFilter();
