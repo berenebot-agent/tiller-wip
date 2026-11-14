@@ -162,8 +162,14 @@ func (s *Server) reconcileLiveRequests(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		IDs []string `json:"ids"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
-	if json.NewDecoder(r.Body).Decode(&input) != nil || len(input.IDs) > 1000 {
+	// The body goes through the same admission gate and read deadline as every
+	// other console write. A hand-rolled decoder here would let an authenticated
+	// tenant park bodies outside the gate (2026-11-14 review, vuln-0001).
+	if err := s.decodeAdminJSONLimit(w, r, &input, 128<<10); err != nil {
+		respondDecodeError(w, err)
+		return
+	}
+	if len(input.IDs) > 1000 {
 		adminError(w, 400, "invalid_request", "Supply at most 1000 tracked request IDs.")
 		return
 	}

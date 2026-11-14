@@ -1503,6 +1503,19 @@ func bodyGateKey(r *http.Request) string {
 	return "console"
 }
 
+// decodeAdminJSONLimit is decodeJSON with an explicit byte cap, for console
+// writes whose body is smaller than the admin default. It acquires the same
+// admission gate and inherits the same read deadline, so no console write can
+// sit outside them just because it wants a tighter cap.
+func (s *Server) decodeAdminJSONLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
+	key := bodyGateKey(r)
+	if !s.bodyReads.acquire(key) {
+		return errBodyReadBusy
+	}
+	defer s.bodyReads.release(key)
+	return decodeJSONBody(w, r, target, maxBytes, false)
+}
+
 func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
 	// Auth endpoints use this decoder, so require a JSON content type. Without
 	// it a cross-site HTML form can post an enctype=text/plain body that is
