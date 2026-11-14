@@ -94,7 +94,8 @@ type Config struct {
 	ListenAddr               string
 	TrustedProxies           []netip.Prefix
 	// MaxSignups caps the number of hosted accounts that self-service signup
-	// can create. 0 means no cap. Set with TILLER_MAX_SIGNUPS.
+	// can create. 0 means no cap. Set with TILLER_MAX_SIGNUPS. Best-effort: the
+	// check precedes account creation, so concurrent signups may slightly overshoot.
 	MaxSignups int
 	// MaxStreamDuration bounds one inference request end to end, including a
 	// streaming response. 0 means no limit. Defaults to 10 minutes in hosted

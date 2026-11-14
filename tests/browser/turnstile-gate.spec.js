@@ -65,7 +65,8 @@ test('signup submit stays disabled until the security check is solved', async ({
   await page.locator('#signup-form input[name=accept_terms]').check();
   await expect(page.locator('#signup-form input[name=email]')).toBeEnabled();
   await expect(submit).toBeDisabled();
-  await expect(page.locator('#show-login-from-signup')).toBeDisabled();
+  // Navigation is never gated.
+  await expect(page.locator('#show-login-from-signup')).toBeEnabled();
   await expect(page.locator('#auth-captcha-wrap .meta-line')).toHaveText('Complete the security check to continue.');
 
   // A locked click is inert: no request reaches the signup endpoint.
@@ -107,7 +108,7 @@ test('password recovery submit stays disabled until the security check is solved
   await expect.poll(() => renderedActions(page)).toEqual(['recovery']);
   await page.locator('#forgot-form input[name=email]').fill('owner@example.com');
   await expect(submit).toBeDisabled();
-  await expect(page.locator('#show-login-from-forgot')).toBeDisabled();
+  await expect(page.locator('#show-login-from-forgot')).toBeEnabled();
 
   await submit.click({ force: true });
   expect(recoveryRequests).toBe(0);
@@ -128,14 +129,14 @@ test('switching views re-locks the new page and releases the old one', async ({ 
   await expect(page.locator('#signup-form button[type=submit]')).toBeEnabled();
 
   // Recovery needs its own action scope, so the widget is re-rendered and the
-  // recovery page starts locked again — including its own "back" control.
+  // recovery submit starts locked again (navigation stays enabled).
   await page.click('#show-login-from-signup');
   await expect(page.locator('#login-form')).toBeVisible();
   await expect(page.locator('#login-form button[type=submit]')).toBeEnabled();
   await page.click('#show-forgot-password');
   await expect.poll(() => renderedActions(page)).toEqual(['signup', 'recovery']);
   await expect(page.locator('#forgot-form button[type=submit]')).toBeDisabled();
-  await expect(page.locator('#show-login-from-forgot')).toBeDisabled();
+  await expect(page.locator('#show-login-from-forgot')).toBeEnabled();
   await solveTurnstile(page);
   await expect(page.locator('#show-login-from-forgot')).toBeEnabled();
 
