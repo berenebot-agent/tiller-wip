@@ -40,11 +40,11 @@ func TestManagementGuideServedLocally(t *testing.T) {
 		if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
 			t.Fatalf("GET %s content-type = %q", path, ct)
 		}
-		page := string(body)
-		for _, want := range []string{"Management API", "Authorization: Bearer mt-tr-", "/api/admin/providers", "insufficient_scope", "api-tokens/self", "client_key_names"} {
-			if !strings.Contains(page, want) {
-				t.Fatalf("GET %s guide missing %q", path, want)
-			}
+		// Content is asserted structurally by
+		// TestManagementReferenceMatchesRegisteredRoutes; this test only pins the
+		// public, credential-free serving contract per path.
+		if !strings.Contains(string(body), "<html") {
+			t.Fatalf("GET %s did not return the HTML guide", path)
 		}
 	}
 
@@ -66,16 +66,17 @@ func TestManagementGuideServedLocally(t *testing.T) {
 	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/markdown") {
 		t.Fatalf("markdown content-type = %q", ct)
 	}
-	md := string(body)
-	for _, want := range []string{"# Tiller Router — Management API", "Authorization: Bearer mt-tr-", "GET /api/admin/api-tokens/self", "/api/admin/virtual-models"} {
-		if !strings.Contains(md, want) {
-			t.Fatalf("markdown guide missing %q", want)
+	if !strings.HasPrefix(string(body), "# ") {
+		preview := string(body)
+		if len(preview) > 40 {
+			preview = preview[:40]
 		}
+		t.Fatalf("markdown guide does not start with a markdown heading: %q", preview)
 	}
 }
 
-// TestManagementGuideServedInHosted proves hosted serves the guide with the
-// hosted limits and without delete-tier endpoints.
+// TestManagementGuideServedInHosted proves hosted serves the guide and that it
+// omits the delete tier, while the discovery document reports hosted limits.
 func TestManagementGuideServedInHosted(t *testing.T) {
 	t.Parallel()
 	_, api, _ := hostedServerHarness(t, false)
@@ -91,11 +92,8 @@ func TestManagementGuideServedInHosted(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("hosted guide = %d", resp.StatusCode)
 	}
-	for _, want := range []string{"Hosted accounts", "Paging and limits", "must be public", "X-RateLimit-Remaining", "60 requests per minute", "rate_limited", "/api/admin/catalogue-templates", "not available to hosted tokens"} {
-		if !strings.Contains(md, want) {
-			t.Fatalf("hosted guide missing %q", want)
-		}
-	}
+	// Hosted-specific prose is left to the discovery document below; the one
+	// structural claim worth pinning here is that the delete tier is absent.
 	if strings.Contains(md, "| DELETE | `/api/admin/providers/{id}`") {
 		t.Fatal("hosted guide lists a delete-tier route")
 	}

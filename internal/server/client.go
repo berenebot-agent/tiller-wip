@@ -799,6 +799,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	terminalPreflightClass := ""
 	oauthRefreshed := make(map[string]bool)
 	cooldownSeconds := 0
+	// Cooldown is scoped to ordered-fallback virtual routes. Fixed virtual routes
+	// and direct real-model routes never read the setting, so cooldownSeconds
+	// stays 0 for them and every cooldown call site below is inert. Keeping the
+	// route-kind decision in this single assignment means the call sites only test
+	// cooldownSeconds > 0; re-testing route.RoutingMode there would be dead code
+	// that looks meaningful.
 	if route.RoutingMode == "ordered_fallback" {
 		cooldownSeconds, _ = s.scope(r).GetFallbackCooldownSeconds(r.Context())
 	}
@@ -1114,7 +1120,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 					return
 				}
-				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
+				if cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
 					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
 				}
 				if !route.Virtual {
@@ -1251,10 +1257,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						}
 					}
 				}
-				// Cooldown applies only to ordered-fallback virtual models. Fixed
-				// virtual routes and direct real-model routes never populate the
-				// shared cooldown state.
-				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
+				// Cooldown applies only to ordered-fallback virtual models. The
+				// cooldownSeconds assignment above already enforces the route kind, so
+				// fixed virtual routes and direct real-model routes never reach here
+				// with a non-zero value.
+				if cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
 					cooldownMessage := fixedUpstreamErrorMessage("upstream_error")
 					if class == "free_tier_rejected" {
 						cooldownMessage = fixedUpstreamErrorMessage(class)
@@ -1358,7 +1365,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// A body-read error caused by the client ending the request is
 				// self-inflicted, not evidence the target is unhealthy: never
 				// cool it. Mirrors the network-error path above.
-				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
+				if cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
 					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
 				}
 				nonTranslationFailure = true
