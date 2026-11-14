@@ -83,10 +83,16 @@ type Config struct {
 	TillerPlatformAdminUser     string
 	TillerPlatformAdminPassword string
 	AdminCookieSecure           bool
-	AdminSessionTTL             time.Duration
-	DataDir                     string
-	ListenAddr                  string
-	TrustedProxies              []netip.Prefix
+	// ConsoleRequestsPerMinute overrides the per-account console request budget
+	// (env TILLER_CONSOLE_REQUESTS_PER_MINUTE). Zero keeps the built-in default.
+	// Self-hosted only: hosted mode rejects it so the budget stays a platform
+	// control. It exists for the browser suite, whose back-to-back UI traffic
+	// exceeds a budget sized for a person at a console.
+	ConsoleRequestsPerMinute int
+	AdminSessionTTL          time.Duration
+	DataDir                  string
+	ListenAddr               string
+	TrustedProxies           []netip.Prefix
 	// MaxSignups caps the number of hosted accounts that self-service signup
 	// can create. 0 means no cap. Set with TILLER_MAX_SIGNUPS.
 	MaxSignups int
@@ -356,6 +362,16 @@ func Load() (Config, error) {
 	}
 	if c.Mode == ModeHosted && c.DebugPprof && (strings.TrimSpace(c.TillerPlatformAdminUser) == "" || c.TillerPlatformAdminPassword == "") {
 		return Config{}, errors.New("TILLER_DEBUG_PPROF=true requires TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD in hosted mode")
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return Config{}, errors.New("TILLER_CONSOLE_REQUESTS_PER_MINUTE must be a positive integer")
+		}
+		if c.Mode == ModeHosted {
+			return Config{}, errors.New("TILLER_CONSOLE_REQUESTS_PER_MINUTE is not allowed in hosted mode")
+		}
+		c.ConsoleRequestsPerMinute = n
 	}
 	if raw := strings.TrimSpace(os.Getenv("TILLER_MAX_SIGNUPS")); raw != "" {
 		n, err := strconv.Atoi(raw)

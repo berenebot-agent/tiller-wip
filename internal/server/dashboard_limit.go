@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/tiller-router/tiller-router/internal/config"
 	"net/http"
 	"strconv"
 	"strings"
@@ -151,4 +152,14 @@ func writeRateLimited(w http.ResponseWriter, message string) {
 		"code":    "rate_limited",
 		"message": message,
 	}})
+}
+
+// consoleBudget is the per-account console request budget: the built-in default
+// unless a self-hosted operator overrides it (config rejects the override in
+// hosted mode).
+func consoleBudget(cfg config.Config) int {
+	if cfg.ConsoleRequestsPerMinute > 0 {
+		return cfg.ConsoleRequestsPerMinute
+	}
+	return dashboardRequestsPerMinute
 }
