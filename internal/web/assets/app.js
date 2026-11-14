@@ -2245,10 +2245,11 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const catalogueAccessField = !client && !onSaved ? `<label data-catalogue-access-field hidden>Catalogue access <select name="catalogue_access"><option value="custom">Custom — choose models after creating</option><option value="all">All models — every model in the current catalogue</option>${templates.map(t => `<option value="template:${h(t.id)}">Template · ${h(t.name)}</option>`).join('')}</select><small>${templates.length ? 'Saved catalogues are managed from Catalogue templates.' : 'No saved catalogues yet — choose Custom or All models.'}</small></label>` : '';
   // Settings only links to the catalogue screen for an existing Catalogue client.
   const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} · Manage models</button></div>` : '';
-  // Detailed error bodies are opt-in per client. Hosted mode never captures
-  // them, so the control is hidden there.
+  // Detailed error bodies are opt-in per client, in every mode: the control is
+  // only meaningful once the account's detailed error logging is on, so it is
+  // shown wherever the account allows it (see the settings Logging card).
   const bodyLog = client?.log_error_bodies || 'inherit';
-  const bodyLogField = runtimeMode === 'hosted' ? '' : `<fieldset class="client-body-log"><legend>Log error bodies</legend><div class="client-body-log-options">${[['inherit', 'Account default'], ['always', 'On'], ['never', 'Off']].map(([value, label]) => `<label><input type="radio" name="log_error_bodies" value="${value}" ${bodyLog === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>`;
+  const bodyLogField = `<fieldset class="client-body-log"><legend>Log error bodies</legend><div class="client-body-log-options">${[['inherit', 'Account default'], ['always', 'On'], ['never', 'Off']].map(([value, label]) => `<label><input type="radio" name="log_error_bodies" value="${value}" ${bodyLog === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>`;
   const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label>${bodyLogField}<label>Retention (days) <input autocomplete="off" name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
@@ -2277,7 +2278,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
       if (client) {
         payload.enabled = values.get('enabled') === 'on';
         payload.logging_enabled = values.get('logging_enabled') === 'on';
-        if (runtimeMode !== 'hosted') payload.log_error_bodies = values.get('log_error_bodies') || 'inherit';
+        payload.log_error_bodies = values.get('log_error_bodies') || 'inherit';
         payload.retention_days = Number(values.get('retention_days'));
         payload.type = values.get('type');
         if (payload.type === 'single') {

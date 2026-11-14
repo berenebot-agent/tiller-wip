@@ -20,10 +20,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	logErrorBodies := false
-	if s.config.Mode != config.ModeHosted {
-		logErrorBodies, err = sc.GetLogErrorBodies(r.Context())
-	}
+	logErrorBodies, err := sc.GetLogErrorBodies(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
@@ -83,10 +80,6 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sc := s.scope(r)
-	if s.config.Mode == config.ModeHosted && input.LogErrorBodies != nil && *input.LogErrorBodies {
-		adminError(w, http.StatusForbidden, "hosted_body_logging_disabled", "Detailed error logging is unavailable in hosted mode.")
-		return
-	}
 	if input.DefaultRetentionDays != nil && *input.DefaultRetentionDays < 1 {
 		adminError(w, 400, "invalid_retention", "Retention must be at least 1 day.")
 		return
