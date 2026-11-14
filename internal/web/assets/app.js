@@ -4079,7 +4079,7 @@ async function setupAnalyticsConsent() {
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
-      $('#verify-message').textContent = 'Choose a passphrase to finish verifying your email.';
+      $('#verify-message').textContent = 'Choose a password to finish verifying your email.';
       const verifyForm = $('#verify-form'); verifyForm.hidden = false;
       verifyForm.onsubmit = async event => {
         event.preventDefault(); $('#verify-error').textContent = '';
