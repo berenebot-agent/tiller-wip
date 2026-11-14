@@ -42,6 +42,12 @@ const (
 	// mid-read at once. Authenticated auth-surface requests charge their
 	// account's share of the inference gate instead.
 	maxConcurrentAuthBodyReads = 32
+	// maxConcurrentPlatformBodyReads bounds body reads on the dedicated platform
+	// (operator) listener. It is its own pool because the operator is
+	// authenticated without a tenant account: without a separate bucket an
+	// anonymous flood on the public listener would refuse the console's writes,
+	// and a console write must never depend on tenant-facing traffic.
+	maxConcurrentPlatformBodyReads = 8
 )
 
 // bodyReadDeadline is an absolute deadline for reading one request body,
