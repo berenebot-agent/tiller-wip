@@ -1397,6 +1397,11 @@ test('provider picker searches the full catalogue, configures defaults, and serv
   await expect(dialog.locator('#dialog-submit')).toHaveText('Connect with GitHub Copilot');
   await expect(dialog.locator('[data-credential-create]')).toBeHidden();
 
+  // An OAuth subscription's upstream is not the operator's choice, so the
+  // wizard never shows a base URL field for one.
+  await expect(dialog.locator('[name="base_url"]')).toHaveCount(0);
+  await expect(dialog.getByLabel('Base URL')).toHaveCount(0);
+
   // Custom-endpoint type: base URL required and native-protocol controls exposed.
   await back();
   await pickType('generic-openai');

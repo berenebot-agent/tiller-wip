@@ -35,12 +35,28 @@ async function setupRedirectOAuth(page, { statusRef }) {
 }
 
 async function openRedirectDialog(page) {
+  await openProviderSettings(page);
+  await page.locator('[data-provider-reconnect-btn]').click();
+}
+
+async function openProviderSettings(page) {
   await openAdmin(page);
   await page.locator('a[data-view="providers"]').first().click();
   await page.getByRole('button', { name: 'Browse codex-redirect models' }).click();
   await page.locator('#drawer-edit').click();
-  await page.locator('[data-provider-reconnect-btn]').click();
+  await expect(page.locator('#form-dialog')).toBeVisible();
 }
+
+test('subscription provider settings never show a base URL field', async ({ page }) => {
+  await setupRedirectOAuth(page, { statusRef: { value: 'pending' } });
+  await openProviderSettings(page);
+
+  // The OAuth provider fixes the upstream, so the field is noise in the form.
+  const dialog = page.locator('#form-dialog');
+  await expect(dialog.locator('[data-provider-reconnect-btn]')).toBeVisible();
+  await expect(dialog.locator('[name="base_url"]')).toHaveCount(0);
+  await expect(dialog.getByLabel('Base URL')).toHaveCount(0);
+});
 
 test('hosted redirect OAuth waits for the callback and closes on completion', async ({ page }) => {
   const statusRef = { value: 'pending' };
