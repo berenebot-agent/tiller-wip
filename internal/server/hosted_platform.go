@@ -108,6 +108,32 @@ func (s *Server) platformSessionStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.platformSessionPayload(r, session))
 }
 
+// platformLoginProbe is the unauthenticated companion to platformSessionStatus.
+// It always answers 401, and alongside the usual error body tells the console
+// whether this deployment challenges console logins, so the login card can
+// mount its Turnstile widget before the first submit. Only the public site key
+// is exposed; it is embedded in every page that renders a widget.
+//
+// The console has no access to /api/auth/options (that is a customer-app route),
+// so without this the client-side gate on platform_login could never mount.
+func (s *Server) platformLoginProbe(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusUnauthorized, "unauthorized", "Platform authentication required.")
+		return
+	}
+	enabled := settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != ""
+	siteKey := ""
+	if enabled {
+		siteKey = settings.TurnstileSiteKey
+	}
+	writeJSON(w, http.StatusUnauthorized, map[string]any{
+		"error":              map[string]any{"code": "unauthorized", "message": "Platform authentication required."},
+		"turnstile_enabled":  enabled,
+		"turnstile_site_key": siteKey,
+	})
+}
+
 func (s *Server) platformStats(w http.ResponseWriter, r *http.Request) {
 	accounts, err := s.identity.PlatformCounts(r.Context())
 	if err != nil {

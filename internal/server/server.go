@@ -624,6 +624,7 @@ func (s *Server) startLogPruner(ctx context.Context) {
 // PlatformHandler mounts it and the main listener answers 404.
 func (s *Server) registerPlatformRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/platform/session", s.platformLogin)
+	mux.HandleFunc("GET /api/platform/session/probe", s.platformLoginProbe)
 	mux.Handle("GET /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformSessionStatus)))
 	mux.Handle("DELETE /api/platform/session", s.requirePlatform(http.HandlerFunc(s.platformLogout)))
 	mux.Handle("GET /api/platform/stats", s.requirePlatform(http.HandlerFunc(s.platformStats)))
