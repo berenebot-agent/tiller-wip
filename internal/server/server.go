@@ -137,6 +137,7 @@ type Server struct {
 	// smaller gate for bodies read before authentication.
 	bodyReads        bodyReadGate
 	preAuthBodyReads bodyReadGate
+	authBodyReads    bodyReadGate
 	// testNotificationLimiter gates the manual test-delivery endpoint
 	// in hosted mode so a tenant cannot hammer arbitrary public HTTPS
 	// webhooks. Keyed by account id.
@@ -498,7 +499,7 @@ func New(cfg config.Config, db *database.DB, logger *slog.Logger, opts ...server
 			}
 		}
 	}
-	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, tokens: tokens, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]notificationCooldownEntry{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), platformGlobalLimiter: newLoginLimiter(20, 15*time.Minute, 15*time.Minute), providerRefreshLimiter: newLoginLimiter(10, 10*time.Minute, 10*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), emailChangeLimiter: newLoginLimiter(3, time.Hour, time.Hour), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementTokenSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), managementTokenAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), dashboardLimiter: newWindowLimiter(dashboardRequestsPerMinute, time.Minute), dashboardHeavyLimiter: newWindowLimiter(dashboardHeavyRequestsPerMinute, time.Minute), dashboardLiveLimiter: newWindowLimiter(dashboardLiveConcurrency, time.Minute), reauthLimiter: newLoginLimiter(reauthMaxFailures, reauthFailureWindow, reauthLockout), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), bodyReads: bodyReadGate{max: maxConcurrentBodyReads, perKey: maxConcurrentBodyReadsPerAccount}, preAuthBodyReads: bodyReadGate{max: maxConcurrentPreAuthBodyReads}, usageAgg: map[string]*usageAggEntry{}, usageCacheTTL: usageAggregateTTL}
+	s := &Server{config: cfg, db: db, store: st, secretCipher: options.cipher, clients: clients, tokens: tokens, sessions: sessions, identity: identityStore, authClient: authClient, googleVerifier: hostedauth.NewGoogleVerifier(authClient), turnstileVerifier: hostedauth.NewTurnstileVerifier(authClient), googleFlows: hostedauth.NewFlowStore(), googlePending: hostedauth.NewPendingSignupStore(), googleReauth: map[[32]byte]time.Time{}, linkAuth: map[[32]byte]time.Time{}, passkeyReauth: map[[32]byte]time.Time{}, mailer: mailManager, outbox: outbox, adminAccount: options.adminAccount, secretHasher: options.tokenHasher, providers: providers.NewManager(st, registry), oauthFlows: oauth.NewFlowStore(nil), oauthDevices: map[string]*oauthDeviceState{}, oauthPending: map[string]time.Time{}, logger: logger, assets: assets, notifyClient: notifyClient, notifyLastSent: map[string]notificationCooldownEntry{}, notifyInFlight: map[string]bool{}, notifyAdmittedByAccount: map[string]int{}, notifBudget: budgetFor(cfg.Mode), testNotificationLimiter: newLoginLimiter(1, hostedTestNotificationCooldown, hostedTestNotificationCooldown), loginLimiter: newLoginLimiter(5, 15*time.Minute, 15*time.Minute), platformGlobalLimiter: newLoginLimiter(20, 15*time.Minute, 15*time.Minute), providerRefreshLimiter: newLoginLimiter(10, 10*time.Minute, 10*time.Minute), setupLimiter: newLoginLimiter(20, time.Minute, time.Minute), wizardEnabled: cfg.Mode != config.ModeHosted && cfg.TillerUser == "" && cfg.TillerUserPassword == "", userLoginIPLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), userLoginEmailLimiter: newLoginLimiter(8, 15*time.Minute, 15*time.Minute), emailChangeLimiter: newLoginLimiter(3, time.Hour, time.Hour), signupLimiter: newLoginLimiter(5, time.Hour, time.Hour), signupEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryIPLimiter: newLoginLimiter(5, time.Hour, time.Hour), recoveryEmailLimiter: newLoginLimiter(5, time.Hour, time.Hour), authRateLimitHashKey: authRateLimitHashKey, clientSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), clientAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), managementTokenSelectorLimiter: newLoginLimiter(20, time.Minute, time.Minute), managementTokenAddressLimiter: newLoginLimiter(40, time.Minute, time.Minute), dashboardLimiter: newWindowLimiter(dashboardRequestsPerMinute, time.Minute), dashboardHeavyLimiter: newWindowLimiter(dashboardHeavyRequestsPerMinute, time.Minute), dashboardLiveLimiter: newWindowLimiter(dashboardLiveConcurrency, time.Minute), reauthLimiter: newLoginLimiter(reauthMaxFailures, reauthFailureWindow, reauthLockout), oauthStartLimiter: newLoginLimiter(10, time.Minute, time.Minute), oauthCallbackLimiter: newLoginLimiter(10, time.Minute, time.Minute), passkeyBeginLimiter: newLoginLimiter(30, time.Minute, time.Minute), backgroundCtx: context.Background(), lastOutcome: map[string]lastOutcome{}, liveHub: &liveHub{outcomeCh: make(chan outcomeEvent, liveOutcomeBuffer), activityCh: make(chan activityEvent, liveOutcomeBuffer), timings: liveTimings{debounce: liveDebounceInterval, idle: liveIdleInterval, sessionCheck: liveSessionCheckInterval}}, inflight: &inflightTracker{clientStates: map[string]inflightState{}, targetStates: map[string]inflightState{}}, cooldown: newCooldownStore(), bodyReads: bodyReadGate{max: maxConcurrentBodyReads, perKey: maxConcurrentBodyReadsPerAccount}, preAuthBodyReads: bodyReadGate{max: maxConcurrentPreAuthBodyReads}, authBodyReads: bodyReadGate{max: maxConcurrentAuthBodyReads}, usageAgg: map[string]*usageAggEntry{}, usageCacheTTL: usageAggregateTTL}
 	s.inflight.emit = s.liveHub.emitActivity
 	s.liveHub.snapshot = s.buildUsageSnapshot
 	s.quota = providerquota.NewPoller(s.providers.Registry().HTTPClient(), s.hydrateQuotaCredential)
@@ -924,7 +925,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct{ Username, Password string }
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -1516,14 +1517,29 @@ func (s *Server) decodeAdminJSONLimit(w http.ResponseWriter, r *http.Request, ta
 	return decodeJSONBody(w, r, target, maxBytes, false)
 }
 
-func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
-	// Auth endpoints use this decoder, so require a JSON content type. Without
-	// it a cross-site HTML form can post an enctype=text/plain body that is
-	// still valid JSON ("JSON CSRF"). decodeJSON intentionally does not impose
-	// this so admin/provider endpoints keep their broader accepted types.
+// decodeAuthJSON decodes an authentication-surface body (login, signup,
+// password reset, email change, passkey management, platform login) under an
+// admission gate. An authenticated request charges its account's share of the
+// inference gate; an unauthenticated one charges a separate auth pool, so
+// anonymous traffic can neither park unbounded bodies nor consume the capacity
+// inference depends on.
+//
+// Auth endpoints require a JSON content type: without it a cross-site HTML form
+// can post an enctype=text/plain body that is still valid JSON ("JSON CSRF").
+// decodeJSON intentionally does not impose that, so admin/provider endpoints
+// keep their broader accepted types.
+func (s *Server) decodeAuthJSON(w http.ResponseWriter, r *http.Request, target any, maxBytes int64) error {
 	if !jsonContentType(r.Header.Get("Content-Type")) {
 		return errors.New("request body must be valid JSON")
 	}
+	gate, key := &s.authBodyReads, ""
+	if accountID, _ := r.Context().Value(accountKey).(string); accountID != "" {
+		gate, key = &s.bodyReads, accountID
+	}
+	if !gate.acquire(key) {
+		return errBodyReadBusy
+	}
+	defer gate.release(key)
 	return decodeJSONBody(w, r, target, maxBytes, true)
 }
 
