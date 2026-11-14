@@ -337,7 +337,7 @@ function authView(name) {
   const passkeySignIn = name === 'login-form' && passkeyAvailable && !!window.__passkeySupported;
   const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
   const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) { passkeyStatus.textContent = ''; passkeyStatus.className = 'setting-tip'; }
-  clearResendCooldowns();
+  stopResendTicks();
   if (googleSignIn) setupGoogleSignIn();
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
@@ -547,31 +547,50 @@ async function resendVerification(email, target) {
 }
 function exposeResend(target, emailInput, messageTarget) {
   const button = $(target); if (!button) return;
-  button.hidden = false; showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : ''); button.onclick = async () => { button.disabled = true; try { await resendVerification($(emailInput).value, messageTarget); startResendCooldown(button); } catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); button.disabled = false; } };
+  button.hidden = false;
+  const onCaptchaDue = () => showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : '');
+  button.onclick = async () => {
+    const email = String($(emailInput).value || '');
+    button.disabled = true;
+    try { await resendVerification(email, messageTarget); markVerificationSent(email); syncResendButton(button, email, onCaptchaDue); }
+    catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); button.disabled = false; }
+  };
+  syncResendButton(button, String($(emailInput).value || ''), onCaptchaDue);
 }
-// startResendCooldown holds a resend button for 60s after a successful send so the
-// address is not hammered by repeat clicks. The server independently caps resends
-// at 5/hour per IP and per email, so this is purely a UX guard. authView() clears
-// any live timer and restores the button's original label when the view changes.
-const resendCooldowns = new Map();
-function startResendCooldown(button, seconds = 60) {
+// Verification resends are throttled for 60s per address so one click cannot
+// fire a burst of mail, and so the post-signup screen stays locked even though
+// the signup request already sent the first message. Deadlines are keyed by the
+// address (matching the server's per-email limit) and kept outside the DOM, so
+// switching auth views resumes the remaining time instead of restarting it.
+// The Turnstile widget renders RESEND_CAPTCHA_LEAD_SECONDS before the button
+// returns, giving the challenge time to solve so the next send is one click.
+const RESEND_COOLDOWN_MS = 60000;
+const RESEND_CAPTCHA_LEAD_SECONDS = 10;
+const resendDeadlines = new Map();
+const resendTicks = new Map();
+function resendKey(email) { return String(email || '').trim().toLowerCase(); }
+function markVerificationSent(email) { resendDeadlines.set(resendKey(email), Date.now() + RESEND_COOLDOWN_MS); }
+function resendSecondsLeft(email) { return Math.max(0, Math.ceil(((resendDeadlines.get(resendKey(email)) || 0) - Date.now()) / 1000)); }
+function resendLabel(button) { if (!button.dataset.resendLabel) button.dataset.resendLabel = button.textContent; return button.dataset.resendLabel; }
+function stopResendTick(button) {
   if (!button) return;
-  clearInterval(resendCooldowns.get(button));
-  const label = button.dataset.resendLabel || button.textContent;
-  button.dataset.resendLabel = label;
-  let left = seconds;
+  const timer = resendTicks.get(button);
+  if (timer) { clearInterval(timer); resendTicks.delete(button); }
+  delete button.dataset.resendCaptcha;
+  button.textContent = resendLabel(button);
+  button.disabled = false;
+}
+function stopResendTicks() { for (const button of [...resendTicks.keys()]) stopResendTick(button); }
+function syncResendButton(button, email, onCaptchaDue) {
+  if (!button) return;
+  const left = resendSecondsLeft(email);
+  resendLabel(button);
+  if (left <= 0) { stopResendTick(button); if (onCaptchaDue) onCaptchaDue(); return; }
   button.disabled = true;
   button.textContent = `Send again in ${left}s`;
-  const timer = setInterval(() => {
-    left -= 1;
-    if (left <= 0) { clearInterval(timer); resendCooldowns.delete(button); button.textContent = label; button.disabled = false; return; }
-    button.textContent = `Send again in ${left}s`;
-  }, 1000);
-  resendCooldowns.set(button, timer);
-}
-function clearResendCooldowns() {
-  resendCooldowns.forEach((timer, button) => { clearInterval(timer); if (button.dataset.resendLabel) button.textContent = button.dataset.resendLabel; button.disabled = false; });
-  resendCooldowns.clear();
+  if (left > RESEND_CAPTCHA_LEAD_SECONDS) delete button.dataset.resendCaptcha;
+  else if (onCaptchaDue && !button.dataset.resendCaptcha) { button.dataset.resendCaptcha = '1'; onCaptchaDue(); }
+  if (!resendTicks.has(button)) resendTicks.set(button, setInterval(() => syncResendButton(button, email, onCaptchaDue), 1000));
 }
 $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
@@ -585,7 +604,13 @@ $('#forgot-done-login').onclick = () => authView('login-form');
 function exposeSignupResend() {
   const button = $('#resend-signup-verification'); if (!button) return;
   button.hidden = false;
-  button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); startResendCooldown(button); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); button.disabled = false; } };
+  const onCaptchaDue = () => showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : '');
+  button.onclick = async () => {
+    button.disabled = true;
+    try { await resendVerification(signupEmail, '#signup-done-error'); markVerificationSent(signupEmail); syncResendButton(button, signupEmail, onCaptchaDue); }
+    catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); button.disabled = false; }
+  };
+  syncResendButton(button, signupEmail, onCaptchaDue);
 }
 $('#signup-form').addEventListener('submit', async event => {
   event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement);
@@ -594,6 +619,9 @@ $('#signup-form').addEventListener('submit', async event => {
     const captcha_token = authCaptchaToken('signup');
     await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), accept_terms: true, captcha_token }) });
     signupEmail = String(form.get('email') || '');
+    // The signup request itself queued the verification mail, so the inbox
+    // screen opens already counting down instead of offering a fresh send.
+    markVerificationSent(signupEmail);
     formElement.reset();
     $('#signup-done-message').textContent = 'If the address can receive mail, a verification message will arrive shortly.';
     authView('signup-done');
