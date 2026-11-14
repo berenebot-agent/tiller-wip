@@ -214,3 +214,36 @@ func TestSavePlatformMailBlankSecretKeepsStoredKey(t *testing.T) {
 		t.Fatalf("from name did not save: %q", got.FromName)
 	}
 }
+
+// TestSavePlatformAuthSecretsCanBeCleared guards the clear_google_client_secret
+// and clear_turnstile_secret flags: the handler blanks the value and the store
+// must persist that, unlike mail secrets where blank means "keep".
+func TestSavePlatformAuthSecretsCanBeCleared(t *testing.T) {
+	t.Parallel()
+	_, st := openStore(t)
+	ctx := context.Background()
+
+	proposal := store.PlatformSettingsProposal{
+		HostedSignupEnabled: true,
+		AuditRetentionDays:  30,
+		Auth: store.PlatformAuthSettings{
+			GoogleEnabled: true, GoogleClientID: "id", GoogleClientSecret: "g-secret",
+			TurnstileEnabled: true, TurnstileSiteKey: "site", TurnstileSecret: "t-secret",
+		},
+	}
+	if err := st.SavePlatformSettings(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+	proposal.Auth.GoogleClientSecret = ""
+	proposal.Auth.TurnstileSecret = ""
+	if err := st.SavePlatformSettings(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetPlatformAuthSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GoogleClientSecret != "" || got.TurnstileSecret != "" {
+		t.Fatalf("cleared secrets survived: google=%q turnstile=%q", got.GoogleClientSecret, got.TurnstileSecret)
+	}
+}
