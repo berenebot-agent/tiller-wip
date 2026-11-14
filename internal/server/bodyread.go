@@ -34,6 +34,14 @@ const (
 	// the inference gate, so an anonymous client can never consume the
 	// capacity inference depends on.
 	maxConcurrentPreAuthBodyReads = 8
+	// maxConcurrentAuthBodyReads bounds UNAUTHENTICATED auth-surface body reads
+	// (login, signup, password reset, platform login) in their own pool. It is
+	// sized above a realistic login burst because each of those bodies is
+	// capped at authRequestMaxBytes (8 KiB); its job is to keep anonymous
+	// bodies off the inference gate while still bounding how many may be
+	// mid-read at once. Authenticated auth-surface requests charge their
+	// account's share of the inference gate instead.
+	maxConcurrentAuthBodyReads = 32
 )
 
 // bodyReadDeadline is an absolute deadline for reading one request body,
