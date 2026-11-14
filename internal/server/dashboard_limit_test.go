@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -243,5 +244,40 @@ func TestDashboardBudgetExemptionCoversOnlySessionPaths(t *testing.T) {
 	}
 	if isDashboardSessionProbe(write) {
 		t.Fatal("a state-changing session call must still spend the account budget")
+	}
+}
+
+// TestClientsViewIsOneBudgetUnitAndMatchesTheStandaloneEndpoints proves the
+// Clients screen's combined read costs a single unit and returns exactly what
+// the five separate endpoints return.
+func TestClientsViewIsOneBudgetUnitAndMatchesTheStandaloneEndpoints(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+	app.dashboardLimiter = newWindowLimiter(20, time.Minute)
+
+	status, view, header := api.request("GET", "/api/admin/clients-view", nil)
+	if status != http.StatusOK {
+		t.Fatalf("clients-view = %d %v, want 200", status, view)
+	}
+	if got := header.Get("X-RateLimit-Remaining"); got != "19" {
+		t.Fatalf("clients-view remaining = %q, want 19 (one unit)", got)
+	}
+	for key, path := range map[string]string{
+		"client_keys":    "/api/admin/client-keys?limit=200&search=&group=",
+		"models":         "/api/admin/models?all=1",
+		"virtual_models": "/api/admin/virtual-models?limit=200",
+		"providers":      "/api/admin/providers?limit=200",
+		"templates":      "/api/admin/catalogue-templates",
+	} {
+		_, want, _ := api.request("GET", path, nil)
+		got, ok := view[key]
+		if !ok {
+			t.Fatalf("clients-view is missing %q", key)
+		}
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		if string(gotJSON) != string(wantJSON) {
+			t.Fatalf("%s differs from %s:\n got %s\nwant %s", key, path, gotJSON, wantJSON)
+		}
 	}
 }
