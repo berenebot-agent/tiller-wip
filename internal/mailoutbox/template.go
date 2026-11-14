@@ -169,7 +169,7 @@ func layout(d layoutData) string {
 	}
 	b.WriteString(`</td></tr>
 <tr><td style="padding:18px 32px 26px 32px;border-top:1px solid #e2e8ed;">
-<p style="margin:0;font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:12px;line-height:1.6;color:#66788b;">Tiller Router — your self-hosted AI model router.<br>You're receiving this because of activity on your account.</p>
+<p style="margin:0;font-family:'Segoe UI',Tahoma,Arial,sans-serif;font-size:12px;line-height:1.6;color:#66788b;">Tiller Router — AI model routing.<br>You're receiving this because of activity on your account.</p>
 </td></tr>
 </table>
 </td></tr>
