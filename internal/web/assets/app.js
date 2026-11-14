@@ -4767,8 +4767,17 @@ $('#platform-users-list').addEventListener('click', async event => {
     }
     return true;
   };
+  // Reauth with the current password reads the field and clears it straight
+  // away: browsers and password managers otherwise autofill this box as a
+  // sign-in form and leave the password sitting in the page.
+  const takePasskeyReauthPassword = () => {
+    const input = $('#account-passkeys-password');
+    const value = input ? input.value : '';
+    if (input) input.value = '';
+    return value;
+  };
   const passkeyReauth = async () => {
-    if (lastAccountProfile?.password_enabled) return { current_password: $('#account-passkeys-password').value };
+    if (lastAccountProfile?.password_enabled) return { current_password: takePasskeyReauthPassword() };
     if (lastAccountProfile?.google_linked && googleReauthValid()) {
       // Presentation only: the backend enforces the one-use, session-bound grant.
       googleReauthConfirmedAt = 0;
@@ -4784,6 +4793,9 @@ $('#platform-users-list').addEventListener('click', async event => {
     if (!enabled) { lastAccountProfile = null; return; }
     lastAccountProfile = profile;
     $('#account-passkeys-password-row').hidden = !profile.password_enabled;
+    // Never carry a typed password across a re-render.
+    const pwInput = $('#account-passkeys-password');
+    if (pwInput) pwInput.value = '';
     // A browser without WebAuthn cannot run any ceremony: hide Add and the
     // re-enable toggle rather than leaving controls that would fail, and say
     // why. Existing passkeys can still be listed and removed (plain HTTP).
