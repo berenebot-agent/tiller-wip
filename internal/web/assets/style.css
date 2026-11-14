@@ -672,12 +672,12 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
 @media(max-width:720px){.system-card .account-details{grid-template-columns:1fr;gap:2px 16px}.system-card .account-details dd{margin-bottom:8px}.account-usage{grid-template-columns:1fr}}
 
 /* Stage D: plan card, legal documents, setup wizard, app footer. */
-.stack-form label.legal-consent{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:1.45;color:var(--text-2);font-weight:400}
-.legal-consent input[type="checkbox"]{flex:none;width:14px;height:14px;margin:1px 0 0}
-.legal-consent a{color:var(--blue)}
-.legal-consent-copy{display:grid;gap:2px;min-width:0;line-height:1.45}
-.legal-consent-copy>span{color:var(--text-2)}
-.legal-consent-copy a{justify-self:start;font-weight:500;text-decoration:underline;text-underline-offset:2px}
+.stack-form label.legal-consent{display:flex;align-items:flex-start;gap:8px;margin-top:-4px;font-size:12px;line-height:1.45;color:var(--text-2);font-weight:400;cursor:pointer}
+.stack-form label.legal-consent input[type="checkbox"]{flex:none;align-self:flex-start;width:15px;height:15px;min-height:0;margin:1px 0 0;padding:0;border-radius:3px}
+.legal-consent a{color:var(--blue);font-weight:500;text-decoration:underline;text-underline-offset:2px}
+.legal-consent-copy{display:block;min-width:0;line-height:1.45;padding-top:1px}
+.legal-consent-copy>span{display:inline;color:var(--text-2)}
+.legal-consent-copy a+a{margin-left:0}
 .collection-notice{font-size:11px;line-height:1.5;color:var(--muted);border:1px solid var(--line);border-radius:var(--r);padding:6px 10px;margin:4px 0}
 .google-signin-button{display:flex;justify-content:center;min-height:44px}
 .google-signin-button iframe,.google-signin-button>div{width:100%!important}
@@ -824,6 +824,7 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
 .login-brand a{display:flex;align-items:center;gap:10px;color:inherit;text-decoration:none}
 .stack-form h2{margin:0;color:var(--ink);font:600 var(--fs-xl)/1.3 var(--sans)}
 .stack-form p{margin:0;color:var(--text-2);font-size:var(--fs)}
+.stack-form>button.btn-link,#signup-done>button.btn-link,#forgot-done>button.btn-link,#verify-panel>button.btn-link{justify-self:center;margin-top:2px;color:var(--blue);font-size:12px}
 .stack-form input:focus,.dialog-fields input:focus,.dialog-fields select:focus,.dialog-fields textarea:focus,.setting-control input:focus,.combobox input[type="text"]:focus,.confirm-type input:focus,.export-range-fields input:focus{border-color:var(--blue);outline:0;box-shadow:0 0 0 3px rgba(37,113,176,.16)}
 .form-error:empty{display:none}
 .dialog-close:hover{background:var(--sunken);color:var(--ink)}
