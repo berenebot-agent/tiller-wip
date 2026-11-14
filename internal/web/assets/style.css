@@ -781,6 +781,7 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
 @media(max-width:720px){.platform-tabs{margin-right:-12px;padding-right:12px}.platform-tab{padding:10px 12px}.platform-metric-strip{grid-template-columns:repeat(2,minmax(0,1fr))}.platform-metric-strip .metric:nth-child(2){border-right:0}.platform-metric-strip .metric:nth-child(-n+2){border-bottom:1px solid var(--line)}.platform-mail-grid{grid-template-columns:1fr}.platform-mail-grid .system-card:first-child{grid-column:auto}}
 .auth-captcha{margin:12px 0;display:grid;justify-items:center;gap:4px}
 .auth-captcha .meta-line{text-align:center}
+.auth-captcha .meta-line.is-error{color:var(--red)}
 #auth-captcha{min-height:0}
 .platform-login-banner{display:grid;gap:2px;margin:0;padding:12px 14px;background:var(--red);color:#fff;border-radius:var(--r)}
 .platform-login-banner strong{font:700 15px/1.2 var(--sans);letter-spacing:.02em;color:#fff}
