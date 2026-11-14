@@ -198,3 +198,45 @@ test('a rejected mail save is visible on the platform console', async ({ page })
   await expect(banner).toContainText('brevo API key is required');
   await expect(page.locator('#platform-flash.flash-error')).toBeVisible();
 });
+
+test('saving mail settings submits while the SMTP branch is inactive', async ({ page }) => {
+  // Regression: the SMTP port input is type=number with min=1. Hidden-and-
+  // still-enabled, it kept the form invalid and the browser refused to submit,
+  // so a Brevo save sent no request at all and showed no feedback.
+  const puts = [];
+  const settings = {
+    hosted_signup_enabled: true,
+    audit_retention_days: 30,
+    mail: { provider: 'brevo', from: 'tiller@example.com', from_name: 'Tiller', smtp_host: '', smtp_port: 0, smtp_username: '', smtp_mode: 'starttls', configured: true, secret_configured: true },
+  };
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'hosted' }) }));
+  await page.route('**/api/analytics/options', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: false }) }));
+  await page.route('**/api/platform/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true, csrf_token: 'csrf-test', expires_at: '2099-01-01T00:00:00Z' }) }));
+  await page.route('**/api/platform/stats', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ usage_available: false, accounts: {} }) }));
+  await page.route('**/api/platform/mail/queue', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ queued: 0, sent_recent: 0, dead_recent: 0, log: [] }) }));
+  await page.route('**/api/platform/settings', route => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      puts.push(body);
+      Object.assign(settings.mail, { from: body.mail_from, from_name: body.mail_from_name, provider: body.mail_provider });
+      return route.fulfill({ status: 204, body: '' });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) });
+  });
+
+  await page.goto('/platform#mail');
+  const form = page.locator('#platform-mail-settings-form');
+  await expect(form).toBeVisible();
+
+  // The SMTP branch is inactive: hidden and disabled, so it cannot block submit.
+  await expect(form.locator('[name="mail_smtp_port"]')).toBeHidden();
+  await expect(form.locator('[name="mail_smtp_port"]')).toBeDisabled();
+
+  await form.locator('[name="mail_from"]').fill('tiller@xiat.net');
+  await form.locator('[name="mail_from_name"]').fill('Tiller Router');
+  await form.getByRole('button', { name: 'Save mail settings' }).click();
+
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0]).toMatchObject({ mail_provider: 'brevo', mail_from: 'tiller@xiat.net', mail_from_name: 'Tiller Router' });
+  await expect(page.locator('#platform-flash')).toHaveText('Mail settings saved.');
+});
