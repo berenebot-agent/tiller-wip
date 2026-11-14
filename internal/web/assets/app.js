@@ -3732,7 +3732,7 @@ async function ensureActivityGraph() {
   }
 }
 // Activity has two panels: Live (graph + live requests) and History (the
-// searchable request log). The tab lives in the hash (#activity/history) so
+// request log). The tab lives in the hash (#activity/history) so
 // deep links and the back button work like the Settings tabs.
 let activityTab = 'live';
 function showActivityTab(tab) {
