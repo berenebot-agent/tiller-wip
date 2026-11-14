@@ -901,8 +901,11 @@ const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github
 function providerQuotaDataHTML(provider) {
   if (!quotaProviderTypes.includes(provider.type)) return '';
   const snap = state.providerQuota?.[provider.id];
-  if (!snap) return '<p class="provider-quota-status">Quota: loading…</p>';
-  if (!snap.available) return '<p class="provider-quota-status">Quota unavailable</p>';
+  const status = state.providerQuotaStatus?.[provider.id] || {};
+  // Not-connected is a pre-condition, not a failure: the provider exists but
+  // the OAuth sign-in (or API key) has not supplied a credential yet.
+  if (!snap || snap.reason === 'not connected' || status.not_connected) return '<p class="provider-quota-status">Quota: connect to see usage</p>';
+  if (!snap.available) return `<p class="provider-quota-status">${h(quotaUnavailableLabel(snap.reason))}</p>`;
   const windows = snap.windows || [];
   if (!windows.length) return '<p class="provider-quota-status">No quota reported</p>';
   const rows = windows.map(w => {
@@ -925,6 +928,19 @@ function providerQuotaDataHTML(provider) {
   return `<div class="provider-quota">${rows.slice(0, inline).join('')}${rows.length > inline ? `<details><summary>${rows.length - inline} more limits</summary>${rows.slice(inline).join('')}</details>` : ''}</div>`;
 }
 
+// quotaUnavailableLabel turns the poller's reason into short card copy. The
+// reason explains why a check produced nothing, which is what distinguishes a
+// transient upstream blip from a credential the provider rejected.
+function quotaUnavailableLabel(reason) {
+  switch (reason) {
+    case 'credentials unavailable': return 'Quota: sign in again to see usage';
+    case 'quota endpoint unavailable': return 'Quota unavailable — retrying';
+    case 'quota format unavailable': return 'Quota unavailable';
+    case 'no quota adapter': return 'Quota unavailable';
+    default: return 'Quota unavailable';
+  }
+}
+
 // Keep successful data age distinct from the time of a failed poll.
 function quotaAge(when) {
   const elapsed = Math.max(0, Math.floor((Date.now() - new Date(when).getTime()) / 60000));
@@ -941,6 +957,7 @@ function providerQuotaHTML(provider) {
   const lastSuccess = status.last_success_at || (snapshot?.available ? snapshot.fetched_at : null);
   const age = lastSuccess ? 'last updated ' + quotaAge(lastSuccess) : (status.last_attempt_at ? 'checked ' + quotaAge(status.last_attempt_at) : 'not checked yet');
   const label = status.refreshing ? 'Refreshing · ' + age
+    : status.not_connected || snapshot?.reason === 'not connected' ? 'Waiting for connection'
     : status.failed ? 'Check failed · ' + age
     : lastSuccess ? 'Updated ' + quotaAge(lastSuccess) : 'Not checked yet';
   const spinner = status.refreshing ? '<span class="provider-quota-spinner" aria-hidden="true"></span>' : '';
@@ -3145,6 +3162,13 @@ function renderProviderUsage() {
 // further upstream requests: the server enforces a 60-second per-provider floor.
 let quotaStatusTimer = null;
 let quotaLoading = false;
+// Consecutive follow-up reads started while a provider had no usable poll yet
+// (refreshing, not connected, or failed with no earlier success). A provider
+// added or just connected can start on an unavailable snapshot; this bounds a
+// short burst so the card recovers within seconds instead of waiting for the
+// 60 s page tick, without polling forever against a genuinely broken endpoint.
+let quotaFollowUps = 0;
+const quotaFollowUpLimit = 3;
 async function loadQuota() {
   if (quotaLoading || state.view !== 'providers' || document.hidden) return;
   quotaLoading = true;
@@ -3161,9 +3185,14 @@ async function loadQuota() {
     quotaLoading = false;
     clearTimeout(quotaStatusTimer);
     quotaStatusTimer = null;
-    if (state.view === 'providers' && !document.hidden &&
-        Object.values(state.providerQuotaStatus || {}).some(status => status.refreshing)) {
+    const statuses = Object.values(state.providerQuotaStatus || {});
+    const waiting = statuses.some(status => status.refreshing || status.not_connected ||
+      (status.failed && !status.last_success_at));
+    if (state.view === 'providers' && !document.hidden && waiting && quotaFollowUps < quotaFollowUpLimit) {
+      quotaFollowUps += 1;
       quotaStatusTimer = setTimeout(loadQuota, 2000);
+    } else {
+      if (!waiting) quotaFollowUps = 0;
     }
   }
 }

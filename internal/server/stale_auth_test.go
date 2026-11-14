@@ -123,6 +123,14 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 		UpdatedAt:    time.Now(),
 	})
 
+	// Creation skips discovery for OAuth providers (there is no credential yet,
+	// so it could only fail); the token is seeded above, so refresh explicitly —
+	// the same sequence the OAuth completion path performs in production.
+	status, payload, _ = api.request("POST", "/api/admin/providers/"+providerID+"/refresh", nil)
+	if status != 200 {
+		t.Fatalf("refresh after seeding the OAuth token: %d %v", status, payload)
+	}
+
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {
 		t.Fatal(payload)

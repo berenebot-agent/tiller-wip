@@ -157,6 +157,12 @@ func TestCodexSessionAffinityHeaderStable(t *testing.T) {
 		ProviderID: providerID, AccessToken: "live-token", RefreshToken: "refresh-token", TokenType: "Bearer",
 		ExpiresAt: &future, AuthState: oauth.AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now(),
 	})
+	// Creation skips discovery for OAuth providers (no credential yet); the
+	// token is seeded above, so refresh explicitly.
+	status, payload, _ = api.request("POST", "/api/admin/providers/"+providerID+"/refresh", nil)
+	if status != 200 {
+		t.Fatalf("refresh after seeding the OAuth token: %d %v", status, payload)
+	}
 
 	status, payload, _ = api.request("GET", "/api/admin/providers/"+providerID+"/models", nil)
 	if status != 200 {

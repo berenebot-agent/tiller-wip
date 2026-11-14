@@ -251,7 +251,23 @@ func (s *Server) persistOAuthToken(ctx context.Context, accountID string, flow o
 	// Re-discover now that the OAuth token exists. The response waits a bounded
 	// time so the UI's follow-up provider reload sees the catalogue.
 	s.refreshProviderCatalogueWait(ctx, accountID, flow.ProviderID, oauthDiscoveryWait)
+	// Quota polling needs the same token, and was attempted (and reported as
+	// "not connected") before the sign-in completed.
+	s.refreshQuotaAfterConnect(accountID, flow.ProviderID)
 	return nil
+}
+
+// refreshQuotaAfterConnect re-polls a provider's quota now that a credential
+// exists. It runs after the token is persisted and after the catalogue
+// re-discovery, so the quota card reflects the connection the moment the user
+// finishes signing in rather than waiting out the background cadence or showing
+// the "not connected" state the pre-connection poll recorded. It is best-effort
+// and never blocks or fails the completion response.
+func (s *Server) refreshQuotaAfterConnect(accountID, providerID string) bool {
+	if s.quota == nil {
+		return false
+	}
+	return s.quota.RefreshNow(accountID, providerID, time.Now().UTC())
 }
 
 func (s *Server) completeProviderOAuth(w http.ResponseWriter, r *http.Request) {
@@ -510,6 +526,8 @@ func (s *Server) storeDeviceToken(ctx context.Context, accountID, id string, gen
 	// that the token exists, before reporting the connection complete, so the
 	// catalogue the UI reloads is fresh.
 	s.refreshProviderCatalogue(ctx, accountID, id)
+	// The quota poller tried before the token existed; re-poll it now.
+	s.refreshQuotaAfterConnect(accountID, id)
 	s.setDeviceConnected(accountID, id, generation, record)
 }
 

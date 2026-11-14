@@ -702,3 +702,132 @@ func TestQuotaReconcileAccountIsolation(t *testing.T) {
 		t.Fatal("another account's provider was evicted")
 	}
 }
+
+// TestNotConnectedIsNotAFailure is the regression for the provider-add
+// sequence: an OAuth provider is polled the instant it is created, before the
+// user can possibly have finished signing in. That poll must not be recorded as
+// a failure, and must not gate the poll that follows the connection.
+// Serial (no t.Parallel): mutates the package-level adapters registry.
+func TestNotConnectedIsNotAFailure(t *testing.T) {
+	var calls int64
+	adapters["test-unconnected"] = func(context.Context, *http.Client, Credential) (Snapshot, error) {
+		atomic.AddInt64(&calls, 1)
+		pct := 12.0
+		return Snapshot{Available: true, Windows: []Window{{Label: "5h", UsedPercent: &pct}}}, nil
+	}
+	defer delete(adapters, "test-unconnected")
+
+	connected := false
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) {
+		if !connected {
+			return "", ErrNotConnected
+		}
+		return "tok", nil
+	})
+	p.Register(ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "test-unconnected"})
+
+	now := time.Now().UTC()
+	snap, polled := p.RefreshIfDue(context.Background(), "acct", "prov", false, now)
+	if !polled || snap.Available {
+		t.Fatalf("pre-connection poll = %+v, polled=%v; want an unavailable result", snap, polled)
+	}
+	if got := p.PollStatesForAccount("acct")["prov"]; got.Failed || !got.NotConnected || got.LastAttemptAt != nil {
+		t.Fatalf("pre-connection status = %+v; want not_connected, not failed, no attempt stamp", got)
+	}
+
+	// The connection completes moments later. The poll that follows must not be
+	// blocked by MinInterval, and must not be stuck on a failure flag.
+	connected = true
+	if !p.TriggerIfDue("acct", "prov", now.Add(time.Second)) {
+		t.Fatal("the first poll after the credential arrived should run immediately")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if got, ok := p.Snapshot("acct", "prov"); ok && got.Available {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("post-connection poll never produced an available snapshot")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if status := p.PollStatesForAccount("acct")["prov"]; status.Failed || status.NotConnected {
+		t.Fatalf("post-connection status = %+v; want a healthy status", status)
+	}
+}
+
+// TestRefreshNowIgnoresCadenceAndFailure proves the post-connection hook polls
+// even though the provider's last attempt is inside MinInterval and its last
+// check failed — the credential it was waiting for has just arrived.
+// Serial (no t.Parallel): mutates the package-level adapters registry.
+func TestRefreshNowIgnoresCadenceAndFailure(t *testing.T) {
+	var calls int64
+	adapters["test-reconnect"] = func(context.Context, *http.Client, Credential) (Snapshot, error) {
+		n := atomic.AddInt64(&calls, 1)
+		if n == 1 {
+			return Snapshot{}, nil
+		}
+		pct := 30.0
+		return Snapshot{Available: true, Windows: []Window{{Label: "5h", UsedPercent: &pct}}}, nil
+	}
+	defer delete(adapters, "test-reconnect")
+
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	p.Reconcile([]ProviderRef{{AccountID: "acct", ProviderID: "prov", Type: "test-reconnect"}})
+
+	now := time.Now().UTC()
+	if _, polled := p.RefreshIfDue(context.Background(), "acct", "prov", true, now); !polled {
+		t.Fatal("first poll should run")
+	}
+	if !p.PollStatesForAccount("acct")["prov"].Failed {
+		t.Fatal("an empty snapshot should mark the provider failed")
+	}
+	// A normal forced refresh right after is suppressed by MinInterval.
+	if p.TriggerIfDue("acct", "prov", now.Add(time.Second)) {
+		t.Fatal("a forced refresh inside MinInterval should be suppressed")
+	}
+	// RefreshNow is for a credential that just changed, so it ignores both.
+	if !p.RefreshNow("acct", "prov", now.Add(time.Second)) {
+		t.Fatal("RefreshNow should ignore the cadence and the failure flag")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if status := p.PollStatesForAccount("acct")["prov"]; !status.Refreshing {
+			if status.Failed {
+				t.Fatalf("status after RefreshNow = %+v; want a healthy check", status)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("RefreshNow poll never finished")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("adapter calls = %d, want 2", got)
+	}
+}
+
+// TestForcedRefreshNeverLengthensFailureRetry pins the interval precedence: an
+// on-view refresh floors at MinInterval but must not override a shorter failure
+// retry. With the two constants equal this is latent, so the test shrinks them
+// to make the precedence observable.
+func TestForcedRefreshNeverLengthensFailureRetry(t *testing.T) {
+	previousRetry, previousMin := FailureRetry, MinInterval
+	FailureRetry = 5 * time.Second
+	MinInterval = 60 * time.Second
+	defer func() { FailureRetry, MinInterval = previousRetry, previousMin }()
+
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	p.Register(ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "codex-subscription"})
+	p.mu.Lock()
+	p.failed[key("acct", "prov")] = true
+	p.last[key("acct", "prov")] = time.Now().UTC()
+	p.mu.Unlock()
+
+	// Six seconds after a failure the retry is due; a forced (on-view) refresh
+	// must respect it rather than pushing the wait out to MinInterval.
+	if _, _, polled := p.beginRefresh("acct", "prov", true, time.Now().UTC().Add(6*time.Second)); !polled {
+		t.Fatal("a forced refresh must not lengthen FailureRetry to MinInterval")
+	}
+}

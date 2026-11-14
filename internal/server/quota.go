@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/providerquota"
 	"github.com/tiller-router/tiller-router/internal/providers"
+	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
 // quotaProviderTypes lists the provider types the quota poller supports. It is
@@ -45,6 +47,14 @@ func (s *Server) hydrateQuotaCredential(ctx context.Context, ref providerquota.P
 	}
 	if desc, ok := providers.Lookup(p.Type); ok && desc.AuthMode == providers.AuthModeOAuth {
 		if err := s.providers.HydrateOAuth(ctx, ref.AccountID, &p); err != nil {
+			if errors.Is(err, oauth.ErrNoToken) {
+				// The OAuth sign-in has not completed. That is not a failed
+				// check: the provider was created moments ago and the quota
+				// poll ran before the user finished signing in. Report it as a
+				// pre-condition so the poller neither records a failure nor
+				// holds the card in the failed state until the next cadence.
+				return "", providerquota.ErrNotConnected
+			}
 			return "", err
 		}
 	}

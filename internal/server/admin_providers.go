@@ -216,7 +216,14 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	refreshCtx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
-	refreshErr := s.providers.Refresh(refreshCtx, sc.AccountID(), providerID)
+	// An OAuth provider has no credential until the user finishes signing in, so
+	// creation-time discovery can only fail and record a refresh error the sign-in
+	// then has to clear. Skip it and let the OAuth completion path re-discover,
+	// which is what makes "provider added" -> "connected" feel like one step.
+	var refreshErr error
+	if descriptor.AuthMode != providers.AuthModeOAuth {
+		refreshErr = s.providers.Refresh(refreshCtx, sc.AccountID(), providerID)
+	}
 	status := http.StatusCreated
 	message := ""
 	if refreshErr != nil {
@@ -377,6 +384,9 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
+	// A replaced credential invalidates the last quota check for a
+	// quota-capable provider: the previous attempt ran against the old key.
+	s.refreshQuotaAfterConnect(sc.AccountID(), r.PathValue("id"))
 	// The credential value is never recorded — only that it was replaced
 	// (../docs/pre_saas_release_review.md TR-014; SECURITY.md secret guardrail).
 	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
