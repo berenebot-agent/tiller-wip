@@ -406,9 +406,12 @@ func (s *Store) DeleteAccountIdentity(ctx context.Context, accountID string) err
 // NormalizeEmail returns the canonical hosted identity form.
 func NormalizeEmail(email string) string { return strings.ToLower(strings.TrimSpace(email)) }
 
+// MinPasswordBytes is the shortest hosted account password the router accepts.
+const MinPasswordBytes = 8
+
 // ValidatePassword enforces the bounded human-password policy.
 func ValidatePassword(password string) error {
-	if len([]byte(password)) < 12 {
+	if len([]byte(password)) < MinPasswordBytes {
 		return ErrWeakPassword
 	}
 	if len([]byte(password)) > 1024 {

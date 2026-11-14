@@ -371,7 +371,7 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := s.identity.ConsumeVerification(r.Context(), input.Token, input.Password)
 	if errors.Is(err, identity.ErrWeakPassword) || errors.Is(err, identity.ErrPasswordTooLong) {
-		adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
+		adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 8 and 1024 bytes.")
 		return
 	}
 	if err != nil {
@@ -475,7 +475,7 @@ func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 	u, err := s.identity.ConsumePasswordReset(r.Context(), input.Token, input.Password)
 	if err != nil {
 		if errors.Is(err, identity.ErrWeakPassword) || errors.Is(err, identity.ErrPasswordTooLong) {
-			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
+			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 8 and 1024 bytes.")
 			return
 		}
 		adminError(w, http.StatusBadRequest, "invalid_reset", "This password-reset link is invalid or expired.")

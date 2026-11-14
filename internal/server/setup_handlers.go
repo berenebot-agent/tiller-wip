@@ -13,8 +13,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/identity"
 )
 
-// setupMinPasswordBytes is the first-run wizard's floor. It is deliberately
-// lower than the hosted-account passphrase floor (12 bytes): local mode is an
+// setupMinPasswordBytes is the first-run wizard's floor. It matches the
+// hosted-account password floor (identity.MinPasswordBytes): local mode is an
 // appliance, the operator is standing at the machine, and the value is theirs
 // to choose. Environment-var credentials remain unvalidated for backwards
 // compatibility.
