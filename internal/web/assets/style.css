@@ -575,7 +575,10 @@ dialog{width:min(580px,calc(100vw - 32px));border:0;border-radius:var(--r-xl);pa
 .provider-card-identity{min-width:0}.provider-card-identity strong{display:block;overflow:hidden;color:var(--ink);font-size:15px;text-overflow:ellipsis;white-space:nowrap}.provider-card-identity small{display:block;overflow:hidden;color:var(--muted);font-size:11px;text-overflow:ellipsis;white-space:nowrap}
 .provider-card-browse>.badge{grid-column:3;grid-row:1}
 .provider-empty{margin-top:12px}
-.provider-empty p{margin:7px 0 15px;color:var(--muted)}
+/* No p override here: .empty-state p already centres the paragraph
+   (`margin:6px auto 0`, 52ch). A local `margin:7px 0 15px` reset would drop the
+   `auto` side margins and shove the copy to the left edge, which made the
+   Providers empty state look misaligned next to Clients and Virtual Models. */
 .provider-catalogue{position:fixed;top:62px;bottom:0;left:0;right:0;z-index:40;display:flex;flex-direction:column;background:var(--canvas);overflow:hidden}
 .provider-catalogue[hidden]{display:none}
 .provider-drawer-toolbar,.provider-drawer-content{width:100%;max-width:1444px;margin-left:auto;margin-right:auto;padding-left:28px;padding-right:28px}
