@@ -332,7 +332,6 @@ function authView(name) {
   $('#show-signup').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.signup_enabled;
   const googleSignIn = hosted && name === 'login-form' && !!hostedAuthOptions.google_enabled;
   $('#google-signin-button').hidden = !googleSignIn;
-  $('#google-signin-notice').hidden = !googleSignIn;
   const passkeyAvailable = hosted ? !!hostedAuthOptions.passkeys_enabled : !!runtimePasskeysEnabled;
   const passkeySignIn = name === 'login-form' && passkeyAvailable && !!window.__passkeySupported;
   const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
