@@ -170,3 +170,47 @@ func TestSeedPlatformMailSettingsRunsOnce(t *testing.T) {
 		t.Fatalf("cleared from name was re-seeded to %q", got.FromName)
 	}
 }
+
+// TestSavePlatformMailBlankSecretKeepsStoredKey proves a blank secret field does
+// not erase the stored secret. The dashboard never sends secrets back to the
+// browser, so the box is always empty; saving any other field (the sender name,
+// say) must leave the API key exactly as it was.
+func TestSavePlatformMailBlankSecretKeepsStoredKey(t *testing.T) {
+	t.Parallel()
+	_, st := openStore(t)
+	ctx := context.Background()
+
+	proposal := store.PlatformSettingsProposal{
+		HostedSignupEnabled: true,
+		AuditRetentionDays:  30,
+		Mail: store.PlatformMailSettings{
+			Provider: "brevo", From: "tiller@example.com", FromName: "Old Name",
+			BrevoAPIKey: "xkeysib-secret",
+		},
+	}
+	if err := st.SavePlatformSettings(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := st.GetPlatformMailSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current.FromName = "Tiller Router"
+	current.BrevoAPIKey = ""
+	proposal.Mail = current
+	if err := st.SavePlatformSettings(ctx, proposal); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.GetPlatformMailSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BrevoAPIKey != "xkeysib-secret" {
+		t.Fatalf("blank secret field erased the stored key: %q", got.BrevoAPIKey)
+	}
+	if got.FromName != "Tiller Router" {
+		t.Fatalf("from name did not save: %q", got.FromName)
+	}
+}

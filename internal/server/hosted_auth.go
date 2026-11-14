@@ -17,6 +17,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostedauth"
 	"github.com/tiller-router/tiller-router/internal/identity"
+	"github.com/tiller-router/tiller-router/internal/mailer"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -49,6 +50,28 @@ func platformMailSettings(m config.MailBootstrap) store.PlatformMailSettings {
 func parseMailPort(raw string) int {
 	port, _ := strconv.Atoi(raw)
 	return port
+}
+
+// adminErrorDetail is adminError with an extra machine-readable detail string.
+// The detail never carries a secret value: it explains which field failed so
+// the operator can fix it without reading server logs.
+func adminErrorDetail(w http.ResponseWriter, status int, code, message, detail string) {
+	errObj := map[string]any{"code": code, "message": message}
+	if detail != "" {
+		errObj["detail"] = detail
+	}
+	writeJSON(w, status, map[string]any{"error": errObj})
+}
+
+// mailValidationReason turns a mailer.Validate failure into an operator-facing
+// sentence. The mailer's messages are already value-free (they name the field,
+// never its contents), so they can be surfaced directly.
+func mailValidationReason(err error) string {
+	msg := strings.TrimSpace(strings.TrimPrefix(err.Error(), mailer.ErrInvalidConfig.Error()+": "))
+	if msg == "" {
+		return ""
+	}
+	return msg
 }
 
 // runtime is the public deployment-mode probe the SPA boots from. In local
