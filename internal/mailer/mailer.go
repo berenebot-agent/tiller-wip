@@ -29,8 +29,12 @@ var (
 // Config is the runtime mail configuration. Secret fields are intentionally not
 // exposed by the platform API; callers should use PublicConfig for status.
 type Config struct {
-	Provider     string
-	From         string
+	Provider string
+	From     string
+	// FromName is the optional display name used in the From header. It is
+	// presentation only: the envelope/return address is always From. Empty
+	// means no name (bare address).
+	FromName     string
 	ResendAPIKey string
 	BrevoAPIKey  string
 	SMTPHost     string
@@ -44,6 +48,7 @@ type Config struct {
 type PublicConfig struct {
 	Provider         string `json:"provider"`
 	From             string `json:"from"`
+	FromName         string `json:"from_name,omitempty"`
 	SMTPHost         string `json:"smtp_host,omitempty"`
 	SMTPPort         int    `json:"smtp_port,omitempty"`
 	SMTPUsername     string `json:"smtp_username,omitempty"`
@@ -134,7 +139,7 @@ func (m *Manager) Status() PublicConfig {
 
 func publicConfig(cfg Config) PublicConfig {
 	return PublicConfig{
-		Provider: cfg.Provider, From: cfg.From, SMTPHost: cfg.SMTPHost,
+		Provider: cfg.Provider, From: cfg.From, FromName: cfg.FromName, SMTPHost: cfg.SMTPHost,
 		SMTPPort: cfg.SMTPPort, SMTPUsername: cfg.SMTPUsername, SMTPMode: cfg.SMTPMode,
 		Configured:       cfg.Provider != "" && cfg.From != "",
 		SecretConfigured: cfg.ResendAPIKey != "" || cfg.BrevoAPIKey != "" || cfg.SMTPPassword != "" || cfg.SMTPUsername != "",
@@ -147,11 +152,11 @@ func build(cfg Config) (Mailer, error) {
 	}
 	switch cfg.Provider {
 	case "resend":
-		return &resendMailer{from: cfg.From, apiKey: cfg.ResendAPIKey, client: &http.Client{Timeout: 15 * time.Second}}, nil
+		return &resendMailer{from: cfg.From, fromName: cfg.FromName, apiKey: cfg.ResendAPIKey, client: &http.Client{Timeout: 15 * time.Second}}, nil
 	case "brevo":
-		return &brevoMailer{from: cfg.From, apiKey: cfg.BrevoAPIKey, client: &http.Client{Timeout: 15 * time.Second}}, nil
+		return &brevoMailer{from: cfg.From, fromName: cfg.FromName, apiKey: cfg.BrevoAPIKey, client: &http.Client{Timeout: 15 * time.Second}}, nil
 	case "smtp":
-		return &smtpMailer{from: cfg.From, host: cfg.SMTPHost, port: cfg.SMTPPort, username: cfg.SMTPUsername, password: cfg.SMTPPassword, mode: cfg.SMTPMode, timeout: 15 * time.Second}, nil
+		return &smtpMailer{from: cfg.From, fromName: cfg.FromName, host: cfg.SMTPHost, port: cfg.SMTPPort, username: cfg.SMTPUsername, password: cfg.SMTPPassword, mode: cfg.SMTPMode, timeout: 15 * time.Second}, nil
 	default:
 		return nil, fmt.Errorf("%w: unsupported provider", ErrInvalidConfig)
 	}
@@ -173,6 +178,9 @@ func Validate(cfg Config) error {
 	}
 	if _, err := mail.ParseAddress(cfg.From); err != nil {
 		return fmt.Errorf("%w: invalid from address", ErrInvalidConfig)
+	}
+	if strings.ContainsAny(cfg.FromName, "\r\n") {
+		return fmt.Errorf("%w: from name must not contain newlines", ErrInvalidConfig)
 	}
 	switch cfg.Provider {
 	case "resend":
@@ -205,16 +213,17 @@ func Validate(cfg Config) error {
 }
 
 type resendMailer struct {
-	from   string
-	apiKey string
-	client *http.Client
+	from     string
+	fromName string
+	apiKey   string
+	client   *http.Client
 }
 
 func (m *resendMailer) Send(ctx context.Context, message Message) (SendResult, error) {
 	if strings.ContainsAny(message.To+message.Subject, "\r\n") {
 		return SendResult{}, errors.New("mailer: invalid message headers")
 	}
-	payload, err := json.Marshal(resendPayload(m.from, message))
+	payload, err := json.Marshal(resendPayload(fromAddress(m.from, m.fromName), message))
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -237,16 +246,17 @@ func (m *resendMailer) Send(ctx context.Context, message Message) (SendResult, e
 }
 
 type brevoMailer struct {
-	from   string
-	apiKey string
-	client *http.Client
+	from     string
+	fromName string
+	apiKey   string
+	client   *http.Client
 }
 
 func (m *brevoMailer) Send(ctx context.Context, message Message) (SendResult, error) {
 	if strings.ContainsAny(message.To+message.Subject, "\r\n") {
 		return SendResult{}, errors.New("mailer: invalid message headers")
 	}
-	payload, err := json.Marshal(brevoPayload(m.from, message))
+	payload, err := json.Marshal(brevoPayload(m.from, m.fromName, message))
 	if err != nil {
 		return SendResult{}, err
 	}
@@ -282,9 +292,9 @@ func (m *brevoMailer) Send(ctx context.Context, message Message) (SendResult, er
 }
 
 type smtpMailer struct {
-	from, host, username, password, mode string
-	port                                 int
-	timeout                              time.Duration
+	from, fromName, host, username, password, mode string
+	port                                           int
+	timeout                                        time.Duration
 }
 
 func (m *smtpMailer) Send(ctx context.Context, message Message) (SendResult, error) {
@@ -341,7 +351,7 @@ func (m *smtpMailer) Send(ctx context.Context, message Message) (SendResult, err
 	if err != nil {
 		return SendResult{}, fmt.Errorf("SMTP data: %w", err)
 	}
-	body := buildSMTPBody(from.String(), to.String(), message)
+	body := buildSMTPBody(fromAddress(m.from, m.fromName), to.String(), message)
 	if _, err := io.WriteString(writer, body); err != nil {
 		_ = writer.Close()
 		return SendResult{}, fmt.Errorf("SMTP write: %w", err)
@@ -355,6 +365,18 @@ func (m *smtpMailer) Send(ctx context.Context, message Message) (SendResult, err
 	return SendResult{}, nil
 }
 
+// fromAddress renders the From header value for a bare address plus an
+// optional display name. Resend accepts the full RFC 5322 `Name <addr>` string
+// in its from field, and SMTP needs it in the header. With an empty name the
+// bare address is returned unchanged. A name supplied by the operator that
+// already carries a display name ("Name <addr>") is honoured as given.
+func fromAddress(addr, name string) string {
+	if name == "" {
+		return addr
+	}
+	return (&mail.Address{Name: name, Address: addr}).String()
+}
+
 // resendPayload builds the Resend email payload. The html field is omitted when
 // empty so the provider sends a plain-text-only message.
 func resendPayload(from string, message Message) map[string]any {
@@ -365,10 +387,16 @@ func resendPayload(from string, message Message) map[string]any {
 	return payload
 }
 
-// brevoPayload builds the Brevo email payload. htmlContent is omitted when empty.
-func brevoPayload(from string, message Message) map[string]any {
+// brevoPayload builds the Brevo email payload. Brevo splits the sender into
+// separate email and name properties, so the display name is never concatenated
+// into the address. htmlContent is omitted when empty.
+func brevoPayload(from, fromName string, message Message) map[string]any {
+	sender := map[string]string{"email": from}
+	if fromName != "" {
+		sender["name"] = fromName
+	}
 	payload := map[string]any{
-		"sender":      map[string]string{"email": from},
+		"sender":      sender,
 		"to":          []map[string]string{{"email": message.To}},
 		"subject":     message.Subject,
 		"textContent": message.Text,

@@ -34,6 +34,7 @@ const minPlatformPasswordLen = 16
 type MailBootstrap struct {
 	Provider     string // "smtp"
 	From         string
+	FromName     string // optional display name for the From header
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUsername string
@@ -537,6 +538,7 @@ func loadMailBootstrap() (MailBootstrap, error) {
 	m := MailBootstrap{
 		Provider:     strings.ToLower(strings.TrimSpace(os.Getenv("TILLER_MAIL_PROVIDER"))),
 		From:         strings.TrimSpace(os.Getenv("TILLER_MAIL_FROM")),
+		FromName:     strings.TrimSpace(os.Getenv("TILLER_MAIL_FROM_NAME")),
 		SMTPHost:     strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_HOST")),
 		SMTPUsername: strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_USERNAME")),
 		SMTPPassword: os.Getenv("TILLER_MAIL_SMTP_PASSWORD"),
@@ -550,6 +552,9 @@ func loadMailBootstrap() (MailBootstrap, error) {
 	}
 	if m.From == "" {
 		return MailBootstrap{}, errors.New("TILLER_MAIL_FROM is required when mail is configured")
+	}
+	if strings.ContainsAny(m.FromName, "\r\n") {
+		return MailBootstrap{}, errors.New("TILLER_MAIL_FROM_NAME must not contain newlines")
 	}
 	if m.SMTPHost == "" {
 		return MailBootstrap{}, errors.New("TILLER_MAIL_SMTP_HOST is required for the smtp provider")

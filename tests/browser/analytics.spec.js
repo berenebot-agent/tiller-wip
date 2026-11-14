@@ -109,3 +109,40 @@ test('platform admin loads and saves analytics settings', async ({ page }) => {
     analytics_site_id: 'tiller.example.com',
   });
 });
+
+test('platform admin loads and saves the mail sender display name', async ({ page }) => {
+  let saved = null;
+  const settings = {
+    hosted_signup_enabled: true,
+    audit_retention_days: 30,
+    mail: { provider: 'brevo', from: 'no-reply@example.com', from_name: 'Tiller', smtp_host: '', smtp_port: 0, smtp_username: '', smtp_mode: 'starttls', configured: true, secret_configured: true },
+  };
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'hosted' }) }));
+  await page.route('**/api/analytics/options', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: false }) }));
+  await page.route('**/api/platform/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true, csrf_token: 'csrf-test', expires_at: '2099-01-01T00:00:00Z' }) }));
+  await page.route('**/api/platform/stats', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ usage_available: false, accounts: {} }) }));
+  await page.route('**/api/platform/mail/queue', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ queued: 0, sent_recent: 0, dead_recent: 0, log: [] }) }));
+  await page.route('**/api/platform/settings', route => {
+    if (route.request().method() === 'PUT') {
+      saved = route.request().postDataJSON();
+      return route.fulfill({ status: 204, body: '' });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) });
+  });
+
+  await page.goto('/platform#mail');
+  const form = page.locator('#platform-mail-settings-form');
+  await expect(form).toBeVisible();
+  await expect(form.locator('[name="mail_from"]')).toHaveValue('no-reply@example.com');
+  await expect(form.locator('[name="mail_from_name"]')).toHaveValue('Tiller');
+
+  await form.locator('[name="mail_from_name"]').fill('Tiller Router');
+  await form.getByRole('button', { name: 'Save mail settings' }).click();
+
+  await expect.poll(() => saved).not.toBeNull();
+  expect(saved).toMatchObject({
+    mail_provider: 'brevo',
+    mail_from: 'no-reply@example.com',
+    mail_from_name: 'Tiller Router',
+  });
+});

@@ -377,7 +377,7 @@ func TestMailBootstrap(t *testing.T) {
 	t.Setenv("TILLER_MODE", "")
 	t.Setenv("TILLER_PUBLIC_URL", "")
 	clearMailEnv := func() {
-		for _, k := range []string{"TILLER_MAIL_PROVIDER", "TILLER_MAIL_FROM", "TILLER_MAIL_SMTP_HOST", "TILLER_MAIL_SMTP_PORT", "TILLER_MAIL_SMTP_USERNAME", "TILLER_MAIL_SMTP_PASSWORD", "TILLER_MAIL_SMTP_MODE"} {
+		for _, k := range []string{"TILLER_MAIL_PROVIDER", "TILLER_MAIL_FROM", "TILLER_MAIL_FROM_NAME", "TILLER_MAIL_SMTP_HOST", "TILLER_MAIL_SMTP_PORT", "TILLER_MAIL_SMTP_USERNAME", "TILLER_MAIL_SMTP_PASSWORD", "TILLER_MAIL_SMTP_MODE"} {
 			t.Setenv(k, "")
 		}
 	}
@@ -396,6 +396,7 @@ func TestMailBootstrap(t *testing.T) {
 	clearMailEnv()
 	t.Setenv("TILLER_MAIL_PROVIDER", "smtp")
 	t.Setenv("TILLER_MAIL_FROM", "no-reply@example.com")
+	t.Setenv("TILLER_MAIL_FROM_NAME", "Tiller")
 	t.Setenv("TILLER_MAIL_SMTP_HOST", "smtp.example.com")
 	c, err = Load()
 	if err != nil {
@@ -403,6 +404,9 @@ func TestMailBootstrap(t *testing.T) {
 	}
 	if c.Mail.SMTPPort != 587 || c.Mail.SMTPMode != "starttls" {
 		t.Errorf("smtp defaults = %+v", c.Mail)
+	}
+	if c.Mail.FromName != "Tiller" {
+		t.Errorf("smtp from name = %q", c.Mail.FromName)
 	}
 
 	// Implicit TLS defaults to port 465.
@@ -428,6 +432,7 @@ func TestMailBootstrap(t *testing.T) {
 		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_MODE": "plain"},
 		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_PORT": "70000"},
 		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_USERNAME": "u"},
+		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_FROM_NAME": "a\nb", "TILLER_MAIL_SMTP_HOST": "h"},
 	}
 	for i, env := range cases {
 		clearMailEnv()

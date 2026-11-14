@@ -4321,6 +4321,7 @@ async function loadPlatformMail() {
   form.elements.mail_provider.value = settings.mail?.provider || '';
   applyMailProviderVisibility(settings.mail?.provider || '');
   form.elements.mail_from.value = settings.mail?.from || '';
+  form.elements.mail_from_name.value = settings.mail?.from_name || '';
   form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
   form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
   form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
@@ -4516,6 +4517,7 @@ $('#platform-mail-settings-form').addEventListener('submit', async event => {
   const payload = {
     mail_provider: form.get('mail_provider'),
     mail_from: form.get('mail_from'),
+    mail_from_name: form.get('mail_from_name'),
     mail_smtp_host: form.get('mail_smtp_host'),
     mail_smtp_port: Number(form.get('mail_smtp_port')) || 0,
     mail_smtp_mode: form.get('mail_smtp_mode'),

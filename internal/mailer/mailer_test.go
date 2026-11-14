@@ -22,6 +22,9 @@ func TestValidateMailConfigs(t *testing.T) {
 		{Provider: "resend", From: "Tiller <no-reply@example.com>", ResendAPIKey: "re_test"},
 		{Provider: "brevo", From: "no-reply@example.com", BrevoAPIKey: "xkeysib-test"},
 		{Provider: "smtp", From: "no-reply@example.com", SMTPHost: "smtp.example.com", SMTPPort: 587, SMTPMode: "starttls"},
+		{Provider: "resend", From: "no-reply@example.com", FromName: "Tiller", ResendAPIKey: "re_test"},
+		{Provider: "brevo", From: "no-reply@example.com", FromName: "Tiller", BrevoAPIKey: "xkeysib-test"},
+		{Provider: "smtp", From: "no-reply@example.com", FromName: "Tiller", SMTPHost: "smtp.example.com", SMTPPort: 587, SMTPMode: "starttls"},
 	}
 	for _, cfg := range valid {
 		if err := Validate(cfg); err != nil {
@@ -33,6 +36,7 @@ func TestValidateMailConfigs(t *testing.T) {
 		{Provider: "brevo", From: "x@y.z"},
 		{Provider: "smtp", From: "x@y.z", SMTPHost: "h", SMTPPort: 587, SMTPMode: "plain"},
 		{Provider: "smtp", From: "x@y.z", SMTPHost: "h", SMTPPort: 587, SMTPMode: "starttls", SMTPUsername: "u"},
+		{Provider: "resend", From: "x@y.z", FromName: "a\r\nBcc: evil@example.com", ResendAPIKey: "re_test"},
 	}
 	for _, cfg := range invalid {
 		if err := Validate(cfg); err == nil {
@@ -107,11 +111,11 @@ func TestResendPayloadIncludesHTMLOnlyWhenPresent(t *testing.T) {
 
 func TestBrevoPayloadIncludesHTMLContentOnlyWhenPresent(t *testing.T) {
 	t.Parallel()
-	plain := brevoPayload("no-reply@example.com", Message{To: "u@example.com", Subject: "s", Text: "t"})
+	plain := brevoPayload("no-reply@example.com", "", Message{To: "u@example.com", Subject: "s", Text: "t"})
 	if _, ok := plain["htmlContent"]; ok {
 		t.Fatal("plain message carried an htmlContent field")
 	}
-	rich := brevoPayload("no-reply@example.com", Message{To: "u@example.com", Subject: "s", Text: "t", HTML: "<p>hi</p>"})
+	rich := brevoPayload("no-reply@example.com", "", Message{To: "u@example.com", Subject: "s", Text: "t", HTML: "<p>hi</p>"})
 	if rich["htmlContent"] != "<p>hi</p>" {
 		t.Fatalf("htmlContent field = %v", rich["htmlContent"])
 	}
@@ -198,5 +202,70 @@ func TestBrevoSendAcceptsMissingOrMalformedMessageID(t *testing.T) {
 				t.Fatalf("message ID = %q, want empty", result.MessageID)
 			}
 		})
+	}
+}
+
+func TestFromAddressRendersDisplayName(t *testing.T) {
+	t.Parallel()
+	if got := fromAddress("no-reply@example.com", ""); got != "no-reply@example.com" {
+		t.Fatalf("bare from = %q", got)
+	}
+	if got := fromAddress("no-reply@example.com", "Tiller"); got != `"Tiller" <no-reply@example.com>` {
+		t.Fatalf("named from = %q", got)
+	}
+	// A name that needs quoting is quoted so the header stays valid.
+	if got := fromAddress("no-reply@example.com", "Tiller Router"); got != `"Tiller Router" <no-reply@example.com>` {
+		t.Fatalf("quoted from = %q", got)
+	}
+}
+
+func TestResendPayloadCarriesDisplayName(t *testing.T) {
+	t.Parallel()
+	payload := resendPayload(fromAddress("no-reply@example.com", "Tiller"), Message{To: "u@example.com", Subject: "s", Text: "t"})
+	if payload["from"] != `"Tiller" <no-reply@example.com>` {
+		t.Fatalf("from = %v", payload["from"])
+	}
+}
+
+func TestBrevoPayloadSplitsSenderNameFromAddress(t *testing.T) {
+	t.Parallel()
+	plain := brevoPayload("no-reply@example.com", "", Message{To: "u@example.com", Subject: "s", Text: "t"})
+	sender, ok := plain["sender"].(map[string]string)
+	if !ok {
+		t.Fatalf("sender = %T", plain["sender"])
+	}
+	if sender["email"] != "no-reply@example.com" {
+		t.Fatalf("sender email = %q", sender["email"])
+	}
+	if _, ok := sender["name"]; ok {
+		t.Fatalf("unnamed sender carried a name: %+v", sender)
+	}
+	named := brevoPayload("no-reply@example.com", "Tiller", Message{To: "u@example.com", Subject: "s", Text: "t"})
+	sender = named["sender"].(map[string]string)
+	if sender["email"] != "no-reply@example.com" || sender["name"] != "Tiller" {
+		t.Fatalf("named sender = %+v", sender)
+	}
+}
+
+func TestBuildSMTPBodyIncludesDisplayName(t *testing.T) {
+	t.Parallel()
+	named := buildSMTPBody(fromAddress("no-reply@example.com", "Tiller"), "u@example.com", Message{Subject: "s", Text: "hello"})
+	if !strings.Contains(named, `From: "Tiller" <no-reply@example.com>`+"\r\n") {
+		t.Fatalf("named body missing display name:\n%s", named)
+	}
+	bare := buildSMTPBody(fromAddress("no-reply@example.com", ""), "u@example.com", Message{Subject: "s", Text: "hello"})
+	if !strings.Contains(bare, "From: no-reply@example.com"+"\r\n") {
+		t.Fatalf("bare body missing plain from:\n%s", bare)
+	}
+}
+
+func TestStatusReportsFromName(t *testing.T) {
+	t.Parallel()
+	m, err := NewManager(Config{Provider: "resend", From: "no-reply@example.com", FromName: "Tiller", ResendAPIKey: "re_test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Status().FromName; got != "Tiller" {
+		t.Fatalf("status from_name = %q", got)
 	}
 }

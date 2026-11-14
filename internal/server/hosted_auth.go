@@ -40,7 +40,7 @@ func (s *Server) requireSameOrigin(w http.ResponseWriter, r *http.Request) bool 
 
 func platformMailSettings(m config.MailBootstrap) store.PlatformMailSettings {
 	return store.PlatformMailSettings{
-		Provider: m.Provider, From: m.From,
+		Provider: m.Provider, From: m.From, FromName: m.FromName,
 		SMTPHost: m.SMTPHost, SMTPPort: strconv.Itoa(m.SMTPPort),
 		SMTPUsername: m.SMTPUsername, SMTPPassword: m.SMTPPassword, SMTPMode: m.SMTPMode,
 	}
