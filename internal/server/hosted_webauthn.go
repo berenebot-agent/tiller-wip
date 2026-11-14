@@ -42,7 +42,7 @@ func (s *Server) passkeyUnavailable(w http.ResponseWriter) bool {
 // request.Body directly with no cap, deadline, or admission gate.
 func (s *Server) passkeyFinishBody(w http.ResponseWriter, r *http.Request) bool {
 	// The body is a JSON PublicKeyCredential. Requiring the JSON content type
-	// closes the same cross-site-form "JSON CSRF" surface decodeJSONLimit
+	// closes the same cross-site-form "JSON CSRF" surface decodeAuthJSON
 	// guards for every other auth endpoint.
 	if !jsonContentType(r.Header.Get("Content-Type")) {
 		adminError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON.")
@@ -218,7 +218,7 @@ func (s *Server) passkeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -305,7 +305,7 @@ func (s *Server) passkeyRename(w http.ResponseWriter, r *http.Request) {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -331,7 +331,7 @@ func (s *Server) passkeyDelete(w http.ResponseWriter, r *http.Request) {
 		ID              string `json:"id"`
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -364,7 +364,7 @@ func (s *Server) setPasswordSignIn(w http.ResponseWriter, r *http.Request) {
 		Enabled         bool   `json:"enabled"`
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
