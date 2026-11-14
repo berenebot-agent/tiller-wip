@@ -233,7 +233,7 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"hosted_signup_enabled": signup, "audit_retention_days": retention,
 		"prevent_search_indexing": preventSearchIndexing,
-		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
+		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "from_name": mail.FromName, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
 		"google":                  map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
 		"turnstile":               map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
 		"analytics":               map[string]any{"enabled": analytics.Enabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
@@ -246,6 +246,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		AuditRetentionDays    *int    `json:"audit_retention_days"`
 		MailProvider          *string `json:"mail_provider"`
 		MailFrom              *string `json:"mail_from"`
+		MailFromName          *string `json:"mail_from_name"`
 		MailResendAPIKey      *string `json:"mail_resend_api_key"`
 		MailBrevoAPIKey       *string `json:"mail_brevo_api_key"`
 		MailSMTPHost          *string `json:"mail_smtp_host"`
@@ -274,7 +275,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	allowed := map[string]bool{
 		"hosted_signup_enabled": true, "audit_retention_days": true,
-		"mail_provider": true, "mail_from": true, "mail_resend_api_key": true, "mail_brevo_api_key": true,
+		"mail_provider": true, "mail_from": true, "mail_from_name": true, "mail_resend_api_key": true, "mail_brevo_api_key": true,
 		"mail_smtp_host": true, "mail_smtp_port": true, "mail_smtp_username": true, "mail_smtp_password": true, "mail_smtp_mode": true,
 		"google_signin_enabled": true, "google_client_id": true, "google_client_secret": true, "clear_google_client_secret": true,
 		"turnstile_enabled": true, "turnstile_site_key": true, "turnstile_secret": true, "clear_turnstile_secret": true,
@@ -287,7 +288,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	mailFields := []string{"mail_provider", "mail_from", "mail_resend_api_key", "mail_brevo_api_key", "mail_smtp_host", "mail_smtp_port", "mail_smtp_username", "mail_smtp_password", "mail_smtp_mode"}
+	mailFields := []string{"mail_provider", "mail_from", "mail_from_name", "mail_resend_api_key", "mail_brevo_api_key", "mail_smtp_host", "mail_smtp_port", "mail_smtp_username", "mail_smtp_password", "mail_smtp_mode"}
 	hasAnyMailField := false
 	for _, key := range mailFields {
 		if _, ok := fields[key]; ok {
@@ -334,6 +335,9 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	if input.MailFrom != nil {
 		currentMail.From = strings.TrimSpace(*input.MailFrom)
+	}
+	if input.MailFromName != nil {
+		currentMail.FromName = strings.TrimSpace(*input.MailFromName)
 	}
 	if input.MailSMTPHost != nil {
 		currentMail.SMTPHost = strings.TrimSpace(*input.MailSMTPHost)
@@ -459,7 +463,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasPreventSearchIndexing && input.PreventSearchIndexing != nil {
 		preventSearchIndexing = *input.PreventSearchIndexing
 	}
-	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
+	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, FromName: currentMail.FromName, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
 	if err := mailer.Validate(cfg); err != nil {
 		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
 		return
@@ -507,6 +511,7 @@ func hasMailUpdate(input struct {
 	AuditRetentionDays    *int    `json:"audit_retention_days"`
 	MailProvider          *string `json:"mail_provider"`
 	MailFrom              *string `json:"mail_from"`
+	MailFromName          *string `json:"mail_from_name"`
 	MailResendAPIKey      *string `json:"mail_resend_api_key"`
 	MailBrevoAPIKey       *string `json:"mail_brevo_api_key"`
 	MailSMTPHost          *string `json:"mail_smtp_host"`
@@ -528,7 +533,7 @@ func hasMailUpdate(input struct {
 	AnalyticsSiteID       *string `json:"analytics_site_id"`
 	PreventSearchIndexing *bool   `json:"prevent_search_indexing"`
 }) bool {
-	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
+	return input.MailProvider != nil || input.MailFrom != nil || input.MailFromName != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
 }
 
 // accountUserStats is the operator view of an account's tenant resource counts
