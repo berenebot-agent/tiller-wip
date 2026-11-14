@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
@@ -165,5 +166,82 @@ func TestDashboardBudgetCoversAccountExport(t *testing.T) {
 	status, payload, _ := api.request("GET", "/api/auth/account/export", nil)
 	if status != http.StatusTooManyRequests || payload["error"].(map[string]any)["code"] != "rate_limited" {
 		t.Fatalf("second export = %d %v, want 429 rate_limited", status, payload)
+	}
+}
+
+// TestDashboardBudgetDoesNotLockOutSessionProbe proves the account budget cannot
+// refuse the request that tells the console who the viewer is. The budget is
+// charged at the principal, so it also covers /api/*/session; if a spent budget
+// answers that probe with 429 the SPA treats it as a signed-out state, paints
+// the login card, and the user is locked out of their own console until the
+// window rolls over -- which a normal dashboard tab (live stream plus polling)
+// triggers on its own.
+//
+// It drives chargeDashboardBudget directly: that is the decision point both
+// requireAdmin and requireUser share, and it keeps the test independent of which
+// mode registers which probe route.
+func TestDashboardBudgetDoesNotLockOutSessionProbe(t *testing.T) {
+	t.Parallel()
+	app, _, accountID := hostedAccountServer(t)
+	app.dashboardLimiter = newWindowLimiter(1, time.Minute)
+
+	// Spend the whole budget on an ordinary console route.
+	ordinary := mustRequest(t, "/api/admin/client-keys")
+	if !app.chargeDashboardBudget(httptest.NewRecorder(), ordinary, accountID) {
+		t.Fatal("the first ordinary request should be admitted")
+	}
+	if app.chargeDashboardBudget(httptest.NewRecorder(), ordinary, accountID) {
+		t.Fatal("expected the budget to be spent")
+	}
+
+	// Both identity probes still answer: a spent budget is a reason to slow
+	// down, never to claim the session is gone.
+	for _, path := range []string{"/api/admin/session", "/api/auth/session"} {
+		if !app.chargeDashboardBudget(httptest.NewRecorder(), mustRequest(t, path), accountID) {
+			t.Fatalf("%s was refused while the budget was spent; the session probe must not be budgeted", path)
+		}
+	}
+
+	// The exemption is narrow: an ordinary console read still refuses, so the
+	// budget itself is untouched.
+	if app.chargeDashboardBudget(httptest.NewRecorder(), ordinary, accountID) {
+		t.Fatal("an ordinary console read must still be refused while the budget is spent")
+	}
+	// And the refusal really writes the rate-limit answer.
+	rec := httptest.NewRecorder()
+	if app.chargeDashboardBudget(rec, ordinary, accountID) || rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("refusal = %d, want 429", rec.Code)
+	}
+}
+
+// TestDashboardBudgetExemptionCoversOnlySessionPaths proves the exemption stays
+// narrow: it names the two session probes and nothing else, so a route cannot
+// drift out of the budget by accident.
+func TestDashboardBudgetExemptionCoversOnlySessionPaths(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{"/api/admin/session", "/api/auth/session"} {
+		if !isDashboardSessionProbe(mustRequest(t, path)) {
+			t.Fatalf("%s should be exempt from the account budget", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/admin/client-keys",
+		"/api/admin/usage",
+		"/api/auth/account",
+		"/api/auth/account/sessions/revoke-all",
+		"/api/admin/api-tokens",
+	} {
+		if isDashboardSessionProbe(mustRequest(t, path)) {
+			t.Fatalf("%s must still spend the account budget", path)
+		}
+	}
+	// Only the identity read is exempt: a write to the same path (logout, which
+	// mutates) is ordinary console traffic and stays budgeted.
+	write, err := http.NewRequest("DELETE", "/api/admin/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isDashboardSessionProbe(write) {
+		t.Fatal("a state-changing session call must still spend the account budget")
 	}
 }
