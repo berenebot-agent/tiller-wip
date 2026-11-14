@@ -357,13 +357,18 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 			currentMail.SMTPPort = strconv.Itoa(*input.MailSMTPPort)
 		}
 	}
-	if input.MailSMTPPassword != nil {
+	// A blank secret field means "keep the stored secret", not "erase it".
+	// The dashboard renders these as empty inputs with a "leave blank to keep
+	// current" hint, so any save of the form (changing only the sender name,
+	// say) would otherwise wipe the API key and report the secret as missing.
+	// An explicit clear remains possible by switching provider.
+	if input.MailSMTPPassword != nil && *input.MailSMTPPassword != "" {
 		currentMail.SMTPPassword = *input.MailSMTPPassword
 	}
-	if input.MailResendAPIKey != nil {
+	if input.MailResendAPIKey != nil && *input.MailResendAPIKey != "" {
 		currentMail.ResendAPIKey = *input.MailResendAPIKey
 	}
-	if input.MailBrevoAPIKey != nil {
+	if input.MailBrevoAPIKey != nil && *input.MailBrevoAPIKey != "" {
 		currentMail.BrevoAPIKey = *input.MailBrevoAPIKey
 	}
 	if input.MailSMTPMode != nil {
@@ -470,22 +475,22 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	// Secrets could not be decrypted, so currentMail carries empty secret fields.
 	// Writing them back would silently erase the stored API key or SMTP password.
-	// Public fields are plaintext and unaffected, so only the secret writes are
-	// suppressed, and the stored values are left untouched.
+	// Only the secrets actually being written are suppressed; the stored values
+	// are left untouched. Public fields are plaintext and unaffected.
 	if mailSecretsLocked {
-		if input.MailResendAPIKey != nil {
+		if input.MailResendAPIKey != nil && *input.MailResendAPIKey != "" {
 			currentMail.ResendAPIKey = store.SecretUnchanged
 		}
-		if input.MailBrevoAPIKey != nil {
+		if input.MailBrevoAPIKey != nil && *input.MailBrevoAPIKey != "" {
 			currentMail.BrevoAPIKey = store.SecretUnchanged
 		}
-		if input.MailSMTPPassword != nil {
+		if input.MailSMTPPassword != nil && *input.MailSMTPPassword != "" {
 			currentMail.SMTPPassword = store.SecretUnchanged
 		}
 	}
 	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, FromName: currentMail.FromName, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
 	if err := mailer.Validate(cfg); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
+		adminErrorDetail(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.", mailValidationReason(err))
 		return
 	}
 	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, PreventSearchIndexing: preventSearchIndexing, Mail: currentMail, Auth: authSettings, Analytics: analytics}

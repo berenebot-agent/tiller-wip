@@ -425,7 +425,13 @@ function flash(message, kind = 'success') {
   clearTimeout(flash.timer);
   flash.timer = setTimeout(() => box.hidden = true, 5000);
 }
-function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
+function errorMessage(error, fallback = 'The operation could not be completed.') {
+  const message = error?.message || fallback;
+  // The API may attach a value-free detail naming the field that failed (see
+  // adminErrorDetail). Surface it so a rejected save explains itself.
+  const detail = error?.data?.error?.detail;
+  return detail ? `${message} (${detail})` : message;
+}
 
 function loadTurnstileScript() {
   if (window.turnstile) return Promise.resolve();
@@ -4596,8 +4602,10 @@ document.querySelector('#platform-settings-form').addEventListener('submit', asy
     flash('Platform settings saved.');
     await loadPlatformSettings();
   } catch (error) {
+    const message = errorMessage(error, 'Could not save platform settings.');
     $('#platform-settings-error').style.color = '';
-    $('#platform-settings-error').textContent = errorMessage(error, 'Could not save platform settings.');
+    $('#platform-settings-error').textContent = message;
+    flash(message, 'error');
   }
 });
 $('#platform-mail-settings-form').addEventListener('submit', async event => {
@@ -4621,8 +4629,10 @@ $('#platform-mail-settings-form').addEventListener('submit', async event => {
     flash('Mail settings saved.');
     await loadPlatformMail();
   } catch (error) {
+    const message = errorMessage(error, 'Could not save mail settings.');
     $('#platform-mail-settings-error').style.color = '';
-    $('#platform-mail-settings-error').textContent = errorMessage(error, 'Could not save mail settings.');
+    $('#platform-mail-settings-error').textContent = message;
+    flash(message, 'error');
   }
 });
 $('#platform-analytics-form').addEventListener('change', event => {
@@ -4642,8 +4652,10 @@ $('#platform-analytics-form').addEventListener('submit', async event => {
     flash('Analytics settings saved.');
     await loadPlatformAnalytics();
   } catch (error) {
+    const message = errorMessage(error, 'Could not save analytics settings.');
     $('#platform-analytics-error').style.color = '';
-    $('#platform-analytics-error').textContent = errorMessage(error, 'Could not save analytics settings.');
+    $('#platform-analytics-error').textContent = message;
+    flash(message, 'error');
   }
 });
 $('#platform-account-search').addEventListener('input', event => {

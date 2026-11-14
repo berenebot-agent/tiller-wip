@@ -182,6 +182,15 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		if value == SecretUnchanged {
 			continue
 		}
+		// A blank secret means "the caller did not supply one", not "erase the
+		// stored secret". The dashboard renders secret inputs empty (it never
+		// returns them to the browser), so saving any other field on the same
+		// form would otherwise wipe the API key. An operator clears a secret by
+		// switching provider or by an explicit clear, never by leaving the box
+		// blank.
+		if value == "" && platformSecretSettings[key] {
+			continue
+		}
 		if err := upsert(key, value); err != nil {
 			return err
 		}
