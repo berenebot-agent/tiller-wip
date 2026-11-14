@@ -163,7 +163,8 @@ func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token
 
 // signupCapReached reports whether self-service signup must refuse because the
 // TILLER_MAX_SIGNUPS cap is met. It fails closed when the count cannot be read.
-// Every path that creates a hosted account (email and Google) must check it.
+// The check is best-effort, not atomic with account creation: concurrent
+// signups may slightly exceed the cap. Every path that creates a hosted account (email and Google) must check it.
 func (s *Server) signupCapReached(ctx context.Context) bool {
 	if s.config.MaxSignups <= 0 {
 		return false

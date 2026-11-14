@@ -57,8 +57,8 @@ let runtimeWizardEnabled = false;
 // /api/auth/options), so mountOptionalAuthCaptcha turns it on only when the
 // server reports it. Once mounted it behaves like any other gated view.
 const CAPTCHA_GATED_CONTROLS = {
-  'signup-form': { action: 'signup', buttons: ['#signup-form button[type="submit"]', '#show-login-from-signup'] },
-  'forgot-form': { action: 'recovery', buttons: ['#forgot-form button[type="submit"]', '#show-login-from-forgot'] },
+  'signup-form': { action: 'signup', buttons: ['#signup-form button[type="submit"]'] },
+  'forgot-form': { action: 'recovery', buttons: ['#forgot-form button[type="submit"]'] },
   'platform-login-form': { action: 'platform_login', optional: true, buttons: ['#platform-login-form button[type="submit"]'] },
 };
 // platformCaptcha holds the challenge settings the console's session probe
