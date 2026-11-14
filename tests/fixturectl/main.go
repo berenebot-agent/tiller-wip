@@ -9,6 +9,8 @@
 //
 //	fixturectl activity --db /path/tiller-router.db --client <id> --rows 55
 //	fixturectl activity --db ... --client <id> --rows 100 --fail-every 10 --fallback-every 7
+//	fixturectl client   --db ... --name <client> --type catalogue
+//	fixturectl provider --db ... --name <provider> --models mock-model,other
 //
 // All rows for one invocation are written in a single transaction and carry
 // deterministic ids/attempts so results are reproducible. Row ids are unique
@@ -34,7 +36,7 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: fixturectl <activity|client> [options]")
+		fmt.Fprintln(os.Stderr, "usage: fixturectl <activity|client|provider> [options]")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -48,8 +50,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "fixturectl: "+err.Error())
 			os.Exit(1)
 		}
+	case "provider":
+		if err := runProvider(os.Args[2:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "fixturectl: "+err.Error())
+			os.Exit(1)
+		}
 	default:
-		fmt.Fprintf(os.Stderr, "fixturectl: unknown subcommand %q (expected activity or client)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "fixturectl: unknown subcommand %q (expected activity, client or provider)\n", os.Args[1])
 		os.Exit(2)
 	}
 }

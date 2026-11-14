@@ -86,4 +86,41 @@ function seedClient(name, opts = {}) {
   return JSON.parse(out.toString('utf8'));
 }
 
-module.exports = { ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE, login, openAdmin, loginFresh, adminCsrf, createProvider, createClient, mockAddModel, mockRemoveModel, mockFailModel, mockOkModel, refreshProviderApi, clearActivity, seedActivity, seedClient };
+// seedProvider creates a provider and its models via fixturectl instead of the
+// real POST /api/admin/providers flow.
+//
+// createProvider() runs live model discovery on the mock upstream. That costs a
+// round-trip per call, and every console request it makes is charged to the
+// account's 60/min budget (internal/server/dashboard_limit.go). A spec that
+// creates a provider in 20 different tests therefore spends most of the budget
+// on setup it never asserts on -- the admin spec hit that budget and every test
+// after the fourth failed in setup with a 429. Seeding writes the same rows
+// discovery would (enabled provider, available models, namespace entry) in one
+// SQLite transaction with no network and no HTTP, so a test that only needs a
+// provider *to exist* pays nothing for it.
+//
+// Use this for permission dialogs, routing pickers, mobile cards, and anything
+// else where the provider is a fixture. Use the real createProvider() when the
+// test asserts on creation itself (validation, discovery, refresh_error).
+//
+// Returns { id, name, type, base_url, model_ids, model_pks, namespace }.
+function seedProvider(name, opts = {}) {
+  const bin = process.env.TILLER_FIXTURE_BIN;
+  const db = process.env.TILLER_FIXTURE_DB;
+  if (!bin || !db) throw new Error('seedProvider requires the fixturectl wiring from tests/browser/run.sh (TILLER_FIXTURE_BIN/TILLER_FIXTURE_DB)');
+  const models = opts.models || ['mock-model'];
+  const args = ['provider', '--db', db, '--name', name, '--models', models.join(',')];
+  if (opts.type) args.push('--type', opts.type);
+  if (opts.baseURL) args.push('--base-url', opts.baseURL);
+  if (opts.origin) args.push('--origin', opts.origin);
+  const out = execFileSync(bin, args, { stdio: 'pipe' });
+  return JSON.parse(out.toString('utf8'));
+}
+
+module.exports = {
+  ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE,
+  login, openAdmin, loginFresh, adminCsrf,
+  createProvider, createClient, seedProvider,
+  mockAddModel, mockRemoveModel, mockFailModel, mockOkModel, refreshProviderApi,
+  clearActivity, seedActivity, seedClient,
+};

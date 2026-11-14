@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const {
   ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE,
-  openAdmin, adminCsrf, createProvider, createClient, seedClient,
+  openAdmin, adminCsrf, createProvider, createClient, seedClient, seedProvider,
   mockAddModel, mockRemoveModel, refreshProviderApi
 } = require('./helpers');
 
@@ -110,7 +110,7 @@ test('mobile: Client Keys renders as cards with expandable detail and working ac
   const csrf = await adminCsrf(page);
   const providerName = 'mobile-cards';
   const clientName = 'mobile-cards-client';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
   await seedClient(clientName);
   // Reload so the freshly created client appears in the (default) Client Keys view.
   await page.reload();
@@ -160,7 +160,7 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   const csrf = await adminCsrf(page);
   const providerName = 'mobile-single';
   const clientName = 'mobile-single-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   const real = (await modelsResponse.json()).data.find(model => model.upstream_model_id === 'mock-model');
   expect(real).toBeTruthy();
@@ -243,7 +243,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   const providerName = 'browser-perm';
   const modelId = `${providerName}/mock-model`;
   const clientName = 'browser-perm-client';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
   await seedClient(clientName);
 
   await page.getByRole('link', { name: 'Clients' }).click();
@@ -298,7 +298,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   const csrf = await adminCsrf(page);
   const providerName = 'single-ui';
   const clientName = 'single-ui-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -367,7 +367,7 @@ test('single-route inline picker: typeahead selects and tick applies', async ({ 
   const csrf = await adminCsrf(page);
   const providerName = 'enter-save';
   const clientName = 'enter-save-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -415,7 +415,7 @@ test('single-route inline picker: red X cancels without saving', async ({ page }
   const csrf = await adminCsrf(page);
   const providerName = 'cancel-route';
   const clientName = 'cancel-route-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -460,7 +460,7 @@ test('single-route inline picker: clicking away without selecting reverts to the
   const csrf = await adminCsrf(page);
   const providerName = 'blur-revert';
   const clientName = 'blur-revert-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsRes.ok()).toBeTruthy();
   const real = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
@@ -493,7 +493,7 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   const csrf = await adminCsrf(page);
   const providerName = 'settings-switch';
   const clientName = 'settings-switch-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -715,7 +715,7 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
   const clientName = 'collapse-perm-client';
   const canonical = id => `${providerName}/${id}`;
 
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   await seedClient(clientName);
 
   // Create a virtual group + model so both the Real and Virtual sections render.
@@ -782,7 +782,7 @@ test('real model search matches the displayed canonical model ID', async ({ page
   await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'canonical-model-search';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
 
   await page.getByRole('link', { name: 'Providers' }).click();
   await expect(page.locator('#provider-drawer')).toBeHidden();
@@ -806,7 +806,7 @@ test('provider deletion shows the exact name with a working copy button', async 
   await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'copy-confirm-provider';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
 
   await page.getByRole('link', { name: 'Providers' }).click();
   await page.getByRole('button', { name: `Browse ${providerName} models` }).click();
@@ -854,7 +854,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
 
   const providerName = 'browser-errclear';
   const clientName = 'browser-errclear-client';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
   await seedClient(clientName);
 
   // 1. Per-client dialog: plant a sentinel error, then a successful re-load
@@ -952,7 +952,7 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
 
   const providerName = 'browser-copy-reqid';
   const clientName = 'browser-copy-reqid-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsRes = await page.request.get('/api/admin/models');
   const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
@@ -1038,7 +1038,7 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
   const csrf = await adminCsrf(page);
   const providerName = 'browser-copy-reqid-insecure';
   const clientName = 'browser-copy-reqid-insecure-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsRes = await page.request.get('/api/admin/models');
   const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
