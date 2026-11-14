@@ -171,10 +171,11 @@ type RouteTarget struct {
 	Locked                bool
 	ReasoningCapabilities sql.NullString
 	MaxOutputTokens       sql.NullInt64
+	SupportsTemperature   sql.NullInt64
 }
 
 func (s *Scope) VirtualRouteTargets(ctx context.Context, virtualID string) ([]RouteTarget, error) {
-	rows, err := s.q.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.account_id=? AND m.account_id=? AND p.account_id=? AND t.enabled=1 ORDER BY t.position`, virtualID, s.accountID, s.accountID, s.accountID)
+	rows, err := s.q.QueryContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens,m.supports_temperature FROM virtual_model_targets t JOIN provider_models m ON m.id=t.provider_model_id JOIN providers p ON p.id=m.provider_id WHERE t.virtual_model_id=? AND t.account_id=? AND m.account_id=? AND p.account_id=? AND t.enabled=1 ORDER BY t.position`, virtualID, s.accountID, s.accountID, s.accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +184,7 @@ func (s *Scope) VirtualRouteTargets(ctx context.Context, virtualID string) ([]Ro
 	for rows.Next() {
 		var v RouteTarget
 		var enabled, available int
-		if err := rows.Scan(&v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.ProviderType, &v.BaseURL, &v.Credential, &enabled, &v.Protocols, &v.NativeProtocol, &v.UpstreamModelID, &available, &v.ReasoningCapabilities, &v.MaxOutputTokens); err != nil {
+		if err := rows.Scan(&v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.ProviderType, &v.BaseURL, &v.Credential, &enabled, &v.Protocols, &v.NativeProtocol, &v.UpstreamModelID, &available, &v.ReasoningCapabilities, &v.MaxOutputTokens, &v.SupportsTemperature); err != nil {
 			return nil, err
 		}
 		v.ProviderEnabled = enabled != 0
@@ -208,8 +209,8 @@ func (s *Scope) VirtualRouteTargets(ctx context.Context, virtualID string) ([]Ro
 func (s *Scope) RealRouteTarget(ctx context.Context, modelID string) (RouteTarget, error) {
 	var v RouteTarget
 	var enabled, available int
-	err := s.q.QueryRowContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=? AND m.account_id=? AND p.account_id=?`, modelID, s.accountID, s.accountID).
-		Scan(&v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.ProviderType, &v.BaseURL, &v.Credential, &enabled, &v.Protocols, &v.NativeProtocol, &v.UpstreamModelID, &available, &v.ReasoningCapabilities, &v.MaxOutputTokens)
+	err := s.q.QueryRowContext(ctx, `SELECT m.id,p.id,p.name,p.type,p.base_url,coalesce(p.credential_secret,''),p.enabled,p.protocols,m.native_protocol,m.upstream_model_id,m.available,m.reasoning_capabilities,m.max_output_tokens,m.supports_temperature FROM provider_models m JOIN providers p ON p.id=m.provider_id WHERE m.id=? AND m.account_id=? AND p.account_id=?`, modelID, s.accountID, s.accountID).
+		Scan(&v.ProviderModelID, &v.ProviderID, &v.ProviderName, &v.ProviderType, &v.BaseURL, &v.Credential, &enabled, &v.Protocols, &v.NativeProtocol, &v.UpstreamModelID, &available, &v.ReasoningCapabilities, &v.MaxOutputTokens, &v.SupportsTemperature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RouteTarget{}, sql.ErrNoRows
 	}
