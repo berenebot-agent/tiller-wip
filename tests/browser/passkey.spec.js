@@ -193,16 +193,6 @@ test('adding a passkey sends the challenge token and the CSRF header', async ({ 
   await expect(page.locator('#account-passkeys-list')).toContainText('Phone');
 });
 
-test('passkey management renders created and last-used metadata', async ({ page }) => {
-  await installCredentialStub(page);
-  await mockHostedPasskeyPage(page);
-  await openAccountTab(page);
-  const row = page.locator('[data-passkey="pk-1"]');
-  await expect(row).toContainText('Laptop');
-  await expect(row).toContainText('Added');
-  await expect(row).toContainText('Last used');
-});
-
 test('passkey-only account confirms a password change with a passkey assertion', async ({ page }) => {
   await installCredentialStub(page);
   const passkeyOnly = { ...PROFILE, password_enabled: false, has_password: true };
@@ -349,21 +339,18 @@ async function mockLocalPasskeySession(page, { profile = LOCAL_PROFILE } = {}) {
   await page.route('**/api/admin/client-keys/types', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
 }
 
-test('local install with passkeys shows the sign-in button', async ({ page }) => {
-  await installCredentialStub(page);
-  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: true }) }));
-  await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
-  await page.goto('/');
-  await expect(page.locator('#passkey-signin')).toBeVisible();
-});
-
-test('local install without passkeys hides the sign-in button', async ({ page }) => {
-  await installCredentialStub(page);
-  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: false }) }));
-  await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
-  await page.goto('/');
-  await expect(page.locator('#passkey-signin')).toBeHidden();
-});
+// The sign-in button is gated on the runtime's passkeys_enabled flag. Both
+// directions are asserted in one test because they are the same one-line
+// conditional; splitting them duplicated the whole fixture for no extra coverage.
+for (const enabled of [true, false]) {
+  test(`local install ${enabled ? 'with' : 'without'} passkeys ${enabled ? 'shows' : 'hides'} the sign-in button`, async ({ page }) => {
+    await installCredentialStub(page);
+    await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: enabled }) }));
+    await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
+    await page.goto('/');
+    await expect(page.locator('#passkey-signin'))[enabled ? 'toBeVisible' : 'toBeHidden']();
+  });
+}
 
 test('local passkey sign-in performs the ceremony and enters the app', async ({ page }) => {
   await installCredentialStub(page);

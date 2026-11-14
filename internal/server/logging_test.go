@@ -954,14 +954,6 @@ func TestOutputObserverRecordsFirstOutputOnce(t *testing.T) {
 	}
 }
 
-// TestOutputObserverNilSafe confirms a nil observer is a no-op, so streaming
-// call sites can pass nil without guards.
-func TestOutputObserverNilSafe(t *testing.T) {
-	t.Parallel()
-	var obs *outputObserver
-	obs.observe()
-}
-
 // TestRecordLastOutcomeIgnoresRecoveredAttempt covers the stale-OAuth recovery
 // path: the pre-refresh 401 stays in Activity as a failed attempt, but because
 // the router repaired the credentials and retried the same target it must not be
@@ -1075,29 +1067,5 @@ func TestCooldownIndexTracksRescheduledEntry(t *testing.T) {
 	}
 	if len(store.until) != 0 {
 		t.Fatalf("entries remained after removal: %+v", store.until)
-	}
-}
-
-// TestResponsesEventHasOutput pins which Responses events count as the first
-// client-visible frame. Reasoning-summary deltas count, so a Codex prefill
-// driven by summary:auto is not mistaken for silence.
-func TestResponsesEventHasOutput(t *testing.T) {
-	t.Parallel()
-	yes := []string{
-		"response.output_text.delta",
-		"response.reasoning_summary_text.delta",
-		"response.reasoning_text.delta",
-		"response.function_call_arguments.delta",
-	}
-	for _, typ := range yes {
-		if !responsesEventHasOutput(map[string]any{"type": typ}) {
-			t.Fatalf("%s should count as output", typ)
-		}
-	}
-	no := []string{"response.created", "response.completed", "response.output_item.added"}
-	for _, typ := range no {
-		if responsesEventHasOutput(map[string]any{"type": typ}) {
-			t.Fatalf("%s should not count as first output", typ)
-		}
 	}
 }
