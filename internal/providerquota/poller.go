@@ -2,6 +2,7 @@ package providerquota
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -19,13 +20,23 @@ var (
 	// an unsuccessful quota check.
 	MinInterval = 60 * time.Second
 	// FailureRetry is how soon a provider whose last poll failed is retried,
-	// overriding the normal (background/active/forced) interval. A transient
-	// failure uses the same 60-second floor as successful checks.
+	// overriding the normal (background/active) interval. A forced (on-view)
+	// refresh only floors at MinInterval, so it never lengthens a retry that is
+	// already due sooner.
 	FailureRetry = 60 * time.Second
 	// ActiveWindow is how recently a provider must have served traffic to be
 	// considered active.
 	ActiveWindow = time.Minute
 )
+
+// ErrNotConnected reports that a provider has no credential to poll with yet:
+// the OAuth sign-in has not completed, or the API key has not been saved. It is
+// a pre-condition rather than a poll failure, so the poller records no snapshot
+// and does not enter the failure-retry state. Without this distinction, an OAuth
+// provider created before the user finished sign-in was polled immediately, the
+// hydration failure was recorded as a poll failure, and the quota card showed
+// "Check failed" until the background cadence recovered.
+var ErrNotConnected = errors.New("quota: provider not connected")
 
 // ProviderRef identifies a provider to poll.
 type ProviderRef struct {
@@ -65,6 +76,9 @@ type Poller struct {
 	// can tighten to ActiveInterval while it is in use. It is in-memory only and
 	// resets on restart, matching the live/telemetry posture.
 	active map[string]time.Time
+	// attempts counts checks started since the provider was registered, so a
+	// caller can tell "not tried yet" from "tried and found no credential".
+	attempts map[string]int64
 	// failed marks a provider whose most recent poll produced no usable
 	// snapshot, so it is retried on the short FailureRetry cadence instead of a
 	// full background/active interval. In-memory only, like active.
@@ -82,6 +96,7 @@ func NewPoller(client *http.Client, hydrate Hydrate) *Poller {
 		inflight: map[string]bool{},
 		active:   map[string]time.Time{},
 		failed:   map[string]bool{},
+		attempts: map[string]int64{},
 	}
 }
 
@@ -168,6 +183,7 @@ func (p *Poller) Reconcile(refs []ProviderRef) {
 		delete(p.last, k)
 		delete(p.inflight, k)
 		delete(p.failed, k)
+		delete(p.attempts, k)
 		p.gen[k]++
 	}
 }
@@ -198,6 +214,7 @@ func (p *Poller) ReconcileAccount(accountID string, refs []ProviderRef) {
 		delete(p.failed, k)
 		delete(p.inflight, k)
 		delete(p.active, k)
+		delete(p.attempts, k)
 	}
 	prefix := accountID + "\x00"
 	for k := range p.refs {
@@ -209,6 +226,7 @@ func (p *Poller) ReconcileAccount(accountID string, refs []ProviderRef) {
 				delete(p.failed, k)
 				delete(p.inflight, k)
 				delete(p.active, k)
+				delete(p.attempts, k)
 				p.gen[k]++
 			}
 		}
@@ -224,6 +242,7 @@ func (p *Poller) Unregister(accountID, providerID string) {
 	delete(p.last, k)
 	delete(p.inflight, k)
 	delete(p.failed, k)
+	delete(p.attempts, k)
 	p.gen[k]++
 	p.mu.Unlock()
 }
@@ -254,8 +273,14 @@ func (p *Poller) SnapshotForAccount(accountID string) map[string]Snapshot {
 // PollStatus keeps the last attempt separate from the last successful result.
 // A failed refresh must not make stale quota figures appear current.
 type PollStatus struct {
-	Refreshing    bool       `json:"refreshing"`
-	Failed        bool       `json:"failed"`
+	Refreshing bool `json:"refreshing"`
+	Failed     bool `json:"failed"`
+	// Attempts counts checks started since the provider was registered.
+	Attempts int64 `json:"attempts"`
+	// NotConnected reports that the provider has no credential yet (OAuth
+	// sign-in not finished, or no API key saved). It is a pre-condition, not a
+	// failure, and the UI prompts for a connection instead of showing an error.
+	NotConnected  bool       `json:"not_connected,omitempty"`
 	LastAttemptAt *time.Time `json:"last_attempt_at,omitempty"`
 	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
 }
@@ -270,7 +295,7 @@ func (p *Poller) PollStatesForAccount(accountID string) map[string]PollStatus {
 		if len(k) < len(prefix) || k[:len(prefix)] != prefix {
 			continue
 		}
-		status := PollStatus{Refreshing: p.inflight[k], Failed: p.failed[k]}
+		status := PollStatus{Refreshing: p.inflight[k], Failed: p.failed[k], NotConnected: p.notConnectedLocked(k), Attempts: p.attempts[k]}
 		if last := p.last[k]; !last.IsZero() {
 			value := last.UTC()
 			status.LastAttemptAt = &value
@@ -301,7 +326,10 @@ func (p *Poller) beginRefresh(accountID, providerID string, force bool, now time
 	if p.failed[k] {
 		interval = FailureRetry
 	}
-	if force {
+	// A forced on-view refresh may shorten the normal cadence down to
+	// MinInterval, but it must never lengthen a shorter retry: a failed poll
+	// keeps FailureRetry while that is the shortest remaining gap.
+	if force && interval > MinInterval {
 		interval = MinInterval
 	}
 	if last := p.last[k]; !last.IsZero() && now.Sub(last) < interval {
@@ -309,7 +337,16 @@ func (p *Poller) beginRefresh(accountID, providerID string, force bool, now time
 	}
 	p.inflight[k] = true
 	p.last[k] = now
+	p.attempts[k]++
 	return ref, p.gen[k], true
+}
+
+// notConnected reports whether the last attempt found no credential to poll
+// with, so the endpoint can tell the admin UI to prompt for a connection rather
+// than report a failure. It assumes p.mu is held.
+func (p *Poller) notConnectedLocked(k string) bool {
+	s, ok := p.snap[k]
+	return ok && s.notConnected
 }
 
 func (p *Poller) finishRefresh(ctx context.Context, ref ProviderRef, generation uint64, now time.Time) Snapshot {
@@ -319,6 +356,15 @@ func (p *Poller) finishRefresh(ctx context.Context, ref ProviderRef, generation 
 	defer p.mu.Unlock()
 	if p.gen[k] == generation {
 		p.inflight[k] = false
+		if snap.notConnected {
+			// No credential yet: nothing was checked, so this is neither a
+			// failure nor an attempt that should gate the next check. Drop the
+			// stamp so the poll that follows the credential lands immediately.
+			delete(p.last, k)
+			delete(p.failed, k)
+			p.snap[k] = Snapshot{ProviderID: ref.ProviderID, ProviderName: ref.Name, ProviderType: ref.Type, Reason: "not connected", notConnected: true}
+			return p.snap[k]
+		}
 		// Retain the last successful snapshot if a later check fails.
 		if snap.Available || !p.snap[k].Available {
 			p.snap[k] = snap
@@ -326,6 +372,24 @@ func (p *Poller) finishRefresh(ctx context.Context, ref ProviderRef, generation 
 		p.failed[k] = !snap.Available
 	}
 	return p.snap[k]
+}
+
+// RefreshNowAndWait is the synchronous twin of RefreshNow, for callers that
+// need the freshly stored credential validated before they respond.
+func (p *Poller) RefreshNowAndWait(ctx context.Context, accountID, providerID string, now time.Time) (Snapshot, bool) {
+	if p == nil {
+		return Snapshot{}, false
+	}
+	k := key(accountID, providerID)
+	p.mu.Lock()
+	if _, ok := p.refs[k]; !ok || p.inflight[k] {
+		p.mu.Unlock()
+		return Snapshot{}, false
+	}
+	delete(p.last, k)
+	delete(p.failed, k)
+	p.mu.Unlock()
+	return p.RefreshIfDue(ctx, accountID, providerID, true, now)
 }
 
 // RefreshIfDue retains a synchronous API for callers and test harnesses.
@@ -341,6 +405,30 @@ func (p *Poller) RefreshIfDue(ctx context.Context, accountID, providerID string,
 // Bound simultaneous quota checks across all users to eight. At saturation,
 // skip a request rather than queueing unbounded goroutines.
 var quotaRefreshGate = make(chan struct{}, 8)
+
+// RefreshNow discards a provider's cadence state and starts an immediate check.
+// It is the post-connection hook: once OAuth sign-in or a credential update
+// supplies the token a previous poll could not find, the provider must be polled
+// again straight away rather than waiting out the background interval or
+// showing a stale failure. Unlike TriggerIfDue it ignores the last-attempt stamp
+// and the failure flag, because the credential it was waiting for has just
+// arrived. A poll already in flight for the provider is left alone: it captured
+// the generation before the credential existed, so its result is discarded.
+func (p *Poller) RefreshNow(accountID, providerID string, now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	k := key(accountID, providerID)
+	p.mu.Lock()
+	if _, ok := p.refs[k]; !ok || p.inflight[k] {
+		p.mu.Unlock()
+		return false
+	}
+	delete(p.last, k)
+	delete(p.failed, k)
+	p.mu.Unlock()
+	return p.TriggerIfDue(accountID, providerID, now)
+}
 
 // TriggerIfDue starts an eligible check asynchronously so cached quota and a
 // per-provider spinner can be shown without waiting for the upstream.
@@ -380,6 +468,12 @@ func (p *Poller) poll(ctx context.Context, ref ProviderRef, now time.Time) Snaps
 		return snap
 	}
 	token, err := p.hydrate(ctx, ref)
+	if errors.Is(err, ErrNotConnected) {
+		// Not connected yet is a pre-condition, not a failed check.
+		snap.notConnected = true
+		snap.Reason = "not connected"
+		return snap
+	}
 	if err != nil || token == "" {
 		snap.Reason = "credentials unavailable"
 		return snap
