@@ -59,7 +59,7 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword string `json:"current_password"`
 		NewPassword     string `json:"new_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -101,7 +101,7 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		NewEmail string `json:"new_email"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -157,7 +157,7 @@ func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Token string `json:"token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -183,7 +183,7 @@ func (s *Server) revokeOwnSessions(w http.ResponseWriter, r *http.Request) {
 		RevokeTokens bool `json:"revoke_tokens"`
 	}
 	if r.ContentLength != 0 {
-		if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+		if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 			respondDecodeError(w, err)
 			return
 		}
@@ -216,7 +216,7 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Confirm  string `json:"confirm"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}

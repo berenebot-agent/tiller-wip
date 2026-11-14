@@ -51,7 +51,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CaptchaToken string `json:"captcha_token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -73,7 +73,7 @@ func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -265,7 +265,7 @@ func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Credential string `json:"credential"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -431,7 +431,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		AcceptTerms  bool `json:"accept_terms"`
 		LinkExisting bool `json:"link_existing"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}

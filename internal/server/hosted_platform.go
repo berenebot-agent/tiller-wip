@@ -50,7 +50,7 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		Password     string `json:"password"`
 		CaptchaToken string `json:"captcha_token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -268,7 +268,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		PreventSearchIndexing *bool   `json:"prevent_search_indexing"`
 	}
 	var fields map[string]json.RawMessage
-	if err := decodeJSONLimit(w, r, &fields, 64<<10); err != nil {
+	if err := s.decodeAuthJSON(w, r, &fields, 64<<10); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
