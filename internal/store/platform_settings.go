@@ -38,6 +38,13 @@ const (
 // it. It is never persisted.
 const SecretUnchanged = "\x00secret-unchanged"
 
+// mailSecretSettings are the secrets whose blank value means "keep stored".
+var mailSecretSettings = map[string]bool{
+	PlatformSettingMailResendAPIKey: true,
+	PlatformSettingMailBrevoAPIKey:  true,
+	PlatformSettingMailSMTPPassword: true,
+}
+
 var platformSecretSettings = map[string]bool{
 	PlatformSettingMailResendAPIKey:   true,
 	PlatformSettingMailBrevoAPIKey:    true,
@@ -182,13 +189,16 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		if value == SecretUnchanged {
 			continue
 		}
-		// A blank secret means "the caller did not supply one", not "erase the
-		// stored secret". The dashboard renders secret inputs empty (it never
+		// A blank MAIL secret means "the caller did not supply one", not "erase
+		// the stored secret": the dashboard renders those inputs empty (it never
 		// returns them to the browser), so saving any other field on the same
-		// form would otherwise wipe the API key. An operator clears a secret by
-		// switching provider or by an explicit clear, never by leaving the box
-		// blank.
-		if value == "" && platformSecretSettings[key] {
+		// form would otherwise wipe the API key. Mail secrets are therefore never
+		// cleared by a blank value.
+		//
+		// Google and Turnstile secrets are different: their handlers load the
+		// current value and only blank it on an explicit clear_* request, so an
+		// empty value here is a deliberate clear and must be written.
+		if value == "" && mailSecretSettings[key] {
 			continue
 		}
 		if err := upsert(key, value); err != nil {
