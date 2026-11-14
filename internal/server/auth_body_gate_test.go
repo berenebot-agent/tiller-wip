@@ -75,6 +75,40 @@ func TestAuthSurfaceDecoderTakesBodyGate(t *testing.T) {
 		app.bodyReads.release(key)
 	}
 
+	// Operator console: its own plane. Saturating the anonymous auth pool must not
+	// refuse a console write, and the console pool refuses on its own.
+	platformReq := func() *http.Request {
+		r := request("")
+		return r.WithContext(context.WithValue(r.Context(), platformListenerContextKey{}, true))
+	}
+	// Re-saturate the anonymous pool so the next assertion is a real separation
+	// test: a full anonymous pool must not refuse a console write.
+	for i := 0; i < maxConcurrentAuthBodyReads; i++ {
+		if !app.authBodyReads.acquire("") {
+			t.Fatalf("auth pool refused at %d while re-saturating", i)
+		}
+	}
+	if err := decode(platformReq()); err != nil {
+		t.Fatalf("platform decode with the ANONYMOUS pool full = %v, want admitted", err)
+	}
+	for i := 0; i < maxConcurrentAuthBodyReads; i++ {
+		app.authBodyReads.release("")
+	}
+	for i := 0; i < maxConcurrentPlatformBodyReads; i++ {
+		if !app.platformBodyReads.acquire("") {
+			t.Fatalf("platform pool refused at %d, before its cap", i)
+		}
+	}
+	if err := decode(platformReq()); !errors.Is(err, errBodyReadBusy) {
+		t.Fatalf("platform decode with the platform pool full = %v, want errBodyReadBusy", err)
+	}
+	if n := app.authBodyReads.inUse(); n != 0 {
+		t.Fatalf("platform decode charged %d anonymous auth slots, want 0", n)
+	}
+	for i := 0; i < maxConcurrentPlatformBodyReads; i++ {
+		app.platformBodyReads.release("")
+	}
+
 	// With capacity free both paths decode normally.
 	if err := decode(request("")); err != nil {
 		t.Fatalf("anonymous decode with free capacity = %v", err)
