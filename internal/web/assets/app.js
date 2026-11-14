@@ -45,6 +45,16 @@ let hostedAuthOptions = {};
 // false for env-admin local installs, which skip onboarding entirely.
 let runtimeSetupRequired = false;
 let runtimeWizardEnabled = false;
+// CAPTCHA_GATED_CONTROLS names the buttons that stay inert until the Turnstile
+// challenge for the mounted view is solved, so a visitor cannot spend a click
+// (or a rate-limit attempt) on a submit that is guaranteed to fail. Buttons are
+// released again the moment a token arrives; expired/error callbacks re-lock
+// them. Views without a mounted widget are never affected, so deployments
+// without Turnstile keep their exact current behaviour.
+const CAPTCHA_GATED_CONTROLS = {
+  'signup-form': { action: 'signup', buttons: ['#signup-form button[type="submit"]', '#show-login-from-signup'] },
+  'forgot-form': { action: 'recovery', buttons: ['#forgot-form button[type="submit"]', '#show-login-from-forgot'] },
+};
 // runtimePasskeysEnabled is true on a local install that has WebAuthn
 // configured (TILLER_PUBLIC_URL set). It gates the passkey sign-in button and
 // the Account passkeys card, mirroring hosted's auth-options payload.
@@ -341,6 +351,7 @@ function authView(name) {
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
   showAuthCaptcha(action);
+  syncAuthCaptchaGate();
 }
 // UI_SESSION_HINT is a purely presentational, client-side flag: when set, the
 // next boot paints the app skeleton instead of the login card while the session
@@ -448,6 +459,7 @@ function loadTurnstileScript() {
   return captchaScriptPromise;
 }
 
+const AUTH_CAPTCHA_PENDING_HINT = 'Complete the security check to continue.';
 async function showAuthCaptcha(action) {
   const wrap = $('#auth-captcha-wrap');
   if (!wrap) return;
@@ -455,26 +467,67 @@ async function showAuthCaptcha(action) {
     captchaGeneration++; captchaToken = ''; captchaAction = '';
     if (captchaWidgetID !== null && window.turnstile) window.turnstile.remove(captchaWidgetID);
     captchaWidgetID = null; $('#auth-captcha').replaceChildren(); wrap.hidden = true;
+    syncAuthCaptchaGate();
     return;
   }
-  if (captchaAction === action && captchaWidgetID !== null) { wrap.hidden = false; return; }
+  if (captchaAction === action && captchaWidgetID !== null) { wrap.hidden = false; syncAuthCaptchaGate(); return; }
   const generation = ++captchaGeneration;
   captchaAction = action; captchaToken = ''; captchaWidgetID = null;
   if (window.turnstile && $('#auth-captcha').dataset.widget) window.turnstile.remove($('#auth-captcha').dataset.widget);
   $('#auth-captcha').replaceChildren(); delete $('#auth-captcha').dataset.widget;
   wrap.hidden = false;
+  const status = wrap.querySelector('.meta-line');
+  if (status) { status.textContent = AUTH_CAPTCHA_PENDING_HINT; status.classList.remove('is-error'); }
+  syncAuthCaptchaGate();
   try {
     await loadTurnstileScript();
     if (generation !== captchaGeneration) return;
     captchaWidgetID = window.turnstile.render('#auth-captcha', {
       sitekey: hostedAuthOptions.turnstile_site_key, action,
-      callback: token => { captchaToken = token; captchaAction = action; },
-      'expired-callback': () => { captchaToken = ''; },
-      'error-callback': () => { captchaToken = ''; },
+      callback: token => { captchaToken = token; captchaAction = action; syncAuthCaptchaGate(); },
+      'expired-callback': () => { captchaToken = ''; syncAuthCaptchaGate(); },
+      'error-callback': () => { captchaToken = ''; syncAuthCaptchaGate(); },
     });
     $('#auth-captcha').dataset.widget = captchaWidgetID;
+    syncAuthCaptchaGate();
   } catch (error) {
-    if (generation === captchaGeneration) $('#auth-captcha-wrap').querySelector('.meta-line').textContent = errorMessage(error, 'Security check failed to load.');
+    if (generation !== captchaGeneration) return;
+    if (status) { status.textContent = errorMessage(error, 'Security check failed to load.'); status.classList.add('is-error'); }
+    // A challenge that cannot load would otherwise lock the visitor out of a
+    // page that may still work: never trap them behind a missing script.
+    syncAuthCaptchaGate({ failed: true });
+  }
+}
+
+// authCaptchaGate resolves the current view's gated controls, or null when no
+// gated form is visible (sign-in, setup, platform console, done screens).
+function authCaptchaGate() {
+  const wrap = $('#auth-captcha-wrap');
+  let view = null;
+  for (const id of Object.keys(CAPTCHA_GATED_CONTROLS)) { const el = $('#' + id); if (el && !el.hidden) { view = id; break; } }
+  if (!view) return null;
+  const config = CAPTCHA_GATED_CONTROLS[view];
+  const mounted = !!(wrap && !wrap.hidden && captchaWidgetID !== null && captchaAction === config.action);
+  const solved = mounted && captchaAction === config.action && !!captchaToken;
+  return { config, locked: mounted && !solved };
+}
+
+// syncAuthCaptchaGate is idempotent: it reconciles the gated buttons with the
+// current challenge state and leaves them alone when no widget is mounted.
+// failed releases the lock so a broken Turnstile script degrades to today's
+// behaviour (the request is still verified server-side).
+function syncAuthCaptchaGate({ failed = false } = {}) {
+  const gate = authCaptchaGate();
+  if (!gate) return;
+  const locked = gate.locked && !failed;
+  for (const selector of gate.config.buttons) {
+    const button = $(selector);
+    if (!button) continue;
+    // Never fight an in-flight submit: it owns the disabled flag itself.
+    if (button.dataset.captchaLock !== '1' && button.disabled) continue;
+    button.disabled = locked;
+    button.setAttribute('aria-disabled', String(locked));
+    if (locked) button.dataset.captchaLock = '1'; else delete button.dataset.captchaLock;
   }
 }
 
@@ -491,6 +544,7 @@ function resetAuthCaptcha(action) {
   if (!hostedAuthOptions.turnstile_enabled || captchaAction !== action) return;
   captchaToken = '';
   if (captchaWidgetID !== null && window.turnstile) window.turnstile.reset(captchaWidgetID);
+  syncAuthCaptchaGate();
 }
 
 $('#login-form').addEventListener('submit', async event => {
@@ -651,9 +705,9 @@ $('#signup-form').addEventListener('submit', async event => {
     $('#signup-done-message').textContent = 'If the address can receive mail, a verification message will arrive shortly.';
     authView('signup-done');
     exposeSignupResend();
-  } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); }
+  } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); syncAuthCaptchaGate(); }
 });
-$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-done-message').textContent = result.message || 'If the address belongs to an account, a password-reset message will arrive shortly.'; authView('forgot-done'); } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
+$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-done-message').textContent = result.message || 'If the address belongs to an account, a password-reset message will arrive shortly.'; authView('forgot-done'); } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); syncAuthCaptchaGate(); } });
 // === GOOGLE IDENTITY SERVICES ===
 // The "Sign in with Google" button and the One Tap account chooser are rendered
 // by Google's own script so the branding and in-page account popup are the ones
