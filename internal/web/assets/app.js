@@ -1038,8 +1038,8 @@ async function openProvider(provider = null, onSaved = null) {
         picker.hidden = true; setup.hidden = false; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = false); submit.hidden = false; submit.disabled = false;
         $('[data-selected-provider]', form).innerHTML = `${providerMark(item.type,item.label,'provider-selected-mark')}<strong>${h(item.label)}</strong>`;
         if (base && (!base.value || base.dataset.auto === 'true')) { base.value = item.default_base_url || ''; base.dataset.auto = 'true'; }
-        name.placeholder = item.type; const oauth = item.auth_mode === 'oauth'; credential.required = Boolean(item.credential_needed) && !oauth; credentialWrap.hidden = item.type === 'opencode-free' || oauth; credentialLabel.hidden = oauth; if (base) base.required = Boolean(item.base_url_required || !item.default_base_url); if (oauth) credential.value = '';
-        submit.textContent = oauth ? `Connect with ${item.label}` : 'Add & discover'; showProtocols(); (base || name).focus();
+        name.placeholder = item.type; const oauth = item.auth_mode === 'oauth'; credential.required = Boolean(item.credential_needed) && !oauth; credentialWrap.hidden = item.type === 'opencode-free' || oauth; credentialLabel.hidden = oauth; const baseWrap = base && base.closest('label'); if (baseWrap) baseWrap.hidden = oauth; if (base) base.required = Boolean(item.base_url_required || !item.default_base_url); if (oauth) credential.value = '';
+        submit.textContent = oauth ? `Connect with ${item.label}` : 'Add & discover'; showProtocols(); (base && !base.closest('label')?.hidden ? base : name).focus();
       };
       search.addEventListener('input', filter);
       search.addEventListener('keydown', event => { const visible = options.filter(option => !option.hidden); if (event.key === 'ArrowDown' && visible.length) { event.preventDefault(); visible[0].focus(); } if (event.key === 'Enter') { event.preventDefault(); if (visible.length) choose(visible[0]); } });
@@ -1047,7 +1047,7 @@ async function openProvider(provider = null, onSaved = null) {
         option.addEventListener('click', () => choose(option));
         option.addEventListener('keydown', event => { const visible = options.filter(candidate => !candidate.hidden), index = visible.indexOf(option); if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); visible[(index + (event.key === 'ArrowDown' ? 1 : visible.length - 1)) % visible.length]?.focus(); } if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(option); } });
       });
-      $('[data-provider-back]', form).addEventListener('click', () => { setup.hidden = true; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); picker.hidden = false; submit.hidden = true; submit.disabled = true; search.focus(); });
+      $('[data-provider-back]', form).addEventListener('click', () => { const baseWrap = $('[name="base_url"]', form)?.closest('label'); if (baseWrap) baseWrap.hidden = false; setup.hidden = true; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); picker.hidden = false; submit.hidden = true; submit.disabled = true; search.focus(); });
       base?.addEventListener('input', () => base.dataset.auto = 'false'); $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); submit.hidden = true; submit.disabled = true; filter();
     } else {
       const item = state.providerTypes.find(candidate => candidate.type === provider.type), replace = $('[data-credential-replace]', form);
