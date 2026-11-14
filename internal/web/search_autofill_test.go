@@ -17,6 +17,11 @@ var inputTagPattern = regexp.MustCompile(`<input\b[^>]*>`)
 var (
 	fieldTagPattern         = regexp.MustCompile(`<(?:input|textarea)\b[^>]*>`)
 	exemptFromAutofillCheck = regexp.MustCompile(`type="(?:checkbox|radio|hidden|file|range)"`)
+	// passwordAutofillOptOut matches a password field that has explicitly
+	// declined every major password manager. A field like this must NOT carry
+	// current-password/new-password: those hint tokens are exactly what makes a
+	// manager offer, and leave, a saved password in the box.
+	passwordAutofillOptOut = regexp.MustCompile(`autocomplete="off".*data-1p-ignore.*data-lpignore="true".*data-bwignore`)
 )
 
 func TestFreeTextFieldsDisableAutofill(t *testing.T) {
@@ -36,7 +41,7 @@ func TestFreeTextFieldsDisableAutofill(t *testing.T) {
 			if strings.Contains(tag, `autocomplete="current-password"`) || strings.Contains(tag, `autocomplete="new-password"`) {
 				continue
 			}
-			if strings.Contains(tag, `type="password"`) {
+			if strings.Contains(tag, `type="password"`) && !passwordAutofillOptOut.MatchString(tag) {
 				t.Errorf("%s: password field needs current-password or new-password: %s", name, tag)
 			}
 		}
