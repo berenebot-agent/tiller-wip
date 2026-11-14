@@ -125,6 +125,8 @@ test('platform admin loads and saves the mail sender display name', async ({ pag
   await page.route('**/api/platform/settings', route => {
     if (route.request().method() === 'PUT') {
       saved = route.request().postDataJSON();
+      // Persist like the real endpoint so the reload reflects the save.
+      Object.assign(settings.mail, { from: saved.mail_from, from_name: saved.mail_from_name, provider: saved.mail_provider });
       return route.fulfill({ status: 204, body: '' });
     }
     return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) });
@@ -145,4 +147,16 @@ test('platform admin loads and saves the mail sender display name', async ({ pag
     mail_from: 'no-reply@example.com',
     mail_from_name: 'Tiller Router',
   });
+
+  // The save must be acknowledged in the console's own banner (the customer
+  // app's #flash is a different, hidden shell).
+  await expect(page.locator('#platform-flash')).toBeVisible();
+  await expect(page.locator('#platform-flash')).toHaveText('Mail settings saved.');
+
+  // Navigating away and back must re-render the saved sender name.
+  await page.locator('#platform-tab-settings').click();
+  await expect(page.locator('#platform-panel-mail')).toBeHidden();
+  await page.locator('#platform-tab-mail').click();
+  await expect(form.locator('[name="mail_from_name"]')).toHaveValue('Tiller Router');
+  await expect(form.locator('[name="mail_from"]')).toHaveValue('no-reply@example.com');
 });
