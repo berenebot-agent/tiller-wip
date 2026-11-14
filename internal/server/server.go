@@ -1073,9 +1073,11 @@ func (s *Server) requireAdmin(next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), adminSessionKey, session)
 		ctx = context.WithValue(ctx, accountKey, accountID)
 		stampRequestPrincipal(r, "admin", accountID)
-		if !s.chargeDashboardBudget(w, r, accountID) {
+		release, ok := s.chargeDashboardBudget(w, r, accountID)
+		if !ok {
 			return
 		}
+		defer release()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -1150,9 +1152,11 @@ func (s *Server) requireManagementToken(w http.ResponseWriter, r *http.Request, 
 	}
 	s.managementTokenSelectorLimiter.success(selector)
 	s.managementTokenAddressLimiter.success(address)
-	if !s.chargeDashboardBudget(w, r, identity.AccountID) {
+	release, ok := s.chargeDashboardBudget(w, r, identity.AccountID)
+	if !ok {
 		return
 	}
+	defer release()
 	if area != "" && !identity.Allows(area, tier) {
 		writeJSON(w, http.StatusForbidden, map[string]any{"error": map[string]any{
 			"code":     "insufficient_scope",

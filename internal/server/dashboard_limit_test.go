@@ -119,6 +119,43 @@ func TestDashboardLiveStreamIsNotChargedToBudget(t *testing.T) {
 	}
 }
 
+// admitted reports whether chargeDashboardBudget let the request through,
+// releasing any live slot it took.
+func admitted(app *Server, w http.ResponseWriter, r *http.Request, accountID string) bool {
+	release, ok := app.chargeDashboardBudget(w, r, accountID)
+	release()
+	return ok
+}
+
+// TestLiveSlotHeldUntilReleased proves the live concurrency slot is held by the
+// caller until it releases, not freed when admission returns.
+func TestLiveSlotHeldUntilReleased(t *testing.T) {
+	t.Parallel()
+	app, _, accountID := hostedAccountServer(t)
+	live := mustRequest(t, "/api/admin/live")
+	var releases []func()
+	for i := 0; i < dashboardLiveConcurrency; i++ {
+		release, ok := app.chargeDashboardBudget(httptest.NewRecorder(), live, accountID)
+		if !ok {
+			t.Fatalf("stream %d refused below the cap", i)
+		}
+		releases = append(releases, release)
+	}
+	rec := httptest.NewRecorder()
+	if _, ok := app.chargeDashboardBudget(rec, live, accountID); ok || rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("stream over the cap = ok %v code %d, want refused 429", ok, rec.Code)
+	}
+	releases[0]()
+	release, ok := app.chargeDashboardBudget(httptest.NewRecorder(), live, accountID)
+	if !ok {
+		t.Fatal("a closed stream must free its slot")
+	}
+	release()
+	for _, r := range releases[1:] {
+		r()
+	}
+}
+
 // mustRequest builds a GET request for the given console path.
 func mustRequest(t *testing.T, path string) *http.Request {
 	t.Helper()
@@ -189,29 +226,29 @@ func TestDashboardBudgetDoesNotLockOutSessionProbe(t *testing.T) {
 
 	// Spend the whole budget on an ordinary console route.
 	ordinary := mustRequest(t, "/api/admin/client-keys")
-	if !app.chargeDashboardBudget(httptest.NewRecorder(), ordinary, accountID) {
+	if !admitted(app, httptest.NewRecorder(), ordinary, accountID) {
 		t.Fatal("the first ordinary request should be admitted")
 	}
-	if app.chargeDashboardBudget(httptest.NewRecorder(), ordinary, accountID) {
+	if admitted(app, httptest.NewRecorder(), ordinary, accountID) {
 		t.Fatal("expected the budget to be spent")
 	}
 
 	// Both identity probes still answer: a spent budget is a reason to slow
 	// down, never to claim the session is gone.
 	for _, path := range []string{"/api/admin/session", "/api/auth/session"} {
-		if !app.chargeDashboardBudget(httptest.NewRecorder(), mustRequest(t, path), accountID) {
+		if !admitted(app, httptest.NewRecorder(), mustRequest(t, path), accountID) {
 			t.Fatalf("%s was refused while the budget was spent; the session probe must not be budgeted", path)
 		}
 	}
 
 	// The exemption is narrow: an ordinary console read still refuses, so the
 	// budget itself is untouched.
-	if app.chargeDashboardBudget(httptest.NewRecorder(), ordinary, accountID) {
+	if admitted(app, httptest.NewRecorder(), ordinary, accountID) {
 		t.Fatal("an ordinary console read must still be refused while the budget is spent")
 	}
 	// And the refusal really writes the rate-limit answer.
 	rec := httptest.NewRecorder()
-	if app.chargeDashboardBudget(rec, ordinary, accountID) || rec.Code != http.StatusTooManyRequests {
+	if admitted(app, rec, ordinary, accountID) || rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("refusal = %d, want 429", rec.Code)
 	}
 }
