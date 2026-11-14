@@ -4082,6 +4082,10 @@ function mountAnalyticsFrame(options) {
 }
 
 async function setupAnalyticsConsent() {
+  // The operator console has no consent banner and, when served on its own
+  // origin/port, no customer analytics endpoint — probing it only produced a
+  // 404 in the browser console.
+  if (location.pathname.startsWith('/platform')) return;
   let options;
   try { options = await api('/api/analytics/options'); } catch { return; }
   if (!options || !options.enabled) return;
@@ -4103,7 +4107,11 @@ async function setupAnalyticsConsent() {
     if (runtimeMode === 'hosted') {
       $('#login-identity-label').firstChild.textContent = 'Email ';
       $('#login-submit').textContent = 'Sign in';
-      try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      // The platform console has its own sign-in form and its own session
+      // endpoint; /api/auth/options is a customer-app route and 404s here.
+      if (!location.pathname.startsWith('/platform')) {
+        try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      }
       await setupAnalyticsConsent();
     } else {
       runtimeSetupRequired = Boolean(runtime.setup_required);
@@ -4573,9 +4581,24 @@ $('#platform-legal-list').addEventListener('submit', async event => {
   try { await api(`/api/platform/legal/${encodeURIComponent(form.dataset.slug)}`, { method: 'PUT', body: JSON.stringify({ title: data.get('title'), body: data.get('body') }) }); flash('Legal document published.'); }
   catch (error) { $('#platform-legal-error').style.color = ''; $('#platform-legal-error').textContent = errorMessage(error, 'Could not publish the document.'); }
 });
+// applyMailProviderVisibility shows the fields that belong to the chosen mail
+// provider and disables the rest.
+//
+// Hidden is not enough. A merely hidden control still takes part in HTML5
+// constraint validation, so the SMTP port (type=number, min=1) kept the whole
+// form invalid while its branch was inactive: the browser refused to submit,
+// logged "An invalid form control with name='mail_smtp_port' is not
+// focusable", and the submit handler never ran — so nothing saved and no
+// message appeared. Disabling an inactive control removes it from both
+// validation and FormData, which is also the correct payload: an inactive
+// branch must not submit stale values.
 function applyMailProviderVisibility(provider) {
   document.querySelectorAll('#platform-mail-settings-form [data-mail-when]').forEach(el => {
-    el.hidden = provider === '' || (el.dataset.mailWhen !== 'any' && el.dataset.mailWhen !== provider);
+    const active = provider !== '' && (el.dataset.mailWhen === 'any' || el.dataset.mailWhen === provider);
+    el.hidden = !active;
+    el.querySelectorAll('input, select, textarea').forEach(control => {
+      control.disabled = !active;
+    });
   });
 }
 document.querySelector('#platform-mail-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
