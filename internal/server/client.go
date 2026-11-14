@@ -682,16 +682,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	s.publishLiveRequest(row, false)
 	// Detailed error bodies are captured only when the client key allows it:
 	// "always" captures them regardless of the account setting, "inherit"
-	// follows that setting, and "never" never captures them. Hosted mode
-	// captures no bodies at all.
+	// follows that setting, and "never" never captures them. This is opt-in in
+	// both modes — hosted included — and both switches default to off, so a
+	// deployment that never enables them persists no bodies at all.
 	logErrorBodies := false
-	if s.config.Mode != config.ModeHosted {
-		switch clientBodyLog {
-		case store.BodyLogAlways:
-			logErrorBodies = true
-		case store.BodyLogInherit:
-			logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
-		}
+	switch clientBodyLog {
+	case store.BodyLogAlways:
+		logErrorBodies = true
+	case store.BodyLogInherit:
+		logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
 	}
 	originalBody := append([]byte(nil), body...)
 	// Extract the canonical reasoning selector once from the original request.

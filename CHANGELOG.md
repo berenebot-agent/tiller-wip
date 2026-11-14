@@ -130,6 +130,17 @@ behavior may still change before a stable `1.0`.
 
 ### Changed
 
+- **Detailed error logging is now opt-in in hosted mode too.** Hosted accounts
+  could not enable it at all, so a provider error whose message was something
+  like "HTTP 400: Bad Request" left nothing to diagnose — the upstream body was
+  simply never stored. The account switch and the per-client
+  `inherit`/`always`/`never` override now behave identically in local and
+  hosted mode, still defaulting to off, still bounded to 1 MiB, still
+  admin-gated. With both switches off (the default) hosted persists no body
+  content, exactly as before; capture happens only when the account operator
+  asks for it. Stored bodies contain prompt content and appear in Activities
+  and CSV exports, and turning the setting off does not purge bodies already
+  stored.
 - **Quieter usage cells.** Every token cell (Clients, Providers → Models,
   Virtual models, mobile model cards and Activity history) now shows the cache
   share and cost as bare figures — `484.85 Mtok` over `97%  $1.02` — instead of

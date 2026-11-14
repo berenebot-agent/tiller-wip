@@ -54,7 +54,8 @@ Notes for embedders:
   or account-wide (`default_logging_enabled`) if the host wants no history.
 - Failed request and provider error bodies are stored only when detailed error
   logging is enabled. Per client key, `log_error_bodies` is `inherit` (follow
-  the account setting), `always` or `never`; hosted mode refuses `always`.
+  the account setting), `always` or `never`. The switch behaves the same in
+  local and hosted mode; both default to off.
 
 ```bash
 # Create a token in Settings → Management API, then:
