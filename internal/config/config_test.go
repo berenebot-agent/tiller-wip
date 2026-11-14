@@ -780,3 +780,37 @@ func TestPlatformPort(t *testing.T) {
 		t.Error("TILLER_PLATFORM_PORT in local mode should fail")
 	}
 }
+
+func TestConsoleRequestsPerMinuteOverride(t *testing.T) {
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_MODE", "")
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_USERNAME", "")
+	t.Setenv("TILLER_PASSWORD", "")
+	t.Setenv("TILLER_ADMIN_USERNAME", "")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "")
+
+	t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", "")
+	if c, err := Load(); err != nil || c.ConsoleRequestsPerMinute != 0 {
+		t.Fatalf("unset = %d err=%v, want 0 (built-in default)", c.ConsoleRequestsPerMinute, err)
+	}
+	t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", "500")
+	if c, err := Load(); err != nil || c.ConsoleRequestsPerMinute != 500 {
+		t.Fatalf("500 = %d err=%v", c.ConsoleRequestsPerMinute, err)
+	}
+	for _, bad := range []string{"0", "-3", "many"} {
+		t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", bad)
+		if _, err := Load(); err == nil {
+			t.Fatalf("%q should be rejected", bad)
+		}
+	}
+
+	// Hosted mode keeps the budget a platform control.
+	t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", "500")
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://tiller.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "127.0.0.1/32")
+	if _, err := Load(); err == nil {
+		t.Fatal("hosted mode must reject the console budget override")
+	}
+}

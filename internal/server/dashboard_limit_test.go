@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"github.com/tiller-router/tiller-router/internal/config"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -279,5 +280,15 @@ func TestClientsViewIsOneBudgetUnitAndMatchesTheStandaloneEndpoints(t *testing.T
 		if string(gotJSON) != string(wantJSON) {
 			t.Fatalf("%s differs from %s:\n got %s\nwant %s", key, path, gotJSON, wantJSON)
 		}
+	}
+}
+
+func TestConsoleBudgetDefaultsAndOverrides(t *testing.T) {
+	t.Parallel()
+	if got := consoleBudget(config.Config{}); got != dashboardRequestsPerMinute {
+		t.Fatalf("default = %d, want %d", got, dashboardRequestsPerMinute)
+	}
+	if got := consoleBudget(config.Config{ConsoleRequestsPerMinute: 500}); got != 500 {
+		t.Fatalf("override = %d, want 500", got)
 	}
 }
