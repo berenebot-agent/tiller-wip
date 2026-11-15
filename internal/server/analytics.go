@@ -104,6 +104,42 @@ func (s *Server) analyticsScriptOrigin() (string, bool) {
 	return analyticsScriptOrigin(settings.ScriptURL)
 }
 
+// analyticsFramePath is the isolated document that hosts the third-party
+// analytics script. It is loaded by the console as a sandboxed iframe with no
+// allow-same-origin, so the vendor script never shares an origin (or a
+// document) with the authenticated application.
+const analyticsFramePath = "/analytics-frame.html"
+
+// analyticsFrameCSP is the Content-Security-Policy for the analytics frame
+// alone. It is the only policy in the application that names the operator's
+// analytics origin: the console document keeps script-src/connect-src 'self'
+// so a compromised vendor script there cannot reach the API.
+func analyticsFrameCSP(origin string) string {
+	policy := "default-src 'none'; script-src 'self'"
+	connect := "connect-src 'none'"
+	img := "img-src 'none'"
+	if origin != "" {
+		policy += " " + origin
+		connect = "connect-src " + origin
+		img = "img-src " + origin
+	}
+	return policy + "; " + connect + "; " + img + "; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
+}
+
+// analyticsFrame serves the isolated analytics document. It must be frameable
+// by the console, so it overrides the DENY set by securityHeaders. It carries
+// no application markup and no credential-readable state: the sandbox on the
+// embedding iframe gives it an opaque origin regardless.
+func (s *Server) analyticsFrame(w http.ResponseWriter, r *http.Request) {
+	origin, _ := s.analyticsScriptOrigin()
+	w.Header().Set("Content-Security-Policy", analyticsFrameCSP(origin))
+	w.Header().Set("X-Frame-Options", "SAMEORIGIN")
+	w.Header().Set("Cache-Control", "no-store")
+	// s.assets serves the embedded analytics-frame.html (and the
+	// analytics-frame.js it loads) with the right content type.
+	s.assets.ServeHTTP(w, r)
+}
+
 // analyticsOptions serves the public, non-secret analytics configuration to
 // the consent-gated frontend. The script is never loaded by the server; the
 // browser requests it only after the visitor consents.

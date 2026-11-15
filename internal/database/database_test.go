@@ -127,6 +127,45 @@ func TestBackupIsConsistentAndReadable(t *testing.T) {
 	}
 }
 
+func TestBackupWithActivityRestoreAndRetention(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := Open(ctx, filepath.Join(dir, "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Activity.Exec(`INSERT INTO request_logs(id,client_key_id,requested_model,protocol,streaming,http_status,latency_ms,client_request_id,created_at) VALUES('act-1','ck','m','chat',0,200,1,'r1',?)`, Now()); err != nil {
+		t.Fatal(err)
+	}
+	backupDir := filepath.Join(dir, "backups")
+	point, err := db.BackupWithActivity(ctx, backupDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := Open(ctx, filepath.Join(point, "tiller-router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := restored.Activity.QueryRow(`SELECT count(*) FROM request_logs WHERE id='act-1'`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("restored Activity count = %d, error = %v", count, err)
+	}
+	restored.Close()
+	if err := PruneRestorePoints(backupDir, time.Hour, time.Now().Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(point); !os.IsNotExist(err) {
+		t.Fatalf("restore point was not pruned: %v", err)
+	}
+	activity := db.Activity
+	db.Activity = nil
+	if _, err := db.BackupWithActivity(ctx, backupDir); err == nil {
+		t.Fatal("backup succeeded without Activity")
+	}
+	db.Activity = activity
+}
+
 // Migration 014 (backfill of legacy route attribution) is exercised end to end
 // by TestMigrateFromEveryCheckpointPreservesData, which seeds a legacy-shaped
 // request row and upgrades from each historical checkpoint. The standalone

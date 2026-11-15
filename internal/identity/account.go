@@ -24,6 +24,11 @@ var (
 	// ErrInvalidSession is returned when a raw session token cannot be parsed.
 	ErrInvalidSession   = errors.New("identity: invalid session token")
 	ErrPasswordDisabled = errors.New("identity: password authentication is disabled")
+	// ErrReauthenticationCancelled reports that a password check gave up waiting
+	// for KDF capacity because the caller's request ended. It is not a failed
+	// password, must not count toward a lockout, and must never be reported to
+	// the client as "wrong password".
+	ErrReauthenticationCancelled = errors.New("identity: reauthentication abandoned by the caller")
 	// ErrMailUnavailable is returned when a queued message cannot be encrypted
 	// because the master key is locked.
 	ErrMailUnavailable = errors.New("identity: mail unavailable while the master key is locked")
@@ -73,6 +78,14 @@ func sessionSelector(raw string) (string, error) {
 // VerifyPassword re-authenticates an already-authenticated user. It is used
 // before sensitive account changes (password, email, delete).
 func (s *Store) VerifyPassword(ctx context.Context, userID, password string) error {
+	return s.VerifyPasswordContext(ctx, userID, password)
+}
+
+// VerifyPasswordContext is VerifyPassword for a live request: it stops waiting
+// for a KDF slot once ctx is done instead of parking behind other work. A
+// caller that went away sees ErrReauthenticationCancelled, which is not a
+// failed password and must never be counted against the account.
+func (s *Store) VerifyPasswordContext(ctx context.Context, userID, password string) error {
 	var hash string
 	var enabled bool
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash,password_auth_enabled FROM users WHERE id=?`, userID).Scan(&hash, &enabled); err != nil {
@@ -83,6 +96,18 @@ func (s *Store) VerifyPassword(ctx context.Context, userID, password string) err
 	}
 	if !enabled {
 		return ErrPasswordDisabled
+	}
+	if verifier, ok := s.passwordHasher.(interface {
+		VerifyContext(context.Context, string, string) (bool, bool)
+	}); ok {
+		verified, available := verifier.VerifyContext(ctx, password, hash)
+		if !available {
+			return ErrReauthenticationCancelled
+		}
+		if !verified {
+			return ErrNotFound
+		}
+		return nil
 	}
 	if !s.passwordHasher.Verify(password, hash) {
 		return ErrNotFound
@@ -344,7 +369,7 @@ func (s *Store) ConfirmEmailChange(ctx context.Context, rawToken string) (User, 
 // changed directly (email-change confirm) rather than revoked wholesale.
 func (s *Store) invalidateUserCache(userID string) {
 	s.mu.Lock()
-	atomic.AddUint64(&s.rev, 1)
+	s.userMutated[userID] = userMutation{seq: atomic.AddUint64(&s.seq, 1), at: time.Now()}
 	for selector, entry := range s.userCache {
 		if entry.session.User.ID == userID {
 			delete(s.userCache, selector)
@@ -376,10 +401,13 @@ func (s *Store) nudgeMail() {
 }
 
 // invalidateOtherUserSessions drops cached sessions for the user except the
-// retained selector and bumps the generation so concurrent readers fail closed.
+// retained selector and marks that user's sessions invalid, so concurrent
+// readers for this user fail closed.
 func (s *Store) invalidateOtherUserSessions(userID, keepSelector string) {
 	s.mu.Lock()
-	atomic.AddUint64(&s.rev, 1)
+	// The retained selector is exempt, so its own in-flight load can publish;
+	// every other session of this user fails closed. Other users are untouched.
+	s.userMutated[userID] = userMutation{seq: atomic.AddUint64(&s.seq, 1), at: time.Now(), keep: keepSelector}
 	for selector, entry := range s.userCache {
 		if entry.session.User.ID == userID && selector != keepSelector {
 			delete(s.userCache, selector)

@@ -150,6 +150,20 @@ type managementCacheEntry struct {
 	expires  time.Time
 }
 
+// mutationMark records when (in monotonic sequence terms) one credential or
+// account was mutated. A verification captures the sequence before it reads
+// the database and fails closed only if its own credential was marked after
+// that point, so another tenant's rotate/revoke can never fail it closed.
+type mutationMark struct {
+	seq uint64
+	at  time.Time
+}
+
+// mutationMarkTTL bounds how long a mutation mark is retained. It is far
+// longer than any verification can take (a queue wait plus one hash), so a
+// verification that started before the mutation always observes the mark.
+const mutationMarkTTL = time.Hour
+
 // ManagementTokenAuthenticator verifies management tokens against the
 // api_tokens table, with a short-lived verified-token cache so a token does
 // not pay a bcrypt verify on every request. It mirrors ClientAuthenticator's
@@ -164,7 +178,13 @@ type ManagementTokenAuthenticator struct {
 	entries    map[[32]byte]managementCacheEntry
 	maxEntries int
 	sem        chan struct{}
-	rev        uint64
+	// seq is a monotonic mutation sequence. Each mutation records the token id
+	// and account it touched with the sequence value at that moment; a
+	// verification fails closed only when the credential it just verified was
+	// mutated after that verification began.
+	seq            uint64
+	mutated        map[string]mutationMark
+	accountMutated map[string]mutationMark
 }
 
 // NewManagementTokenAuthenticatorWithHasher constructs a
@@ -178,7 +198,7 @@ func NewManagementTokenAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) 
 	if hasher == nil {
 		hasher = BcryptHasher{}
 	}
-	return &ManagementTokenAuthenticator{store: store.New(db), key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]managementCacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4)}, nil
+	return &ManagementTokenAuthenticator{store: store.New(db), key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]managementCacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4), mutated: make(map[string]mutationMark), accountMutated: make(map[string]mutationMark)}, nil
 }
 
 // SetCacheTTL overrides the verified-token cache TTL. It is called once at
@@ -229,7 +249,7 @@ func (a *ManagementTokenAuthenticator) AuthenticateContext(ctx context.Context, 
 	}
 	defer func() { <-a.sem }()
 
-	generation := atomic.LoadUint64(&a.rev)
+	generation := atomic.LoadUint64(&a.seq)
 	row, err := a.store.ManagementTokenBySelector(ctx, selector)
 	if err != nil || !row.Enabled || row.AccountStatus != "active" || !a.hasher.Verify(secret, row.SecretHash) {
 		return ManagementTokenIdentity{}, ErrManagementTokenInvalid
@@ -261,9 +281,11 @@ func (a *ManagementTokenAuthenticator) AuthenticateContext(ctx context.Context, 
 	_ = a.store.TouchManagementTokenLastUsed(ctx, identity.ID, formatUTC(now))
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if atomic.LoadUint64(&a.rev) != generation {
-		// A mutation (rotate/revoke/scope change) raced this verification;
-		// fail closed rather than publish a stale grant.
+	if a.mutatedSinceLocked(identity.ID, identity.AccountID, generation) {
+		// A mutation (rotate/revoke/scope change, or an account-wide revoke)
+		// raced this verification; fail closed rather than publish a stale
+		// grant. Only this token's own mutation reaches here: another tenant's
+		// mutation is not compared, so it cannot fail this request closed.
 		return ManagementTokenIdentity{}, ErrManagementTokenInvalid
 	}
 	a.ensureCacheRoomLocked(now)
@@ -295,6 +317,16 @@ func (a *ManagementTokenAuthenticator) sweepExpiredLocked(now time.Time) {
 	for key, entry := range a.entries {
 		if !now.Before(entry.expires) {
 			delete(a.entries, key)
+		}
+	}
+	for id, mark := range a.mutated {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(a.mutated, id)
+		}
+	}
+	for id, mark := range a.accountMutated {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(a.accountMutated, id)
 		}
 	}
 }
@@ -335,21 +367,60 @@ func (a *ManagementTokenAuthenticator) InvalidateWith(tokenID string, publish fu
 	return nil
 }
 
-// InvalidateAll drops the entire cache, e.g. after revoke-all.
-func (a *ManagementTokenAuthenticator) InvalidateAll() {
+// InvalidateAccount immediately drops every cached token for one account.
+// Account suspension, deletion, credential reset and revoke-all use it so
+// containment does not wait for the cache TTL.
+//
+// It marks the account with the current mutation sequence before dropping its
+// entries. A verification for this account that began before the mark fails
+// closed instead of republishing a grant the caller just deleted, while
+// verifications for every other account keep running: the mark is account
+// scoped, never a process-wide fence.
+func (a *ManagementTokenAuthenticator) InvalidateAccount(accountID string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	atomic.AddUint64(&a.rev, 1)
-	a.entries = make(map[[32]byte]managementCacheEntry)
+	a.markLocked("", accountID)
+	for key, entry := range a.entries {
+		if entry.identity.AccountID == accountID {
+			delete(a.entries, key)
+		}
+	}
 }
 
 func (a *ManagementTokenAuthenticator) invalidateLocked(tokenID string) {
-	atomic.AddUint64(&a.rev, 1)
+	a.markLocked(tokenID, "")
 	for key, entry := range a.entries {
 		if entry.identity.ID == tokenID {
 			delete(a.entries, key)
 		}
 	}
+}
+
+// markLocked advances the mutation sequence and records the affected token
+// and/or account. Called with a.mu held.
+func (a *ManagementTokenAuthenticator) markLocked(tokenID, accountID string) {
+	seq := atomic.AddUint64(&a.seq, 1)
+	now := time.Now()
+	if tokenID != "" {
+		a.mutated[tokenID] = mutationMark{seq: seq, at: now}
+	}
+	if accountID != "" {
+		a.accountMutated[accountID] = mutationMark{seq: seq, at: now}
+	}
+}
+
+// mutatedSinceLocked reports whether the token or its account was mutated
+// after a verification captured seq. Called with a.mu held.
+func (a *ManagementTokenAuthenticator) mutatedSinceLocked(tokenID, accountID string, seq uint64) bool {
+	if mark, ok := a.mutated[tokenID]; ok && mark.seq > seq {
+		return true
+	}
+	if accountID != "" {
+		if mark, ok := a.accountMutated[accountID]; ok && mark.seq > seq {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *ManagementTokenAuthenticator) cacheKey(raw string) [32]byte {

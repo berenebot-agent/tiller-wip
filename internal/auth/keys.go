@@ -35,9 +35,48 @@ const (
 // the alternative -- unbounded concurrency -- lets a burst of login attempts
 // park gigabytes. The SecretHasher interface is deliberately left unchanged:
 // callers acquire this slot inside the hasher implementation.
+//
+// A slot is only held once the KDF actually runs, and the wait for one is
+// cancellable: a request whose client has gone away releases its place in the
+// queue instead of occupying a slot nothing is waiting for. That is what stops
+// one account from parking every slot with abandoned work and stalling other
+// people's sign-in.
+//
+// The capacity is a variable so tests can shrink it; production never changes
+// it after start-up.
 var argonAdmission = make(chan struct{}, 4)
 
+// setArgonCapacity replaces the gate with an empty one of the given capacity and
+// returns a function restoring the previous gate. It exists only for tests: a
+// test that needs to observe the gate saturated shrinks it, rather than filling
+// the production gate, because every other test in the package queues behind the
+// same slots. Production code never calls it.
+func setArgonCapacity(n int) (restore func()) {
+	previous := argonAdmission
+	argonAdmission = make(chan struct{}, n)
+	return func() { argonAdmission = previous }
+}
+
+// acquireArgonSlot blocks until a slot is free. It is the context-free form,
+// used where no request is involved (bootstrap, CLI, credential sync).
 func acquireArgonSlot() { argonAdmission <- struct{}{} }
+
+// acquireArgonSlotContext blocks until a slot is free or ctx is done, reporting
+// whether a slot was obtained. A cancelled or expired caller is never parked:
+// it gives up its place, so a burst of abandoned requests cannot starve live
+// ones. A nil ctx behaves like context.Background().
+func acquireArgonSlotContext(ctx context.Context) bool {
+	if ctx == nil {
+		acquireArgonSlot()
+		return true
+	}
+	select {
+	case argonAdmission <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
 
 func releaseArgonSlot() { <-argonAdmission }
 
@@ -98,6 +137,18 @@ func VerifySecret(secret, encoded string) bool {
 	acquireArgonSlot()
 	defer releaseArgonSlot()
 	return argon2idVerify(secret, encoded)
+}
+
+// VerifySecretContext verifies a secret without parking on a saturated
+// admission gate for a caller that has gone away. It reports (ok, available):
+// available is false when ctx ended before a KDF slot could be taken, in which
+// case ok is meaningless and the caller must not treat it as a failed match.
+func VerifySecretContext(ctx context.Context, secret, encoded string) (ok, available bool) {
+	if !acquireArgonSlotContext(ctx) {
+		return false, false
+	}
+	defer releaseArgonSlot()
+	return argon2idVerify(secret, encoded), true
 }
 
 // argon2idHash is the canonical Argon2id implementation. Both Argon2Hasher and
@@ -205,7 +256,14 @@ type ClientAuthenticator struct {
 	// maxEntries caps the cache; a test may lower it.
 	maxEntries int
 	sem        chan struct{}
-	rev        uint64
+	// seq is a monotonic mutation sequence. Each mutation records the key id
+	// and account it touched with the sequence value at that moment; a
+	// verification fails closed only when the credential it just verified was
+	// mutated after that verification began, never because another tenant
+	// rotated one of its own keys.
+	seq            uint64
+	mutated        map[string]mutationMark
+	accountMutated map[string]mutationMark
 }
 
 // NewClientAuthenticatorWithHasher constructs a ClientAuthenticator with the
@@ -218,7 +276,7 @@ func NewClientAuthenticatorWithHasher(db *sql.DB, hasher SecretHasher) (*ClientA
 	if hasher == nil {
 		hasher = BcryptHasher{}
 	}
-	return &ClientAuthenticator{store: store.New(db), key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]cacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4)}, nil
+	return &ClientAuthenticator{store: store.New(db), key: key, ttl: defaultClientKeyCacheTTL, hasher: hasher, entries: make(map[[32]byte]cacheEntry), maxEntries: maxAuthCacheEntries, sem: make(chan struct{}, 4), mutated: make(map[string]mutationMark), accountMutated: make(map[string]mutationMark)}, nil
 }
 
 // SetCacheTTL overrides the verified-key cache TTL. It is called once at
@@ -282,7 +340,7 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	}
 	defer func() { <-a.sem }()
 
-	generation := atomic.LoadUint64(&a.rev)
+	generation := atomic.LoadUint64(&a.seq)
 	var identity ClientIdentity
 	var hash string
 	row, err := a.store.ClientKeyBySelector(ctx, selector)
@@ -301,7 +359,7 @@ func (a *ClientAuthenticator) AuthenticateContext(ctx context.Context, raw strin
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if atomic.LoadUint64(&a.rev) != generation {
+	if a.mutatedSinceLocked(identity.ID, identity.AccountID, generation) {
 		return ClientIdentity{}, false, true
 	}
 	a.ensureCacheRoomLocked(now)
@@ -336,6 +394,16 @@ func (a *ClientAuthenticator) sweepExpiredLocked(now time.Time) {
 	for key, entry := range a.entries {
 		if !now.Before(entry.expires) {
 			delete(a.entries, key)
+		}
+	}
+	for id, mark := range a.mutated {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(a.mutated, id)
+		}
+	}
+	for id, mark := range a.accountMutated {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(a.accountMutated, id)
 		}
 	}
 }
@@ -384,7 +452,7 @@ func (a *ClientAuthenticator) InvalidateWith(clientID string, publish func() err
 }
 
 func (a *ClientAuthenticator) invalidateLocked(clientID string) {
-	atomic.AddUint64(&a.rev, 1)
+	a.markLocked(clientID, "")
 	for key, entry := range a.entries {
 		if entry.identity.ID == clientID {
 			delete(a.entries, key)
@@ -393,12 +461,39 @@ func (a *ClientAuthenticator) invalidateLocked(clientID string) {
 }
 
 func (a *ClientAuthenticator) invalidateAccountLocked(accountID string) {
-	atomic.AddUint64(&a.rev, 1)
+	a.markLocked("", accountID)
 	for key, entry := range a.entries {
 		if entry.identity.AccountID == accountID {
 			delete(a.entries, key)
 		}
 	}
+}
+
+// markLocked advances the mutation sequence and records the affected key
+// and/or account. Called with a.mu held.
+func (a *ClientAuthenticator) markLocked(clientID, accountID string) {
+	seq := atomic.AddUint64(&a.seq, 1)
+	now := time.Now()
+	if clientID != "" {
+		a.mutated[clientID] = mutationMark{seq: seq, at: now}
+	}
+	if accountID != "" {
+		a.accountMutated[accountID] = mutationMark{seq: seq, at: now}
+	}
+}
+
+// mutatedSinceLocked reports whether the key or its account was mutated after
+// a verification captured seq. Called with a.mu held.
+func (a *ClientAuthenticator) mutatedSinceLocked(clientID, accountID string, seq uint64) bool {
+	if mark, ok := a.mutated[clientID]; ok && mark.seq > seq {
+		return true
+	}
+	if accountID != "" {
+		if mark, ok := a.accountMutated[accountID]; ok && mark.seq > seq {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *ClientAuthenticator) cacheKey(raw string) [32]byte {
@@ -471,8 +566,15 @@ type SessionStore struct {
 	maxEntries int
 	mu         sync.Mutex
 	cache      map[string]sessionCacheEntry
-	rev        uint64
-	renewHook  func()
+	// seq is a monotonic mutation sequence. Logout marks only its own selector;
+	// a global invalidation (credential change) records a floor that invalidates
+	// every session that existed before it. A verification compares against the
+	// mark for its own selector, so one browser's logout cannot fail another
+	// browser's session load closed.
+	seq             uint64
+	revoked         map[string]mutationMark
+	invalidateAllAt uint64
+	renewHook       func()
 }
 
 // NewSessionStoreWithHasher constructs a SessionStore that uses the same hasher
@@ -497,7 +599,7 @@ func NewSessionStoreTiered(db *sql.DB, username, password string, ttl time.Durat
 	if credentialHasher == nil {
 		credentialHasher = Argon2Hasher{}
 	}
-	s := &SessionStore{db: db, ttl: ttl, tokenHasher: tokenHasher, credentialHasher: credentialHasher, cacheTTL: defaultSessionCacheTTL, maxEntries: maxAuthCacheEntries, cache: make(map[string]sessionCacheEntry)}
+	s := &SessionStore{db: db, ttl: ttl, tokenHasher: tokenHasher, credentialHasher: credentialHasher, cacheTTL: defaultSessionCacheTTL, maxEntries: maxAuthCacheEntries, cache: make(map[string]sessionCacheEntry), revoked: make(map[string]mutationMark)}
 	if username != "" || password != "" {
 		if err := s.syncCredential(username, password); err != nil {
 			return nil, err
@@ -719,12 +821,15 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 		return Session{}, false
 	}
 	now := time.Now()
+	// Capture the mutation sequence before reading anything. A logout that
+	// lands after this point marks its own selector and fails this load closed;
+	// a logout of any other session does not.
+	start := atomic.LoadUint64(&s.seq)
 	s.mu.Lock()
 	if entry, found := s.cache[selector]; found {
 		if now.Before(entry.expires) && now.Before(entry.session.ExpiresAt) {
 			want := sha256.Sum256([]byte(secret))
 			if subtle.ConstantTimeCompare(want[:], entry.secretHash[:]) == 1 {
-				generation := atomic.LoadUint64(&s.rev)
 				s.mu.Unlock()
 				if now.Add(s.ttl / 2).After(entry.session.ExpiresAt) {
 					expires := now.Add(s.ttl)
@@ -733,34 +838,32 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 					}
 					result, err := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(expires), formatUTC(now), selector, formatUTC(entry.session.ExpiresAt))
 					if err == nil {
-						affected, rowsErr := result.RowsAffected()
-						if rowsErr != nil {
-							return Session{}, false
-						}
-						if affected == 1 {
-							entry.session.ExpiresAt, entry.expires = expires, now.Add(s.cacheTTL)
-						} else {
-							current, ok := s.loadSession(selector, secret, now)
-							if !ok {
-								return Session{}, false
+						// A renewal failure is not an authentication failure: the
+						// cached session stays valid until its current expiry, so
+						// keep serving it rather than signing the user out over a
+						// transient database error.
+						if affected, rowsErr := result.RowsAffected(); rowsErr == nil {
+							if affected == 1 {
+								entry.session.ExpiresAt, entry.expires = expires, now.Add(s.cacheTTL)
+							} else {
+								current, ok := s.loadSession(selector, secret, now)
+								if !ok {
+									return Session{}, false
+								}
+								entry.session = current
 							}
-							entry.session = current
 						}
 					}
-				}
-				if atomic.LoadUint64(&s.rev) != generation {
-					return Session{}, false
 				}
 				if !now.Before(entry.session.ExpiresAt) {
 					return Session{}, false
 				}
-				return s.publishSession(selector, entry.session, secret, now, generation)
+				return s.publishSession(selector, entry.session, secret, now, start)
 			}
 		}
 		delete(s.cache, selector)
 	}
 	s.mu.Unlock()
-	generation := atomic.LoadUint64(&s.rev)
 
 	session, ok := s.loadSession(selector, secret, now)
 	if !ok {
@@ -774,22 +877,20 @@ func (s *SessionStore) Get(token string) (Session, bool) {
 			s.renewHook()
 		}
 		result, updateErr := s.db.Exec(`UPDATE admin_sessions SET expires_at=?, last_used_at=? WHERE id=? AND expires_at=?`, formatUTC(next), formatUTC(now), selector, formatUTC(exp))
-		if updateErr != nil {
-			return Session{}, false
-		}
-		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
-			if err != nil {
-				return Session{}, false
+		if updateErr == nil {
+			if affected, err := result.RowsAffected(); err == nil {
+				if affected == 1 {
+					session.ExpiresAt = next
+				} else {
+					session, ok = s.loadSession(selector, secret, now)
+					if !ok {
+						return Session{}, false
+					}
+				}
 			}
-			session, ok = s.loadSession(selector, secret, now)
-			if !ok {
-				return Session{}, false
-			}
-		} else {
-			session.ExpiresAt = next
 		}
 	}
-	return s.publishSession(selector, session, secret, now, generation)
+	return s.publishSession(selector, session, secret, now, start)
 }
 
 func (s *SessionStore) loadSession(selector, secret string, now time.Time) (Session, bool) {
@@ -816,7 +917,7 @@ func (s *SessionStore) loadSession(selector, secret string, now time.Time) (Sess
 func (s *SessionStore) publishSession(selector string, session Session, secret string, now time.Time, generation uint64) (Session, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if atomic.LoadUint64(&s.rev) != generation {
+	if s.invalidatedLocked(selector, generation) {
 		return Session{}, false
 	}
 	if current, ok := s.cache[selector]; ok && current.session.ExpiresAt.After(session.ExpiresAt) {
@@ -854,6 +955,11 @@ func (s *SessionStore) sweepExpiredLocked(now time.Time) {
 	for key, entry := range s.cache {
 		if !now.Before(entry.expires) {
 			delete(s.cache, key)
+		}
+	}
+	for selector, mark := range s.revoked {
+		if now.Sub(mark.at) > mutationMarkTTL {
+			delete(s.revoked, selector)
 		}
 	}
 }
@@ -921,9 +1027,29 @@ func (s *SessionStore) Delete(token string) {
 func (s *SessionStore) revoke(selector string) {
 	s.mu.Lock()
 	_, _ = s.db.Exec(`DELETE FROM admin_sessions WHERE id=?`, selector)
-	atomic.AddUint64(&s.rev, 1)
+	s.markRevokedLocked(selector)
 	delete(s.cache, selector)
 	s.mu.Unlock()
+}
+
+// markRevokedLocked records that one selector was revoked, so a load that
+// started before the revocation cannot publish it back into the cache. Called
+// with s.mu held.
+func (s *SessionStore) markRevokedLocked(selector string) {
+	seq := atomic.AddUint64(&s.seq, 1)
+	s.revoked[selector] = mutationMark{seq: seq, at: time.Now()}
+}
+
+// invalidatedLocked reports whether this selector was revoked, or every
+// session was invalidated, after a load captured seq. Called with s.mu held.
+func (s *SessionStore) invalidatedLocked(selector string, seq uint64) bool {
+	if atomic.LoadUint64(&s.invalidateAllAt) > seq {
+		return true
+	}
+	if mark, ok := s.revoked[selector]; ok && mark.seq > seq {
+		return true
+	}
+	return false
 }
 
 func (s *SessionStore) CheckCSRF(session Session, token string) bool {
@@ -934,7 +1060,9 @@ func (s *SessionStore) CheckCSRF(session Session, token string) bool {
 func (s *SessionStore) InvalidateAll() error {
 	s.mu.Lock()
 	_, err := s.db.Exec(`DELETE FROM admin_sessions`)
-	atomic.AddUint64(&s.rev, 1)
+	// A global floor: every load that captured a sequence before this point is
+	// invalid, regardless of selector. Logout uses markRevokedLocked instead.
+	atomic.StoreUint64(&s.invalidateAllAt, atomic.AddUint64(&s.seq, 1))
 	s.cache = make(map[string]sessionCacheEntry)
 	s.mu.Unlock()
 	return err

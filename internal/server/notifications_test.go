@@ -1110,3 +1110,42 @@ func openTestDB(t *testing.T) *database.DB {
 	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
+
+func TestWebhookHostChangeClearsStoredAuthHeader(t *testing.T) {
+	api, _, _, _ := loggingTestHarness(t, mockUpstream(t))
+	headerSet := func() bool {
+		t.Helper()
+		status, payload, _ := api.request("GET", "/api/admin/settings", nil)
+		if status != 200 {
+			t.Fatalf("get settings: %d %v", status, payload)
+		}
+		set, _ := payload["notifications_auth_header_set"].(bool)
+		return set
+	}
+	put := func(body map[string]any) {
+		t.Helper()
+		if status, payload, _ := api.request("PUT", "/api/admin/settings", body); status != 204 {
+			t.Fatalf("update settings %v: %d %v", body, status, payload)
+		}
+	}
+	put(map[string]any{"notifications_webhook_url": "https://ntfy.example.com/a", "notifications_auth_header": "Bearer secret"})
+	if !headerSet() {
+		t.Fatal("auth header was not stored")
+	}
+	// Same host (path change) and a repeated save keep the header.
+	put(map[string]any{"notifications_webhook_url": "https://ntfy.example.com/b"})
+	put(map[string]any{"notifications_webhook_url": "https://ntfy.example.com/b"})
+	if !headerSet() {
+		t.Fatal("same-host save cleared the auth header")
+	}
+	// A new host drops the stored header unless a replacement is supplied.
+	put(map[string]any{"notifications_webhook_url": "https://attacker.example.net/hook"})
+	if headerSet() {
+		t.Fatal("host change left the old Authorization header in place")
+	}
+	put(map[string]any{"notifications_webhook_url": "https://ntfy.example.com/a", "notifications_auth_header": "Bearer new"})
+	put(map[string]any{"notifications_webhook_url": "https://other.example.org/x", "notifications_auth_header": "Bearer replacement"})
+	if !headerSet() {
+		t.Fatal("explicit replacement header was dropped")
+	}
+}

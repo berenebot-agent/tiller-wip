@@ -9,6 +9,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostednet"
+	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -19,10 +20,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
 	}
-	logErrorBodies := false
-	if s.config.Mode != config.ModeHosted {
-		logErrorBodies, err = sc.GetLogErrorBodies(r.Context())
-	}
+	logErrorBodies, err := sc.GetLogErrorBodies(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not load settings.")
 		return
@@ -77,15 +75,11 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 		NotificationsEventAdminLogin       *bool   `json:"notifications_event_admin_login"`
 		NotificationsAuthHeader            *string `json:"notifications_auth_header"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	sc := s.scope(r)
-	if s.config.Mode == config.ModeHosted && input.LogErrorBodies != nil && *input.LogErrorBodies {
-		adminError(w, http.StatusForbidden, "hosted_body_logging_disabled", "Detailed error logging is unavailable in hosted mode.")
-		return
-	}
 	if input.DefaultRetentionDays != nil && *input.DefaultRetentionDays < 1 {
 		adminError(w, 400, "invalid_retention", "Retention must be at least 1 day.")
 		return
@@ -115,6 +109,21 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if input.NotificationsCooldownSeconds != nil && *input.NotificationsCooldownSeconds < 0 {
 		adminError(w, 400, "invalid_cooldown", "Notification cooldown must be 0 or more seconds.")
 		return
+	}
+	// The stored Authorization header was issued for the current webhook host.
+	// When the URL moves to a different host and the request does not supply a
+	// replacement header, drop the stored one so it cannot be sent to the new
+	// destination.
+	if input.NotificationsWebhookURL != nil && input.NotificationsAuthHeader == nil {
+		current, err := sc.GetNotificationSettings(r.Context())
+		if err != nil {
+			adminError(w, 500, "database_error", "Could not update settings.")
+			return
+		}
+		if current.AuthHeader != "" && !providers.SameUpstreamHost(current.WebhookURL, *input.NotificationsWebhookURL) {
+			cleared := ""
+			input.NotificationsAuthHeader = &cleared
+		}
 	}
 	// Hosted-mode policy: the cooldown is pinned at 60s and the admin-
 	// login event never applies (hosted accounts have no admin login).

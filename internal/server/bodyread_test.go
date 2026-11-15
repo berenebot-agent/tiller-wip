@@ -327,3 +327,47 @@ func TestBodyReadGateReleasedBeforeStreamEnds(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestConsoleWriteBodyUsesTheAdmissionGate proves a console write body is
+// admitted through the same gate as inference. Before this, the management
+// writes applied only a byte cap, so a modest burst of large admin bodies was
+// held in memory with no admission check at all.
+func TestConsoleWriteBodyUsesTheAdmissionGate(t *testing.T) {
+	t.Parallel()
+	app, api, _ := hostedAccountServer(t)
+
+	// Hold the only aggregate slot so the next body read must be refused.
+	app.bodyReads = bodyReadGate{max: 1}
+	if !app.bodyReads.acquire("held") {
+		t.Fatal("could not hold the single slot")
+	}
+
+	status, payload, header := api.request("POST", "/api/admin/api-tokens", map[string]any{"name": "blocked"})
+	if status != http.StatusServiceUnavailable || payload["error"].(map[string]any)["code"] != "body_read_busy" {
+		t.Fatalf("write while the gate is full = %d %v, want 503 body_read_busy", status, payload)
+	}
+	if header.Get("Retry-After") == "" {
+		t.Fatal("a refused body read must say when to retry")
+	}
+
+	// Reads carry no body, so they are unaffected.
+	if status, _, _ := api.request("GET", "/api/admin/client-keys", nil); status != http.StatusOK {
+		t.Fatalf("read while the gate is full = %d, want 200", status)
+	}
+
+	app.bodyReads.release("held")
+	if status, payload, _ := api.request("POST", "/api/admin/api-tokens", map[string]any{
+		"name": "admitted", "scopes": map[string]int{}, "expires_at": hostedExpiry(1),
+	}); status != http.StatusCreated {
+		t.Fatalf("write after release = %d %v, want 201", status, payload)
+	}
+}
+
+// TestConsoleWriteBodyCapIsBounded proves the console decoder no longer accepts
+// 32 MiB bodies: the cap is what an admin request actually needs.
+func TestConsoleWriteBodyCapIsBounded(t *testing.T) {
+	t.Parallel()
+	if adminRequestMaxBytes > 4<<20 {
+		t.Fatalf("adminRequestMaxBytes = %d, want at most 4 MiB", adminRequestMaxBytes)
+	}
+}

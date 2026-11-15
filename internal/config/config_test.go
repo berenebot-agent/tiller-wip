@@ -377,7 +377,7 @@ func TestMailBootstrap(t *testing.T) {
 	t.Setenv("TILLER_MODE", "")
 	t.Setenv("TILLER_PUBLIC_URL", "")
 	clearMailEnv := func() {
-		for _, k := range []string{"TILLER_MAIL_PROVIDER", "TILLER_MAIL_FROM", "TILLER_MAIL_SMTP_HOST", "TILLER_MAIL_SMTP_PORT", "TILLER_MAIL_SMTP_USERNAME", "TILLER_MAIL_SMTP_PASSWORD", "TILLER_MAIL_SMTP_MODE"} {
+		for _, k := range []string{"TILLER_MAIL_PROVIDER", "TILLER_MAIL_FROM", "TILLER_MAIL_FROM_NAME", "TILLER_MAIL_SMTP_HOST", "TILLER_MAIL_SMTP_PORT", "TILLER_MAIL_SMTP_USERNAME", "TILLER_MAIL_SMTP_PASSWORD", "TILLER_MAIL_SMTP_MODE"} {
 			t.Setenv(k, "")
 		}
 	}
@@ -396,6 +396,7 @@ func TestMailBootstrap(t *testing.T) {
 	clearMailEnv()
 	t.Setenv("TILLER_MAIL_PROVIDER", "smtp")
 	t.Setenv("TILLER_MAIL_FROM", "no-reply@example.com")
+	t.Setenv("TILLER_MAIL_FROM_NAME", "Tiller")
 	t.Setenv("TILLER_MAIL_SMTP_HOST", "smtp.example.com")
 	c, err = Load()
 	if err != nil {
@@ -403,6 +404,9 @@ func TestMailBootstrap(t *testing.T) {
 	}
 	if c.Mail.SMTPPort != 587 || c.Mail.SMTPMode != "starttls" {
 		t.Errorf("smtp defaults = %+v", c.Mail)
+	}
+	if c.Mail.FromName != "Tiller" {
+		t.Errorf("smtp from name = %q", c.Mail.FromName)
 	}
 
 	// Implicit TLS defaults to port 465.
@@ -428,6 +432,7 @@ func TestMailBootstrap(t *testing.T) {
 		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_MODE": "plain"},
 		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_PORT": "70000"},
 		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_SMTP_HOST": "h", "TILLER_MAIL_SMTP_USERNAME": "u"},
+		{"TILLER_MAIL_PROVIDER": "smtp", "TILLER_MAIL_FROM": "x@y.z", "TILLER_MAIL_FROM_NAME": "a\nb", "TILLER_MAIL_SMTP_HOST": "h"},
 	}
 	for i, env := range cases {
 		clearMailEnv()
@@ -484,7 +489,7 @@ func TestLogLevel(t *testing.T) {
 	}
 }
 
-func TestTrustedProxy(t *testing.T) {
+func TestTrustedProxies(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("TILLER_USERNAME", "admin")
 	t.Setenv("TILLER_PASSWORD", "secret")
@@ -496,8 +501,8 @@ func TestTrustedProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no trusted proxy should load: %v", err)
 	}
-	if c.TrustedProxy.IsValid() {
-		t.Error("TrustedProxy should be invalid when unset")
+	if len(c.TrustedProxies) != 0 {
+		t.Errorf("TrustedProxies should be empty when unset, got %v", c.TrustedProxies)
 	}
 
 	// A valid CIDR enables proxy-header trust.
@@ -506,31 +511,18 @@ func TestTrustedProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid trusted proxy should load: %v", err)
 	}
-	if !c.TrustedProxy.IsValid() {
-		t.Error("TrustedProxy should be set")
-	}
-	if c.TrustedProxy != netip.MustParsePrefix("172.18.0.0/16") {
-		t.Errorf("TrustedProxy = %s, want 172.18.0.0/16", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0] != netip.MustParsePrefix("172.18.0.0/16") {
+		t.Errorf("TrustedProxies = %v, want [172.18.0.0/16]", c.TrustedProxies)
 	}
 
-	// A bare proxy address is treated as a single-address CIDR.
+	// A bare proxy address is treated as a single-address prefix.
 	t.Setenv("TILLER_TRUSTED_PROXY", "10.1.1.18")
 	c, err = Load()
 	if err != nil {
 		t.Fatalf("bare trusted proxy address should load: %v", err)
 	}
-	if c.TrustedProxy != netip.MustParsePrefix("10.1.1.18/32") {
-		t.Errorf("TrustedProxy = %s, want 10.1.1.18/32", c.TrustedProxy)
-	}
-
-	// A bare IP (no /prefix) is treated as /32.
-	t.Setenv("TILLER_TRUSTED_PROXY", "10.1.1.18")
-	c, err = Load()
-	if err != nil {
-		t.Fatalf("bare IP for TILLER_TRUSTED_PROXY should load as /32: %v", err)
-	}
-	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "10.1.1.18/32" {
-		t.Errorf("TrustedProxy should be 10.1.1.18/32, got %v", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0].String() != "10.1.1.18/32" {
+		t.Errorf("TrustedProxies should be [10.1.1.18/32], got %v", c.TrustedProxies)
 	}
 
 	// A bare IPv6 address is treated as /128, not widened to /32.
@@ -539,24 +531,46 @@ func TestTrustedProxy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bare IPv6 for TILLER_TRUSTED_PROXY should load as /128: %v", err)
 	}
-	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "2001:db8::1234/128" {
-		t.Errorf("TrustedProxy should be 2001:db8::1234/128, got %v", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0].String() != "2001:db8::1234/128" {
+		t.Errorf("TrustedProxies should be [2001:db8::1234/128], got %v", c.TrustedProxies)
 	}
 
-	// An explicit IPv6 CIDR is preserved verbatim.
+	// An explicit IPv6 CIDR is preserved.
 	t.Setenv("TILLER_TRUSTED_PROXY", "2001:db8::/32")
 	c, err = Load()
 	if err != nil {
 		t.Fatalf("IPv6 CIDR for TILLER_TRUSTED_PROXY should load: %v", err)
 	}
-	if !c.TrustedProxy.IsValid() || c.TrustedProxy.String() != "2001:db8::/32" {
-		t.Errorf("TrustedProxy should be 2001:db8::/32, got %v", c.TrustedProxy)
+	if len(c.TrustedProxies) != 1 || c.TrustedProxies[0].String() != "2001:db8::/32" {
+		t.Errorf("TrustedProxies should be [2001:db8::/32], got %v", c.TrustedProxies)
 	}
 
-	// An invalid trusted proxy is a hard error.
+	// A comma-separated list covers a CDN in front of the reverse proxy. Every
+	// entry is kept, in order, so the X-Forwarded-For walk can skip all of them.
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.0/16, 2001:db8::/32,10.1.1.18")
+	c, err = Load()
+	if err != nil {
+		t.Fatalf("multiple trusted proxies should load: %v", err)
+	}
+	want := []string{"172.18.0.0/16", "2001:db8::/32", "10.1.1.18/32"}
+	if len(c.TrustedProxies) != len(want) {
+		t.Fatalf("TrustedProxies = %v, want %v", c.TrustedProxies, want)
+	}
+	for i, w := range want {
+		if c.TrustedProxies[i].String() != w {
+			t.Errorf("TrustedProxies[%d] = %s, want %s", i, c.TrustedProxies[i], w)
+		}
+	}
+
+	// An invalid trusted proxy is a hard error, including one bad entry in an
+	// otherwise valid list (never silently skipped).
 	t.Setenv("TILLER_TRUSTED_PROXY", "not-a-cidr")
 	if _, err := Load(); err == nil {
 		t.Error("TILLER_TRUSTED_PROXY=not-a-cidr should fail to load")
+	}
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.0/16,not-a-cidr")
+	if _, err := Load(); err == nil {
+		t.Error("a malformed entry in TILLER_TRUSTED_PROXY should fail to load")
 	}
 }
 
@@ -703,5 +717,100 @@ func TestHostedPlatformPasswordMinimumLength(t *testing.T) {
 	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "0123456789abcdef")
 	if _, err := Load(); err != nil {
 		t.Fatalf("16-character platform password rejected: %v", err)
+	}
+}
+
+func TestMaxStreamDuration(t *testing.T) {
+	t.Setenv("TILLER_USERNAME", "admin")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "")
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxStreamDuration != 0 {
+		t.Errorf("local default = %v, want 0 (no limit)", c.MaxStreamDuration)
+	}
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "90s")
+	if c, err = Load(); err != nil || c.MaxStreamDuration != 90*time.Second {
+		t.Errorf("override = %v, %v, want 90s", c.MaxStreamDuration, err)
+	}
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "-1s")
+	if _, err = Load(); err == nil {
+		t.Error("negative duration should be rejected")
+	}
+	t.Setenv("TILLER_MAX_STREAM_DURATION", "0")
+	if c, err = Load(); err != nil || c.MaxStreamDuration != 0 {
+		t.Errorf("0 = %v, %v, want disabled", c.MaxStreamDuration, err)
+	}
+	if DefaultHostedMaxStreamDuration != 10*time.Minute {
+		t.Errorf("hosted default = %v, want 10m", DefaultHostedMaxStreamDuration)
+	}
+}
+
+func TestPlatformPort(t *testing.T) {
+	t.Setenv("TILLER_USERNAME", "admin@example.com")
+	t.Setenv("TILLER_PASSWORD", "secret")
+	t.Setenv("TILLER_PLATFORM_ADMIN_USERNAME", "platform-admin")
+	t.Setenv("TILLER_PLATFORM_ADMIN_PASSWORD", "platform-secret-0123456789")
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://app.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "172.18.0.1")
+	t.Setenv("TILLER_LISTEN_ADDR", ":8080")
+
+	t.Setenv("TILLER_PLATFORM_PORT", "")
+	if c, err := Load(); err != nil || c.PlatformPort != 0 {
+		t.Fatalf("unset: port=%d err=%v, want 0 and no error", c.PlatformPort, err)
+	}
+	t.Setenv("TILLER_PLATFORM_PORT", "9443")
+	if c, err := Load(); err != nil || c.PlatformPort != 9443 {
+		t.Fatalf("9443: port=%d err=%v", c.PlatformPort, err)
+	}
+	for _, bad := range []string{"0", "70000", "abc", "8080"} {
+		t.Setenv("TILLER_PLATFORM_PORT", bad)
+		if _, err := Load(); err == nil {
+			t.Errorf("TILLER_PLATFORM_PORT=%q should fail", bad)
+		}
+	}
+	t.Setenv("TILLER_PLATFORM_PORT", "9443")
+	t.Setenv("TILLER_MODE", "local")
+	if _, err := Load(); err == nil {
+		t.Error("TILLER_PLATFORM_PORT in local mode should fail")
+	}
+}
+
+func TestConsoleRequestsPerMinuteOverride(t *testing.T) {
+	t.Setenv("TILLER_DATA_DIR", t.TempDir())
+	t.Setenv("TILLER_MODE", "")
+	t.Setenv("TILLER_TRUSTED_PROXY", "")
+	t.Setenv("TILLER_USERNAME", "")
+	t.Setenv("TILLER_PASSWORD", "")
+	t.Setenv("TILLER_ADMIN_USERNAME", "")
+	t.Setenv("TILLER_ADMIN_PASSWORD", "")
+
+	t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", "")
+	if c, err := Load(); err != nil || c.ConsoleRequestsPerMinute != 0 {
+		t.Fatalf("unset = %d err=%v, want 0 (built-in default)", c.ConsoleRequestsPerMinute, err)
+	}
+	t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", "500")
+	if c, err := Load(); err != nil || c.ConsoleRequestsPerMinute != 500 {
+		t.Fatalf("500 = %d err=%v", c.ConsoleRequestsPerMinute, err)
+	}
+	for _, bad := range []string{"0", "-3", "many"} {
+		t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", bad)
+		if _, err := Load(); err == nil {
+			t.Fatalf("%q should be rejected", bad)
+		}
+	}
+
+	// Hosted mode keeps the budget a platform control.
+	t.Setenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE", "500")
+	t.Setenv("TILLER_MODE", "hosted")
+	t.Setenv("TILLER_PUBLIC_URL", "https://tiller.example.com")
+	t.Setenv("TILLER_TRUSTED_PROXY", "127.0.0.1/32")
+	if _, err := Load(); err == nil {
+		t.Fatal("hosted mode must reject the console budget override")
 	}
 }

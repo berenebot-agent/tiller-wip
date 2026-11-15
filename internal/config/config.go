@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -33,6 +34,7 @@ const minPlatformPasswordLen = 16
 type MailBootstrap struct {
 	Provider     string // "smtp"
 	From         string
+	FromName     string // optional display name for the From header
 	SMTPHost     string
 	SMTPPort     int
 	SMTPUsername string
@@ -44,6 +46,9 @@ type MailBootstrap struct {
 func (m MailBootstrap) Configured() bool {
 	return m.Provider != "" || m.From != "" || m.SMTPHost != ""
 }
+
+// DefaultHostedMaxStreamDuration is the per-request time limit in hosted mode.
+const DefaultHostedMaxStreamDuration = 10 * time.Minute
 
 type Config struct {
 	// Mode selects local (default) or hosted. An unset/empty TILLER_MODE is
@@ -78,12 +83,31 @@ type Config struct {
 	TillerPlatformAdminUser     string
 	TillerPlatformAdminPassword string
 	AdminCookieSecure           bool
-	AdminSessionTTL             time.Duration
-	DataDir                     string
-	ListenAddr                  string
-	TrustedProxy                netip.Prefix
-	ModelsDevEnabled            bool
-	LogLevel                    string
+	// ConsoleRequestsPerMinute overrides the per-account console request budget
+	// (env TILLER_CONSOLE_REQUESTS_PER_MINUTE). Zero keeps the built-in default.
+	// Self-hosted only: hosted mode rejects it so the budget stays a platform
+	// control. It exists for the browser suite, whose back-to-back UI traffic
+	// exceeds a budget sized for a person at a console.
+	ConsoleRequestsPerMinute int
+	AdminSessionTTL          time.Duration
+	DataDir                  string
+	ListenAddr               string
+	TrustedProxies           []netip.Prefix
+	// MaxSignups caps the number of hosted accounts that self-service signup
+	// can create. 0 means no cap. Set with TILLER_MAX_SIGNUPS. Best-effort: the
+	// check precedes account creation, so concurrent signups may slightly overshoot.
+	MaxSignups int
+	// MaxStreamDuration bounds one inference request end to end, including a
+	// streaming response. 0 means no limit. Defaults to 10 minutes in hosted
+	// mode and unlimited otherwise. Set with TILLER_MAX_STREAM_DURATION
+	// (a Go duration such as "10m"; "0" disables).
+	MaxStreamDuration time.Duration
+	// PlatformPort, when non-zero (TILLER_PLATFORM_PORT), serves the platform
+	// console on its own listener on this port and removes it from the main
+	// listener. Zero keeps the console on the main port. Hosted mode only.
+	PlatformPort     int
+	ModelsDevEnabled bool
+	LogLevel         string
 	// DNSFallbackServers are tried after supplied DNS servers fail. A nil
 	// list disables failover; valid positive/negative replies never fall back.
 	DNSFallbackServers []string
@@ -113,6 +137,8 @@ type Config struct {
 	// BackupRetention is how long snapshots are kept before pruning. Off-host
 	// copies are the operator's responsibility (see docs/backup_restore_runbook.md).
 	BackupRetention time.Duration
+	// BackupIncludeActivity includes the separate Activity database in restore points.
+	BackupIncludeActivity bool
 	// MasterKey is the raw TILLER_MASTER_KEY value (base64 of 32 random
 	// bytes). MasterKeyFile is the raw TILLER_MASTER_KEY_FILE path. The file
 	// takes precedence. When both are empty, the key is loaded from
@@ -268,30 +294,51 @@ func Load() (Config, error) {
 		}
 		c.SessionCacheTTL = clampCacheTTL(v)
 	}
-	// Setting TILLER_TRUSTED_PROXY to a CIDR is the switch that enables
-	// proxy-header trust: forwarded headers are only honoured when the direct
-	// peer is inside that CIDR, so a spoofable header can never be trusted
-	// from an untrusted peer. Hosted mode requires this setting; local mode may
-	// leave it unset to disable proxy-header trust.
+	// TILLER_TRUSTED_PROXY lists the reverse proxies whose forwarded headers
+	// are trusted, comma-separated. Each entry is a CIDR or a bare address
+	// (treated as a single-host prefix). Forwarded headers are honoured only
+	// when the direct peer is inside the list, so a spoofable header can never
+	// be trusted from an untrusted peer. Multiple entries matter when a CDN
+	// sits in front of the proxy: every edge range must be listed or the
+	// X-Forwarded-For walk stops at the edge address and collapses all users
+	// onto it. Hosted mode requires at least one; local mode may leave it unset
+	// to disable proxy-header trust.
 	if raw := os.Getenv("TILLER_TRUSTED_PROXY"); raw != "" {
-		var v netip.Prefix
-		if strings.Contains(raw, "/") {
-			parsed, err := netip.ParsePrefix(raw)
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if strings.Contains(part, "/") {
+				parsed, err := netip.ParsePrefix(part)
+				if err != nil {
+					return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
+				}
+				c.TrustedProxies = append(c.TrustedProxies, parsed.Masked())
+				continue
+			}
+			addr, err := netip.ParseAddr(part)
 			if err != nil {
 				return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
 			}
-			v = parsed
-		} else {
-			addr, err := netip.ParseAddr(raw)
-			if err != nil {
-				return Config{}, fmt.Errorf("TILLER_TRUSTED_PROXY: %w", err)
-			}
-			v = netip.PrefixFrom(addr, addr.BitLen())
+			c.TrustedProxies = append(c.TrustedProxies, netip.PrefixFrom(addr, addr.BitLen()))
 		}
-		c.TrustedProxy = v
 	}
-	if c.Mode == ModeHosted && !c.TrustedProxy.IsValid() {
+	if c.Mode == ModeHosted && len(c.TrustedProxies) == 0 {
 		return Config{}, errors.New("TILLER_TRUSTED_PROXY is required in hosted mode and must identify the direct reverse proxy")
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_PLATFORM_PORT")); raw != "" {
+		port, err := strconv.Atoi(raw)
+		if err != nil || port < 1 || port > 65535 {
+			return Config{}, fmt.Errorf("TILLER_PLATFORM_PORT must be a port number between 1 and 65535, got %q", raw)
+		}
+		if c.Mode != ModeHosted {
+			return Config{}, errors.New("TILLER_PLATFORM_PORT only applies in hosted mode")
+		}
+		if _, mainPort, splitErr := net.SplitHostPort(c.ListenAddr); splitErr == nil && mainPort == strconv.Itoa(port) {
+			return Config{}, errors.New("TILLER_PLATFORM_PORT must differ from the port in TILLER_LISTEN_ADDR")
+		}
+		c.PlatformPort = port
 	}
 	if raw := os.Getenv("TILLER_MODELS_DEV_ENABLED"); raw != "" {
 		v, err := strconv.ParseBool(raw)
@@ -317,6 +364,39 @@ func Load() (Config, error) {
 	if c.Mode == ModeHosted && c.DebugPprof && (strings.TrimSpace(c.TillerPlatformAdminUser) == "" || c.TillerPlatformAdminPassword == "") {
 		return Config{}, errors.New("TILLER_DEBUG_PPROF=true requires TILLER_PLATFORM_ADMIN_USERNAME and TILLER_PLATFORM_ADMIN_PASSWORD in hosted mode")
 	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_CONSOLE_REQUESTS_PER_MINUTE")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			return Config{}, errors.New("TILLER_CONSOLE_REQUESTS_PER_MINUTE must be a positive integer")
+		}
+		if c.Mode == ModeHosted {
+			return Config{}, errors.New("TILLER_CONSOLE_REQUESTS_PER_MINUTE is not allowed in hosted mode")
+		}
+		c.ConsoleRequestsPerMinute = n
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_MAX_SIGNUPS")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 0 {
+			return Config{}, errors.New("TILLER_MAX_SIGNUPS must be a non-negative integer")
+		}
+		c.MaxSignups = n
+	}
+	if c.Mode == ModeHosted {
+		c.MaxStreamDuration = DefaultHostedMaxStreamDuration
+	}
+	if raw := strings.TrimSpace(os.Getenv("TILLER_MAX_STREAM_DURATION")); raw != "" {
+		v, err := time.ParseDuration(raw)
+		if err != nil && raw == "0" {
+			v, err = 0, nil
+		}
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_MAX_STREAM_DURATION: %w", err)
+		}
+		if v < 0 {
+			return Config{}, fmt.Errorf("TILLER_MAX_STREAM_DURATION must not be negative, got %q", raw)
+		}
+		c.MaxStreamDuration = v
+	}
 	if raw := os.Getenv("TILLER_BACKUP_INTERVAL"); raw != "" {
 		v, err := time.ParseDuration(raw)
 		if err != nil {
@@ -326,6 +406,13 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("TILLER_BACKUP_INTERVAL must not be negative, got %q", raw)
 		}
 		c.BackupInterval = v
+	}
+	if raw := os.Getenv("TILLER_BACKUP_INCLUDE_ACTIVITY"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("TILLER_BACKUP_INCLUDE_ACTIVITY: %w", err)
+		}
+		c.BackupIncludeActivity = v
 	}
 	if raw := os.Getenv("TILLER_BACKUP_RETENTION"); raw != "" {
 		v, err := time.ParseDuration(raw)
@@ -468,6 +555,7 @@ func loadMailBootstrap() (MailBootstrap, error) {
 	m := MailBootstrap{
 		Provider:     strings.ToLower(strings.TrimSpace(os.Getenv("TILLER_MAIL_PROVIDER"))),
 		From:         strings.TrimSpace(os.Getenv("TILLER_MAIL_FROM")),
+		FromName:     strings.TrimSpace(os.Getenv("TILLER_MAIL_FROM_NAME")),
 		SMTPHost:     strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_HOST")),
 		SMTPUsername: strings.TrimSpace(os.Getenv("TILLER_MAIL_SMTP_USERNAME")),
 		SMTPPassword: os.Getenv("TILLER_MAIL_SMTP_PASSWORD"),
@@ -481,6 +569,9 @@ func loadMailBootstrap() (MailBootstrap, error) {
 	}
 	if m.From == "" {
 		return MailBootstrap{}, errors.New("TILLER_MAIL_FROM is required when mail is configured")
+	}
+	if strings.ContainsAny(m.FromName, "\r\n") {
+		return MailBootstrap{}, errors.New("TILLER_MAIL_FROM_NAME must not contain newlines")
 	}
 	if m.SMTPHost == "" {
 		return MailBootstrap{}, errors.New("TILLER_MAIL_SMTP_HOST is required for the smtp provider")

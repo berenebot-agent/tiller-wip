@@ -106,6 +106,14 @@ func (s *Scope) ListManagementTokens(ctx context.Context) ([]ManagementTokenRow,
 	return out, rows.Err()
 }
 
+// CountManagementTokens returns how many browser-managed tokens the account
+// holds (the environment-managed boot token is excluded).
+func (s *Scope) CountManagementTokens(ctx context.Context) (int, error) {
+	var n int
+	err := s.q.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_tokens WHERE account_id=? AND id<>?`, s.accountID, EnvironmentManagementTokenID).Scan(&n)
+	return n, err
+}
+
 // GetManagementToken returns one management token from the scope's account.
 func (s *Scope) GetManagementToken(ctx context.Context, id string) (ManagementTokenRow, error) {
 	return s.scanManagementTokenRow(s.q.QueryRowContext(ctx, `SELECT id,name,description,secret_fingerprint,scopes,enabled,expires_at,last_used_at,created_at,rotated_at,updated_at FROM api_tokens WHERE id=? AND account_id=?`, id, s.accountID))
@@ -122,14 +130,35 @@ type CreateManagementTokenInput struct {
 	Fingerprint string
 	Scopes      string
 	ExpiresAt   sql.NullString
+	// Limit caps how many browser-managed tokens the account may hold. Zero
+	// means no cap (local mode).
+	Limit int
 }
 
+// ErrManagementTokenLimit reports that the account already holds Limit tokens,
+// so the insert was refused.
+var ErrManagementTokenLimit = errors.New("management token limit reached")
+
 // CreateManagementToken persists a management token for the scope's account.
+//
+// The count is part of the insert rather than a separate read: a check-then-act
+// pair lets concurrent requests all pass the same stale count and overshoot the
+// cap by the number of requests in flight. The cap is one of the compensating
+// controls for minting tokens without step-up, so it has to be exact.
 func (s *Scope) CreateManagementToken(ctx context.Context, in CreateManagementTokenInput) error {
 	now := now()
-	_, err := s.q.ExecContext(ctx, `INSERT INTO api_tokens(id,account_id,name,description,selector,secret_hash,secret_fingerprint,scopes,enabled,expires_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,?,?,?)`,
-		in.ID, s.accountID, in.Name, in.Description, in.Selector, in.Hash, in.Fingerprint, in.Scopes, in.ExpiresAt, now, now)
-	return err
+	res, err := s.q.ExecContext(ctx, `INSERT INTO api_tokens(id,account_id,name,description,selector,secret_hash,secret_fingerprint,scopes,enabled,expires_at,created_at,updated_at)
+		SELECT ?,?,?,?,?,?,?,?,1,?,?,?
+		WHERE ?=0 OR (SELECT COUNT(*) FROM api_tokens WHERE account_id=? AND id<>?) < ?`,
+		in.ID, s.accountID, in.Name, in.Description, in.Selector, in.Hash, in.Fingerprint, in.Scopes, in.ExpiresAt, now, now,
+		in.Limit, s.accountID, EnvironmentManagementTokenID, in.Limit)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrManagementTokenLimit
+	}
+	return nil
 }
 
 // UpdateManagementTokenInput is the merged, fully-validated field set for an

@@ -13,8 +13,8 @@ import (
 	"github.com/tiller-router/tiller-router/internal/identity"
 )
 
-// setupMinPasswordBytes is the first-run wizard's floor. It is deliberately
-// lower than the hosted-account passphrase floor (12 bytes): local mode is an
+// setupMinPasswordBytes is the first-run wizard's floor. It matches the
+// hosted-account password floor (identity.MinPasswordBytes): local mode is an
 // appliance, the operator is standing at the machine, and the value is theirs
 // to choose. Environment-var credentials remain unvalidated for backwards
 // compatibility.
@@ -52,7 +52,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input setupInput
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -92,7 +92,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setSessionCookie(w, r, session.Token, session.ExpiresAt)
-	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", input.Username, clientIP(r, s.config.TrustedProxy)))
+	s.notifyAdminEvent(database.LocalAccountID, eventAdminLogin, fmt.Sprintf("User: %s\nIP: %s", input.Username, clientIP(r, s.config.TrustedProxies)))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"authenticated": true,
 		"username":      input.Username,

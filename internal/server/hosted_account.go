@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/identity"
@@ -58,7 +59,7 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword string `json:"current_password"`
 		NewPassword     string `json:"new_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -71,15 +72,14 @@ func (s *Server) changeOwnPassword(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusConflict, "password_disabled", "Password changes are unavailable while Google is linked.")
 		return
 	}
-	_, authErr := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword)
-	if authErr != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing your password.")
+	if _, authErr := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword); authErr != nil {
+		s.writeReauthFailure(w, authErr, "Confirm your identity with your password, passkey, or Google before changing your password.")
 		return
 	}
 	if _, err := s.identity.ChangePasswordAfterReauthentication(r.Context(), session.User.ID, rawUserSessionToken(r), input.NewPassword); err != nil {
 		switch {
 		case errors.Is(err, identity.ErrWeakPassword), errors.Is(err, identity.ErrPasswordTooLong):
-			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
+			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 8 and 1024 bytes.")
 		case errors.Is(err, identity.ErrInvalidSession):
 			adminError(w, http.StatusUnauthorized, "unauthorized", "User authentication required.")
 		default:
@@ -101,7 +101,7 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 		NewEmail string `json:"new_email"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -116,11 +116,15 @@ func (s *Server) requestOwnEmailChange(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing your email.")
+		s.writeReauthFailure(w, err, "Confirm your identity with your password, passkey, or Google before changing your email.")
 		return
 	}
 	if !validEmail(input.NewEmail) {
 		adminError(w, http.StatusBadRequest, "invalid_request", "Enter a valid email address.")
+		return
+	}
+	if !s.emailChangeLimiter.allowAttempt(session.User.AccountID) {
+		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many email-change requests. Try again later.")
 		return
 	}
 	if _, err := s.identity.RequestEmailChange(r.Context(), session.User.ID, rawUserSessionToken(r), input.NewEmail); err != nil {
@@ -153,7 +157,7 @@ func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Token string `json:"token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -174,11 +178,30 @@ func (s *Server) confirmEmailChange(w http.ResponseWriter, r *http.Request) {
 // revokeOwnSessions logs the user out everywhere, including this device.
 func (s *Server) revokeOwnSessions(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(userSessionKey).(identity.UserSession)
+	// Tokens survive sign-out unless the caller opts in to revoking them.
+	var input struct {
+		RevokeTokens bool `json:"revoke_tokens"`
+	}
+	if r.ContentLength != 0 {
+		if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
+			respondDecodeError(w, err)
+			return
+		}
+	}
+	// Revoke tokens first, and stop if that fails: the user stays signed in and
+	// sees an error rather than being told tokens were revoked when they were
+	// not. Deleting tokens is idempotent, so a retry is safe.
+	if input.RevokeTokens {
+		if err := s.revokeAccountManagementTokens(r.Context(), session.User.AccountID); err != nil {
+			adminError(w, http.StatusInternalServerError, "token_revocation_failed", "Could not revoke API tokens, so you were not signed out. Try again.")
+			return
+		}
+	}
 	if err := s.identity.RevokeAllUserSessions(r.Context(), session.User.ID); err != nil {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not revoke sessions.")
 		return
 	}
-	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.sessions_revoked", ActorType: "user", ActorID: session.User.ID})
+	s.recordAccountAudit(r.Context(), session.User.AccountID, store.AuditEvent{Event: "user.sessions_revoked", Metadata: map[string]string{"tokens_revoked": strconv.FormatBool(input.RevokeTokens)}, ActorType: "user", ActorID: session.User.ID})
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.user_sessions_revoked", ActorType: "user", TargetType: "account", TargetID: session.User.AccountID})
 	s.clearCookie(w, userSessionCookie)
 	w.WriteHeader(http.StatusNoContent)
@@ -193,7 +216,7 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 		Confirm  string `json:"confirm"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -212,7 +235,7 @@ func (s *Server) deleteOwnAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if _, err := s.reauthenticateSensitive(r, session.User.ID, input.Password); err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before deleting your account.")
+		s.writeReauthFailure(w, err, "Confirm your identity with your password, passkey, or Google before deleting your account.")
 		return
 	}
 	accountID := session.User.AccountID
@@ -237,6 +260,8 @@ func (s *Server) purgeAccount(ctx context.Context, accountID string) error {
 	}
 	s.identity.InvalidateAccount(accountID)
 	s.clients.InvalidateAccount(accountID)
+	s.tokens.InvalidateAccount(accountID)
+	s.cancelAccountStreams(accountID)
 	if err := s.storeHandle().BeginActivityCleanup(accountID, ""); err != nil {
 		return err
 	}

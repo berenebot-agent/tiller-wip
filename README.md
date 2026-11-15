@@ -201,6 +201,7 @@ there when converting an existing local installation:
 TILLER_PLATFORM_ADMIN_USERNAME=platform-admin        # /platform username
 TILLER_PLATFORM_ADMIN_PASSWORD=replace-with-a-long-random-password
 TILLER_TRUSTED_PROXY=172.20.0.2/32                   # required hosted: direct reverse proxy IP/CIDR
+TILLER_PLATFORM_PORT=9443                            # recommended hosted: serve /platform on its own port (see below)
 TILLER_USERNAME=owner@example.com                     # optional one-time migration input
 TILLER_PASSWORD=existing-local-password               # optional one-time migration input
 TILLER_PORT=8080                                     # host port (default 8080)
@@ -218,8 +219,9 @@ TILLER_INGRESS_NETWORK_EXTERNAL=true                 # set only for a pre-existi
 
 ## Advanced
 
-Headless and hosted-operation topics live in
-[docs/ADVANCED.md](docs/ADVANCED.md): management API tokens and scopes,
+Headless and hosted-operation topics: [docs/management-api.md](docs/management-api.md) covers the management API
+(tokens, scopes, quickstart; every instance also serves `/api/admin`, `/api.json`
+and `/api/openapi.json`), and [docs/ADVANCED.md](docs/ADVANCED.md) covers
 embedding Tiller as another application's LLM gateway, hosted Compose
 networking, hosted Google sign-in and Turnstile, and DNS recovery after
 restarts.

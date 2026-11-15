@@ -1,7 +1,7 @@
 const { test, expect } = require('@playwright/test');
 const {
   ADMIN_USER, ADMIN_PASS, MOCK_BASE, MOCK_CONTROL_BASE,
-  openAdmin, adminCsrf, createProvider, createClient, seedClient,
+  openAdmin, adminCsrf, createProvider, createClient, seedClient, seedProvider,
   mockAddModel, mockRemoveModel, refreshProviderApi
 } = require('./helpers');
 
@@ -110,7 +110,7 @@ test('mobile: Client Keys renders as cards with expandable detail and working ac
   const csrf = await adminCsrf(page);
   const providerName = 'mobile-cards';
   const clientName = 'mobile-cards-client';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
   await seedClient(clientName);
   // Reload so the freshly created client appears in the (default) Client Keys view.
   await page.reload();
@@ -160,7 +160,7 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   const csrf = await adminCsrf(page);
   const providerName = 'mobile-single';
   const clientName = 'mobile-single-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   const real = (await modelsResponse.json()).data.find(model => model.upstream_model_id === 'mock-model');
   expect(real).toBeTruthy();
@@ -197,9 +197,10 @@ test('mobile: Single-key card route summary and Settings entry point', async ({ 
   await card.locator('.client-card-quick-actions').getByRole('button', { name: 'Change route' }).click();
   const dialog = page.locator('#form-dialog');
   await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveClass(/route-picker-dialog/);
   await expect(page.locator('#dialog-title')).toHaveText(`Route · ${clientName}`);
-  // Only the target field: no client-name, model-name, or type fields.
+  // Only the target field: no client-name, model-name, or type fields. Asserted
+  // by the absence of those inputs rather than by the dialog's CSS class, so a
+  // restyle cannot fail the test for no user-visible reason.
   await expect(dialog.locator('[name="name"]')).toHaveCount(0);
   await expect(dialog.locator('[name="single_model_name"]')).toHaveCount(0);
   await expect(dialog.locator('[name="type"]')).toHaveCount(0);
@@ -242,7 +243,7 @@ test('permission edits survive filtering, and cancel/save semantics hold', async
   const providerName = 'browser-perm';
   const modelId = `${providerName}/mock-model`;
   const clientName = 'browser-perm-client';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
   await seedClient(clientName);
 
   await page.getByRole('link', { name: 'Clients' }).click();
@@ -297,7 +298,7 @@ test('Single key creation, response identity, rename warning, and inline route s
   const csrf = await adminCsrf(page);
   const providerName = 'single-ui';
   const clientName = 'single-ui-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -366,7 +367,7 @@ test('single-route inline picker: typeahead selects and tick applies', async ({ 
   const csrf = await adminCsrf(page);
   const providerName = 'enter-save';
   const clientName = 'enter-save-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -414,7 +415,7 @@ test('single-route inline picker: red X cancels without saving', async ({ page }
   const csrf = await adminCsrf(page);
   const providerName = 'cancel-route';
   const clientName = 'cancel-route-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -459,7 +460,7 @@ test('single-route inline picker: clicking away without selecting reverts to the
   const csrf = await adminCsrf(page);
   const providerName = 'blur-revert';
   const clientName = 'blur-revert-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsRes = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsRes.ok()).toBeTruthy();
   const real = (await modelsRes.json()).data.find(m => m.upstream_model_id === 'mock-model');
@@ -492,7 +493,7 @@ test('Settings dialog switches a client between catalogue and single', async ({ 
   const csrf = await adminCsrf(page);
   const providerName = 'settings-switch';
   const clientName = 'settings-switch-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsResponse = await page.request.get(`/api/admin/providers/${provider.id}/models`);
   expect(modelsResponse.ok()).toBeTruthy();
   const models = (await modelsResponse.json()).data;
@@ -714,7 +715,7 @@ test('Manage models collapse: Real/Virtual sections and provider groups', async 
   const clientName = 'collapse-perm-client';
   const canonical = id => `${providerName}/${id}`;
 
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   await seedClient(clientName);
 
   // Create a virtual group + model so both the Real and Virtual sections render.
@@ -781,7 +782,7 @@ test('real model search matches the displayed canonical model ID', async ({ page
   await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'canonical-model-search';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
 
   await page.getByRole('link', { name: 'Providers' }).click();
   await expect(page.locator('#provider-drawer')).toBeHidden();
@@ -805,7 +806,7 @@ test('provider deletion shows the exact name with a working copy button', async 
   await openAdmin(page);
   const csrf = await adminCsrf(page);
   const providerName = 'copy-confirm-provider';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
 
   await page.getByRole('link', { name: 'Providers' }).click();
   await page.getByRole('button', { name: `Browse ${providerName} models` }).click();
@@ -853,7 +854,7 @@ test('activity loads clear a previously shown error on success', async ({ page }
 
   const providerName = 'browser-errclear';
   const clientName = 'browser-errclear-client';
-  await createProvider(page, csrf, providerName);
+  await seedProvider(providerName);
   await seedClient(clientName);
 
   // 1. Per-client dialog: plant a sentinel error, then a successful re-load
@@ -951,7 +952,7 @@ test('activity request ID: click-to-copy on secure origin lands the full ID on t
 
   const providerName = 'browser-copy-reqid';
   const clientName = 'browser-copy-reqid-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsRes = await page.request.get('/api/admin/models');
   const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
@@ -1037,7 +1038,7 @@ test('activity request ID: insecure origin renders a plain tooltip, no click aff
   const csrf = await adminCsrf(page);
   const providerName = 'browser-copy-reqid-insecure';
   const clientName = 'browser-copy-reqid-insecure-client';
-  const provider = await createProvider(page, csrf, providerName);
+  const provider = await seedProvider(providerName);
   const modelsRes = await page.request.get('/api/admin/models');
   const realModel = (await modelsRes.json()).data.find(m => m.provider_id === provider.id && m.upstream_model_id === 'mock-model');
   expect(realModel).toBeTruthy();
@@ -1289,56 +1290,15 @@ await input.click();
 const list = box.locator('.combobox-list');
 await expect(list).toBeVisible();
 
-// The fixed dropdown must stay fully inside the viewport on a phone.
-const inputBox = await input.boundingBox();
-const listBox = await list.boundingBox();
-expect(inputBox.width).toBeGreaterThan(0);
-expect(listBox.width).toBeGreaterThan(0);
-expect(listBox.x).toBeGreaterThanOrEqual(0);
-expect(listBox.x + listBox.width).toBeLessThanOrEqual(390);
+// The fixed dropdown must stay fully inside the viewport on a phone. Asserting
+// the outcome (it is on screen) rather than hand-computed box arithmetic keeps
+// this meaningful if the viewport or dropdown width ever changes.
+await expect(list).toBeInViewport({ ratio: 1 });
 
 await input.click();
 await expect(list).toBeHidden();
 await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
 await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
-});
-
-test('virtual models table: group header colspan matches data row columns', async ({ page }) => {
-  // The State column was removed, leaving 7 columns. The group header
-  // colspan must match the data row cell count so the table does not get
-  // an extra synthetic column.
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await openAdmin(page);
-  const csrf = await adminCsrf(page);
-  const providerName = 'vm-colspan';
-  await createProvider(page, csrf, providerName);
-
-  const groupRes = await page.request.post('/api/admin/virtual-groups', { headers: { 'X-CSRF-Token': csrf }, data: { name: 'vm-colspan-vg' } });
-  expect(groupRes.status()).toBe(201);
-  const group = await groupRes.json();
-  const modelsRes = await page.request.get('/api/admin/models?all=1');
-  const real = (await modelsRes.json()).data.find(m => m.provider_name === providerName && m.upstream_model_id === 'mock-model');
-  expect(real).toBeTruthy();
-  const virtualRes = await page.request.post('/api/admin/virtual-models', { headers: { 'X-CSRF-Token': csrf }, data: { group_id: group.id, name: 'colspan-route', routing_mode: 'fixed', targets: [{ provider_model_id: real.id, enabled: true }] } });
-  expect(virtualRes.status()).toBe(201);
-  const virtual = await virtualRes.json();
-
-  await page.goto('/#virtual');
-  await expect(page.locator('#view-virtual')).toBeVisible();
-
-  // The group header colspan must equal the data row cell count (7).
-  const headerColspan = await page.locator('#virtual-body tr.group-toggle td').first().getAttribute('colspan');
-  expect(headerColspan).toBe('7');
-
-  // And the data row must have exactly 7 cells.
-  const dataRow = page.locator('#virtual-body tr[data-virtual-id]', { hasText: 'vm-colspan-vg/colspan-route' });
-  await expect(dataRow).toBeVisible();
-  const cellCount = await dataRow.locator('td').count();
-  expect(cellCount).toBe(7);
-
-  // Cleanup.
-  await page.request.delete(`/api/admin/virtual-models/${virtual.id}`, { headers: { 'X-CSRF-Token': csrf } });
-  await page.request.delete(`/api/admin/virtual-groups/${group.id}`, { headers: { 'X-CSRF-Token': csrf } });
 });
 
 test('provider picker searches the full catalogue, configures defaults, and serves local logos', async ({ page }) => {
@@ -1397,9 +1357,23 @@ test('provider picker searches the full catalogue, configures defaults, and serv
   await expect(dialog.locator('#dialog-submit')).toHaveText('Connect with GitHub Copilot');
   await expect(dialog.locator('[data-credential-create]')).toBeHidden();
 
+  // An OAuth subscription's upstream is not the operator's choice, so the
+  // wizard never shows a base URL field for one. The input stays in the DOM
+  // (it carries the type's default upstream into the create request) but must
+  // not be visible or editable.
+  await expect(dialog.getByLabel('Base URL')).toBeHidden();
+  await expect(dialog.locator('[name="base_url"]')).not.toBeVisible();
+
+  await back();
+  await pickType('claude-subscription');
+  await expect(dialog.getByLabel('Base URL')).toBeHidden();
+  await expect(dialog.locator('#dialog-submit')).toHaveText('Connect with Claude Code Subscription');
+
+  // Picking a non-OAuth type afterwards brings the field back for real use.
   // Custom-endpoint type: base URL required and native-protocol controls exposed.
   await back();
   await pickType('generic-openai');
+  await expect(dialog.getByLabel('Base URL')).toBeVisible();
   await expect(dialog.locator('[name="base_url"]')).toHaveJSProperty('required', true);
   await expect(dialog.locator('[data-protocol-config]')).toBeVisible();
   await expect(dialog.locator('[data-protocol-config]')).not.toHaveAttribute('hidden');

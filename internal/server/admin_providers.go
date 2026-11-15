@@ -86,8 +86,8 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		Enabled    *bool                `json:"enabled"`
 		Protocols  []providers.Protocol `json:"protocols"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
@@ -216,7 +216,14 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	refreshCtx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
 	defer cancel()
-	refreshErr := s.providers.Refresh(refreshCtx, sc.AccountID(), providerID)
+	// An OAuth provider has no credential until the user finishes signing in, so
+	// creation-time discovery can only fail and record a refresh error the sign-in
+	// then has to clear. Skip it and let the OAuth completion path re-discover,
+	// which is what makes "provider added" -> "connected" feel like one step.
+	var refreshErr error
+	if descriptor.AuthMode != providers.AuthModeOAuth {
+		refreshErr = s.providers.Refresh(refreshCtx, sc.AccountID(), providerID)
+	}
 	status := http.StatusCreated
 	message := ""
 	if refreshErr != nil {
@@ -239,9 +246,12 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		Enabled         *bool                `json:"enabled"`
 		Protocols       []providers.Protocol `json:"protocols"`
 		ConfirmBreaking bool                 `json:"confirm_breaking_change"`
+		// ConfirmCredentialReset acknowledges that moving an editable provider
+		// to a different upstream host clears its stored credential.
+		ConfirmCredentialReset bool `json:"confirm_credential_reset"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	sc := s.scope(r)
@@ -260,6 +270,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		}
 		current.Name = strings.TrimSpace(*input.Name)
 	}
+	clearCredential := false
 	if input.BaseURL != nil {
 		base := strings.TrimRight(*input.BaseURL, "/")
 		if providers.ValidateBaseURL(base) != nil {
@@ -270,7 +281,21 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 			adminError(w, 400, "hosted_outbound_url_required", "Hosted provider URLs must use validated public HTTPS on port 443.")
 			return
 		}
-		current.BaseURL = base
+		if base != strings.TrimRight(current.BaseURL, "/") {
+			descriptor, known := providers.Lookup(current.Type)
+			if known && descriptor.BaseURLLocked {
+				adminError(w, 400, "base_url_locked", "The upstream URL of this provider type is fixed. Delete and recreate the provider to use a different endpoint.")
+				return
+			}
+			if !providers.SameUpstreamHost(base, current.BaseURL) {
+				if !input.ConfirmCredentialReset {
+					adminError(w, 409, "credential_reset_confirmation_required", "Changing the upstream host clears the stored credential. Confirm and enter the credential for the new host.")
+					return
+				}
+				clearCredential = true
+			}
+			current.BaseURL = base
+		}
 	}
 	if input.Enabled != nil {
 		current.Enabled = *input.Enabled
@@ -285,6 +310,8 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 		Enabled:    current.Enabled,
 		EnabledSet: input.Enabled != nil,
 		Protocols:  current.Protocols,
+
+		ClearCredential: clearCredential,
 	})
 	if errors.Is(err, store.ErrProviderNotFound) {
 		adminError(w, 404, "not_found", "Provider not found.")
@@ -304,6 +331,9 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.BaseURL != nil {
 		changed = append(changed, "base_url")
+	}
+	if clearCredential {
+		changed = append(changed, "credential_cleared")
 	}
 	if input.Enabled != nil {
 		changed = append(changed, "enabled")
@@ -337,7 +367,11 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 	var input struct {
 		Credential string `json:"credential"`
 	}
-	if decodeJSON(w, r, &input) != nil || input.Credential == "" {
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
+		return
+	}
+	if input.Credential == "" {
 		adminError(w, 400, "credential_required", "A non-empty credential is required.")
 		return
 	}
@@ -350,6 +384,9 @@ func (s *Server) replaceProviderCredential(w http.ResponseWriter, r *http.Reques
 		adminError(w, 404, "not_found", "Provider not found.")
 		return
 	}
+	// A replaced credential invalidates the last quota check for a
+	// quota-capable provider: the previous attempt ran against the old key.
+	s.refreshQuotaAfterConnect(sc.AccountID(), r.PathValue("id"))
 	// The credential value is never recorded — only that it was replaced
 	// (../docs/pre_saas_release_review.md TR-014; SECURITY.md secret guardrail).
 	s.recordResourceAudit(r, sc.AccountID(), store.AuditEvent{
@@ -517,8 +554,8 @@ func (in *manualModelInput) normalizeAndValidate(w http.ResponseWriter) bool {
 
 func (s *Server) addManualModel(w http.ResponseWriter, r *http.Request) {
 	var input manualModelInput
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	if !input.normalizeAndValidate(w) {

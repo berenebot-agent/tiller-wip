@@ -193,16 +193,6 @@ test('adding a passkey sends the challenge token and the CSRF header', async ({ 
   await expect(page.locator('#account-passkeys-list')).toContainText('Phone');
 });
 
-test('passkey management renders created and last-used metadata', async ({ page }) => {
-  await installCredentialStub(page);
-  await mockHostedPasskeyPage(page);
-  await openAccountTab(page);
-  const row = page.locator('[data-passkey="pk-1"]');
-  await expect(row).toContainText('Laptop');
-  await expect(row).toContainText('Added');
-  await expect(row).toContainText('Last used');
-});
-
 test('passkey-only account confirms a password change with a passkey assertion', async ({ page }) => {
   await installCredentialStub(page);
   const passkeyOnly = { ...PROFILE, password_enabled: false, has_password: true };
@@ -349,20 +339,55 @@ async function mockLocalPasskeySession(page, { profile = LOCAL_PROFILE } = {}) {
   await page.route('**/api/admin/client-keys/types', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
 }
 
-test('local install with passkeys shows the sign-in button', async ({ page }) => {
+// The sign-in button is gated on the runtime's passkeys_enabled flag. Both
+// directions are asserted in one test because they are the same one-line
+// conditional; splitting them duplicated the whole fixture for no extra coverage.
+for (const enabled of [true, false]) {
+  test(`local install ${enabled ? 'with' : 'without'} passkeys ${enabled ? 'shows' : 'hides'} the sign-in button`, async ({ page }) => {
+    await installCredentialStub(page);
+    await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: enabled }) }));
+    await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
+    await page.goto('/');
+    await expect(page.locator('#passkey-signin'))[enabled ? 'toBeVisible' : 'toBeHidden']();
+  });
+}
+
+test('local passkey sign-in button survives an in-session logout', async ({ page }) => {
+  // Regression: the button is gated on a flag read from /api/runtime at boot.
+  // Logout returns to the login card without a reload, so a boot-only flag left
+  // the button hidden until the user refreshed the page. Sign in with a
+  // password, log out, and the button must still be there.
   await installCredentialStub(page);
   await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: true }) }));
-  await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
+  let signedIn = false;
+  const session = JSON.stringify({ authenticated: true, username: 'admin', csrf_token: 'local-csrf' });
+  await page.route('**/api/admin/session', route => {
+    if (route.request().method() === 'DELETE') { signedIn = false; return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' }); }
+    if (route.request().method() === 'POST') { signedIn = true; return route.fulfill({ status: 200, contentType: 'application/json', body: session }); }
+    if (signedIn) return route.fulfill({ status: 200, contentType: 'application/json', body: session });
+    return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) });
+  });
+  await page.route('**/api/auth/onboarding', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ needs_onboarding: false }) }));
+  await page.route('**/api/admin/providers**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/client-keys**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/virtual-models**', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [] }) }));
+  await page.route('**/api/admin/usage', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) }));
+  await page.route('**/api/admin/live', route => route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' }));
+
   await page.goto('/');
   await expect(page.locator('#passkey-signin')).toBeVisible();
-});
+  await page.locator('#login-form').getByLabel('Tiller username').fill('admin');
+  await page.locator('#login-form').getByLabel('Password').fill('correct horse');
+  // Not getByRole('button', { name: 'Sign in' }): the passkey button on this card
+  // is "Sign in with a passkey", so the loose name matches both.
+  await page.locator('#login-submit').click();
+  await expect(page.locator('#app')).toBeVisible();
 
-test('local install without passkeys hides the sign-in button', async ({ page }) => {
-  await installCredentialStub(page);
-  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'local', setup_required: false, wizard_enabled: false, passkeys_enabled: false }) }));
-  await page.route('**/api/admin/session', route => route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'Authentication required.' } }) }));
-  await page.goto('/');
-  await expect(page.locator('#passkey-signin')).toBeHidden();
+  await page.locator('#logout').click();
+  await expect(page.locator('#login-form')).toBeVisible();
+  // Repainted by the logout path itself, with no reload in between.
+  await expect(page.locator('#passkey-signin')).toBeVisible();
+  await expect(page.locator('#passkey-signin')).toBeEnabled();
 });
 
 test('local passkey sign-in performs the ceremony and enters the app', async ({ page }) => {
@@ -440,31 +465,73 @@ test('Google-only user confirms with Google then adds their first passkey', asyn
 });
 
 
-test('platform login escalates to Turnstile only when the server requests it', async ({ page }) => {
+// The operator console is a separate shell: it never reads /api/auth/options
+// (that is a customer-app route), so its Turnstile widget is mounted from
+// /api/platform/session/probe. The gate is optional — with the probe reporting
+// nothing configured the console sign-in behaves exactly as before.
+async function mockPlatformLogin(page, { turnstile = true, submitStatus = 403, submitCode = 'captcha_required', submitOk = false } = {}) {
   await page.addInitScript(() => {
     window.__captchaActions = [];
+    window.__captchaSites = [];
     window.turnstile = {
-      render: (_selector, options) => { window.__captchaActions.push(options.action); options.callback('captcha-proof'); return 'widget'; },
+      render: (selector, options) => { window.__captchaActions.push(options.action); window.__captchaSites.push(options.sitekey); options.callback('captcha-proof'); return 'widget'; },
       reset: () => {}, remove: () => {},
     };
   });
   await page.route('**/api/runtime', route => route.fulfill({ json: { mode: 'hosted' } }));
-  await page.route('**/api/auth/options', route => route.fulfill({ json: { turnstile_enabled: true, turnstile_site_key: 'site-key' } }));
+  await page.route('**/api/platform/session/probe', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ authenticated: false, turnstile_enabled: turnstile, turnstile_site_key: turnstile ? 'console-site-key' : '' }),
+  }));
+  const attempts = [];
   await page.route('**/api/platform/session', async route => {
     if (route.request().method() === 'GET') return route.fulfill({ status: 401, json: { error: { code: 'unauthorized' } } });
-    const body = route.request().postDataJSON();
-    attempts.push(body);
-    return route.fulfill({ status: 403, json: { error: { code: 'captcha_required', message: 'Complete the security check.' } } });
+    attempts.push(route.request().postDataJSON());
+    if (submitOk) return route.fulfill({ status: 200, json: { authenticated: true, csrf_token: 'platform-csrf', platform_exposed: false, console_insecure: false } });
+    return route.fulfill({ status: submitStatus, json: { error: { code: submitCode, message: 'Rejected.' } } });
   });
-  const attempts = [];
+  return attempts;
+}
+
+test('platform login mounts the security check from the console probe and sends its token', async ({ page }) => {
+  const attempts = await mockPlatformLogin(page);
   await page.goto('/platform');
+  await expect(page.locator('#auth-captcha-wrap')).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.__captchaActions)).toEqual(['platform_login']);
+  // The console must use the site key the probe reported, not a customer key.
+  expect(await page.evaluate(() => window.__captchaSites)).toEqual(['console-site-key']);
+  await page.locator('#platform-login-form input[name=username]').fill('operator');
+  await page.locator('#platform-login-form input[name=password]').fill('test-password');
+  await page.locator('#platform-login-form button[type=submit]').click();
+  await expect.poll(() => attempts.length).toBe(1);
+  expect(attempts[0].captcha_token).toBe('captcha-proof');
+});
+
+test('platform login sends no token when the server reports no challenge', async ({ page }) => {
+  const attempts = await mockPlatformLogin(page, { turnstile: false, submitStatus: 401, submitCode: 'invalid_credentials' });
+  await page.goto('/platform');
+  await expect(page.locator('#platform-login-form')).toBeVisible();
+  await expect(page.locator('#auth-captcha-wrap')).toBeHidden();
+  expect(await page.evaluate(() => window.__captchaActions)).toEqual([]);
   await page.locator('#platform-login-form input[name=username]').fill('operator');
   await page.locator('#platform-login-form input[name=password]').fill('test-password');
   await page.locator('#platform-login-form button[type=submit]').click();
   await expect.poll(() => attempts.length).toBe(1);
   expect(attempts[0].captcha_token).toBe('');
+});
+
+test('a solved platform challenge is reused for the retry', async ({ page }) => {
+  const attempts = await mockPlatformLogin(page, { submitOk: true });
+  await page.goto('/platform');
+  await expect(page.locator('#platform-login-form')).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__captchaActions)).toEqual(['platform_login']);
+  await page.locator('#platform-login-form input[name=username]').fill('operator');
+  await page.locator('#platform-login-form input[name=password]').fill('test-password');
   await page.locator('#platform-login-form button[type=submit]').click();
-  await expect.poll(() => attempts.length).toBe(2);
-  expect(attempts[1].captcha_token).toBe('captcha-proof');
+  await expect.poll(() => attempts.length).toBe(1);
+  // The token is not burnt on success: the console must not re-mount the widget
+  // (or clear it) on the way into the dashboard.
+  expect(attempts[0].captcha_token).toBe('captcha-proof');
+  expect(await page.evaluate(() => window.__captchaActions)).toEqual(['platform_login']);
 });

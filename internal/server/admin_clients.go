@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/tiller-router/tiller-router/internal/auth"
-	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -110,8 +109,8 @@ func (s *Server) createClientKey(w http.ResponseWriter, r *http.Request) {
 		SingleTargetID   string `json:"single_target_id"`
 		TemplateID       string `json:"template_id"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
@@ -221,8 +220,8 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		// it to Custom. Absent leaves the link unchanged.
 		TemplateID *string `json:"template_id"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	if input.RetentionDays != nil && *input.RetentionDays < 1 {
@@ -237,10 +236,6 @@ func (s *Server) updateClientKey(w http.ResponseWriter, r *http.Request) {
 		bodyLogMode = strings.TrimSpace(*input.LogErrorBodies)
 		if !store.ValidBodyLogMode(bodyLogMode) {
 			adminError(w, 400, "invalid_body_log_mode", "Detailed error body logging must be inherit, always or never.")
-			return
-		}
-		if s.config.Mode == config.ModeHosted && bodyLogMode == store.BodyLogAlways {
-			adminError(w, http.StatusForbidden, "hosted_body_logging_disabled", "Detailed error logging is unavailable in hosted mode.")
 			return
 		}
 	}
@@ -538,7 +533,7 @@ func (s *Server) getPermissions(w http.ResponseWriter, r *http.Request) {
 
 // decodePermissionUpdates reads a permission-matrix PUT body. It writes the
 // error response and returns ok=false when the body is invalid.
-func decodePermissionUpdates(w http.ResponseWriter, r *http.Request) (defaults []store.PermissionDefaultUpdate, permissions []store.PermissionModelUpdate, ok bool) {
+func (s *Server) decodePermissionUpdates(w http.ResponseWriter, r *http.Request) (defaults []store.PermissionDefaultUpdate, permissions []store.PermissionModelUpdate, ok bool) {
 	var input struct {
 		Defaults []struct {
 			Kind    string `json:"kind"`
@@ -551,8 +546,8 @@ func decodePermissionUpdates(w http.ResponseWriter, r *http.Request) (defaults [
 			Enabled bool   `json:"enabled"`
 		} `json:"permissions"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return nil, nil, false
 	}
 	for _, d := range input.Defaults {
@@ -579,7 +574,7 @@ func decodePermissionUpdates(w http.ResponseWriter, r *http.Request) (defaults [
 }
 
 func (s *Server) updatePermissions(w http.ResponseWriter, r *http.Request) {
-	defaults, permissions, ok := decodePermissionUpdates(w, r)
+	defaults, permissions, ok := s.decodePermissionUpdates(w, r)
 	if !ok {
 		return
 	}

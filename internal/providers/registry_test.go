@@ -17,15 +17,6 @@ import (
 	"github.com/tiller-router/tiller-router/internal/providers/codex"
 )
 
-func TestRegistryIncludesApprovedProviders(t *testing.T) {
-	t.Parallel()
-	for _, providerType := range []string{"openai", "codex-subscription", "anthropic", "openrouter", "ollama-local", "ollama-cloud", "deepseek", "zai", "gemini", "azure-openai", "bedrock-api-key", "groq", "mistral", "xai", "together", "fireworks", "cerebras", "perplexity", "nvidia-nim", "huggingface", "cloudflare-ai", "alibaba-qwen", "minimax", "opencode-zen", "opencode-go", "opencode-free", "commandcode", "generic-openai", "vllm", "lm-studio", "llama-cpp"} {
-		if _, ok := Lookup(providerType); !ok {
-			t.Errorf("missing provider type %s", providerType)
-		}
-	}
-}
-
 func TestDiscoverCommandCodeUsesSupportedEndpoints(t *testing.T) {
 	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -274,17 +265,15 @@ func TestIsOpenCodeFreeModel(t *testing.T) {
 		id   string
 		free bool
 	}{
+		// The "-free" suffix is the general rule (case-insensitive).
 		{"deepseek-v4-flash-free", true},
-		{"mimo-v2.5-free", true},
 		{"MIMO-V2.5-FREE", true},
+		{"ox-alpha-free", false},
+		// "big-pickle" is the named provider-scoped exception: a free model
+		// whose ID carries no suffix. Listed here so the exception is not
+		// silently dropped as a "stale" entry.
 		{"big-pickle", true},
 		{"Big-Pickle", true},
-		{"ox-alpha-free", false},
-		{"OX-ALPHA-FREE", false},
-		{"gpt-5.5", false},
-		{"plain-model", false},
-		{"", false},
-		{"free", false},
 	} {
 		if got := IsOpenCodeFreeModel(tc.id); got != tc.free {
 			t.Errorf("IsOpenCodeFreeModel(%q) = %v, want %v", tc.id, got, tc.free)

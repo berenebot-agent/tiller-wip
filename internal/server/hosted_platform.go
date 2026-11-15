@@ -22,10 +22,25 @@ import (
 const platformGlobalKey = "platform"
 
 func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.requireSameOrigin(w, r) {
+	if !s.sameOriginRequest(r) {
+		// A console login rejected here is almost always a transport
+		// misconfiguration, not an attack: the browser used https, the request
+		// arrived without a trusted X-Forwarded-Proto header, and the expected
+		// origin scheme fell back to http. Say so once in the log, because the
+		// browser only ever sees a bare 400.
+		if s.logger != nil {
+			expected := "http"
+			if s.secureRequest(r) {
+				expected = "https"
+			}
+			s.logger.Warn("platform console login rejected by the same-origin check: the expected origin scheme follows the transport, so check that the console is served over HTTPS or that the proxy sends X-Forwarded-Proto: https and is listed in TILLER_TRUSTED_PROXY",
+				"origin", r.Header.Get("Origin"), "host", r.Host, "expected_scheme", expected,
+				"trusted_proxies", len(s.config.TrustedProxies))
+		}
+		adminError(w, http.StatusBadRequest, "invalid_request", "Request did not originate from this site.")
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if s.loginLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many failed login attempts. Try again later.")
 		return
@@ -35,7 +50,7 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		Password     string `json:"password"`
 		CaptchaToken string `json:"captcha_token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -56,14 +71,14 @@ func (s *Server) platformLogin(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "internal_error", "Could not create session.")
 		return
 	}
-	s.setPlatformSessionCookie(w, session.Token, session.ExpiresAt)
+	s.setPlatformSessionCookie(w, r, session.Token, session.ExpiresAt)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.login", ActorType: "platform"})
-	writeJSON(w, http.StatusOK, platformSessionPayload(session))
+	writeJSON(w, http.StatusOK, s.platformSessionPayload(r, session))
 }
 
 func (s *Server) requirePlatform(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		cookie, err := r.Cookie(platformSessionCookie)
+		cookie, err := r.Cookie(s.platformCookieName(r))
 		if err != nil {
 			adminError(w, http.StatusUnauthorized, "unauthorized", "Platform authentication required.")
 			return
@@ -73,7 +88,7 @@ func (s *Server) requirePlatform(next http.Handler) http.Handler {
 			adminError(w, http.StatusUnauthorized, "unauthorized", "Platform authentication required.")
 			return
 		}
-		s.setPlatformSessionCookie(w, cookie.Value, session.ExpiresAt)
+		s.setPlatformSessionCookie(w, r, cookie.Value, session.ExpiresAt)
 		if r.Method != http.MethodGet && r.Method != http.MethodHead && !s.identity.CheckPlatformCSRF(session, r.Header.Get("X-CSRF-Token")) {
 			adminError(w, http.StatusForbidden, "csrf_failed", "A valid CSRF token is required.")
 			return
@@ -90,7 +105,33 @@ func contextWithPlatformSession(ctx context.Context, session identity.PlatformSe
 
 func (s *Server) platformSessionStatus(w http.ResponseWriter, r *http.Request) {
 	session := r.Context().Value(platformSessionKey).(identity.PlatformSession)
-	writeJSON(w, http.StatusOK, platformSessionPayload(session))
+	writeJSON(w, http.StatusOK, s.platformSessionPayload(r, session))
+}
+
+// platformLoginProbe is the unauthenticated companion to platformSessionStatus.
+// It always answers 401, and alongside the usual error body tells the console
+// whether this deployment challenges console logins, so the login card can
+// mount its Turnstile widget before the first submit. Only the public site key
+// is exposed; it is embedded in every page that renders a widget.
+//
+// The console has no access to /api/auth/options (that is a customer-app route),
+// so without this the client-side gate on platform_login could never mount.
+func (s *Server) platformLoginProbe(w http.ResponseWriter, r *http.Request) {
+	settings, err := s.storeHandle().GetPlatformAuthSettings(r.Context())
+	if err != nil {
+		adminError(w, http.StatusUnauthorized, "unauthorized", "Platform authentication required.")
+		return
+	}
+	enabled := settings.TurnstileEnabled && settings.TurnstileSiteKey != "" && settings.TurnstileSecret != ""
+	siteKey := ""
+	if enabled {
+		siteKey = settings.TurnstileSiteKey
+	}
+	writeJSON(w, http.StatusUnauthorized, map[string]any{
+		"error":              map[string]any{"code": "unauthorized", "message": "Platform authentication required."},
+		"turnstile_enabled":  enabled,
+		"turnstile_site_key": siteKey,
+	})
 }
 
 func (s *Server) platformStats(w http.ResponseWriter, r *http.Request) {
@@ -125,20 +166,61 @@ func (s *Server) platformUsageTotals(ctx context.Context, current time.Time) (st
 }
 
 func (s *Server) platformLogout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(platformSessionCookie); err == nil {
+	name := s.platformCookieName(r)
+	if cookie, err := r.Cookie(name); err == nil {
 		s.identity.DeletePlatformSession(cookie.Value)
 	}
-	http.SetCookie(w, &http.Cookie{Name: platformSessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, Secure: name == platformSessionCookie, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.logout", ActorType: "platform"})
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) setPlatformSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
-	http.SetCookie(w, &http.Cookie{Name: platformSessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: maxAge(expires)})
+// platformInsecureSessionCookie is used only on the dedicated platform
+// listener when it is reached over plain HTTP (for example across a VPN):
+// browsers refuse the Secure-only __Host- cookie there. The listener is meant
+// to be network-restricted, and the public listener never uses this name.
+//
+// This downgrade is an accepted risk, not a fallback to rely on silently. The
+// operator is warned in the console and in the log every time it happens, and
+// SECURITY.md documents the residual: a cookie without Secure can be replayed
+// by anyone who can observe the console connection. Fix the transport (TLS, or
+// X-Forwarded-Proto: https from a TILLER_TRUSTED_PROXY peer) rather than
+// exposing the console beyond a restricted network.
+const platformInsecureSessionCookie = "tiller_platform_session"
+
+// platformCookieName picks the cookie shape for a
+// request: the hardened __Host- cookie everywhere, except plain HTTP on the
+// dedicated platform listener.
+func (s *Server) platformCookieName(r *http.Request) string {
+	if onPlatformListener(r) && !s.secureRequest(r) {
+		return platformInsecureSessionCookie
+	}
+	return platformSessionCookie
 }
 
-func platformSessionPayload(session identity.PlatformSession) map[string]any {
-	return map[string]any{"authenticated": true, "csrf_token": session.CSRFToken, "expires_at": session.ExpiresAt.UTC()}
+func (s *Server) setPlatformSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	name := s.platformCookieName(r)
+	if name != platformSessionCookie && s.logger != nil {
+		// Never log the token. The peer address is what identifies the proxy or
+		// VPN hop whose configuration made this happen.
+		s.logger.Warn("platform console issued a non-Secure session cookie: console transport is not HTTPS and no trusted proxy reported X-Forwarded-Proto: https",
+			"remote", clientIP(r, s.config.TrustedProxies))
+	}
+	http.SetCookie(w, &http.Cookie{Name: name, Value: token, Path: "/", HttpOnly: true, Secure: name == platformSessionCookie, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: maxAge(expires)})
+}
+
+// platformSessionPayload reports the two console deployment warnings: whether
+// the console shares the public listener, and whether this session's cookie had
+// to fall back to the non-Secure shape because the transport could not be proven
+// HTTPS. The console renders both so the downgrade is visible, never implicit.
+func (s *Server) platformSessionPayload(r *http.Request, session identity.PlatformSession) map[string]any {
+	return map[string]any{
+		"authenticated":    true,
+		"csrf_token":       session.CSRFToken,
+		"expires_at":       session.ExpiresAt.UTC(),
+		"platform_exposed": s.config.PlatformPort == 0,
+		"console_insecure": s.platformCookieName(r) != platformSessionCookie,
+	}
 }
 
 func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
@@ -153,8 +235,12 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := s.mailer.Status()
+	// A locked secret cipher must not hide the public mail fields (provider,
+	// from address, from name, SMTP endpoint). Those are plaintext settings and
+	// are always returned; only secret_configured degrades.
 	mail, err := s.storeHandle().GetPlatformMailSettings(r.Context())
-	if err != nil {
+	mailSecretsLocked := errors.Is(err, store.ErrSecretsLocked)
+	if err != nil && !mailSecretsLocked {
 		adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
 		return
 	}
@@ -177,7 +263,7 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"hosted_signup_enabled": signup, "audit_retention_days": retention,
 		"prevent_search_indexing": preventSearchIndexing,
-		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured},
+		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "from_name": mail.FromName, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured, "secrets_locked": mailSecretsLocked},
 		"google":                  map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
 		"turnstile":               map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
 		"analytics":               map[string]any{"enabled": analytics.Enabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
@@ -190,6 +276,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		AuditRetentionDays    *int    `json:"audit_retention_days"`
 		MailProvider          *string `json:"mail_provider"`
 		MailFrom              *string `json:"mail_from"`
+		MailFromName          *string `json:"mail_from_name"`
 		MailResendAPIKey      *string `json:"mail_resend_api_key"`
 		MailBrevoAPIKey       *string `json:"mail_brevo_api_key"`
 		MailSMTPHost          *string `json:"mail_smtp_host"`
@@ -212,13 +299,13 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		PreventSearchIndexing *bool   `json:"prevent_search_indexing"`
 	}
 	var fields map[string]json.RawMessage
-	if err := decodeJSONLimit(w, r, &fields, 64<<10); err != nil {
+	if err := s.decodeAuthJSON(w, r, &fields, 64<<10); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
 	allowed := map[string]bool{
 		"hosted_signup_enabled": true, "audit_retention_days": true,
-		"mail_provider": true, "mail_from": true, "mail_resend_api_key": true, "mail_brevo_api_key": true,
+		"mail_provider": true, "mail_from": true, "mail_from_name": true, "mail_resend_api_key": true, "mail_brevo_api_key": true,
 		"mail_smtp_host": true, "mail_smtp_port": true, "mail_smtp_username": true, "mail_smtp_password": true, "mail_smtp_mode": true,
 		"google_signin_enabled": true, "google_client_id": true, "google_client_secret": true, "clear_google_client_secret": true,
 		"turnstile_enabled": true, "turnstile_site_key": true, "turnstile_secret": true, "clear_turnstile_secret": true,
@@ -231,7 +318,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	}
-	mailFields := []string{"mail_provider", "mail_from", "mail_resend_api_key", "mail_brevo_api_key", "mail_smtp_host", "mail_smtp_port", "mail_smtp_username", "mail_smtp_password", "mail_smtp_mode"}
+	mailFields := []string{"mail_provider", "mail_from", "mail_from_name", "mail_resend_api_key", "mail_brevo_api_key", "mail_smtp_host", "mail_smtp_port", "mail_smtp_username", "mail_smtp_password", "mail_smtp_mode"}
 	hasAnyMailField := false
 	for _, key := range mailFields {
 		if _, ok := fields[key]; ok {
@@ -266,11 +353,12 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	defer s.platformSettingsMu.Unlock()
 	st := s.storeHandle()
 	currentMail, err := st.GetPlatformMailSettings(r.Context())
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, store.ErrSecretsLocked) {
 		adminError(w, http.StatusServiceUnavailable, "mail_locked", "Mail settings are unavailable.")
 		return
 	}
-	if err != nil {
+	mailSecretsLocked := errors.Is(err, store.ErrSecretsLocked)
+	if errors.Is(err, sql.ErrNoRows) {
 		currentMail = store.PlatformMailSettings{SMTPMode: "starttls"}
 	}
 	if input.MailProvider != nil {
@@ -278,6 +366,9 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	if input.MailFrom != nil {
 		currentMail.From = strings.TrimSpace(*input.MailFrom)
+	}
+	if input.MailFromName != nil {
+		currentMail.FromName = strings.TrimSpace(*input.MailFromName)
 	}
 	if input.MailSMTPHost != nil {
 		currentMail.SMTPHost = strings.TrimSpace(*input.MailSMTPHost)
@@ -292,13 +383,18 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 			currentMail.SMTPPort = strconv.Itoa(*input.MailSMTPPort)
 		}
 	}
-	if input.MailSMTPPassword != nil {
+	// A blank secret field means "keep the stored secret", not "erase it".
+	// The dashboard renders these as empty inputs with a "leave blank to keep
+	// current" hint, so any save of the form (changing only the sender name,
+	// say) would otherwise wipe the API key and report the secret as missing.
+	// Mail secrets are never cleared by a blank value; the store keeps them.
+	if input.MailSMTPPassword != nil && *input.MailSMTPPassword != "" {
 		currentMail.SMTPPassword = *input.MailSMTPPassword
 	}
-	if input.MailResendAPIKey != nil {
+	if input.MailResendAPIKey != nil && *input.MailResendAPIKey != "" {
 		currentMail.ResendAPIKey = *input.MailResendAPIKey
 	}
-	if input.MailBrevoAPIKey != nil {
+	if input.MailBrevoAPIKey != nil && *input.MailBrevoAPIKey != "" {
 		currentMail.BrevoAPIKey = *input.MailBrevoAPIKey
 	}
 	if input.MailSMTPMode != nil {
@@ -403,9 +499,24 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasPreventSearchIndexing && input.PreventSearchIndexing != nil {
 		preventSearchIndexing = *input.PreventSearchIndexing
 	}
-	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
-	if err := mailer.Validate(cfg); err != nil {
-		adminError(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.")
+	// Secrets could not be decrypted, so currentMail carries empty secret fields.
+	// A new secret cannot be accepted safely in that state (it would sit beside
+	// credentials that cannot be read), so refuse it outright. Non-secret fields
+	// are still saved: blank mail secrets are never written (see
+	// SavePlatformSettings), so the stored ciphertext is left untouched.
+	if mailSecretsLocked && (nonEmptyString(input.MailResendAPIKey) || nonEmptyString(input.MailBrevoAPIKey) || nonEmptyString(input.MailSMTPPassword)) {
+		adminError(w, http.StatusConflict, "secrets_locked", "Mail credentials are locked because the master key is missing or does not match. Restore the key before changing mail secrets.")
+		return
+	}
+	cfg := mailer.Config{Provider: currentMail.Provider, From: currentMail.From, FromName: currentMail.FromName, ResendAPIKey: currentMail.ResendAPIKey, BrevoAPIKey: currentMail.BrevoAPIKey, SMTPHost: currentMail.SMTPHost, SMTPPort: parseMailPort(currentMail.SMTPPort), SMTPUsername: currentMail.SMTPUsername, SMTPPassword: currentMail.SMTPPassword, SMTPMode: currentMail.SMTPMode}
+	validateCfg := cfg
+	if mailSecretsLocked {
+		// The real secrets are unreadable, so validate only the public fields.
+		// This stand-in is never stored or used to build a mailer.
+		validateCfg.ResendAPIKey, validateCfg.BrevoAPIKey = "locked", "locked"
+	}
+	if err := mailer.Validate(validateCfg); err != nil {
+		adminErrorDetail(w, http.StatusBadRequest, "invalid_mail_settings", "Mail settings are invalid.", mailValidationReason(err))
 		return
 	}
 	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, PreventSearchIndexing: preventSearchIndexing, Mail: currentMail, Auth: authSettings, Analytics: analytics}
@@ -419,7 +530,10 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	}
 	s.setPlatformAnalytics(analytics)
 	s.setPlatformPreventSearchIndexing(preventSearchIndexing)
-	if cfg.Provider == "" {
+	if mailSecretsLocked {
+		// cfg carries empty secrets; activating it would replace a working mailer
+		// with a credential-less one. Leave the running mailer as it is.
+	} else if cfg.Provider == "" {
 		s.mailer.Clear()
 	} else if err := s.mailer.Update(cfg); err != nil {
 		adminError(w, http.StatusInternalServerError, "internal_error", "Mail settings could not be activated.")
@@ -451,6 +565,7 @@ func hasMailUpdate(input struct {
 	AuditRetentionDays    *int    `json:"audit_retention_days"`
 	MailProvider          *string `json:"mail_provider"`
 	MailFrom              *string `json:"mail_from"`
+	MailFromName          *string `json:"mail_from_name"`
 	MailResendAPIKey      *string `json:"mail_resend_api_key"`
 	MailBrevoAPIKey       *string `json:"mail_brevo_api_key"`
 	MailSMTPHost          *string `json:"mail_smtp_host"`
@@ -472,7 +587,7 @@ func hasMailUpdate(input struct {
 	AnalyticsSiteID       *string `json:"analytics_site_id"`
 	PreventSearchIndexing *bool   `json:"prevent_search_indexing"`
 }) bool {
-	return input.MailProvider != nil || input.MailFrom != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
+	return input.MailProvider != nil || input.MailFrom != nil || input.MailFromName != nil || input.MailResendAPIKey != nil || input.MailBrevoAPIKey != nil || input.MailSMTPHost != nil || input.MailSMTPPort != nil || input.MailSMTPUsername != nil || input.MailSMTPPassword != nil || input.MailSMTPMode != nil
 }
 
 // accountUserStats is the operator view of an account's tenant resource counts
@@ -598,6 +713,10 @@ func (s *Server) changeAccountStatus(w http.ResponseWriter, r *http.Request, sta
 		return
 	}
 	s.clients.InvalidateAccount(accountID)
+	s.tokens.InvalidateAccount(accountID)
+	if status == "suspended" {
+		s.cancelAccountStreams(accountID)
+	}
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_" + status, ActorType: "platform", TargetType: "account", TargetID: accountID})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -614,6 +733,8 @@ func (s *Server) revokeAccountSessions(w http.ResponseWriter, r *http.Request) {
 	accountID := r.PathValue("id")
 	s.identity.InvalidateAccount(accountID)
 	s.clients.InvalidateAccount(accountID)
+	s.tokens.InvalidateAccount(accountID)
+	s.cancelAccountStreams(accountID)
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_sessions_revoked", ActorType: "platform", TargetType: "account", TargetID: accountID})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -623,7 +744,7 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Confirm string `json:"confirm"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil || strings.TrimSpace(input.Confirm) != accountID {
+	if err := s.decodeJSON(w, r, &input); err != nil || strings.TrimSpace(input.Confirm) != accountID {
 		adminError(w, http.StatusBadRequest, "confirmation_required", "Type the account ID to confirm deletion.")
 		return
 	}
@@ -638,3 +759,5 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.account_deleted", ActorType: "platform", TargetType: "account", TargetID: accountID})
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func nonEmptyString(p *string) bool { return p != nil && *p != "" }

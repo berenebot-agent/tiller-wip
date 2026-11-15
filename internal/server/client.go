@@ -430,6 +430,7 @@ type resolvedRoute struct {
 	// real target. nil when unknown.
 	ReasoningCapabilities *providers.ReasoningCapabilities
 	MaxOutputTokens       sql.NullInt64
+	SupportsTemperature   sql.NullInt64
 }
 
 func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requested string) (resolvedRoute, error) {
@@ -529,6 +530,7 @@ func (s *Server) resolveRoute(ctx context.Context, accountID, clientID, requeste
 		route.UpstreamModelID = resolved.UpstreamModelID
 		route.NativeProtocol = resolved.NativeProtocol
 		route.ReasoningCapabilities = resolved.ReasoningCapabilities
+		route.SupportsTemperature = resolved.SupportsTemperature
 		route.RequestedModel = clientModel
 		route.Virtual = false
 		route.Available = resolved.Available
@@ -577,6 +579,7 @@ func routeTargetToResolved(t store.RouteTarget) resolvedRoute {
 	target.Available = t.Available
 	target.CredentialsLocked = t.Locked
 	target.MaxOutputTokens = t.MaxOutputTokens
+	target.SupportsTemperature = t.SupportsTemperature
 	target.UpstreamModelID = t.UpstreamModelID
 	return target
 }
@@ -617,6 +620,10 @@ func readUpstreamErrorBody(body io.Reader) ([]byte, error) {
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming providers.Protocol) {
 	identity := r.Context().Value(clientKey).(auth.ClientIdentity)
+	// Bound the whole request and make it cancellable when the account is
+	// suspended. Every later r.Context() use inherits both.
+	r, endRequest := s.limitRequest(r, identity.AccountID)
+	defer endRequest()
 	// maxInferenceBodyBytes bounds one request body. 8 MiB is roughly two
 	// million tokens of text — beyond every model's context window — so no
 	// legitimate request is lost, while the process-wide product of the
@@ -678,16 +685,15 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	s.publishLiveRequest(row, false)
 	// Detailed error bodies are captured only when the client key allows it:
 	// "always" captures them regardless of the account setting, "inherit"
-	// follows that setting, and "never" never captures them. Hosted mode
-	// captures no bodies at all.
+	// follows that setting, and "never" never captures them. This is opt-in in
+	// both modes — hosted included — and both switches default to off, so a
+	// deployment that never enables them persists no bodies at all.
 	logErrorBodies := false
-	if s.config.Mode != config.ModeHosted {
-		switch clientBodyLog {
-		case store.BodyLogAlways:
-			logErrorBodies = true
-		case store.BodyLogInherit:
-			logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
-		}
+	switch clientBodyLog {
+	case store.BodyLogAlways:
+		logErrorBodies = true
+	case store.BodyLogInherit:
+		logErrorBodies, _ = s.scope(r).GetLogErrorBodies(r.Context())
 	}
 	originalBody := append([]byte(nil), body...)
 	// Extract the canonical reasoning selector once from the original request.
@@ -795,6 +801,12 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 	terminalPreflightClass := ""
 	oauthRefreshed := make(map[string]bool)
 	cooldownSeconds := 0
+	// Cooldown is scoped to ordered-fallback virtual routes. Fixed virtual routes
+	// and direct real-model routes never read the setting, so cooldownSeconds
+	// stays 0 for them and every cooldown call site below is inert. Keeping the
+	// route-kind decision in this single assignment means the call sites only test
+	// cooldownSeconds > 0; re-testing route.RoutingMode there would be dead code
+	// that looks meaningful.
 	if route.RoutingMode == "ordered_fallback" {
 		cooldownSeconds, _ = s.scope(r).GetFallbackCooldownSeconds(r.Context())
 	}
@@ -841,10 +853,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 			row.liveAttempt = &requestAttempt{provider: candidate.Provider.Name, model: candidate.UpstreamModelID}
 			s.publishLiveRequest(row, false)
 			if ctxErr := r.Context().Err(); ctxErr != nil {
-				class := "client_cancelled"
-				if errors.Is(ctxErr, context.DeadlineExceeded) {
-					class = "client_timeout"
-				}
+				class := clientFailureClass(r.Context(), "client_cancelled")
 				row.httpStatus = 502
 				row.errorText = strPtr(class)
 				row.errorMessage = strPtrIfNonEmpty(fixedUpstreamErrorMessage(class))
@@ -1013,6 +1022,9 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					continue
 				}
 			}
+			if candidate.SupportsTemperature.Valid && candidate.SupportsTemperature.Int64 == 0 {
+				attemptBody = omitTemperature(attemptBody)
+			}
 			endpoint, e := providers.Endpoint(candidate.Provider, target)
 			if e != nil {
 				nonTranslationFailure = true
@@ -1103,11 +1115,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				s.logAttempt(row, row.attempts[len(row.attempts)-1])
 				nonTranslationFailure = true
 				if r.Context().Err() != nil {
-					if errors.Is(r.Context().Err(), context.DeadlineExceeded) {
-						class = "client_timeout"
-					} else {
-						class = "client_cancelled"
-					}
+					class = clientFailureClass(r.Context(), "client_cancelled")
 					row.httpStatus = 502
 					row.errorText = strPtr(class)
 					row.fallbackReason = strPtr(class)
@@ -1117,7 +1125,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 					inferenceError(w, 502, "api_error", class, "The client request ended before fallback could complete.", incoming == providers.ProtocolMessages)
 					return
 				}
-				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
+				if cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
 					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
 				}
 				if !route.Virtual {
@@ -1254,10 +1262,11 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 						}
 					}
 				}
-				// Cooldown applies only to ordered-fallback virtual models. Fixed
-				// virtual routes and direct real-model routes never populate the
-				// shared cooldown state.
-				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
+				// Cooldown applies only to ordered-fallback virtual models. The
+				// cooldownSeconds assignment above already enforces the route kind, so
+				// fixed virtual routes and direct real-model routes never reach here
+				// with a non-zero value.
+				if cooldownSeconds > 0 && cooldownTrigger(class, response.StatusCode) {
 					cooldownMessage := fixedUpstreamErrorMessage("upstream_error")
 					if class == "free_tier_rejected" {
 						cooldownMessage = fixedUpstreamErrorMessage(class)
@@ -1361,7 +1370,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, incoming provider
 				// A body-read error caused by the client ending the request is
 				// self-inflicted, not evidence the target is unhealthy: never
 				// cool it. Mirrors the network-error path above.
-				if route.RoutingMode == "ordered_fallback" && cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
+				if cooldownSeconds > 0 && cooldownTrigger(class, 0) && r.Context().Err() == nil {
 					s.openCooldown(candidate, class, row, cooldownSeconds, fixedUpstreamErrorMessage(class))
 				}
 				nonTranslationFailure = true
@@ -2247,6 +2256,13 @@ func ctxErrString(err error) string {
 // upstream_timeout.
 func clientFailureClass(ctx context.Context, fallback string) string {
 	if err := ctx.Err(); err != nil {
+		cause := context.Cause(ctx)
+		if errors.Is(cause, errStreamTimeLimit) {
+			return codeStreamTimeLimit
+		}
+		if errors.Is(cause, errAccountSuspended) {
+			return codeAccountSuspended
+		}
 		if errors.Is(err, context.DeadlineExceeded) {
 			return "client_timeout"
 		}

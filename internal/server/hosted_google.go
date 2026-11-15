@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +43,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.oauthStartLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
@@ -50,7 +51,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CaptchaToken string `json:"captcha_token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -64,7 +65,7 @@ func (s *Server) startGoogleSignIn(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
-	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxy)) {
+	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxies)) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
 	}
@@ -72,16 +73,21 @@ func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
 	// A password is the normal proof. A short-lived link grant replaces it when
 	// the user has just authenticated with their password and accepted the
 	// link prompt, so the factor is not demanded twice.
+	//
+	// The check goes through reauthenticateSensitive, not identity.VerifyPassword
+	// directly: every password prompt for an authenticated principal must share
+	// one failure counter, or a stolen session gets a private unlimited budget
+	// here while every other screen locks out.
 	if !s.hasLinkAuth(rawUserSessionToken(r)) {
-		if err := s.identity.VerifyPassword(r.Context(), session.User.ID, input.CurrentPassword); err != nil {
-			adminError(w, http.StatusUnauthorized, "invalid_credentials", "Your current password is incorrect.")
+		if _, err := s.reauthenticateSensitive(r, session.User.ID, input.CurrentPassword); err != nil {
+			s.writeReauthFailure(w, err, "Your current password is incorrect.")
 			return
 		}
 	}
@@ -91,7 +97,7 @@ func (s *Server) startGoogleLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startGoogleReauth(w http.ResponseWriter, r *http.Request) {
-	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxy)) {
+	if !s.oauthStartLimiter.allowAttempt(clientIP(r, s.config.TrustedProxies)) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
 	}
@@ -137,7 +143,7 @@ func (s *Server) beginGoogleFlow(w http.ResponseWriter, r *http.Request, intent 
 }
 
 func (s *Server) googleCallback(w http.ResponseWriter, r *http.Request) {
-	if !s.oauthCallbackLimiter.allowAttempt(clientIP(r, s.config.TrustedProxy)) {
+	if !s.oauthCallbackLimiter.allowAttempt(clientIP(r, s.config.TrustedProxies)) {
 		s.googleCallbackError(w, r, "google_failed")
 		return
 	}
@@ -251,7 +257,7 @@ func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.oauthStartLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many sign-in attempts. Try again later.")
 		return
@@ -259,7 +265,7 @@ func (s *Server) completeGoogleGSI(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Credential string `json:"credential"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -416,7 +422,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
@@ -425,7 +431,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		AcceptTerms  bool `json:"accept_terms"`
 		LinkExisting bool `json:"link_existing"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -514,6 +520,10 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
+	if s.signupCapReached(r.Context()) {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
+	}
 	terms, err := s.storeHandle().GetLegalDoc(r.Context(), "terms")
 	if err != nil {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
@@ -524,7 +534,7 @@ func (s *Server) completeGoogleSignup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
-	acceptance := identity.SignupAcceptance{TermsUpdatedAt: terms.UpdatedAt, PrivacyUpdatedAt: privacy.UpdatedAt, IP: clientIP(r, s.config.TrustedProxy), UserAgent: r.UserAgent()}
+	acceptance := identity.SignupAcceptance{TermsUpdatedAt: terms.UpdatedAt, PrivacyUpdatedAt: privacy.UpdatedAt, IP: clientIP(r, s.config.TrustedProxies), UserAgent: r.UserAgent()}
 	u, err := s.identity.CreateGoogleSignup(r.Context(), claims.Email, claims.Subject, acceptance)
 	if err != nil {
 		if _, lookupErr := s.identity.UserByEmail(r.Context(), claims.Email); lookupErr == nil || errors.Is(err, identity.ErrGoogleIdentityTaken) {
@@ -601,24 +611,83 @@ func (s *Server) consumeGoogleReauth(sessionToken string) bool {
 	return ok && now.Before(expires)
 }
 
+// Re-authentication throttle. Every sensitive operation that asks for the
+// password again (change password, change email, delete account, change sign-in
+// methods, manage API tokens) shares one failure count per user, so a stolen
+// session cannot get a fresh budget by switching screens.
+const (
+	reauthMaxFailures   = 5
+	reauthFailureWindow = 15 * time.Minute
+	reauthLockout       = 15 * time.Minute
+)
+
+var (
+	// errReauthRateLimited reports that this user is currently locked out after
+	// too many failed password confirmations.
+	errReauthRateLimited = errors.New("reauthentication rate limited")
+	// errReauthCancelled reports that the password check stopped because the
+	// caller's request ended. It is never a wrong password answer.
+	errReauthCancelled = errors.New("reauthentication abandoned")
+)
+
+// reauthenticateSensitive proves the person at the keyboard is the account
+// owner before a sensitive change. It accepts the password, or a passkey or
+// Google confirmation already completed in this session, and throttles failures
+// per user.
+//
+// The throttle only limits *password guesses*. A passkey or Google grant is
+// still honoured while the user is locked out: someone who forgot their
+// password can confirm with their passkey and carry on, while an attacker
+// holding only a stolen session gains nothing because they cannot produce the
+// passkey. Only a successful password check clears the failure streak; a grant
+// never does, so switching to a passkey cannot launder a guessing streak.
 func (s *Server) reauthenticateSensitive(r *http.Request, userID, password string) (bool, error) {
-	err := s.identity.VerifyPassword(r.Context(), userID, password)
-	if err == nil {
-		s.consumeGoogleReauth(rawUserSessionToken(r))
-		s.consumePasskeyReauth(rawUserSessionToken(r))
-		s.clearLinkAuth(rawUserSessionToken(r))
-		return false, nil
-	}
 	sessionToken := rawUserSessionToken(r)
-	// A passkey assertion or a Google re-auth completed earlier in this session
-	// stands in for the password. Each grant is single-use and short-lived.
+	// The grant check runs first so a locked-out user with a passkey or Google
+	// proof is not stopped by the password throttle.
 	if s.consumePasskeyReauth(sessionToken) {
 		return false, nil
 	}
 	if s.consumeGoogleReauth(sessionToken) {
 		return true, nil
 	}
+	if s.reauthLimiter.locked(userID) {
+		if s.logger != nil {
+			s.logger.Warn("re-authentication refused while locked out", "user_id", userID)
+		}
+		return false, errReauthRateLimited
+	}
+	err := s.identity.VerifyPasswordContext(r.Context(), userID, password)
+	// An abandoned request is neither a match nor a guess: do not charge the
+	// account for one and do not report it as a wrong password.
+	if errors.Is(err, identity.ErrReauthenticationCancelled) || r.Context().Err() != nil {
+		return false, errReauthCancelled
+	}
+	if err == nil {
+		s.reauthLimiter.success(userID)
+		s.clearLinkAuth(sessionToken)
+		return false, nil
+	}
+	if s.reauthLimiter.recordFailure(userID) && s.logger != nil {
+		s.logger.Warn("re-authentication locked out after repeated failures", "user_id", userID)
+	}
 	return false, err
+}
+
+// writeReauthFailure turns a reauthenticateSensitive error into the response
+// every sensitive-route caller gives. A lockout is reported as a rate limit with
+// a retry hint; an abandoned request is not reported as a wrong password; a
+// genuine mismatch keeps the caller's own message.
+func (s *Server) writeReauthFailure(w http.ResponseWriter, err error, fallback string) {
+	switch {
+	case errors.Is(err, errReauthRateLimited):
+		w.Header().Set("Retry-After", strconv.Itoa(int(reauthLockout.Seconds())))
+		adminError(w, http.StatusTooManyRequests, "authentication_rate_limited", "Too many failed attempts. Try again later.")
+	case errors.Is(err, errReauthCancelled):
+		adminError(w, http.StatusRequestTimeout, "request_cancelled", "The confirmation did not complete. Try again.")
+	default:
+		adminError(w, http.StatusUnauthorized, "reauth_required", fallback)
+	}
 }
 
 // clearLinkAuth drops any outstanding link grant for a session. It runs when a
