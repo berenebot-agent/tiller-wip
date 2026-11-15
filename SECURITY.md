@@ -42,6 +42,26 @@ use the forwarded client address. It is defense in depth only: hosted outbound
 requests remain subject to the application `SafeTransport`, and operators may
 add provider-specific VPS firewall rules separately.
 
+**The dedicated console listener may run without TLS inside a restricted
+network, and that is an accepted downgrade.** With `TILLER_PLATFORM_PORT` set,
+the console is meant to be reachable only from a VPN or a private management
+network. When it is reached over plain HTTP the session cookie cannot carry the
+`__Host-` prefix or `Secure`, so it is issued as `tiller_platform_session`
+without `Secure`. That is deliberate — refusing the session instead would turn a
+proxy misconfiguration into a console outage — but it is never silent: the
+console shows a warning banner, the server logs a warning naming the peer, and
+`GET /api/platform/session` reports `console_insecure: true`. The residual risk
+is that anyone who can observe the console connection can replay the cookie;
+restrict that path (VPN, firewall, or TLS) accordingly. Prefer terminating TLS
+in front of the console and sending `X-Forwarded-Proto: https` from a proxy
+listed in `TILLER_TRUSTED_PROXY`; that restores the hardened cookie. A console
+login answered with `400 invalid_request` while the browser used HTTPS almost
+always means that header or the trusted-proxy list is misconfigured, and the
+server log now says so. The console's operator diagnostics
+(`/api/admin/debug/memory`, and the pprof prefix when `TILLER_DEBUG_PPROF` is
+set) are registered on the listener that issues the platform credential, so an
+operator session can never authenticate them on the customer origin.
+
 **Recoverable provider credentials are encrypted at rest (always on).**
 Provider API credentials, OAuth access/refresh/id tokens and `provider_data`, the
 notification auth header, and hosted mail credentials are sealed with AES-256-GCM (versioned `enc:v1:`
@@ -114,8 +134,27 @@ own scopes. Backup export, account export, identity operations, setup, debug
 endpoints, and the live SSE stream are never token-reachable. Failed token
 authentication is rate-limited per selector and per address; rotate/delete/
 scope changes invalidate the verification cache synchronously. Tokens survive
-admin credential changes — revoke them explicitly on suspected compromise. In
-hosted mode the feature is disabled (routes 404, no bearer path exists).
+admin credential changes in local mode — revoke them explicitly on suspected
+compromise.
+
+**Management API tokens (hosted mode).** The same token family is available to
+hosted accounts with a tighter policy. A token row belongs to exactly one
+account and authority comes from that row, never from request input; the
+authenticator joins the account and accepts only `active` accounts, and
+suspension, deletion and "revoke sessions" drop the account's cached tokens
+immediately (deletion also removes the rows). Minting, rotating, widening,
+extending or re-enabling a token requires only the signed-in session: there is
+deliberately **no password or passkey step-up** (decision of 2026-11-10 — the
+password field made browsers autofill saved credentials into the token's name
+field). The accepted trade-off is that a stolen session cookie can mint a
+long-lived write-scope token; the compensating controls are the 10-token cap, the
+write-tier ceiling (no delete tier), the shared 60 requests/minute per-account
+budget, an `api_token_created` email to the account owner, and audit events.
+Hosted tokens default to a 30-day expiry in the UI and no expiry is allowed.
+Password reset does not revoke tokens; "sign out everywhere" asks whether to
+revoke them too. Lifecycle, identity, account export, audit, passkeys and
+billing-style surfaces stay cookie-only. The `TILLER_ADMIN_API_KEY` seed is
+rejected at startup in hosted mode. See `docs/hosted_decisions.md` §13.
 
 **Headless embedding seed.** Setting `TILLER_ADMIN_API_KEY` /
 `TILLER_ADMIN_API_KEY_FILE` (local mode only) seeds a single full-power
@@ -141,8 +180,9 @@ passwords use Argon2id (64 MiB/3/4); verification and reset links are opaque,
 single-use, short-lived, and hash-only at rest. Customer sessions and platform
 operator sessions use separate host-only Secure/HttpOnly/SameSite cookies and
 CSRF tokens. Account suspension immediately revokes customer sessions and
-blocks client-key traffic. Hosted detailed body logging is unavailable even if
-the account settings request attempts to enable it. Customer login and recovery
+blocks client-key traffic. Hosted detailed body logging is off by default and
+only ever captures when the account operator opts in (see *Detailed error
+logging* below). Customer login and recovery
 requests have in-memory per-IP budgets; login and recovery also use normalized-
 email keyed throttles. The per-email login failure lockout can temporarily block
 an account after repeated failed attempts regardless of source IP; this targeted
@@ -207,8 +247,17 @@ default — follow the account setting), **always** (capture bodies even when th
 account setting is off) or **never** (never capture them, even when the account
 setting is on). Both switches are off by default, so bodies are stored only
 where an administrator explicitly asked for them. A client set to *always* keeps
-capturing bodies after the account setting is turned off; hosted mode rejects
-*always* outright and captures no bodies at all.
+capturing bodies after the account setting is turned off.
+
+Both switches behave identically in local and hosted mode; hosted previously
+refused to capture bodies at all, which made a provider error with a terse
+message undebuggable for its own operator. Capture in hosted therefore requires
+an explicit opt-in from that account, and the privacy consequences are the
+operator's to accept: stored bodies contain prompt content, appear in the
+Activity detail views and CSV exports, and are retained under the client key's
+retention window. Turning the setting off stops new captures; it does not purge
+bodies already stored. Deleting the account removes them along with the rest of
+its Activity history.
 
 **Hosted quota and onboarding controls.** Hosted accounts are subject to plan
 entitlements (provider/client-key/virtual-model creation, concurrent streams,

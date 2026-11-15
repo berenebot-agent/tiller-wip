@@ -48,6 +48,7 @@ type modelsDevProvider struct {
 }
 
 type modelsDevModel struct {
+	Temperature      *bool               `json:"temperature"`
 	Reasoning        *bool               `json:"reasoning"`
 	ToolCall         *bool               `json:"tool_call"`
 	StructuredOutput *bool               `json:"structured_output"`
@@ -325,6 +326,9 @@ func enrichModel(model Model, md modelsDevModel, providerType string) Model {
 		if v, ok := visionFromModalities(md.Modalities.Input); ok {
 			model.SupportsVision = &v
 		}
+	}
+	if model.SupportsTemperature == nil {
+		model.SupportsTemperature = md.Temperature
 	}
 	if model.SupportsReasoning == nil && md.Reasoning != nil {
 		model.SupportsReasoning = md.Reasoning

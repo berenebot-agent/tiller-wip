@@ -12,6 +12,7 @@ const (
 	PlatformSettingHostedSignupEnabled   = "hosted_signup_enabled"
 	PlatformSettingMailProvider          = "mail_provider"
 	PlatformSettingMailFrom              = "mail_from"
+	PlatformSettingMailFromName          = "mail_from_name"
 	PlatformSettingMailResendAPIKey      = "mail_resend_api_key"
 	PlatformSettingMailBrevoAPIKey       = "mail_brevo_api_key"
 	PlatformSettingMailSMTPHost          = "mail_smtp_host"
@@ -31,6 +32,18 @@ const (
 	PlatformSettingAnalyticsSiteID       = "analytics_site_id"
 	PlatformSettingPreventSearchIndexing = "prevent_search_indexing"
 )
+
+// SecretUnchanged is a sentinel meaning "leave the stored value alone". It is
+// used when a secret could not be read (locked cipher) so a save cannot erase
+// it. It is never persisted.
+const SecretUnchanged = "\x00secret-unchanged"
+
+// mailSecretSettings are the secrets whose blank value means "keep stored".
+var mailSecretSettings = map[string]bool{
+	PlatformSettingMailResendAPIKey: true,
+	PlatformSettingMailBrevoAPIKey:  true,
+	PlatformSettingMailSMTPPassword: true,
+}
 
 var platformSecretSettings = map[string]bool{
 	PlatformSettingMailResendAPIKey:   true,
@@ -82,8 +95,11 @@ func (s *Store) DeletePlatformSetting(ctx context.Context, key string) error {
 // PlatformMailSettings is the decrypted in-memory mail configuration. It is
 // never serialized directly to an HTTP response.
 type PlatformMailSettings struct {
-	Provider     string
-	From         string
+	Provider string
+	From     string
+	// FromName is the optional display name shown in the recipient's mailbox.
+	// It is public (not a secret) and is never part of the envelope address.
+	FromName     string
 	ResendAPIKey string
 	BrevoAPIKey  string
 	SMTPHost     string
@@ -153,6 +169,7 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 	}
 	values := map[string]string{
 		PlatformSettingMailProvider: proposal.Mail.Provider, PlatformSettingMailFrom: proposal.Mail.From,
+		PlatformSettingMailFromName:     proposal.Mail.FromName,
 		PlatformSettingMailResendAPIKey: proposal.Mail.ResendAPIKey, PlatformSettingMailBrevoAPIKey: proposal.Mail.BrevoAPIKey,
 		PlatformSettingMailSMTPHost: proposal.Mail.SMTPHost, PlatformSettingMailSMTPPort: proposal.Mail.SMTPPort,
 		PlatformSettingMailSMTPUsername: proposal.Mail.SMTPUsername, PlatformSettingMailSMTPPassword: proposal.Mail.SMTPPassword,
@@ -169,6 +186,21 @@ func (s *Store) SavePlatformSettings(ctx context.Context, proposal PlatformSetti
 		PlatformSettingAnalyticsSiteID:    proposal.Analytics.SiteID,
 	}
 	for key, value := range values {
+		if value == SecretUnchanged {
+			continue
+		}
+		// A blank MAIL secret means "the caller did not supply one", not "erase
+		// the stored secret": the dashboard renders those inputs empty (it never
+		// returns them to the browser), so saving any other field on the same
+		// form would otherwise wipe the API key. Mail secrets are therefore never
+		// cleared by a blank value.
+		//
+		// Google and Turnstile secrets are different: their handlers load the
+		// current value and only blank it on an explicit clear_* request, so an
+		// empty value here is a deliberate clear and must be written.
+		if value == "" && mailSecretSettings[key] {
+			continue
+		}
 		if err := upsert(key, value); err != nil {
 			return err
 		}
@@ -277,9 +309,15 @@ func boolString(value bool) string {
 	return "0"
 }
 
+// GetPlatformMailSettings reads the platform mail configuration. Public fields
+// (provider, from address, from name, SMTP endpoint) are always returned, even
+// when the secret cipher is locked: they are stored in plaintext and must never
+// be blanked just because a secret could not be decrypted. Only the secret
+// fields degrade, and in that case the returned error wraps ErrSecretsLocked so
+// callers can report "secrets unavailable" while still rendering the rest.
 func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettings, error) {
 	keys := []string{
-		PlatformSettingMailProvider, PlatformSettingMailFrom, PlatformSettingMailResendAPIKey,
+		PlatformSettingMailProvider, PlatformSettingMailFrom, PlatformSettingMailFromName, PlatformSettingMailResendAPIKey,
 		PlatformSettingMailBrevoAPIKey, PlatformSettingMailSMTPHost, PlatformSettingMailSMTPPort,
 		PlatformSettingMailSMTPUsername, PlatformSettingMailSMTPPassword, PlatformSettingMailSMTPMode,
 	}
@@ -294,6 +332,7 @@ func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettin
 	}
 	defer rows.Close()
 	values := make(map[string]string, len(keys))
+	var secretErr error
 	for rows.Next() {
 		var key, value string
 		if err := rows.Scan(&key, &value); err != nil {
@@ -302,7 +341,12 @@ func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettin
 		if platformSecretSettings[key] {
 			value, err = decryptWith(s.cipher, secretAAD("platform", "setting", key, "value"), value)
 			if err != nil {
-				return PlatformMailSettings{}, err
+				// Keep every public field; only the secret is unavailable.
+				if !errors.Is(err, ErrSecretsLocked) {
+					return PlatformMailSettings{}, err
+				}
+				secretErr = ErrSecretsLocked
+				value = ""
 			}
 		}
 		values[key] = value
@@ -312,19 +356,31 @@ func (s *Store) GetPlatformMailSettings(ctx context.Context) (PlatformMailSettin
 	}
 	return PlatformMailSettings{
 		Provider: values[PlatformSettingMailProvider], From: values[PlatformSettingMailFrom],
+		FromName:     values[PlatformSettingMailFromName],
 		ResendAPIKey: values[PlatformSettingMailResendAPIKey], BrevoAPIKey: values[PlatformSettingMailBrevoAPIKey],
 		SMTPHost: values[PlatformSettingMailSMTPHost],
 		SMTPPort: values[PlatformSettingMailSMTPPort], SMTPUsername: values[PlatformSettingMailSMTPUsername],
 		SMTPPassword: values[PlatformSettingMailSMTPPassword], SMTPMode: values[PlatformSettingMailSMTPMode],
-	}, nil
+	}, secretErr
 }
 
-// SeedPlatformMailSettings writes only keys that are currently absent. It is
-// used for one-time environment bootstrap; dashboard/database values win after
-// the first seed.
+// PlatformSettingMailSeeded is the marker recording that the environment mail
+// bootstrap has already run. Without it, "never configured" and "deliberately
+// cleared in the dashboard" are indistinguishable: a cleared value looks
+// absent, so the next boot would silently re-seed the environment value.
+const PlatformSettingMailSeeded = "mail_env_seeded"
+
+// SeedPlatformMailSettings writes only keys that are currently absent, and only
+// once ever. It is used for the one-time environment bootstrap; after the first
+// seed the dashboard/database values win, including a deliberate clear.
 func (s *Store) SeedPlatformMailSettings(ctx context.Context, settings PlatformMailSettings) error {
+	seeded, err := s.platformMailSeeded(ctx)
+	if err != nil || seeded {
+		return err
+	}
 	values := map[string]string{
 		PlatformSettingMailProvider: settings.Provider, PlatformSettingMailFrom: settings.From,
+		PlatformSettingMailFromName:     settings.FromName,
 		PlatformSettingMailResendAPIKey: settings.ResendAPIKey, PlatformSettingMailBrevoAPIKey: settings.BrevoAPIKey,
 		PlatformSettingMailSMTPHost: settings.SMTPHost,
 		PlatformSettingMailSMTPPort: settings.SMTPPort, PlatformSettingMailSMTPUsername: settings.SMTPUsername,
@@ -345,7 +401,32 @@ func (s *Store) SeedPlatformMailSettings(ctx context.Context, settings PlatformM
 			return err
 		}
 	}
-	return nil
+	return s.SetPlatformSetting(ctx, PlatformSettingMailSeeded, "1")
+}
+
+// platformMailSeeded reports whether the one-time environment mail bootstrap
+// has already run. Installations seeded before the marker existed are detected
+// from a persisted provider row, so they are not re-seeded either.
+func (s *Store) platformMailSeeded(ctx context.Context) (bool, error) {
+	var marker int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM platform_settings WHERE key=?`, PlatformSettingMailSeeded).Scan(&marker)
+	if err != nil {
+		return false, err
+	}
+	if marker != 0 {
+		return true, nil
+	}
+	// ONE-TIME UPGRADE GUARD: a mail row written before the marker existed
+	// means the bootstrap already ran (or an operator configured mail in the
+	// dashboard). Backfill the marker rather than re-seeding over it.
+	var provider int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM platform_settings WHERE key=?`, PlatformSettingMailProvider).Scan(&provider); err != nil {
+		return false, err
+	}
+	if provider == 0 {
+		return false, nil
+	}
+	return true, s.SetPlatformSetting(ctx, PlatformSettingMailSeeded, "1")
 }
 
 func (s *Store) HostedSignupEnabled(ctx context.Context) (bool, error) {

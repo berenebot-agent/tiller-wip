@@ -6,8 +6,110 @@ behavior may still change before a stable `1.0`.
 
 ## [Unreleased]
 
+### Security
+
+- **Account-link start is no longer a password oracle.**
+  `POST /api/auth/google/link/start` called `identity.VerifyPassword` directly
+  instead of the shared `reauthenticateSensitive` helper, so a session cookie
+  could confirm the account password at full request rate with a distinct
+  correct/incorrect answer, while every other password prompt was locked out
+  after five failures. It now inherits the shared 5-failure, 15-minute lockout,
+  and a correct password is refused exactly like a wrong one while locked. A
+  guessed password was worth more than the guess itself: it authorised this same
+  route to attach an attacker-controlled identity, which disables password
+  sign-in and survives session revocation.
+
+- **The per-account console budget now covers every console route.** It was
+  charged at each `handleManage` registration, so the token lifecycle routes,
+  the account export, password change and the audit view — all registered with
+  the plain authentication wrapper — could be called in a loop for free while
+  doing bcrypt and full-table work. The charge now happens in
+  `requireAdmin`/`requireUser`, and the `requireManage` cookie path no longer
+  charges a second time. The numbers are unchanged (60/min per account, 10/min
+  for whole-table reports).
+
+- **Console write bodies are bounded and admitted.** Management writes applied a
+  32 MiB cap but never acquired the request-body admission gate, so a modest
+  burst of large admin bodies was held in memory with no admission check. Writes
+  now pass through the per-account inference gate and the cap is 4 MiB.
+
+- **The 10-token-per-account cap is atomic.** The count was read and the row
+  inserted as separate statements, so a concurrent burst overshot the cap. The
+  count is now part of the `INSERT`; the cap is one of the compensating controls
+  for minting tokens without step-up, so it has to be exact.
+
+- **Operator diagnostics are registered only on the listener that issues the
+  operator credential.** `/api/admin/debug/memory` (and the pprof prefix when
+  `TILLER_DEBUG_PPROF` is set) sat on the public mux behind
+  `requirePlatform`, so a console cookie authenticated a customer-origin request
+  and enabling pprof would have published heap dumps there. They now live with
+  the platform routes, and 404 on the customer origin.
+
+- **The console's non-Secure cookie is an accepted, visible downgrade.** When
+  the dedicated console listener is reached without TLS or a trusted
+  `X-Forwarded-Proto: https`, its session cookie cannot be `Secure`. That is kept
+  deliberately (refusing it would turn a proxy misconfiguration into a console
+  outage for a VPN-only deployment), but it is no longer silent: the console
+  shows a banner, the server logs the peer, and `GET /api/platform/session`
+  reports `console_insecure`. `SECURITY.md` records the residual. A same-origin
+  rejection on console login now logs the cause instead of only returning 400.
+
+- **Outbound block list covers the remaining special-use ranges.**
+  `192.88.99.0/24` (deprecated 6to4 relay anycast), `2001:2::/48` (IPv6
+  benchmarking) and `3fff::/20` (documentation) are global-unicast and were
+  dialable.
+
+- **Third-party analytics runs in an isolated frame.** The vendor script is no
+  longer injected into the console document. It loads in
+  `/analytics-frame.html`, embedded as a sandboxed iframe (`allow-scripts` only,
+  so no `allow-same-origin`), which gives it an opaque origin: it cannot read
+  the console's DOM or cookies, and its `/api/...` requests are cross-origin and
+  uncredentialed. The operator's analytics origin is also removed from the
+  console's own Content-Security-Policy — that policy keeps
+  `script-src 'self'` and `connect-src 'self'` — and appears only in the frame's
+  dedicated policy. Previously a compromised analytics script shared the
+  dashboard document and could call the API with the user's session. Behaviour
+  is unchanged for operators: analytics remains consent-gated and still
+  measures signed-in console traffic.
+
+- **Provider upstream URLs are locked for fixed-vendor and OAuth types.** Their
+  Base URL is read-only (API: `base_url_locked`), so a stored credential cannot
+  be redirected to another host. Types whose URL is the point of the type
+  (`generic-openai`, `vllm`, Azure OpenAI, Bedrock, Cloudflare) stay editable,
+  but moving to a different host now requires `confirm_credential_reset` and
+  clears the stored credential in the same update; the edit form accepts a
+  replacement credential in the same save. The notification webhook's stored
+  Authorization header is likewise dropped when the webhook host changes
+  without a replacement header.
+- **Platform console on its own port.** Hosted deployments can set
+  `TILLER_PLATFORM_PORT` to serve `/platform` and `/api/platform/*` on a
+  separate listener (published to a VPN or loopback only); the main listener
+  returns 404 for them. When unset the console stays on the main port with a
+  startup warning and an in-console banner.
+
 ### Added
 
+- **Hosted management API rate-limit headers.** Token responses carry
+  `X-RateLimit-Limit/Remaining/Reset`; a `429` sets an accurate `Retry-After`
+  (seconds until the window ends) and a body with `limit`, `window_seconds` and
+  `retry_after`. The per-account budget is now a fixed window, so refused
+  requests no longer extend the block.
+- **Self-documenting management API, on local and hosted.** `/api/admin`
+  (guide), `/api.json` (discovery) and the new `/api/openapi.json` (OpenAPI 3.1)
+  are generated from the routes the server registers, so they cannot drift —
+  catalogue-template routes, previously missing from the guide, are now listed.
+  Hosted instances serve them too, with the hosted limits. New
+  `docs/management-api.md` is the GitHub-facing guide. The discovery field
+  `request_body_bytes` is renamed `admin_request_body_bytes` (it only describes
+  admin JSON requests), and `offset_max` is added.
+- **Management API tokens in hosted mode.** Hosted customers can now create
+  `mt-tr-` tokens under Settings → Management API. Hosted tokens are stricter
+  than local ones: new tokens default to a 30-day expiry (no expiry is
+  allowed), access is capped at read/write, each account may hold 10, and all of
+  an account's tokens share a 60 requests/minute budget. Suspending or deleting
+  the account revokes tokens immediately; "sign out everywhere" asks whether to
+  revoke them too (password resets leave them alone). A security email is sent
+  when a token is created.
 - **Per-client detailed error body logging.** Each client key now carries its
   own mode for detailed error content: *inherit* (the default, follow the
   account-wide Detailed Error Logging setting), *always* (capture failed request
@@ -28,6 +130,17 @@ behavior may still change before a stable `1.0`.
 
 ### Changed
 
+- **Detailed error logging is now opt-in in hosted mode too.** Hosted accounts
+  could not enable it at all, so a provider error whose message was something
+  like "HTTP 400: Bad Request" left nothing to diagnose — the upstream body was
+  simply never stored. The account switch and the per-client
+  `inherit`/`always`/`never` override now behave identically in local and
+  hosted mode, still defaulting to off, still bounded to 1 MiB, still
+  admin-gated. With both switches off (the default) hosted persists no body
+  content, exactly as before; capture happens only when the account operator
+  asks for it. Stored bodies contain prompt content and appear in Activities
+  and CSV exports, and turning the setting off does not purge bodies already
+  stored.
 - **Quieter usage cells.** Every token cell (Clients, Providers → Models,
   Virtual models, mobile model cards and Activity history) now shows the cache
   share and cost as bare figures — `484.85 Mtok` over `97%  $1.02` — instead of
@@ -48,6 +161,31 @@ behavior may still change before a stable `1.0`.
 
 ### Fixed
 
+- **Cache invalidation no longer signs other tenants out.** Client-key,
+  management-token and customer/platform session caches fenced every
+  verification with one process-wide counter, so rotating a key or logging out
+  in one account failed a concurrent cache miss in another closed as a 401
+  (and charged that account's brute-force limiter). Mutations now mark only
+  the credential, user or account they touch; a verification fails closed only
+  when its own principal changed after it began. A transient database error
+  during sliding renewal keeps the existing session expiry instead of signing
+  the user out. `TILLER_TRUSTED_PROXY` accepts a comma-separated list, so a CDN
+  in front of the reverse proxy no longer collapses per-IP limits onto edge
+  addresses.
+- **Transactions retry SQLite snapshot contention.** A read-then-write
+  transaction that loses its WAL snapshot to a concurrent commit fails with
+  `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` does not retry. `RunTx` and the
+  Activity write transaction now retry that class of error a few times with
+  jittered backoff instead of surfacing an immediate failure on the request
+  path.
+- **OAuth redirect callbacks are bound to the starting browser.** `/auth/callback`
+  accepted a leaked `state` from any client; the flow start now sets an
+  `HttpOnly` cookie scoped to the callback path and the callback requires it
+  before consuming the state. Dormant for now (`claude.RedirectCallbackSupported`
+  is false) but safe to enable.
+- **Provider-terms record ships with the source tree.**
+  `docs/provider_terms_review.md` is now under `repo/docs/`, matching the code
+  comments that reference it.
 - **Prompt-cache percentage across provider accounting conventions.** Stored
   `input_tokens` now always means the whole prompt: Anthropic's uncached
   Messages count has its cache read/write tokens folded in at ingestion, while

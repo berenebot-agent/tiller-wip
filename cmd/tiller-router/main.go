@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -153,12 +154,29 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	runCtx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	app.StartBackground(runCtx)
-	httpServer := &http.Server{Addr: cfg.ListenAddr, Handler: app.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
-	errCh := make(chan error, 1)
+	newHTTPServer := func(addr string, handler http.Handler) *http.Server {
+		return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 1 << 20}
+	}
+	httpServer := newHTTPServer(cfg.ListenAddr, app.Handler())
+	servers := []*http.Server{httpServer}
+	errCh := make(chan error, 2)
 	go func() {
 		logger.Info("tiller-router listening", "addr", cfg.ListenAddr)
 		errCh <- httpServer.ListenAndServe()
 	}()
+	if cfg.Mode == config.ModeHosted {
+		if cfg.PlatformPort == 0 {
+			logger.Warn("platform console is exposed on the main listener: set TILLER_PLATFORM_PORT to serve it on a separate, network-restricted port (for example a VPN-only port)")
+		} else {
+			platformAddr := ":" + strconv.Itoa(cfg.PlatformPort)
+			platformServer := newHTTPServer(platformAddr, app.PlatformHandler())
+			servers = append(servers, platformServer)
+			go func() {
+				logger.Info("platform console listening", "addr", platformAddr, "note", "not served on the main listener; restrict who can reach this port")
+				errCh <- platformServer.ListenAndServe()
+			}()
+		}
+	}
 	select {
 	case err := <-errCh:
 		if !errors.Is(err, http.ErrServerClosed) {
@@ -170,7 +188,12 @@ func run(cfg config.Config, logger *slog.Logger) error {
 		// Attempt both shutdown steps even if the HTTP drain errors, so the
 		// Activity writer is always flushed (StopBackground) and the database is
 		// always closed. Return the first error after both are attempted.
-		shutdownErr := httpServer.Shutdown(shutdownCtx)
+		var shutdownErr error
+		for _, srv := range servers {
+			if err := srv.Shutdown(shutdownCtx); err != nil && shutdownErr == nil {
+				shutdownErr = err
+			}
+		}
 		// A long stream can use the whole HTTP drain budget. The Activity flush
 		// needs its own, or it returns at once and the database closes under it.
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)

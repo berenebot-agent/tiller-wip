@@ -31,6 +31,10 @@ services:
     stop_grace_period: 30s
 
     environment:
+      # Scheduled snapshots; Activity is optional and can increase disk use.
+      TILLER_BACKUP_INTERVAL: ${TILLER_BACKUP_INTERVAL:-6h}
+      TILLER_BACKUP_RETENTION: ${TILLER_BACKUP_RETENTION:-168h}
+      TILLER_BACKUP_INCLUDE_ACTIVITY: ${TILLER_BACKUP_INCLUDE_ACTIVITY:-false}
       # Local operator credential (optional). Omit BOTH for first-run setup in
       # the browser; set BOTH to skip it. Setting only one is a startup error.
       # TILLER_USERNAME / TILLER_PASSWORD are the current names. The legacy
@@ -101,6 +105,7 @@ services:
       # providers (Resend, Brevo) are configured in the dashboard only.
       TILLER_MAIL_PROVIDER: ${TILLER_MAIL_PROVIDER:-}
       TILLER_MAIL_FROM: ${TILLER_MAIL_FROM:-}
+      TILLER_MAIL_FROM_NAME: ${TILLER_MAIL_FROM_NAME:-}
       TILLER_MAIL_SMTP_HOST: ${TILLER_MAIL_SMTP_HOST:-}
       TILLER_MAIL_SMTP_PORT: ${TILLER_MAIL_SMTP_PORT:-}
       TILLER_MAIL_SMTP_MODE: ${TILLER_MAIL_SMTP_MODE:-}

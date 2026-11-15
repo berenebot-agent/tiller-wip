@@ -36,23 +36,33 @@ func (s *Server) passkeyUnavailable(w http.ResponseWriter) bool {
 	return false
 }
 
-// passkeyFinishBody bounds the body, admits it through the dedicated pre-auth
-// gate (never the inference gate) with a short absolute deadline, buffering the body so the WebAuthn library can
-// still parse it from a fresh reader. Without this the library reads
-// request.Body directly with no cap, deadline, or admission gate.
+// passkeyFinishBody bounds the body, admits it through an admission gate with a
+// short absolute deadline, and buffers the body so the WebAuthn library can still
+// parse it from a fresh reader. Without this the library reads request.Body
+// directly with no cap, deadline, or admission gate.
+//
+// The gate follows the principal: sign-in finish is anonymous and charges the
+// dedicated 8-slot pre-auth pool, while passkey registration and re-auth are
+// authenticated and charge that account's share of the inference gate. Charging
+// both to the pre-auth pool let an anonymous flood on the sign-in route refuse a
+// signed-in tenant's registration and re-auth (2026-11-14 review).
 func (s *Server) passkeyFinishBody(w http.ResponseWriter, r *http.Request) bool {
 	// The body is a JSON PublicKeyCredential. Requiring the JSON content type
-	// closes the same cross-site-form "JSON CSRF" surface decodeJSONLimit
+	// closes the same cross-site-form "JSON CSRF" surface decodeAuthJSON
 	// guards for every other auth endpoint.
 	if !jsonContentType(r.Header.Get("Content-Type")) {
 		adminError(w, http.StatusBadRequest, "invalid_request", "Request body must be valid JSON.")
 		return false
 	}
-	if !s.preAuthBodyReads.acquire("") {
+	gate, key := &s.preAuthBodyReads, ""
+	if accountID, _ := r.Context().Value(accountKey).(string); accountID != "" {
+		gate, key = &s.bodyReads, accountID
+	}
+	if !gate.acquire(key) {
 		adminError(w, http.StatusServiceUnavailable, "body_read_busy", "The router is busy reading request bodies. Retry shortly.")
 		return false
 	}
-	defer s.preAuthBodyReads.release("")
+	defer gate.release(key)
 	r.Body = http.MaxBytesReader(w, r.Body, webauthnFinishMaxBytes)
 	var body []byte
 	if err := withBodyReadDeadlineFor(w, preAuthBodyReadDeadline, func() error {
@@ -82,7 +92,7 @@ func (s *Server) passkeyLoginBegin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	// begin is unauthenticated, so each call is charged against a per-IP fixed
 	// window. Without this an attacker can churn ceremonies and the
 	// process-wide challenge store; a dedicated budget (not the shared
@@ -110,7 +120,7 @@ func (s *Server) passkeyLoginFinish(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if s.userLoginIPLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
 		return
@@ -184,7 +194,7 @@ func (s *Server) requireSignInReauth(w http.ResponseWriter, r *http.Request, use
 		err = s.verifyLocalOperatorPassword(r.Context(), user, password)
 	}
 	if err != nil {
-		adminError(w, http.StatusUnauthorized, "reauth_required", "Confirm your identity with your password, passkey, or Google before changing sign-in methods.")
+		s.writeReauthFailure(w, err, "Confirm your identity with your password, passkey, or Google before changing sign-in methods.")
 		return false
 	}
 	return true
@@ -218,7 +228,7 @@ func (s *Server) passkeyRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -305,7 +315,7 @@ func (s *Server) passkeyRename(w http.ResponseWriter, r *http.Request) {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -331,7 +341,7 @@ func (s *Server) passkeyDelete(w http.ResponseWriter, r *http.Request) {
 		ID              string `json:"id"`
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -364,7 +374,7 @@ func (s *Server) setPasswordSignIn(w http.ResponseWriter, r *http.Request) {
 		Enabled         bool   `json:"enabled"`
 		CurrentPassword string `json:"current_password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}

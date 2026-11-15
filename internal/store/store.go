@@ -258,22 +258,30 @@ func (s *Scope) ActivityAvailable() bool { return s.activity != nil }
 // is never used for tenant SQL while the transaction is open. A nil error
 // commits, any other error rolls back. RunTx must not be called on a scope that
 // is already inside a transaction.
+//
+// A read-then-write transaction can lose its WAL snapshot to a concurrent
+// commit and fail with SQLITE_BUSY_SNAPSHOT, which the busy handler does not
+// retry; the whole transaction is retried a few times on that class of error.
+// fn must therefore be database-only and free of external side effects, which
+// the tenant-transaction I/O guard already enforces.
 func (s *Scope) RunTx(ctx context.Context, opts *sql.TxOptions, fn func(*Scope) error) error {
 	if s.db == nil {
 		return errNestedTx
 	}
-	tx, err := s.db.BeginTx(ctx, opts)
-	if err != nil {
-		return err
-	}
-	activeTenantTxs.Add(1)
-	defer activeTenantTxs.Add(-1)
-	child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu, enforceLimits: s.enforceLimits}
-	if err := fn(child); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return retryBusy(ctx, func() error {
+		tx, err := s.db.BeginTx(ctx, opts)
+		if err != nil {
+			return err
+		}
+		activeTenantTxs.Add(1)
+		defer activeTenantTxs.Add(-1)
+		child := &Scope{db: nil, q: tx, accountID: s.accountID, activity: s.activity, cipher: s.cipher, cleanupMu: s.cleanupMu, enforceLimits: s.enforceLimits}
+		if err := fn(child); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 // withActivity runs fn against the shared Activity database. Every caller's
@@ -305,15 +313,17 @@ func (s *Scope) runActivityTx(ctx context.Context, fn func(q querier) error) err
 	if s.activity == nil {
 		return ErrActivityUnavailable
 	}
-	tx, err := s.activity.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	if err := fn(tx); err != nil {
-		_ = tx.Rollback()
-		return err
-	}
-	return tx.Commit()
+	return retryBusy(ctx, func() error {
+		tx, err := s.activity.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		if err := fn(tx); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		return tx.Commit()
+	})
 }
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

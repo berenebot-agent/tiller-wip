@@ -17,6 +17,7 @@ import (
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/hostedauth"
 	"github.com/tiller-router/tiller-router/internal/identity"
+	"github.com/tiller-router/tiller-router/internal/mailer"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -40,7 +41,7 @@ func (s *Server) requireSameOrigin(w http.ResponseWriter, r *http.Request) bool 
 
 func platformMailSettings(m config.MailBootstrap) store.PlatformMailSettings {
 	return store.PlatformMailSettings{
-		Provider: m.Provider, From: m.From,
+		Provider: m.Provider, From: m.From, FromName: m.FromName,
 		SMTPHost: m.SMTPHost, SMTPPort: strconv.Itoa(m.SMTPPort),
 		SMTPUsername: m.SMTPUsername, SMTPPassword: m.SMTPPassword, SMTPMode: m.SMTPMode,
 	}
@@ -49,6 +50,28 @@ func platformMailSettings(m config.MailBootstrap) store.PlatformMailSettings {
 func parseMailPort(raw string) int {
 	port, _ := strconv.Atoi(raw)
 	return port
+}
+
+// adminErrorDetail is adminError with an extra machine-readable detail string.
+// The detail never carries a secret value: it explains which field failed so
+// the operator can fix it without reading server logs.
+func adminErrorDetail(w http.ResponseWriter, status int, code, message, detail string) {
+	errObj := map[string]any{"code": code, "message": message}
+	if detail != "" {
+		errObj["detail"] = detail
+	}
+	writeJSON(w, status, map[string]any{"error": errObj})
+}
+
+// mailValidationReason turns a mailer.Validate failure into an operator-facing
+// sentence. The mailer's messages are already value-free (they name the field,
+// never its contents), so they can be surfaced directly.
+func mailValidationReason(err error) string {
+	msg := strings.TrimSpace(strings.TrimPrefix(err.Error(), mailer.ErrInvalidConfig.Error()+": "))
+	if msg == "" {
+		return ""
+	}
+	return msg
 }
 
 // runtime is the public deployment-mode probe the SPA boots from. In local
@@ -105,6 +128,12 @@ func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token
 		return false
 	}
 	if !settings.TurnstileEnabled {
+		// Hosted mode fails closed for flows that create accounts: free signup
+		// without a captcha is an open relay for abuse.
+		if s.config.Mode == config.ModeHosted && (action == "signup" || action == "google_signin") {
+			adminError(w, http.StatusServiceUnavailable, "captcha_unavailable", "Security verification is temporarily unavailable.")
+			return false
+		}
 		return true
 	}
 	if settings.TurnstileSiteKey == "" || settings.TurnstileSecret == "" {
@@ -132,11 +161,23 @@ func (s *Server) verifyAuthCaptcha(w http.ResponseWriter, r *http.Request, token
 	return true
 }
 
+// signupCapReached reports whether self-service signup must refuse because the
+// TILLER_MAX_SIGNUPS cap is met. It fails closed when the count cannot be read.
+// The check is best-effort, not atomic with account creation: concurrent
+// signups may slightly exceed the cap. Every path that creates a hosted account (email and Google) must check it.
+func (s *Server) signupCapReached(ctx context.Context) bool {
+	if s.config.MaxSignups <= 0 {
+		return false
+	}
+	counts, err := s.identity.PlatformCounts(ctx)
+	return err != nil || counts.Accounts >= int64(s.config.MaxSignups)
+}
+
 func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.signupLimiter.allowAttempt(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many signup attempts. Try again later.")
 		return
@@ -146,12 +187,16 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
 		return
 	}
+	if s.signupCapReached(r.Context()) {
+		adminError(w, http.StatusServiceUnavailable, "signup_unavailable", "Signup is currently unavailable.")
+		return
+	}
 	var input struct {
 		Email        string `json:"email"`
 		AcceptTerms  bool   `json:"accept_terms"`
 		CaptchaToken string `json:"captcha_token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -186,7 +231,7 @@ func (s *Server) signup(w http.ResponseWriter, r *http.Request) {
 	acceptance := identity.SignupAcceptance{
 		TermsUpdatedAt:   terms.UpdatedAt,
 		PrivacyUpdatedAt: privacy.UpdatedAt,
-		IP:               clientIP(r, s.config.TrustedProxy),
+		IP:               clientIP(r, s.config.TrustedProxies),
 		UserAgent:        r.UserAgent(),
 	}
 	result, err := s.identity.CreateSignup(r.Context(), input.Email, acceptance)
@@ -202,7 +247,7 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if s.userLoginIPLimiter.locked(key) {
 		adminError(w, http.StatusTooManyRequests, "rate_limited", "Too many login attempts. Try again later.")
 		return
@@ -211,7 +256,7 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 		Email    string `json:"email"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -227,6 +272,12 @@ func (s *Server) userLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := s.identity.AuthenticatePassword(r.Context(), input.Email, input.Password)
+	if errors.Is(err, identity.ErrReauthenticationCancelled) || (err != nil && r.Context().Err() != nil) {
+		// The client went away while queued for a KDF slot. Not a wrong
+		// password: do not charge the IP or email limiters.
+		adminError(w, http.StatusRequestTimeout, "request_cancelled", "The sign-in did not complete. Try again.")
+		return
+	}
 	if err != nil {
 		s.userLoginIPLimiter.recordFailure(key)
 		s.userLoginEmailLimiter.recordFailure(emailKey)
@@ -309,6 +360,11 @@ func (s *Server) requireUser(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, userKey, session.User)
 		ctx = context.WithValue(ctx, accountKey, session.User.AccountID)
 		stampRequestPrincipal(r, "user", session.User.AccountID)
+		release, ok := s.chargeDashboardBudget(w, r, session.User.AccountID)
+		if !ok {
+			return
+		}
+		defer release()
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -335,13 +391,13 @@ func (s *Server) verifyEmail(w http.ResponseWriter, r *http.Request) {
 		Token    string `json:"token"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConsumeVerification(r.Context(), input.Token, input.Password)
 	if errors.Is(err, identity.ErrWeakPassword) || errors.Is(err, identity.ErrPasswordTooLong) {
-		adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
+		adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 8 and 1024 bytes.")
 		return
 	}
 	if err != nil {
@@ -374,7 +430,7 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericSignupMessage})
 		return
@@ -383,7 +439,7 @@ func (s *Server) resendVerification(w http.ResponseWriter, r *http.Request) {
 		Email        string `json:"email"`
 		CaptchaToken string `json:"captcha_token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -404,7 +460,7 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSameOrigin(w, r) {
 		return
 	}
-	key := clientIP(r, s.config.TrustedProxy)
+	key := clientIP(r, s.config.TrustedProxies)
 	if !s.recoveryIPLimiter.allowAttempt(key) {
 		writeJSON(w, http.StatusAccepted, map[string]any{"message": genericResetMessage})
 		return
@@ -413,7 +469,7 @@ func (s *Server) requestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		Email        string `json:"email"`
 		CaptchaToken string `json:"captcha_token"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
@@ -438,14 +494,14 @@ func (s *Server) confirmPasswordReset(w http.ResponseWriter, r *http.Request) {
 		Token    string `json:"token"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSONLimit(w, r, &input, authRequestMaxBytes); err != nil {
+	if err := s.decodeAuthJSON(w, r, &input, authRequestMaxBytes); err != nil {
 		respondDecodeError(w, err)
 		return
 	}
 	u, err := s.identity.ConsumePasswordReset(r.Context(), input.Token, input.Password)
 	if err != nil {
 		if errors.Is(err, identity.ErrWeakPassword) || errors.Is(err, identity.ErrPasswordTooLong) {
-			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 12 and 1024 bytes.")
+			adminError(w, http.StatusBadRequest, "invalid_password", "Password must be between 8 and 1024 bytes.")
 			return
 		}
 		adminError(w, http.StatusBadRequest, "invalid_reset", "This password-reset link is invalid or expired.")

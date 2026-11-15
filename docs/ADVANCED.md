@@ -6,26 +6,15 @@ covered in the [README](../README.md).
 
 ## Management API
 
-The web interface is a pure client of a JSON REST API under `/api/admin/*`. In local mode you can drive that same API from scripts and agents (for example a Hermes agent) with a **management API token**: create one under **Settings → Management API**, and authenticate with `Authorization: Bearer mt-tr-…`. No cookie or CSRF token is involved.
+The web interface is a pure client of a JSON REST API under `/api/admin/*`, and
+you can drive it from scripts and agents with a **management API token**
+(Settings → Management API). Tokens, scopes, the hosted limits, errors and a
+curl quickstart are documented in **[management-api.md](management-api.md)**.
 
-Each token carries per-area access with three escalating levels — `read` ⊂ `write` ⊂ `delete`:
-
-| Area | read | write | delete |
-|---|---|---|---|
-| Providers | inspect providers, models, OAuth status | create/edit providers, swap credentials, refresh discovery, connect OAuth, add manual models | delete providers/models, disconnect OAuth |
-| Virtual models | inspect routes | create/edit groups and virtual models | delete groups and virtual models |
-| Client keys | list keys and permissions | create/edit/rotate keys, edit permissions | delete keys |
-| Settings | read settings | change logging, fallback, and notification settings, send a test notification | — |
-| Monitoring | usage, quota, activity (+CSV exports), cooldown status, health | — | clear activity, clear cooldown |
-
-Notes:
-
-- Tokens are shown **once** at creation; only a bcrypt hash is stored. Rotate or revoke at any time; expiry is optional (presets or a custom date).
-- Token management itself is browser-only: a token can never list, mint, or edit tokens. It can introspect itself (`GET /api/admin/api-tokens/self`).
-- Permanently out of reach for tokens: backup/account export, identity (password, passkeys, email, account deletion, sessions), onboarding, debug endpoints, and the live SSE stream.
-- Tokens survive admin credential changes; revoke compromised tokens explicitly in the Management API tab.
-- A built-in usage guide is served at `/api/admin` (and `/api`): open it in a browser for a rendered reference, or fetch it with `Accept: text/markdown` to hand an agent the entire guide as plain text.
-- A machine-readable discovery document is served at `/api.json` (or `/api` with `Accept: application/json`), so a host SDK can probe the instance — name, API base, auth scheme, key prefix, scopes, capabilities, and limits.
+Each running instance also documents itself: `/api/admin` (rendered guide, or
+markdown with `Accept: text/markdown`), `/api.json` (discovery) and
+`/api/openapi.json` (OpenAPI 3.1), all generated from the routes the instance
+enforces.
 
 ## Embedding Tiller
 
@@ -65,7 +54,8 @@ Notes for embedders:
   or account-wide (`default_logging_enabled`) if the host wants no history.
 - Failed request and provider error bodies are stored only when detailed error
   logging is enabled. Per client key, `log_error_bodies` is `inherit` (follow
-  the account setting), `always` or `never`; hosted mode refuses `always`.
+  the account setting), `always` or `never`. The switch behaves the same in
+  local and hosted mode; both default to off.
 
 ```bash
 # Create a token in Settings → Management API, then:
@@ -108,11 +98,62 @@ TILLER_INGRESS_NETWORK_EXTERNAL=true
 
 The hosted deployment requires `TILLER_PUBLIC_URL` and
 `TILLER_TRUSTED_PROXY`, set to the direct reverse proxy's IP/CIDR so client IP
-rate limits and audit records use the real client address. It still uses the
+rate limits and audit records use the real client address. When a CDN sits in
+front of the proxy, list every edge range as well, comma-separated
+(`TILLER_TRUSTED_PROXY=172.20.0.2/32,198.51.100.0/24,2001:db8::/32`): the
+`X-Forwarded-For` walk skips every trusted hop, so a range omitted here
+collapses all users onto the nearest edge address and makes the per-IP limits
+lock out unrelated people. It still uses the
 application-level `SafeTransport` for public HTTPS
 destination validation and SSRF protection. Docker network isolation is only
 defense in depth; it is not a substitute for the application policy or an
 optional VPS firewall hardening rule.
+
+## Front-door request limits
+
+Tiller meters a logged-in account's console traffic (dashboard and API tokens
+share one budget) and throttles repeated failed password confirmations. It does
+**not** meter per source IP: behind a reverse proxy the app only knows the
+address the proxy forwards, so a per-IP allowance belongs at the proxy, where
+the real peer is known and a flood can be rejected before it reaches Go.
+
+nginx:
+
+```nginx
+# http block
+limit_req_zone $binary_remote_addr zone=tiller_general:10m rate=20r/s;
+limit_req_zone $binary_remote_addr zone=tiller_auth:10m    rate=2r/s;
+
+# server block
+limit_req zone=tiller_general burst=40 nodelay;
+location /api/auth/ {
+    limit_req zone=tiller_auth burst=5 nodelay;
+    proxy_pass http://tiller-router:8080;
+}
+```
+
+Caddy:
+
+```caddy
+app.example.com {
+    # caddy-ratelimit plugin (github.com/mholt/caddy-ratelimit)
+    rate_limit {
+        zone general {
+            key {remote_host}
+            events 20
+            window 1s
+        }
+    }
+    reverse_proxy tiller-router:8080
+}
+```
+
+The app's own budgets are intentionally generous so ordinary use never touches
+them; the proxy limit is the layer that keeps one noisy source from consuming
+the connection pool. Two proxy settings are required for the dashboard to work
+regardless of the limits above: disable response buffering for
+`/api/admin/live` (nginx `proxy_buffering off;`), and keep the proxy's read
+timeout above the stream's 5s heartbeat.
 
 ## Hosted Google sign-in and Turnstile
 
@@ -149,6 +190,23 @@ The Google OAuth client secret and Turnstile secret key are encrypted at rest.
 The browser receives neither secret. If you rotate a secret, enter the new
 value and save; leave it blank to keep the stored value. Use the explicit
 “Clear saved … secret” checkbox to remove one.
+
+## Analytics isolation
+
+Optional web analytics are configured from the platform console and are loaded
+only after a visitor accepts the consent banner. The vendor script never runs in
+the console document: it is mounted in `/analytics-frame.html`, embedded as a
+sandboxed iframe with `allow-scripts` only. Without `allow-same-origin` the frame
+has an opaque origin, so the script cannot read the console's DOM or cookies and
+its `/api/...` requests are cross-origin and uncredentialed. The configured
+analytics origin is added only to that frame's Content-Security-Policy; the
+console keeps `script-src 'self'` and `connect-src 'self'`. A compromised
+analytics vendor therefore cannot act as a signed-in user.
+
+One visible consequence of the frame boundary: the vendor sees the frame URL
+(`/analytics-frame.html`) rather than the console route. Providers that derive
+the page path from the script's own URL will report that path; set the path
+explicitly in the vendor's site settings if you need per-view breakdowns.
 
 ## DNS recovery after restarts
 

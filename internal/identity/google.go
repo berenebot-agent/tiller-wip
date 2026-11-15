@@ -61,7 +61,7 @@ func (s *Store) CreateGoogleSignup(ctx context.Context, email, subject string, a
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,email,password_hash,password_auth_enabled,status,email_verified_at,created_at,updated_at) VALUES(?,?, '',0,'active',?,?,?)`, userID, email, formatTime(now), formatTime(now), formatTime(now)); err != nil {
 		return User{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,plan,status,owner_user_id,created_at,updated_at) VALUES(?,'free','active',?,?,?)`, accountID, userID, formatTime(now), formatTime(now)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts(id,plan,status,owner_user_id,created_at,updated_at) VALUES(?,COALESCE((SELECT value FROM platform_settings WHERE key='signup_default_plan'),'free'),'active',?,?,?)`, accountID, userID, formatTime(now), formatTime(now)); err != nil {
 		return User{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO user_identities(id,user_id,provider,subject,email,created_at) VALUES(?,?,'google',?,?,?)`, identityID, userID, subject, email, formatTime(now)); err != nil {

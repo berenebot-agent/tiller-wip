@@ -7,6 +7,12 @@ const { test, expect } = require('@playwright/test');
 const SCRIPT_URL = 'https://analytics.example.com/script.js';
 const SITE_ID = 'site-1';
 
+// analyticsFrame is the sandboxed iframe the console mounts once consent is
+// given. Since 4e0038a the vendor script is loaded inside that frame rather
+// than into the application document, so the frame — not a <script> in the
+// page — is the observable that proves analytics loaded.
+const analyticsFrame = page => page.locator('iframe[data-tiller-analytics]');
+
 async function mockHostedAnalytics(page, { enabled = true } = {}) {
   await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'hosted' }) }));
   await page.route('**/api/auth/options', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({}) }));
@@ -15,7 +21,7 @@ async function mockHostedAnalytics(page, { enabled = true } = {}) {
     contentType: 'application/json',
     body: JSON.stringify(enabled ? { enabled: true, provider: 'umami', script_url: SCRIPT_URL, site_id: SITE_ID } : { enabled: false }),
   }));
-  // The local-mode CSP blocks the third-party origin, so the script element is
+  // The local-mode CSP blocks the third-party origin, so the vendor script is
   // created but never fetches. Fulfil it anyway so no request dangles.
   await page.route('https://analytics.example.com/**', route => route.fulfill({ status: 200, contentType: 'application/javascript', body: '/* analytics */' }));
 }
@@ -26,14 +32,24 @@ test('analytics script loads only after consent is accepted', async ({ page }) =
 
   const banner = page.locator('#analytics-consent');
   await expect(banner).toBeVisible();
-  await expect(page.locator('script[data-tiller-analytics]')).toHaveCount(0);
+  await expect(analyticsFrame(page)).toHaveCount(0);
 
   await page.locator('#analytics-accept').click();
   await expect(banner).toBeHidden();
-  const script = page.locator('script[data-tiller-analytics]');
-  await expect(script).toHaveCount(1);
-  await expect(script).toHaveAttribute('src', SCRIPT_URL);
-  await expect(script).toHaveAttribute('data-website-id', SITE_ID);
+  // Analytics never run in the application document: the vendor script lives in
+  // a sandboxed, opaque-origin frame (see analytics-frame.js), so the console
+  // document itself must carry no analytics script at all.
+  await expect(page.locator('script[data-tiller-analytics]')).toHaveCount(0);
+  const frame = analyticsFrame(page);
+  await expect(frame).toHaveCount(1);
+  const params = new URL(await frame.getAttribute('src'), 'http://127.0.0.1').searchParams;
+  expect(params.get('src')).toBe(SCRIPT_URL);
+  expect(params.get('site')).toBe(SITE_ID);
+  expect(params.get('provider')).toBe('umami');
+  // The sandbox is what keeps the vendor out of the console: scripts only, no
+  // same-origin, no popups, no top navigation.
+  expect(await frame.getAttribute('sandbox')).toBe('allow-scripts');
+  expect(await frame.getAttribute('referrerpolicy')).toBe('no-referrer');
 });
 
 test('declining is remembered and no analytics script is loaded', async ({ page }) => {
@@ -44,12 +60,12 @@ test('declining is remembered and no analytics script is loaded', async ({ page 
   await expect(banner).toBeVisible();
   await page.locator('#analytics-decline').click();
   await expect(banner).toBeHidden();
-  await expect(page.locator('script[data-tiller-analytics]')).toHaveCount(0);
+  await expect(analyticsFrame(page)).toHaveCount(0);
 
-  // The decision survives a reload: no banner, still no script.
+  // The decision survives a reload: no banner, still no frame.
   await page.reload();
   await expect(page.locator('#analytics-consent')).toBeHidden();
-  await expect(page.locator('script[data-tiller-analytics]')).toHaveCount(0);
+  await expect(analyticsFrame(page)).toHaveCount(0);
 });
 
 test('a stored acceptance loads analytics without prompting', async ({ page }) => {
@@ -58,7 +74,7 @@ test('a stored acceptance loads analytics without prompting', async ({ page }) =
   await page.goto('/');
 
   await expect(page.locator('#analytics-consent')).toBeHidden();
-  await expect(page.locator('script[data-tiller-analytics]')).toHaveCount(1);
+  await expect(analyticsFrame(page)).toHaveCount(1);
 });
 
 test('no banner or script when analytics is disabled', async ({ page }) => {
@@ -66,7 +82,7 @@ test('no banner or script when analytics is disabled', async ({ page }) => {
   await page.goto('/');
 
   await expect(page.locator('#analytics-consent')).toBeHidden();
-  await expect(page.locator('script[data-tiller-analytics]')).toHaveCount(0);
+  await expect(analyticsFrame(page)).toHaveCount(0);
 });
 
 test('platform admin loads and saves analytics settings', async ({ page }) => {
@@ -108,4 +124,135 @@ test('platform admin loads and saves analytics settings', async ({ page }) => {
     analytics_script_url: 'https://plausible.example.com/js/script.js',
     analytics_site_id: 'tiller.example.com',
   });
+});
+
+test('platform admin loads and saves the mail sender display name', async ({ page }) => {
+  let saved = null;
+  const settings = {
+    hosted_signup_enabled: true,
+    audit_retention_days: 30,
+    mail: { provider: 'brevo', from: 'no-reply@example.com', from_name: 'Tiller', smtp_host: '', smtp_port: 0, smtp_username: '', smtp_mode: 'starttls', configured: true, secret_configured: true },
+  };
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'hosted' }) }));
+  await page.route('**/api/analytics/options', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: false }) }));
+  await page.route('**/api/platform/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true, csrf_token: 'csrf-test', expires_at: '2099-01-01T00:00:00Z' }) }));
+  await page.route('**/api/platform/stats', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ usage_available: false, accounts: {} }) }));
+  await page.route('**/api/platform/mail/queue', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ queued: 0, sent_recent: 0, dead_recent: 0, log: [] }) }));
+  await page.route('**/api/platform/settings', route => {
+    if (route.request().method() === 'PUT') {
+      saved = route.request().postDataJSON();
+      // Persist like the real endpoint so the reload reflects the save.
+      Object.assign(settings.mail, { from: saved.mail_from, from_name: saved.mail_from_name, provider: saved.mail_provider });
+      return route.fulfill({ status: 204, body: '' });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) });
+  });
+
+  await page.goto('/platform#mail');
+  const form = page.locator('#platform-mail-settings-form');
+  await expect(form).toBeVisible();
+  await expect(form.locator('[name="mail_from"]')).toHaveValue('no-reply@example.com');
+  await expect(form.locator('[name="mail_from_name"]')).toHaveValue('Tiller');
+
+  await form.locator('[name="mail_from_name"]').fill('Tiller Router');
+  await form.getByRole('button', { name: 'Save mail settings' }).click();
+
+  await expect.poll(() => saved).not.toBeNull();
+  expect(saved).toMatchObject({
+    mail_provider: 'brevo',
+    mail_from: 'no-reply@example.com',
+    mail_from_name: 'Tiller Router',
+  });
+
+  // The save must be acknowledged in the console's own banner (the customer
+  // app's #flash is a different, hidden shell).
+  await expect(page.locator('#platform-flash')).toBeVisible();
+  await expect(page.locator('#platform-flash')).toHaveText('Mail settings saved.');
+
+  // Navigating away and back must re-render the saved sender name.
+  await page.locator('#platform-tab-settings').click();
+  await expect(page.locator('#platform-panel-mail')).toBeHidden();
+  await page.locator('#platform-tab-mail').click();
+  await expect(form.locator('[name="mail_from_name"]')).toHaveValue('Tiller Router');
+  await expect(form.locator('[name="mail_from"]')).toHaveValue('no-reply@example.com');
+});
+
+test('a rejected mail save is visible on the platform console', async ({ page }) => {
+  const settings = {
+    hosted_signup_enabled: true,
+    audit_retention_days: 30,
+    mail: { provider: 'brevo', from: 'no-reply@example.com', from_name: 'Tiller', smtp_host: '', smtp_port: 0, smtp_username: '', smtp_mode: 'starttls', configured: true, secret_configured: true },
+  };
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'hosted' }) }));
+  await page.route('**/api/analytics/options', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: false }) }));
+  await page.route('**/api/platform/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true, csrf_token: 'csrf-test', expires_at: '2099-01-01T00:00:00Z' }) }));
+  await page.route('**/api/platform/stats', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ usage_available: false, accounts: {} }) }));
+  await page.route('**/api/platform/mail/queue', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ queued: 0, sent_recent: 0, dead_recent: 0, log: [] }) }));
+  await page.route('**/api/platform/settings', route => {
+    if (route.request().method() === 'PUT') {
+      // Mirror the real rejection shape, including the field-level detail.
+      return route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { code: 'invalid_mail_settings', message: 'Mail settings are invalid.', detail: 'brevo API key is required' } }),
+      });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) });
+  });
+
+  await page.goto('/platform#mail');
+  const form = page.locator('#platform-mail-settings-form');
+  await expect(form).toBeVisible();
+  await form.locator('[name="mail_from_name"]').fill('Tiller Router');
+  await form.getByRole('button', { name: 'Save mail settings' }).click();
+
+  // The failure must not be silent: it appears in the console banner, and the
+  // message names the field that was rejected rather than a bare "invalid".
+  const banner = page.locator('#platform-flash');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText('Mail settings are invalid.');
+  await expect(banner).toContainText('brevo API key is required');
+  await expect(page.locator('#platform-flash.flash-error')).toBeVisible();
+});
+
+test('saving mail settings submits while the SMTP branch is inactive', async ({ page }) => {
+  // Regression: the SMTP port input is type=number with min=1. Hidden-and-
+  // still-enabled, it kept the form invalid and the browser refused to submit,
+  // so a Brevo save sent no request at all and showed no feedback.
+  const puts = [];
+  const settings = {
+    hosted_signup_enabled: true,
+    audit_retention_days: 30,
+    mail: { provider: 'brevo', from: 'tiller@example.com', from_name: 'Tiller', smtp_host: '', smtp_port: 0, smtp_username: '', smtp_mode: 'starttls', configured: true, secret_configured: true },
+  };
+  await page.route('**/api/runtime', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ mode: 'hosted' }) }));
+  await page.route('**/api/analytics/options', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ enabled: false }) }));
+  await page.route('**/api/platform/session', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ authenticated: true, csrf_token: 'csrf-test', expires_at: '2099-01-01T00:00:00Z' }) }));
+  await page.route('**/api/platform/stats', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ usage_available: false, accounts: {} }) }));
+  await page.route('**/api/platform/mail/queue', route => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ queued: 0, sent_recent: 0, dead_recent: 0, log: [] }) }));
+  await page.route('**/api/platform/settings', route => {
+    if (route.request().method() === 'PUT') {
+      const body = route.request().postDataJSON();
+      puts.push(body);
+      Object.assign(settings.mail, { from: body.mail_from, from_name: body.mail_from_name, provider: body.mail_provider });
+      return route.fulfill({ status: 204, body: '' });
+    }
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(settings) });
+  });
+
+  await page.goto('/platform#mail');
+  const form = page.locator('#platform-mail-settings-form');
+  await expect(form).toBeVisible();
+
+  // The SMTP branch is inactive: hidden and disabled, so it cannot block submit.
+  await expect(form.locator('[name="mail_smtp_port"]')).toBeHidden();
+  await expect(form.locator('[name="mail_smtp_port"]')).toBeDisabled();
+
+  await form.locator('[name="mail_from"]').fill('tiller@xiat.net');
+  await form.locator('[name="mail_from_name"]').fill('Tiller Router');
+  await form.getByRole('button', { name: 'Save mail settings' }).click();
+
+  await expect.poll(() => puts.length).toBe(1);
+  expect(puts[0]).toMatchObject({ mail_provider: 'brevo', mail_from: 'tiller@xiat.net', mail_from_name: 'Tiller Router' });
+  await expect(page.locator('#platform-flash')).toHaveText('Mail settings saved.');
 });

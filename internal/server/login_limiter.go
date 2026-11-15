@@ -253,9 +253,9 @@ func peerIP(r *http.Request) string {
 // proxy range, which is the standard proxy-chain trust boundary. This is the
 // canonical X-Forwarded-For walker: Server.requestClientIP delegates to it
 // after its X-Real-IP preference check, so the two can never drift.
-func clientIP(r *http.Request, trustedProxy netip.Prefix) string {
+func clientIP(r *http.Request, trustedProxies []netip.Prefix) string {
 	direct := peerIP(r)
-	if !trustedProxy.IsValid() {
+	if len(trustedProxies) == 0 {
 		return direct
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -263,7 +263,7 @@ func clientIP(r *http.Request, trustedProxy netip.Prefix) string {
 		host = r.RemoteAddr
 	}
 	peer, err := netip.ParseAddr(host)
-	if err != nil || !trustedProxy.Contains(peer) {
+	if err != nil || !trustedProxyContains(trustedProxies, peer) {
 		return direct
 	}
 	parts := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
@@ -279,11 +279,22 @@ func clientIP(r *http.Request, trustedProxy netip.Prefix) string {
 		addrs[i] = addr
 	}
 	for i := len(addrs) - 1; i >= 0; i-- {
-		if !trustedProxy.Contains(addrs[i]) {
+		if !trustedProxyContains(trustedProxies, addrs[i]) {
 			return addrs[i].String()
 		}
 	}
 	return addrs[0].String()
+}
+
+// trustedProxyContains reports whether addr is inside any configured proxy
+// prefix. An empty list trusts nobody (proxy headers are ignored).
+func trustedProxyContains(prefixes []netip.Prefix, addr netip.Addr) bool {
+	for _, prefix := range prefixes {
+		if prefix.IsValid() && prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // limiterKey collapses an IPv6 address to its /64 so one host cannot dodge a

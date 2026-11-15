@@ -34,6 +34,11 @@ type Snapshot struct {
 	Reason       string    `json:"reason,omitempty"`
 	Windows      []Window  `json:"windows,omitempty"`
 	FetchedAt    time.Time `json:"fetched_at,omitempty"`
+
+	// notConnected marks a poll that never reached the quota endpoint because
+	// the provider has no credential yet. It is unexported: the poller uses it
+	// to skip the failure and cadence bookkeeping, and it is never served.
+	notConnected bool
 }
 
 // Window is one quota window (e.g. a 5-hour or weekly limit). UsedPercent is

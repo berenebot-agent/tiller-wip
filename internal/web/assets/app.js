@@ -45,9 +45,32 @@ let hostedAuthOptions = {};
 // false for env-admin local installs, which skip onboarding entirely.
 let runtimeSetupRequired = false;
 let runtimeWizardEnabled = false;
+// CAPTCHA_GATED_CONTROLS names the buttons that stay inert until the Turnstile
+// challenge for the mounted view is solved, so a visitor cannot spend a click
+// (or a rate-limit attempt) on a submit that is guaranteed to fail. Buttons are
+// released again the moment a token arrives; expired/error callbacks re-lock
+// them. Views without a mounted widget are never affected, so deployments
+// without Turnstile keep their exact current behaviour.
+//
+// The platform console is "optional": its challenge is mounted from the
+// /api/platform/session 401 payload (the operator console never reads
+// /api/auth/options), so mountOptionalAuthCaptcha turns it on only when the
+// server reports it. Once mounted it behaves like any other gated view.
+const CAPTCHA_GATED_CONTROLS = {
+  'signup-form': { action: 'signup', buttons: ['#signup-form button[type="submit"]'] },
+  'forgot-form': { action: 'recovery', buttons: ['#forgot-form button[type="submit"]'] },
+  'platform-login-form': { action: 'platform_login', optional: true, buttons: ['#platform-login-form button[type="submit"]'] },
+};
+// platformCaptcha holds the challenge settings the console's session probe
+// reports. Kept separate from hostedAuthOptions because the console does not
+// load (and must not assume) the customer-app auth-options payload.
+let platformCaptcha = { enabled: false, site_key: '' };
 // runtimePasskeysEnabled is true on a local install that has WebAuthn
 // configured (TILLER_PUBLIC_URL set). It gates the passkey sign-in button and
-// the Account passkeys card, mirroring hosted's auth-options payload.
+// the Account passkeys card, mirroring hosted's auth-options payload. It is
+// refreshed whenever the login card is painted (see refreshAuthOptions), not
+// just at boot: logout returns to the login card in-session with no reload, so
+// a boot-only flag would hide the button until the user refreshed.
 let runtimePasskeysEnabled = false;
 // accountEmailForDelete holds the signed-in email for the delete confirmation
 // modal (the modal requires it to be typed exactly). googleReauthConfirmedAt is
@@ -332,15 +355,33 @@ function authView(name) {
   $('#show-signup').hidden = !hosted || name !== 'login-form' || !hostedAuthOptions.signup_enabled;
   const googleSignIn = hosted && name === 'login-form' && !!hostedAuthOptions.google_enabled;
   $('#google-signin-button').hidden = !googleSignIn;
-  $('#google-signin-notice').hidden = !googleSignIn;
   const passkeyAvailable = hosted ? !!hostedAuthOptions.passkeys_enabled : !!runtimePasskeysEnabled;
   const passkeySignIn = name === 'login-form' && passkeyAvailable && !!window.__passkeySupported;
-  const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) passkeyBtn.hidden = !passkeySignIn;
+  const passkeyBtn = $('#passkey-signin'); if (passkeyBtn) { passkeyBtn.hidden = !passkeySignIn; passkeyBtn.disabled = false; }
   const passkeyStatus = $('#passkey-signin-status'); if (passkeyStatus) { passkeyStatus.textContent = ''; passkeyStatus.className = 'setting-tip'; }
+  stopResendTicks();
   if (googleSignIn) setupGoogleSignIn();
   ['resend-login-verification', 'resend-signup-verification', 'verify-email-wrap', 'resend-verification', 'reset-login'].forEach(id => { const el = $('#' + id); if (el) el.hidden = true; });
   const action = name === 'signup-form' ? 'signup' : name === 'forgot-form' ? 'recovery' : '';
-  showAuthCaptcha(action);
+  // Only the customer auth views own the challenge mount: clear it for them and
+  // leave the console's challenge alone (showAuthCaptcha('') would tear down a
+  // widget the console session probe just mounted).
+  if (!CAPTCHA_GATED_CONTROLS[name]?.optional) showAuthCaptcha(action);
+  syncAuthCaptchaGate();
+}
+// mountOptionalAuthCaptcha mounts the challenge for a view whose settings are
+// reported by the server (the platform console) rather than by
+// /api/auth/options. A session probe that reports nothing configured leaves the
+// view exactly as it was, so an installation without Turnstile is unaffected.
+function mountOptionalAuthCaptcha(name, settings) {
+  const config = CAPTCHA_GATED_CONTROLS[name];
+  if (!config?.optional) return;
+  const enabled = !!settings?.turnstile_enabled && !!settings?.turnstile_site_key;
+  platformCaptcha = { enabled, site_key: enabled ? String(settings.turnstile_site_key) : '' };
+  showAuthCaptcha(enabled ? config.action : '');
+  // The probe resolved after the view painted, so apply the gate now rather
+  // than waiting for the next submit to discover it.
+  syncAuthCaptchaGate();
 }
 // UI_SESSION_HINT is a purely presentational, client-side flag: when set, the
 // next boot paints the app skeleton instead of the login card while the session
@@ -351,7 +392,44 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); refreshAuthOptions(); }
+// refreshAuthOptions re-reads what the login card greys in or out (passkey and
+// Google sign-in, signup, Turnstile) and repaints it. The flags it refreshes
+// come from /api/runtime and /api/auth/options, which used to be fetched once in
+// initialise(). Logout returns to the login card without a reload, so that
+// boot-only fetch left the passkey button hidden (it is gated on
+// runtimePasskeysEnabled) until the page was refreshed. Runs after showLogin()
+// has painted, then repaints authView in place if the login card is on screen.
+// Declarations only — showLogin() calls this before they scroll past.
+let runtimeProbeDone = false;
+let authOptionsRefreshing = false;
+async function refreshAuthOptions() {
+  if (!runtimeProbeDone || authOptionsRefreshing) return;
+  authOptionsRefreshing = true;
+  try {
+    if (runtimeMode === 'hosted') {
+      // The platform console has its own sign-in form; /api/auth/options is a
+      // customer-app route and 404s there.
+      if (location.pathname.startsWith('/platform')) return;
+      try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+    } else {
+      let runtime;
+      try { runtime = await fetch('/api/runtime', { credentials: 'same-origin' }).then(res => res.json()); } catch { return; }
+      runtimeSetupRequired = Boolean(runtime.setup_required);
+      runtimeWizardEnabled = Boolean(runtime.wizard_enabled);
+      runtimePasskeysEnabled = Boolean(runtime.passkeys_enabled);
+    }
+    applyAccountTabVisibility();
+  } finally {
+    authOptionsRefreshing = false;
+  }
+  // Repaint only if the login card is still the visible surface: a user who
+  // typed their password and signed in while the probe was in flight must not
+  // have authView() yank the app off screen.
+  if ($('#login-shell').hidden || !$('#app').hidden || !$('#platform-shell').hidden) return;
+  const name = ['login-form','signup-form','signup-done','forgot-form','forgot-done','verify-panel','reset-form','platform-login-form','google-consent-form','google-link-confirm-form'].find(id => { const el = $('#' + id); return el && !el.hidden; });
+  if (name) authView(name);
+}
 // The signed-in identity in the top bar is the shortcut into Settings →
 // Account. Account is hosted-only, so in self-hosted mode the control stays
 // disabled and renders as plain text rather than as a dead link.
@@ -404,8 +482,34 @@ function finishGoogleLinkPrompt() {
   if (session) showApp(session);
   else showLogin();
 }
-function flash(message, kind = 'success') { const box = $('#flash'); box.textContent = message; box.className = `flash flash-${kind}`; box.hidden = false; clearTimeout(flash.timer); flash.timer = setTimeout(() => box.hidden = true, 5000); }
-function errorMessage(error, fallback = 'The operation could not be completed.') { return error?.message || fallback; }
+// flash shows a transient status message. The operator console is a separate
+// shell from the customer app, so it carries its own banner: pick whichever one
+// is currently mounted, otherwise a platform save reports success into a
+// hidden container and the operator sees nothing.
+function flashTarget() {
+  const platform = $('#platform-shell');
+  if (platform && !platform.hidden) {
+    const box = $('#platform-flash');
+    if (box) return box;
+  }
+  return $('#flash');
+}
+function flash(message, kind = 'success') {
+  const box = flashTarget();
+  if (!box) return;
+  box.textContent = message;
+  box.className = `flash flash-${kind}`;
+  box.hidden = false;
+  clearTimeout(flash.timer);
+  flash.timer = setTimeout(() => box.hidden = true, 5000);
+}
+function errorMessage(error, fallback = 'The operation could not be completed.') {
+  const message = error?.message || fallback;
+  // The API may attach a value-free detail naming the field that failed (see
+  // adminErrorDetail). Surface it so a rejected save explains itself.
+  const detail = error?.data?.error?.detail;
+  return detail ? `${message} (${detail})` : message;
+}
 
 function loadTurnstileScript() {
   if (window.turnstile) return Promise.resolve();
@@ -422,38 +526,91 @@ function loadTurnstileScript() {
   return captchaScriptPromise;
 }
 
+const AUTH_CAPTCHA_PENDING_HINT = 'Complete the security check to continue.';
+// captchaSettingsFor is the Turnstile configuration for an action: the customer
+// auth views read /api/auth/options, the platform console reads its session
+// probe. Synchronous, so a mount is decided before showAuthCaptcha yields.
+function captchaSettingsFor(action) {
+  if (action === 'platform_login') return platformCaptcha.enabled ? platformCaptcha : null;
+  return hostedAuthOptions.turnstile_enabled ? { enabled: true, site_key: hostedAuthOptions.turnstile_site_key } : null;
+}
+const captchaConfiguredFor = action => !!captchaSettingsFor(action);
 async function showAuthCaptcha(action) {
   const wrap = $('#auth-captcha-wrap');
   if (!wrap) return;
-  if (!hostedAuthOptions.turnstile_enabled || !action) {
+  const settings = action ? captchaSettingsFor(action) : null;
+  // Bumped before any await so a later mount invalidates an earlier one: a
+  // slow teardown must not wipe a widget mounted while it was awaiting.
+  const generation = ++captchaGeneration;
+  if (!settings || !action) {
     captchaGeneration++; captchaToken = ''; captchaAction = '';
     if (captchaWidgetID !== null && window.turnstile) window.turnstile.remove(captchaWidgetID);
     captchaWidgetID = null; $('#auth-captcha').replaceChildren(); wrap.hidden = true;
+    syncAuthCaptchaGate();
     return;
   }
-  if (captchaAction === action && captchaWidgetID !== null) { wrap.hidden = false; return; }
-  const generation = ++captchaGeneration;
+  if (captchaAction === action && captchaWidgetID !== null) { wrap.hidden = false; syncAuthCaptchaGate(); return; }
   captchaAction = action; captchaToken = ''; captchaWidgetID = null;
   if (window.turnstile && $('#auth-captcha').dataset.widget) window.turnstile.remove($('#auth-captcha').dataset.widget);
   $('#auth-captcha').replaceChildren(); delete $('#auth-captcha').dataset.widget;
   wrap.hidden = false;
+  const status = wrap.querySelector('.meta-line');
+  if (status) { status.textContent = AUTH_CAPTCHA_PENDING_HINT; status.classList.remove('is-error'); }
+  syncAuthCaptchaGate();
   try {
     await loadTurnstileScript();
     if (generation !== captchaGeneration) return;
     captchaWidgetID = window.turnstile.render('#auth-captcha', {
-      sitekey: hostedAuthOptions.turnstile_site_key, action,
-      callback: token => { captchaToken = token; captchaAction = action; },
-      'expired-callback': () => { captchaToken = ''; },
-      'error-callback': () => { captchaToken = ''; },
+      sitekey: settings.site_key, action,
+      callback: token => { captchaToken = token; captchaAction = action; syncAuthCaptchaGate(); },
+      'expired-callback': () => { captchaToken = ''; syncAuthCaptchaGate(); },
+      'error-callback': () => { captchaToken = ''; syncAuthCaptchaGate(); },
     });
     $('#auth-captcha').dataset.widget = captchaWidgetID;
+    syncAuthCaptchaGate();
   } catch (error) {
-    if (generation === captchaGeneration) $('#auth-captcha-wrap').querySelector('.meta-line').textContent = errorMessage(error, 'Security check failed to load.');
+    if (generation !== captchaGeneration) return;
+    if (status) { status.textContent = errorMessage(error, 'Security check failed to load.'); status.classList.add('is-error'); }
+    // A challenge that cannot load would otherwise lock the visitor out of a
+    // page that may still work: never trap them behind a missing script.
+    syncAuthCaptchaGate({ failed: true });
+  }
+}
+
+// authCaptchaGate resolves the current view's gated controls, or null when no
+// gated form is visible (sign-in, setup, platform console, done screens).
+function authCaptchaGate() {
+  const wrap = $('#auth-captcha-wrap');
+  let view = null;
+  for (const id of Object.keys(CAPTCHA_GATED_CONTROLS)) { const el = $('#' + id); if (el && !el.hidden) { view = id; break; } }
+  if (!view) return null;
+  const config = CAPTCHA_GATED_CONTROLS[view];
+  const mounted = !!(wrap && !wrap.hidden && captchaWidgetID !== null && captchaAction === config.action);
+  const solved = mounted && captchaAction === config.action && !!captchaToken;
+  return { config, locked: mounted && !solved };
+}
+
+// syncAuthCaptchaGate is idempotent: it reconciles the gated buttons with the
+// current challenge state and leaves them alone when no widget is mounted.
+// failed releases the lock so a broken Turnstile script degrades to today's
+// behaviour (the request is still verified server-side).
+function syncAuthCaptchaGate({ failed = false } = {}) {
+  const gate = authCaptchaGate();
+  if (!gate) return;
+  const locked = gate.locked && !failed;
+  for (const selector of gate.config.buttons) {
+    const button = $(selector);
+    if (!button) continue;
+    // Never fight an in-flight submit: it owns the disabled flag itself.
+    if (button.dataset.captchaLock !== '1' && button.disabled) continue;
+    button.disabled = locked;
+    button.setAttribute('aria-disabled', String(locked));
+    if (locked) button.dataset.captchaLock = '1'; else delete button.dataset.captchaLock;
   }
 }
 
 function authCaptchaToken(action) {
-  if (!hostedAuthOptions.turnstile_enabled) return '';
+  if (!captchaConfiguredFor(action)) return '';
   if (captchaAction !== action || !captchaToken) {
     showAuthCaptcha(action);
     throw new Error('Complete the security check, then try again.');
@@ -462,9 +619,10 @@ function authCaptchaToken(action) {
 }
 
 function resetAuthCaptcha(action) {
-  if (!hostedAuthOptions.turnstile_enabled || captchaAction !== action) return;
+  if (!captchaConfiguredFor(action) || captchaAction !== action) return;
   captchaToken = '';
   if (captchaWidgetID !== null && window.turnstile) window.turnstile.reset(captchaWidgetID);
+  syncAuthCaptchaGate();
 }
 
 $('#login-form').addEventListener('submit', async event => {
@@ -546,7 +704,50 @@ async function resendVerification(email, target) {
 }
 function exposeResend(target, emailInput, messageTarget) {
   const button = $(target); if (!button) return;
-  button.hidden = false; showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : ''); button.onclick = async () => { button.disabled = true; try { await resendVerification($(emailInput).value, messageTarget); } catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+  button.hidden = false;
+  const onCaptchaDue = () => showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : '');
+  button.onclick = async () => {
+    const email = String($(emailInput).value || '');
+    button.disabled = true;
+    try { await resendVerification(email, messageTarget); markVerificationSent(email); syncResendButton(button, email, onCaptchaDue); }
+    catch (error) { showAuthError(messageTarget.replace('#', ''), error, 'Could not resend verification email.'); button.disabled = false; }
+  };
+  syncResendButton(button, String($(emailInput).value || ''), onCaptchaDue);
+}
+// Verification resends are throttled for 60s per address so one click cannot
+// fire a burst of mail, and so the post-signup screen stays locked even though
+// the signup request already sent the first message. Deadlines are keyed by the
+// address (matching the server's per-email limit) and kept outside the DOM, so
+// switching auth views resumes the remaining time instead of restarting it.
+// The Turnstile widget renders RESEND_CAPTCHA_LEAD_SECONDS before the button
+// returns, giving the challenge time to solve so the next send is one click.
+const RESEND_COOLDOWN_MS = 60000;
+const RESEND_CAPTCHA_LEAD_SECONDS = 10;
+const resendDeadlines = new Map();
+const resendTicks = new Map();
+function resendKey(email) { return String(email || '').trim().toLowerCase(); }
+function markVerificationSent(email) { resendDeadlines.set(resendKey(email), Date.now() + RESEND_COOLDOWN_MS); }
+function resendSecondsLeft(email) { return Math.max(0, Math.ceil(((resendDeadlines.get(resendKey(email)) || 0) - Date.now()) / 1000)); }
+function resendLabel(button) { if (!button.dataset.resendLabel) button.dataset.resendLabel = button.textContent; return button.dataset.resendLabel; }
+function stopResendTick(button) {
+  if (!button) return;
+  const timer = resendTicks.get(button);
+  if (timer) { clearInterval(timer); resendTicks.delete(button); }
+  delete button.dataset.resendCaptcha;
+  button.textContent = resendLabel(button);
+  button.disabled = false;
+}
+function stopResendTicks() { for (const button of [...resendTicks.keys()]) stopResendTick(button); }
+function syncResendButton(button, email, onCaptchaDue) {
+  if (!button) return;
+  const left = resendSecondsLeft(email);
+  resendLabel(button);
+  if (left <= 0) { stopResendTick(button); if (onCaptchaDue) onCaptchaDue(); return; }
+  button.disabled = true;
+  button.textContent = `Send again in ${left}s`;
+  if (left > RESEND_CAPTCHA_LEAD_SECONDS) delete button.dataset.resendCaptcha;
+  else if (onCaptchaDue && !button.dataset.resendCaptcha) { button.dataset.resendCaptcha = '1'; onCaptchaDue(); }
+  if (!resendTicks.has(button)) resendTicks.set(button, setInterval(() => syncResendButton(button, email, onCaptchaDue), 1000));
 }
 $('#show-signup').onclick = () => authView('signup-form');
 $('#show-forgot-password').onclick = () => authView('forgot-form');
@@ -560,7 +761,13 @@ $('#forgot-done-login').onclick = () => authView('login-form');
 function exposeSignupResend() {
   const button = $('#resend-signup-verification'); if (!button) return;
   button.hidden = false;
-  button.onclick = async () => { button.disabled = true; try { await resendVerification(signupEmail, '#signup-done-error'); } catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); } finally { button.disabled = false; } };
+  const onCaptchaDue = () => showAuthCaptcha(hostedAuthOptions.turnstile_enabled ? 'recovery' : '');
+  button.onclick = async () => {
+    button.disabled = true;
+    try { await resendVerification(signupEmail, '#signup-done-error'); markVerificationSent(signupEmail); syncResendButton(button, signupEmail, onCaptchaDue); }
+    catch (error) { showAuthError('signup-done-error', error, 'Could not resend verification email.'); button.disabled = false; }
+  };
+  syncResendButton(button, signupEmail, onCaptchaDue);
 }
 $('#signup-form').addEventListener('submit', async event => {
   event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement);
@@ -569,13 +776,16 @@ $('#signup-form').addEventListener('submit', async event => {
     const captcha_token = authCaptchaToken('signup');
     await api('/api/auth/signup', { method: 'POST', body: JSON.stringify({ email: form.get('email'), accept_terms: true, captcha_token }) });
     signupEmail = String(form.get('email') || '');
+    // The signup request itself queued the verification mail, so the inbox
+    // screen opens already counting down instead of offering a fresh send.
+    markVerificationSent(signupEmail);
     formElement.reset();
     $('#signup-done-message').textContent = 'If the address can receive mail, a verification message will arrive shortly.';
     authView('signup-done');
     exposeSignupResend();
-  } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); }
+  } catch (error) { showAuthError('signup-error', error, 'Signup failed.'); } finally { resetAuthCaptcha('signup'); syncAuthCaptchaGate(); }
 });
-$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-done-message').textContent = result.message || 'If the address belongs to an account, a password-reset message will arrive shortly.'; authView('forgot-done'); } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); } });
+$('#forgot-form').addEventListener('submit', async event => { event.preventDefault(); const form = new FormData(event.currentTarget); try { const captcha_token = authCaptchaToken('recovery'); const result = await api('/api/auth/password-reset/request', { method: 'POST', body: JSON.stringify({ email: form.get('email'), captcha_token }) }); $('#forgot-done-message').textContent = result.message || 'If the address belongs to an account, a password-reset message will arrive shortly.'; authView('forgot-done'); } catch (error) { showAuthError('forgot-error', error, 'Recovery failed.'); } finally { resetAuthCaptcha('recovery'); syncAuthCaptchaGate(); } });
 // === GOOGLE IDENTITY SERVICES ===
 // The "Sign in with Google" button and the One Tap account chooser are rendered
 // by Google's own script so the branding and in-page account popup are the ones
@@ -666,28 +876,49 @@ $('#reset-form').addEventListener('submit', async event => { event.preventDefaul
 $('#platform-login-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
-  const hadChallenge = captchaAction === 'platform_login';
   try {
     const session = await api('/api/platform/session', { method: 'POST', body: JSON.stringify({
       username: form.get('username'), password: form.get('password'),
-      captcha_token: hadChallenge ? authCaptchaToken('platform_login') : '',
+      // Mounted challenge ⇒ the gate holds this button until it is solved, so the
+      // token is present here; a failed submit is re-challenged in the catch.
+      captcha_token: authCaptchaToken('platform_login'),
     }) });
     state.csrf = session.csrf_token; setSessionHint(true); hideBoot();
     $('#login-shell').hidden = true; $('#platform-shell').hidden = false;
+    showPlatformExposure(session);
     await selectPlatformTab(platformTabFromHash(), { push: false });
   } catch (error) {
     showAuthError('platform-login-error', error, 'Platform login failed.');
-    if (error.code === 'captcha_required') await showAuthCaptcha('platform_login');
-  } finally {
-    if (hadChallenge) resetAuthCaptcha('platform_login');
+    if (error.code === 'captcha_required') await mountOptionalAuthCaptcha('platform-login-form', { turnstile_enabled: true, turnstile_site_key: platformCaptcha.site_key });
+    else if (error.code === 'captcha_rejected') resetAuthCaptcha('platform_login');
   }
 });
-$('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); } };
+$('#platform-logout').onclick = async () => { try { await api('/api/platform/session', { method: 'DELETE' }); } finally { history.replaceState(null, '', '/platform'); showLogin(); probePlatformLogin(); } };
+// probePlatformLogin asks the console what its login card needs to mount. The
+// probe always answers 401 by design, so this is the one place where a 401 is
+// expected; it never surfaces an error and never disturbs a challenge that is
+// already mounted (mountOptionalAuthCaptcha keeps an existing widget).
+async function probePlatformLogin() {
+  try {
+    const settings = await api('/api/platform/session/probe');
+    mountOptionalAuthCaptcha('platform-login-form', settings);
+  } catch (error) {
+    if (error?.data?.turnstile_enabled || error?.data?.turnstile_site_key) mountOptionalAuthCaptcha('platform-login-form', error.data);
+  }
+}
 
 const PLATFORM_TABS = ['overview', 'users', 'plans', 'mail', 'logs', 'legal', 'settings'];
 function platformTabFromHash() {
   const tab = location.hash.replace(/^#\/?/, '').split('/')[0];
   return PLATFORM_TABS.includes(tab) ? tab : 'overview';
+}
+function showPlatformExposure(session) {
+  const exposed = $('#platform-exposed-banner');
+  if (exposed) exposed.hidden = !session?.platform_exposed;
+  // A non-Secure console cookie means the transport could not be proven HTTPS.
+  // Accepted for a VPN-restricted console (SECURITY.md), never silent.
+  const insecure = $('#platform-insecure-banner');
+  if (insecure) insecure.hidden = !session?.console_insecure;
 }
 async function selectPlatformTab(tab, { push = true } = {}) {
   if (!PLATFORM_TABS.includes(tab)) tab = 'overview';
@@ -711,7 +942,7 @@ async function selectPlatformTab(tab, { push = true } = {}) {
   try { await loadPlatformDashboard(tab); }
   catch (error) {
     if (tab === 'overview') setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'));
-    const errorEl = $(`#platform-${tab === 'overview' ? 'overview' : tab === 'logs' ? 'audit' : tab}-error`);
+    const errorEl = $(platformErrorElementID(tab));
     if (errorEl) errorEl.textContent = errorMessage(error, `Could not load ${tab}.`);
   }
 }
@@ -819,7 +1050,7 @@ function providerCard(provider) {
   const usage = providerQuotaHTML(provider) + providerCostHTML(provider);
   return `<article class="provider-card${provider.enabled ? '' : ' provider-card-disabled'}${provider.last_refresh_error ? ' provider-card-error' : ''}" data-provider-id="${h(provider.id)}" data-provider-name="${h(provider.name.toLowerCase())}" data-provider-type="${h(providerLabel.toLowerCase())}">
     <button class="provider-card-browse" type="button" data-provider-open="${h(provider.id)}" aria-label="Browse ${h(provider.name)} models">${providerMark(provider.type, providerLabel, 'provider-card-mark')}<span class="provider-card-identity"><strong>${h(provider.name)}</strong><small>${h(providerLabel)}</small></span>${badge(healthy, stateLabel, healthy ? 'good' : provider.enabled ? 'warn' : 'neutral')}</button>
-    <dl class="provider-card-facts"><div><dt>Models</dt><dd>${h(provider.available_model_count)}${retired ? `<small> +${h(retired)} retired</small>` : ''}</dd></div><div><dt>API</dt><dd class="provider-card-protocols">${(provider.protocols || []).map(p => `<span class="protocol">${h(p)}</span>`).join('') || '<span class="meta-line">Default</span>'}</dd></div><div><dt>Refreshed</dt><dd title="${h(date(provider.last_refresh_at))}">${h(refreshed)}</dd></div></dl>
+    <dl class="provider-card-facts"><div><dt>Models</dt><dd>${h(provider.available_model_count)}${retired ? `<small> +${h(retired)} retired</small>` : ''}</dd></div><div><dt>API</dt><dd class="provider-card-protocols">${(provider.protocols || []).map(p => `<span class="protocol">${h(p)}</span>`).join('') || '<span class="meta-line">Default</span>'}</dd></div><div><dt>Models refreshed</dt><dd title="${h(date(provider.last_refresh_at))}">${h(refreshed)}</dd></div></dl>
     ${provider.last_refresh_error ? `<p class="provider-card-alert">${h(provider.last_refresh_error)}</p>` : ''}
     ${usage ? `<div class="provider-usage">${usage}</div>` : ''}
   </article>`;
@@ -840,8 +1071,11 @@ const quotaProviderTypes = ['codex-subscription', 'claude-subscription', 'github
 function providerQuotaDataHTML(provider) {
   if (!quotaProviderTypes.includes(provider.type)) return '';
   const snap = state.providerQuota?.[provider.id];
-  if (!snap) return '<p class="provider-quota-status">Quota: loading…</p>';
-  if (!snap.available) return '<p class="provider-quota-status">Quota unavailable</p>';
+  const status = state.providerQuotaStatus?.[provider.id] || {};
+  // Not-connected is a pre-condition, not a failure: the provider exists but
+  // the OAuth sign-in (or API key) has not supplied a credential yet.
+  if (!snap || snap.reason === 'not connected' || status.not_connected) return '<p class="provider-quota-status">Quota: connect to see usage</p>';
+  if (!snap.available) return `<p class="provider-quota-status">${h(quotaUnavailableLabel(snap.reason))}</p>`;
   const windows = snap.windows || [];
   if (!windows.length) return '<p class="provider-quota-status">No quota reported</p>';
   const rows = windows.map(w => {
@@ -864,6 +1098,19 @@ function providerQuotaDataHTML(provider) {
   return `<div class="provider-quota">${rows.slice(0, inline).join('')}${rows.length > inline ? `<details><summary>${rows.length - inline} more limits</summary>${rows.slice(inline).join('')}</details>` : ''}</div>`;
 }
 
+// quotaUnavailableLabel turns the poller's reason into short card copy. The
+// reason explains why a check produced nothing, which is what distinguishes a
+// transient upstream blip from a credential the provider rejected.
+function quotaUnavailableLabel(reason) {
+  switch (reason) {
+    case 'credentials unavailable': return 'Quota: sign in again to see usage';
+    case 'quota endpoint unavailable': return 'Quota unavailable — retrying';
+    case 'quota format unavailable': return 'Quota unavailable';
+    case 'no quota adapter': return 'Quota unavailable';
+    default: return 'Quota unavailable';
+  }
+}
+
 // Keep successful data age distinct from the time of a failed poll.
 function quotaAge(when) {
   const elapsed = Math.max(0, Math.floor((Date.now() - new Date(when).getTime()) / 60000));
@@ -880,6 +1127,7 @@ function providerQuotaHTML(provider) {
   const lastSuccess = status.last_success_at || (snapshot?.available ? snapshot.fetched_at : null);
   const age = lastSuccess ? 'last updated ' + quotaAge(lastSuccess) : (status.last_attempt_at ? 'checked ' + quotaAge(status.last_attempt_at) : 'not checked yet');
   const label = status.refreshing ? 'Refreshing · ' + age
+    : status.not_connected || snapshot?.reason === 'not connected' ? 'Waiting for connection'
     : status.failed ? 'Check failed · ' + age
     : lastSuccess ? 'Updated ' + quotaAge(lastSuccess) : 'Not checked yet';
   const spinner = status.refreshing ? '<span class="provider-quota-spinner" aria-hidden="true"></span>' : '';
@@ -907,6 +1155,12 @@ function providerCostHTML(provider) {
 }
 const badge = (active, label, kind = active ? 'good' : 'bad') => `<span class="badge badge-${kind}">${h(label)}</span>`;
 const typeLabel = type => state.providerTypes.find(item => item.type === type)?.label || type;
+// signInLabel is the short provider name used in the device dialog's approval
+// button ("Login to Codex"). It is a display name only: the registered label
+// stays the dialog title, and an unknown type falls back to that label rather
+// than guessing from the type string.
+const signInLabels = { 'codex-subscription': 'Codex', 'github-copilot': 'GitHub Copilot' };
+const signInLabel = type => signInLabels[type] || typeLabel(type);
 
 $('#add-provider').onclick = () => openProvider();
 $('#add-provider-empty').onclick = () => openProvider();
@@ -916,6 +1170,7 @@ function providerFields(provider) {
   const options = state.providerTypes.map(item => `<option value="${h(item.type)}" ${provider?.type === item.type ? 'selected' : ''}>${h(item.label)}</option>`).join('');
   const selectedProtocols = provider?.protocols || ['chat'];
   const isOAuthEdit = provider && ['codex-subscription','claude-subscription','github-copilot'].includes(provider.type);
+  const urlLocked = Boolean(provider && state.providerTypes.find(candidate => candidate.type === provider.type)?.base_url_locked);
   const authSearch = item => item.auth_mode === 'oauth' ? 'oauth' : item.credential_needed ? 'api key' : 'no credential';
   const COMMON_PROVIDERS = ['openai','anthropic','openrouter','gemini','deepseek','github-copilot','ollama-local','generic-openai'];
   const rank = item => { const index = COMMON_PROVIDERS.indexOf(item.type); return index < 0 ? COMMON_PROVIDERS.length : index; };
@@ -923,8 +1178,8 @@ function providerFields(provider) {
   const typeField = provider
     ? `<label>Provider type <select name="type" disabled required>${options}</select></label>`
     : `<div class="provider-type-picker" data-provider-picker><label for="provider-type-search">Search provider types</label><input id="provider-type-search" type="search" autocomplete="off" placeholder="Search by name, protocol, or auth method" aria-controls="provider-type-options"><div class="provider-type-options" id="provider-type-options" role="listbox" aria-label="Provider types">${catalogue.map(item => `<button type="button" class="provider-type-option" role="option" aria-selected="false" data-provider-type-option="${h(item.type)}" data-search="${h(`${item.label} ${item.type} ${authSearch(item)} ${(item.protocols || []).join(' ')}`.toLowerCase())}">${providerMark(item.type,item.label,'provider-type-mark')}<span class="provider-type-copy"><strong>${h(item.label)}</strong><small>${item.auth_mode === 'oauth' ? 'OAuth' : item.credential_needed ? 'API key' : 'No credential'} · ${(item.protocols || []).map(h).join(' / ') || 'provider default'}</small></span></button>`).join('')}</div><input type="hidden" name="type" value="" required></div>`;
-  return `${typeField}<div class="provider-setup" data-provider-setup ${provider ? '' : 'hidden'}><div class="provider-setup-inner">${provider ? '' : '<button class="btn btn-small btn-secondary" type="button" data-provider-back>← Choose another provider</button>'}<div data-selected-provider></div><label>Provider name <input name="name" value="${h(provider?.name || '')}" placeholder="openai-main" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"><small>Lowercase namespace used in client-facing model IDs. Leave blank to use provider type (e.g. DeepSeek → deepseek).</small></label>
-    ${isOAuthEdit ? `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" disabled><small>Fixed by the OAuth provider. Reconnect to change the upstream.</small></label>` : `<label>Base URL <input name="base_url" type="url" value="${h(provider?.base_url || '')}" placeholder="https://api.example.com/v1" required></label>`}
+  return `${typeField}<div class="provider-setup" data-provider-setup ${provider ? '' : 'hidden'}><div class="provider-setup-inner">${provider ? '' : '<button class="btn btn-small btn-secondary" type="button" data-provider-back>← Choose another provider</button>'}<div data-selected-provider></div><label>Provider name <input autocomplete="off" name="name" value="${h(provider?.name || '')}" placeholder="openai-main" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"><small>Lowercase namespace used in client-facing model IDs. Leave blank to use provider type (e.g. DeepSeek → deepseek).</small></label>
+    ${isOAuthEdit ? '' : urlLocked ? `<label>Base URL <input autocomplete="off" name="base_url" type="url" value="${h(provider?.base_url || '')}" disabled><small>Fixed for this provider type so its credential cannot be sent to another host. Delete and recreate the provider to use a different endpoint.</small></label>` : `<label>Base URL <input autocomplete="off" name="base_url" type="url" value="${h(provider?.base_url || '')}" placeholder="https://api.example.com/v1" required>${provider ? '<small>Changing the host clears the stored credential.</small>' : ''}</label>${provider ? '<label class="confirm-check" data-confirm-host-wrap hidden><input name="confirm_credential_reset" type="checkbox"> <span>Confirm: the stored credential will be cleared. Enter the credential for the new host below.</span></label>' : ''}`}
     ${provider ? '' : '<div data-credential-create><label data-api-credential>API credential <input name="credential" type="password" autocomplete="new-password"><small>Write-only. Leave empty only when the provider permits unauthenticated access.</small></label></div>'}
     ${provider && !isOAuthEdit ? `<label data-credential-replace>Replacement credential <input name="credential" type="password" autocomplete="new-password" placeholder="•••••••• (set)"><small>A credential is configured. Type a new value to replace it.</small></label>` : ''}
     ${isOAuthEdit ? '<div data-provider-reconnect><label>OAuth connection <button type="button" class="btn btn-secondary" data-provider-reconnect-btn>Reconnect</button><small>Start a fresh OAuth sign-in. Replaces any saved token for this provider.</small></label></div><div data-provider-disconnect><button type="button" class="btn btn-danger" data-provider-disconnect-btn>Disconnect</button><small>Remove the OAuth connection. Provider configuration, models, and routing are preserved.</small></div>' : ''}
@@ -958,9 +1213,9 @@ async function openProvider(provider = null, onSaved = null) {
         type.value = item.type; options.forEach(candidate => candidate.setAttribute('aria-selected', String(candidate === option)));
         picker.hidden = true; setup.hidden = false; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = false); submit.hidden = false; submit.disabled = false;
         $('[data-selected-provider]', form).innerHTML = `${providerMark(item.type,item.label,'provider-selected-mark')}<strong>${h(item.label)}</strong>`;
-        if (!base.value || base.dataset.auto === 'true') { base.value = item.default_base_url || ''; base.dataset.auto = 'true'; }
-        name.placeholder = item.type; const oauth = item.auth_mode === 'oauth'; credential.required = Boolean(item.credential_needed) && !oauth; credentialWrap.hidden = item.type === 'opencode-free' || oauth; credentialLabel.hidden = oauth; base.required = Boolean(item.base_url_required || !item.default_base_url); if (oauth) credential.value = '';
-        submit.textContent = oauth ? `Connect with ${item.label}` : 'Add & discover'; showProtocols(); base.focus();
+        if (base && (!base.value || base.dataset.auto === 'true')) { base.value = item.default_base_url || ''; base.dataset.auto = 'true'; }
+        name.placeholder = item.type; const oauth = item.auth_mode === 'oauth'; credential.required = Boolean(item.credential_needed) && !oauth; credentialWrap.hidden = item.type === 'opencode-free' || oauth; credentialLabel.hidden = oauth; const baseWrap = base && base.closest('label'); if (baseWrap) baseWrap.hidden = oauth; if (base) base.required = Boolean(item.base_url_required || !item.default_base_url); if (oauth) credential.value = '';
+        submit.textContent = oauth ? `Connect with ${item.label}` : 'Add & discover'; showProtocols(); (base && !base.closest('label')?.hidden ? base : name).focus();
       };
       search.addEventListener('input', filter);
       search.addEventListener('keydown', event => { const visible = options.filter(option => !option.hidden); if (event.key === 'ArrowDown' && visible.length) { event.preventDefault(); visible[0].focus(); } if (event.key === 'Enter') { event.preventDefault(); if (visible.length) choose(visible[0]); } });
@@ -968,27 +1223,29 @@ async function openProvider(provider = null, onSaved = null) {
         option.addEventListener('click', () => choose(option));
         option.addEventListener('keydown', event => { const visible = options.filter(candidate => !candidate.hidden), index = visible.indexOf(option); if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); visible[(index + (event.key === 'ArrowDown' ? 1 : visible.length - 1)) % visible.length]?.focus(); } if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); choose(option); } });
       });
-      $('[data-provider-back]', form).addEventListener('click', () => { setup.hidden = true; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); picker.hidden = false; submit.hidden = true; submit.disabled = true; search.focus(); });
-      base.addEventListener('input', () => base.dataset.auto = 'false'); $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); submit.hidden = true; submit.disabled = true; filter();
+      $('[data-provider-back]', form).addEventListener('click', () => { const baseWrap = $('[name="base_url"]', form)?.closest('label'); if (baseWrap) baseWrap.hidden = false; setup.hidden = true; $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); picker.hidden = false; submit.hidden = true; submit.disabled = true; search.focus(); });
+      base?.addEventListener('input', () => base.dataset.auto = 'false'); $$('input,select,textarea,fieldset,button', setup).forEach(control => control.disabled = true); submit.hidden = true; submit.disabled = true; filter();
     } else {
       const item = state.providerTypes.find(candidate => candidate.type === provider.type), replace = $('[data-credential-replace]', form);
       if (replace) replace.hidden = provider.type === 'opencode-free' || item?.auth_mode === 'oauth'; showProtocols();
       const reconnect = $('[data-provider-reconnect-btn]', form); if (reconnect) reconnect.onclick = () => { $('#form-dialog').close(); connectProviderOAuth(provider.id); };
       const disconnect = $('[data-provider-disconnect-btn]', form); if (disconnect) disconnect.onclick = () => { $('#form-dialog').close(); disconnectProviderOAuth(provider.id); };
       const name = $('[name="name"]', form), confirm = $('[data-confirm-wrap]', form); const sync = () => { confirm.hidden = name.value === provider.name; if (confirm.hidden) $('[name="confirm_breaking_change"]', form).checked = false; }; name.addEventListener('input', sync); sync();
+      const hostInput = $('[name="base_url"]', form), hostWrap = $('[data-confirm-host-wrap]', form), hostOf = value => { try { return new URL(value).host.toLowerCase() + '|' + new URL(value).protocol; } catch { return value; } };
+      if (hostInput && hostWrap && !hostInput.disabled) { const syncHost = () => { hostWrap.hidden = hostOf(hostInput.value) === hostOf(provider.base_url || ''); if (hostWrap.hidden) $('[name="confirm_credential_reset"]', form).checked = false; }; hostInput.addEventListener('input', syncHost); syncHost(); }
     }
   }, onSubmit: async form => {
     const values = new FormData(form), rawName = String(values.get('name') || '').trim(), payload = { name: rawName || String(values.get('type') || '').trim(), base_url: values.get('base_url'), enabled: values.get('enabled') === 'on', protocols: values.getAll('protocol') };
-    if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
+    if (provider) { payload.confirm_breaking_change = values.get('confirm_breaking_change') === 'on'; payload.confirm_credential_reset = values.get('confirm_credential_reset') === 'on' || Boolean(values.get('credential')); await api(`/api/admin/providers/${provider.id}`, { method: 'PATCH', body: JSON.stringify(payload) }); if (values.get('credential')) await api(`/api/admin/providers/${provider.id}/credential`, { method: 'PUT', body: JSON.stringify({ credential: values.get('credential') }) }); flash('Provider configuration updated.'); }
     else { payload.type = values.get('type'); payload.credential = values.get('credential'); const result = await api('/api/admin/providers', { method: 'POST', body: JSON.stringify(payload) }); loadPlanSnapshot(true); if (['codex-subscription','claude-subscription','github-copilot'].includes(payload.type)) { $('#form-dialog').close(); await loadProviders(); connectProviderOAuth(result.id, onSaved); return; } flash(result.refresh_error || 'Provider saved and catalogue discovered.', result.refresh_error ? 'info' : 'success'); }
     await loadProviders(); await loadClients(); if (!provider) refreshWizardButton(false); if (onSaved) await onSaved();
   }});
 }
 async function refreshProvider(id) { const button = $('#drawer-refresh'); if (drawerProviderID === id) button.disabled = true; try { await api(`/api/admin/providers/${id}/refresh`, { method: 'POST' }); flash('Catalogue refresh completed.'); await loadProviders(); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); await loadProviders(); await loadClients(); } finally { button.disabled = false; } }
  async function connectProviderOAuth(id, onSaved = null) { const provider = state.providers.find(item => item.id === id); const type = provider?.type; try { const result = await api(`/api/admin/providers/${id}/oauth/start`, { method: 'POST' }); if (result.flow === 'device_code') { showDeviceDialog(id, result, type, onSaved); return; } window.open(result.authorization_url, 'tiller-oauth-auth', 'popup,width=520,height=720,resizable=yes,scrollbars=yes'); if (result.callback_mode === 'redirect') { showOAuthRedirectDialog(id, result.authorization_url, type, result.redirect_uri, onSaved); return; } showOAuthCallbackDialog(id, result.authorization_url, type, result.redirect_uri, onSaved); } catch (error) { flash(errorMessage(error), 'error'); } }
- function showDeviceDialog(id, result, type, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label.toUpperCase(), title: `Connect ${label}`, submit: 'Done', fields: `<p>1. Open the ${h(label)} sign-in page.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><a class="btn btn-secondary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Open sign-in page</a> <button type="button" class="btn btn-secondary" data-copy-device>Copy code</button></p><p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for authorization...</span></p>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const node = $('[data-oauth-status]', form); if (node) node.textContent = status.status === 'pending' ? 'Waiting for authorization...' : status.status === 'connected' ? label + ' connected.' : (status.error || 'Connection failed.'); if (status.status !== 'pending') { clearInterval(poll); $('[data-oauth-spinner]', form)?.remove(); if (status.status === 'connected') { $('#form-dialog').close(); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); } else { submit.hidden = false; } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
-function showOAuthRedirectDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. It returns to <code>${h(redirectURI)}</code> automatically. Leave this dialog open.</p><p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for sign-in...</span></p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><details><summary>Trouble signing in? Paste the redirected URL instead.</summary><label>Redirected URL <textarea name="redirected_url" rows="3" placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label><small>Copy the complete URL from the sign-in window's address bar and paste it above, then choose Connect.</small></details>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; const urlField = $('[name="redirected_url"]', form); const syncSubmit = () => { submit.hidden = !String(urlField.value || '').trim(); }; urlField.addEventListener('input', syncSubmit); syncSubmit(); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const node = $('[data-oauth-status]', form); if (status.status === 'connected') { if (node) node.textContent = label + ' connected.'; clearInterval(poll); $('[data-oauth-spinner]', form)?.remove(); $('#form-dialog').close(); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); return; } if (node && status.status && status.status !== 'pending') { node.textContent = status.error || 'Connection failed. Finish sign-in again, or paste the redirected URL.'; } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async form => { const value = String(new FormData(form).get('redirected_url') || '').trim(); if (!value) { throw new Error('Finish sign-in in the popup, or paste the complete redirected URL.'); } await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
- function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `${String(redirectURI).includes('/oauth/code/callback') ? '<p>1. Finish signing in in the small sign-in window.<br>2. The page that follows shows an authorization code. Copy it.<br>3. Paste the code below.</p>' : `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p>`}<p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for sign-in...</span></p><label>Authorization URL <textarea readonly rows="4">${h(authorizationURL)}</textarea></label><label>Authorization code or redirected URL <textarea name="redirected_url" rows="3" required placeholder="code#state"></textarea></label>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; form.addEventListener('input', () => { submit.hidden = !String($('[name="redirected_url"]', form).value || '').trim(); }); }, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
+ function showDeviceDialog(id, result, type, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label.toUpperCase(), title: `Connect ${label}`, submit: 'Done', fields: `<p>1. Open the ${h(label)} sign-in page.<br>2. Enter this code:<br><strong class="device-code">${h(result.user_code)}</strong><br>3. Approve access, then leave this dialog open.</p><p><button type="button" class="btn btn-secondary" data-copy-device>Copy</button>${result.verification_uri ? ` <a class="btn btn-primary" href="${h(result.verification_uri)}" target="_blank" rel="noopener">Login to ${h(signInLabel(type))}</a>` : ''}</p><p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for authorization...</span></p>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; $('[data-copy-device]', form).onclick = () => navigator.clipboard?.writeText(result.user_code); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const node = $('[data-oauth-status]', form); if (node) node.textContent = status.status === 'pending' ? 'Waiting for authorization...' : status.status === 'connected' ? label + ' connected.' : (status.error || 'Connection failed.'); if (status.status !== 'pending') { clearInterval(poll); $('[data-oauth-spinner]', form)?.remove(); if (status.status === 'connected') { $('#form-dialog').close(); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); } else { submit.hidden = false; } } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async () => { await loadProviders(); }}); }
+function showOAuthRedirectDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `<p>1. Finish signing in in the small sign-in window.<br>2. It returns to <code>${h(redirectURI)}</code> automatically. Leave this dialog open.</p><p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for sign-in...</span></p><label>Authorization URL <textarea autocomplete="off" readonly rows="4">${h(authorizationURL)}</textarea></label><details><summary>Trouble signing in? Paste the redirected URL instead.</summary><label>Redirected URL <textarea autocomplete="off" name="redirected_url" rows="3" placeholder="${h(redirectURI)}?code=...&state=..."></textarea></label><small>Copy the complete URL from the sign-in window's address bar and paste it above, then choose Connect.</small></details>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; const urlField = $('[name="redirected_url"]', form); const syncSubmit = () => { submit.hidden = !String(urlField.value || '').trim(); }; urlField.addEventListener('input', syncSubmit); syncSubmit(); const poll = setInterval(async () => { try { const status = await api(`/api/admin/providers/${id}/oauth/status`); const node = $('[data-oauth-status]', form); if (status.status === 'connected') { if (node) node.textContent = label + ' connected.'; clearInterval(poll); $('[data-oauth-spinner]', form)?.remove(); $('#form-dialog').close(); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); return; } if (node && status.status && status.status !== 'pending') { node.textContent = status.error || 'Connection failed. Finish sign-in again, or paste the redirected URL.'; } } catch { /* dialog remains available for transient polling errors */ } }, 2000); form.addEventListener('close', () => clearInterval(poll), { once: true }); }, onSubmit: async form => { const value = String(new FormData(form).get('redirected_url') || '').trim(); if (!value) { throw new Error('Finish sign-in in the popup, or paste the complete redirected URL.'); } await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
+ function showOAuthCallbackDialog(id, authorizationURL, type, redirectURI, onSaved = null) { const label = typeLabel(type); openEntity({ eyebrow: label, title: 'Finish sign-in', submit: 'Connect', fields: `${String(redirectURI).includes('/oauth/code/callback') ? '<p>1. Finish signing in in the small sign-in window.<br>2. The page that follows shows an authorization code. Copy it.<br>3. Paste the code below.</p>' : `<p>1. Finish signing in in the small sign-in window.<br>2. When it redirects to <code>${h(redirectURI)}</code>, copy the complete URL from your browser address bar.<br>3. Paste that URL below. The page may not load; that is expected.</p>`}<p class="oauth-status"><span class="oauth-wait-spin" data-oauth-spinner aria-hidden="true"></span><span data-oauth-status>Waiting for sign-in...</span></p><label>Authorization URL <textarea autocomplete="off" readonly rows="4">${h(authorizationURL)}</textarea></label><label>Authorization code or redirected URL <textarea autocomplete="off" name="redirected_url" rows="3" required placeholder="code#state"></textarea></label>`, onMount: form => { const submit = $('#dialog-submit'); submit.hidden = true; form.addEventListener('input', () => { submit.hidden = !String($('[name="redirected_url"]', form).value || '').trim(); }); }, onSubmit: async form => { const value = new FormData(form).get('redirected_url'); await api(`/api/admin/providers/${id}/oauth/callback`, { method: 'POST', body: JSON.stringify({ redirected_url: value }) }); flash(label + ' connected.'); await loadProviders(); if (onSaved) await onSaved(); }}); }
 async function deleteProvider(id) {
   const provider = state.providers.find(item => item.id === id);
   const doDelete = async () => {
@@ -1020,11 +1277,11 @@ function manualModelFields(preferredProviderID = '') {
   const providers = state.providers.filter(item => item.enabled);
   const protocols = ['', 'chat', 'responses', 'messages'];
   return `<label>Provider <select name="provider_id" required>${providers.map(provider => `<option value="${h(provider.id)}" ${provider.id === preferredProviderID ? 'selected' : ''}>${h(provider.name)}</option>`).join('')}</select></label>
-    <label>Provider-native model ID <input name="upstream_model_id" required maxlength="255" placeholder="model-name"><small>Enter the exact model ID accepted by the provider.</small></label>
+    <label>Provider-native model ID <input autocomplete="off" name="upstream_model_id" required maxlength="255" placeholder="model-name"><small>Enter the exact model ID accepted by the provider.</small></label>
     <div class="detect-row"><button type="button" class="btn btn-small btn-secondary" data-detect-model>Detect metadata</button><span class="meta-line">Fills from the provider, then models.dev. Blank fields are detected on save.</span></div>
-    <label>Display name <input name="display_name" placeholder="Optional"></label>
-    <label>Context length <input name="context_length" type="number" min="1" placeholder="Optional"></label>
-    <label>Max output tokens <input name="max_output_tokens" type="number" min="1" placeholder="Optional"></label>
+    <label>Display name <input autocomplete="off" name="display_name" placeholder="Optional"></label>
+    <label>Context length <input autocomplete="off" name="context_length" type="number" min="1" placeholder="Optional"></label>
+    <label>Max output tokens <input autocomplete="off" name="max_output_tokens" type="number" min="1" placeholder="Optional"></label>
     <label>Native protocol <select name="native_protocol">${protocols.map(protocol => `<option value="${protocol}">${protocol || 'Provider default'}</option>`).join('')}</select><small>Leave as provider default unless the upstream surface is known.</small></label>`;
 }
 function openManualModel(preferredProviderID = '') {
@@ -1637,7 +1894,7 @@ $('#refresh-capabilities').onclick = async () => {
 };
 $('#close-capabilities').onclick = $('#done-capabilities').onclick = () => $('#capabilities-dialog').close();
 $('#add-virtual-group').onclick = () => openVirtualGroup(); $('#add-virtual-model').onclick = () => openVirtualModel();
-function openVirtualGroup(group = null) { openEntity({ eyebrow: 'VIRTUAL NAMESPACE', title: group ? `Rename ${group.name}` : 'Create virtual group', fields: `<label>Group name <input name="name" value="${h(group?.name || '')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>Lowercase slug. Shares the provider namespace.</small></label>${group ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>I understand that every model ID in this group will change.</span></label>' : ''}`, submit: group ? 'Rename group' : 'Create group', onMount: group ? form => { const nameInput = $('[name="name"]', form), wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === group.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); } : null, onSubmit: async form => { const values = new FormData(form); if (group) await api(`/api/admin/virtual-groups/${group.id}`, { method: 'PATCH', body: JSON.stringify({ name: values.get('name'), confirm_breaking_change: values.get('confirm') === 'on' }) }); else await api('/api/admin/virtual-groups', { method: 'POST', body: JSON.stringify({ name: values.get('name') }) }); flash(group ? 'Virtual group renamed.' : 'Virtual group created.'); await loadVirtual(); } }); }
+function openVirtualGroup(group = null) { openEntity({ eyebrow: 'VIRTUAL NAMESPACE', title: group ? `Rename ${group.name}` : 'Create virtual group', fields: `<label>Group name <input autocomplete="off" name="name" value="${h(group?.name || '')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>Lowercase slug. Shares the provider namespace.</small></label>${group ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>I understand that every model ID in this group will change.</span></label>' : ''}`, submit: group ? 'Rename group' : 'Create group', onMount: group ? form => { const nameInput = $('[name="name"]', form), wrap = $('[data-confirm-wrap]', form); const sync = () => { wrap.hidden = nameInput.value === group.name; if (wrap.hidden) { const cb = $('[name="confirm"]', form); if (cb) cb.checked = false; } }; nameInput.addEventListener('input', sync); sync(); } : null, onSubmit: async form => { const values = new FormData(form); if (group) await api(`/api/admin/virtual-groups/${group.id}`, { method: 'PATCH', body: JSON.stringify({ name: values.get('name'), confirm_breaking_change: values.get('confirm') === 'on' }) }); else await api('/api/admin/virtual-groups', { method: 'POST', body: JSON.stringify({ name: values.get('name') }) }); flash(group ? 'Virtual group renamed.' : 'Virtual group created.'); await loadVirtual(); } }); }
 async function deleteVirtualGroup(id) { const group = state.groups.find(item => item.id === id); if (!await confirmAction({ title: `Delete group ${group.name}?`, copy: 'Only empty virtual groups can be deleted.', action: 'Delete group', typeMatch: group.name, typeLabel: 'group name' })) return; try { await api(`/api/admin/virtual-groups/${id}`, { method: 'DELETE' }); flash('Virtual group deleted.'); await loadVirtual(); } catch (error) { flash(errorMessage(error), 'error'); } }
 // Position a combobox list within the visual viewport, opening upward when there
 // isn't enough room below (e.g. the mobile virtual keyboard is open). The list is
@@ -1722,8 +1979,8 @@ function combobox({ input, hidden, options, placeholder, onSelect, onEnter, minW
 }
 function virtualModelFields(model) {
   const groupOptions = state.groups.map(group => `<option value="${h(group.id)}" ${model?.group_id === group.id ? 'selected' : ''}>${h(group.name)}</option>`).join('');
-  const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
-  return `<div class="row">${groupField}<label>Virtual model name <input name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Targets run from top to bottom. Turn a target off to skip it, or use the arrows to change its priority.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
+  const groupField = state.groups.length ? `<label>Virtual group <select name="group_id" ${model ? 'disabled' : ''} required>${groupOptions}</select></label>` : `<label>New virtual group <input autocomplete="off" name="group_name" value="${h(model?.group_name || 'virtual')}" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" placeholder="virtual" required><small>No group exists yet; this creates one.</small></label>`;
+  return `<div class="row">${groupField}<label>Virtual model name <input autocomplete="off" name="name" value="${h(model?.name || '')}" placeholder="coding" required><small>Stable client-facing identity.</small></label></div><label>Routing mode <select name="routing_mode"><option value="fixed" ${model?.routing_mode !== 'ordered_fallback' ? 'selected' : ''}>Fixed</option><option value="ordered_fallback" ${model?.routing_mode === 'ordered_fallback' ? 'selected' : ''}>Ordered fallback</option></select></label><small class="fallback-hint" data-fallback-hint hidden>Targets run from top to bottom. Turn a target off to skip it, or use the arrows to change its priority.</small><div class="routing-targets" data-fixed-target></div><div class="routing-targets" data-fallback-targets hidden></div><button class="btn btn-small btn-secondary target-add" type="button" data-target-add hidden>+ Add target</button>${model ? '<label class="confirm-check" data-confirm-wrap hidden><input name="confirm" type="checkbox"> <span>Confirm if changing the virtual model name; this is a breaking client-facing rename.</span></label>' : ''}`;
 }
 function openVirtualModel(model = null, onSaved = null) { if (!model && capReached('virtual_models')) { flash(capNotice('virtual_models'), 'error'); return; } if (!state.models.length) { flash('Discover at least one real model before creating a virtual route.', 'info'); return; } let availableOptions = []; const dialog = $('#form-dialog'); if (model) { dialog.classList.add('virtual-settings-dialog'); dialog.addEventListener('close', () => dialog.classList.remove('virtual-settings-dialog'), { once: true }); } openEntity({ eyebrow: model ? 'ROUTING POLICY' : 'NEW STABLE IDENTITY', title: model ? `Edit ${model.canonical_model_id}` : 'Create virtual model', fields: virtualModelFields(model), submit: model ? 'Apply' : 'Create route', onMount: form => {
   const fixed = $('[data-fixed-target]', form), fallback = $('[data-fallback-targets]', form), mode = $('[name="routing_mode"]', form), addButton = $('[data-target-add]', form), hint = $('[data-fallback-hint]', form);
@@ -1741,7 +1998,9 @@ async function deleteVirtualModel(id) { const model = state.virtualModels.find(i
 async function loadClients() {
   const token = ++state.loadToken;
   const search = $('#client-search').value, group = $('#client-group-filter').value;
-  const [result, models, virtual, providers, templates] = await Promise.all([api(`/api/admin/client-keys?limit=200&search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`), api('/api/admin/models?all=1'), api('/api/admin/virtual-models?limit=200'), api('/api/admin/providers?limit=200'), api('/api/admin/catalogue-templates')]);
+  // One request (one unit of the account's console budget) instead of five.
+  const view = await api(`/api/admin/clients-view?search=${encodeURIComponent(search || '')}&group=${encodeURIComponent(group || '')}`);
+  const result = view.client_keys, models = view.models, virtual = view.virtual_models, providers = view.providers, templates = view.templates;
   if (token !== state.loadToken) return;
   state.clients = result.data; state.models = models.data; state.virtualModels = virtual.data; state.providers = providers.data; state.templates = templates.data;
   renderClientGroupFilter();
@@ -1973,7 +2232,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   dialog.classList.add('client-form-dialog');
   dialog.addEventListener('close', () => dialog.classList.remove('client-form-dialog'), { once: true });
   const selectedType = client?.type || defaultType;
-  const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text" autocomplete="off"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
+  const singleFields = `<section data-single-fields ${client?.type === 'single' ? '' : 'hidden'}><label>Client-facing model name <input autocomplete="off" name="single_model_name" value="${h(client?.single_model_name || 'main')}" pattern="[A-Za-z0-9._~-](?:[A-Za-z0-9._~/-]{0,253}[A-Za-z0-9._~-])?" required><small>This is the only model identity exposed to the client.</small></label><label>Target <div class="combobox" data-single-target><input type="text" autocomplete="off"><input type="hidden" name="single_target" required></div><small>Search and select an available real or virtual model.</small></label>${client ? '<label class="confirm-check" data-single-confirm hidden><input name="confirm_model_name_change" type="checkbox"> <span>I understand changing this client-facing name may require client reconfiguration.</span></label>' : ''}</section>`;
   const typeField = `<label>Type <select name="type"><option value="catalogue" ${selectedType === 'catalogue' ? 'selected' : ''}>Catalogue — Choose which real and virtual models the client can access</option><option value="single" ${selectedType !== 'catalogue' ? 'selected' : ''}>Single — Expose one model to the client and route all requests to that single model</option></select></label>`;
   // A new Catalogue client picks its model access here: a saved template links
   // immediately, All models grants everything, and Custom opens the model
@@ -1986,15 +2245,16 @@ function openClient(client = null, onSaved = null, defaultType = null) {
   const catalogueAccessField = !client && !onSaved ? `<label data-catalogue-access-field hidden>Catalogue access <select name="catalogue_access"><option value="custom">Custom — choose models after creating</option><option value="all">All models — every model in the current catalogue</option>${templates.map(t => `<option value="template:${h(t.id)}">Template · ${h(t.name)}</option>`).join('')}</select><small>${templates.length ? 'Saved catalogues are managed from Catalogue templates.' : 'No saved catalogues yet — choose Custom or All models.'}</small></label>` : '';
   // Settings only links to the catalogue screen for an existing Catalogue client.
   const catalogueField = client?.type === 'catalogue' ? `<div class="settings-catalogue" data-catalogue-fields><button class="btn btn-small btn-secondary" type="button" data-open-catalogue>${h(catalogueLabel(client))} · Manage models</button></div>` : '';
-  // Detailed error bodies are opt-in per client. Hosted mode never captures
-  // them, so the control is hidden there.
+  // Detailed error bodies are opt-in per client, in every mode: the control is
+  // only meaningful once the account's detailed error logging is on, so it is
+  // shown wherever the account allows it (see the settings Logging card).
   const bodyLog = client?.log_error_bodies || 'inherit';
-  const bodyLogField = runtimeMode === 'hosted' ? '' : `<fieldset class="client-body-log"><legend>Log error bodies</legend><div class="client-body-log-options">${[['inherit', 'Account default'], ['always', 'On'], ['never', 'Off']].map(([value, label]) => `<label><input type="radio" name="log_error_bodies" value="${value}" ${bodyLog === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>`;
-  const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label>${bodyLogField}<label>Retention (days) <input name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
+  const bodyLogField = `<fieldset class="client-body-log"><legend>Log error bodies</legend><div class="client-body-log-options">${[['inherit', 'Account default'], ['always', 'On'], ['never', 'Off']].map(([value, label]) => `<label><input type="radio" name="log_error_bodies" value="${value}" ${bodyLog === value ? 'checked' : ''}><span>${label}</span></label>`).join('')}</div></fieldset>`;
+  const operationalFields = client ? `<label class="toggle-label"><input class="switch" name="logging_enabled" type="checkbox" ${client.logging_enabled ? 'checked' : ''}> Log requests for this client</label>${bodyLogField}<label>Retention (days) <input autocomplete="off" name="retention_days" type="number" min="1" step="1" value="${h(client.retention_days)}" required><small>Request logs older than this are pruned.</small></label>` : '';
   openEntity({
     eyebrow: client ? 'CLIENT SETTINGS' : 'ISSUE CREDENTIAL',
     title: client ? `Settings · ${client.name}` : 'Create client',
-    fields: `<div class="client-name-settings"><label>Client name <input name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Enabled</label>` : ''}</div><label>Group <input name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label><label>Description <textarea name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueAccessField}${catalogueField}${singleFields}${operationalFields}`,
+    fields: `<div class="client-name-settings"><label>Client name <input autocomplete="off" name="name" value="${h(client?.name || '')}" placeholder="Hermes Server 3" required></label>${client ? `<label class="toggle-label"><input class="switch" name="enabled" type="checkbox" ${client.enabled ? 'checked' : ''}> Enabled</label>` : ''}</div><label>Group <input autocomplete="off" name="group" value="${h(client?.group || 'default')}" maxlength="63" placeholder="default"><small>Optional group to organise client keys visually.</small></label><label>Description <textarea autocomplete="off" name="description" rows="3" placeholder="Workload, owner, or deployment note">${h(client?.description || '')}</textarea></label>${typeField}${catalogueAccessField}${catalogueField}${singleFields}${operationalFields}`,
     submit: client ? 'Save client' : 'Create & show key',
     onMount: form => {
       const typeSelect = $('[name="type"]', form), fields = $('[data-single-fields]', form), name = $('[name="single_model_name"]', form);
@@ -2018,7 +2278,7 @@ function openClient(client = null, onSaved = null, defaultType = null) {
       if (client) {
         payload.enabled = values.get('enabled') === 'on';
         payload.logging_enabled = values.get('logging_enabled') === 'on';
-        if (runtimeMode !== 'hosted') payload.log_error_bodies = values.get('log_error_bodies') || 'inherit';
+        payload.log_error_bodies = values.get('log_error_bodies') || 'inherit';
         payload.retention_days = Number(values.get('retention_days'));
         payload.type = values.get('type');
         if (payload.type === 'single') {
@@ -2167,7 +2427,7 @@ function openTemplateForm(template = null) {
   openEntity({
     eyebrow: 'CATALOGUE TEMPLATE',
     title: template ? `Rename · ${template.name}` : 'Create catalogue template',
-    fields: `<label>Template name <input name="name" value="${h(template?.name || '')}" maxlength="100" placeholder="Coding agents" required></label><label>Description <textarea name="description" rows="2" placeholder="Who uses it, or what it is for">${h(template?.description || '')}</textarea></label>${startField}`,
+    fields: `<label>Template name <input autocomplete="off" name="name" value="${h(template?.name || '')}" maxlength="100" placeholder="Coding agents" required></label><label>Description <textarea autocomplete="off" name="description" rows="2" placeholder="Who uses it, or what it is for">${h(template?.description || '')}</textarea></label>${startField}`,
     submit: template ? 'Save template' : 'Create template',
     onSubmit: async form => {
       const values = new FormData(form);
@@ -2730,45 +2990,19 @@ filterInput('#global-activity-search', value => { globalActivityFeed.setSearch(v
 
 let authHeaderDirty = false;
 let authHeaderClear = false;
-// HOSTED_NOTIFICATION_COOLDOWN mirrors the server's hosted clamp
-// (hostedNotificationCooldownSeconds in internal/server/notifications.go). The
-// server is authoritative — it re-clamps on read and on write — this only
-// keeps the form honest so a readonly-looking field never shows a stale value.
-const HOSTED_NOTIFICATION_COOLDOWN = 60;
-function applyHostedNotificationPolicy(hosted, nf) {
-  // Hosted accounts never perform an admin login, so the event does not apply.
-  $('#notifications-event-admin-login').hidden = hosted;
-  const cooldown = $('[name="notifications_cooldown_seconds"]', nf);
-  cooldown.readOnly = hosted;
-  if (hosted) cooldown.value = HOSTED_NOTIFICATION_COOLDOWN;
-  $('#notifications-cooldown-tip').textContent = hosted
-    ? 'Fixed at 60 seconds in hosted mode.'
-    : 'Suppress repeat notifications for the same event + model within this window. 0 disables.';
-}
 async function loadSettings() {
   $('#backup-card').hidden = runtimeMode === 'hosted';
-  const hosted = runtimeMode === 'hosted';
   const token = ++state.loadToken;
   const settings = await api('/api/admin/settings');
   if (token !== state.loadToken) return;
-  $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false; applyHostedNotificationPolicy(hosted, nf);
+  $('[name="default_logging_enabled"]', $('#settings-form')).checked = settings.default_logging_enabled; $('[name="log_error_bodies"]', $('#settings-form')).checked = settings.log_error_bodies; $('[name="default_retention_days"]', $('#settings-form')).value = settings.default_retention_days; $('[name="fallback_timeout_seconds"]', $('#fallback-form')).value = settings.fallback_timeout_seconds; $('[name="fallback_cooldown_seconds"]', $('#fallback-form')).value = settings.fallback_cooldown_seconds; const nf = $('#notifications-form'); $('[name="notifications_enabled"]', nf).checked = settings.notifications_enabled; $('[name="notifications_webhook_url"]', nf).value = settings.notifications_webhook_url || ''; $('[name="notifications_event_fallback"]', nf).checked = settings.notifications_event_fallback; $('[name="notifications_event_all_failed"]', nf).checked = settings.notifications_event_all_failed; $('[name="notifications_event_client_key_created"]', nf).checked = settings.notifications_event_client_key_created; $('[name="notifications_event_client_key_deleted"]', nf).checked = settings.notifications_event_client_key_deleted; $('[name="notifications_event_admin_login"]', nf).checked = settings.notifications_event_admin_login; const cooldownInput = $('[name="notifications_cooldown_seconds"]', nf); cooldownInput.value = settings.notifications_cooldown_seconds; const authInput = $('[name="notifications_auth_header"]', nf); authInput.value = ''; authInput.placeholder = settings.notifications_auth_header_set ? '•••••••• (set — leave blank to keep)' : 'Optional, e.g. Bearer <token>'; $('#notifications-auth-note').textContent = settings.notifications_auth_header_set ? 'An Authorization header is configured. Leave blank to keep it; type a new value to replace it.' : ''; $('#clear-notifications-auth').hidden = !settings.notifications_auth_header_set; authHeaderDirty = false; authHeaderClear = false;
 }
 async function saveSettings() { const settingsForm = $('#settings-form'), fallbackForm = $('#fallback-form'), notificationsForm = $('#notifications-form'); if (!settingsForm.reportValidity() || !fallbackForm.reportValidity() || !notificationsForm.reportValidity()) return; const settingsValues = new FormData(settingsForm), fallbackValues = new FormData(fallbackForm), notificationsValues = new FormData(notificationsForm); const buttons = [$('#save-settings-bottom')]; buttons.forEach(b => b.disabled = true); $('#settings-error').textContent = ''; $('#fallback-error').textContent = ''; $('#notifications-error').textContent = '';   const body = { default_logging_enabled: settingsValues.get('default_logging_enabled') === 'on', default_retention_days: Number(settingsValues.get('default_retention_days')), log_error_bodies: settingsValues.get('log_error_bodies') === 'on', fallback_timeout_seconds: Number(fallbackValues.get('fallback_timeout_seconds')), fallback_cooldown_seconds: Number(fallbackValues.get('fallback_cooldown_seconds')), notifications_enabled: notificationsValues.get('notifications_enabled') === 'on', notifications_webhook_url: notificationsValues.get('notifications_webhook_url') || '', notifications_event_fallback: notificationsValues.get('notifications_event_fallback') === 'on', notifications_event_all_failed: notificationsValues.get('notifications_event_all_failed') === 'on', notifications_event_client_key_created: notificationsValues.get('notifications_event_client_key_created') === 'on', notifications_event_client_key_deleted: notificationsValues.get('notifications_event_client_key_deleted') === 'on', notifications_cooldown_seconds: Number(notificationsValues.get('notifications_cooldown_seconds')) }; if (runtimeMode !== 'hosted') { body.notifications_event_admin_login = notificationsValues.get('notifications_event_admin_login') === 'on'; } if (authHeaderDirty) body.notifications_auth_header = notificationsValues.get('notifications_auth_header') || ''; if (authHeaderClear) body.notifications_auth_header = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; flash('Settings saved.'); await loadSettings(); } catch (error) { const message = errorMessage(error); $('#settings-error').textContent = message; $('#fallback-error').textContent = message; $('#notifications-error').textContent = message; } finally { buttons.forEach(b => b.disabled = false); } }
 $('#save-settings-bottom').addEventListener('click', saveSettings);
 $('[name="log_error_bodies"]', $('#settings-form')).addEventListener('change', async event => { try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ log_error_bodies: event.target.checked }) }); flash(event.target.checked ? 'Detailed error logging enabled.' : 'Detailed error logging disabled.'); } catch (error) { event.target.checked = !event.target.checked; $('#settings-error').textContent = errorMessage(error); } });
 $('[name="notifications_auth_header"]', $('#notifications-form')).addEventListener('input', () => { authHeaderDirty = true; authHeaderClear = false; });
 $('#clear-notifications-auth').addEventListener('click', async () => { const button = $('#clear-notifications-auth'); button.disabled = true; $('#notifications-error').textContent = ''; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify({ notifications_auth_header: '' }) }); authHeaderClear = false; authHeaderDirty = false; $('[name="notifications_auth_header"]', $('#notifications-form')).value = ''; $('#notifications-auth-note').textContent = 'Authorization header cleared.'; $('#clear-notifications-auth').hidden = true; } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
-$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); if (runtimeMode === 'hosted') lockTestNotificationButton(); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { if (runtimeMode !== 'hosted') button.disabled = false; } });
-// In hosted mode the server allows one test delivery per minute per account
-// (hostedTestNotificationCooldown in internal/server/notifications.go). The
-// button is held disabled for that window so the UI matches the server budget
-// instead of surfacing a 429 on a second click.
-function lockTestNotificationButton() {
-  const button = $('#send-test-notification');
-  button.disabled = true;
-  setTimeout(() => { button.disabled = false; }, HOSTED_NOTIFICATION_COOLDOWN * 1000);
-}
-
+$('#send-test-notification').addEventListener('click', async () => { const button = $('#send-test-notification'); button.disabled = true; $('#notifications-error').textContent = ''; try { const nf = $('#notifications-form'); const body = { notifications_webhook_url: $('[name="notifications_webhook_url"]', nf).value || '' }; if (authHeaderDirty) body.notifications_auth_header = $('[name="notifications_auth_header"]', nf).value || ''; if (authHeaderClear) body.notifications_auth_header = ''; await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(body) }); authHeaderDirty = false; authHeaderClear = false; await api('/api/admin/notifications/test', { method: 'POST' }); flash('Test notification delivered.'); } catch (error) { $('#notifications-error').textContent = errorMessage(error); } finally { button.disabled = false; } });
 // === MANAGEMENT API TOKENS (local mode) ===
 // API tokens address the same REST API the dashboard uses, with per-area
 // ceilings: read ⊂ write ⊂ delete. The grid decides which tiers are offered
@@ -2793,7 +3027,7 @@ let managementTokens = [];
 let managementScopeReader = null;
 
 function managementScopeGrid(scopes = {}) {
-  return `<div class="scope-grid" data-scope-grid>${MANAGEMENT_API_AREAS.map(area => `<div class="scope-row" data-scope-area="${area.key}"><span class="scope-area-label">${h(area.label)}</span><div class="scope-tiers">${MANAGEMENT_API_TIERS.map(tier => { const offered = MANAGEMENT_API_AREA_TIERS[area.key].includes(tier.level); return `<button type="button" class="scope-tier" data-scope-tier="${tier.level}" aria-pressed="false"${offered ? '' : ' disabled'}>${tier.key}</button>`; }).join('')}</div></div>`).join('')}</div>`;
+  return `<div class="scope-grid" data-scope-grid>${MANAGEMENT_API_AREAS.map(area => `<div class="scope-row" data-scope-area="${area.key}"><span class="scope-area-label">${h(area.label)}</span><div class="scope-tiers">${MANAGEMENT_API_TIERS.map(tier => { const offered = MANAGEMENT_API_AREA_TIERS[area.key].includes(tier.level) && !(runtimeMode === 'hosted' && tier.level > 2); return `<button type="button" class="scope-tier" data-scope-tier="${tier.level}" aria-pressed="false"${offered ? '' : ' disabled'}>${tier.key}</button>`; }).join('')}</div></div>`).join('')}</div>`;
 }
 
 // wireManagementScopeGrid paints the escalating toggles: clicking a tier sets
@@ -2830,11 +3064,13 @@ function managementExpiryFromForm(form) {
   return new Date(Date.now() + Number(choice) * 86400000).toISOString();
 }
 
-function managementExpiryField(expiresAt) {
+function managementExpiryField(expiresAt, isEdit = false) {
   const custom = !!expiresAt;
-  const options = [['', 'Never'], ['30', '30 days'], ['90', '90 days'], ['365', '365 days'], ['custom', 'Custom date…']]
-    .map(([value, label]) => `<option value="${value}"${(custom ? value === 'custom' : value === '') ? ' selected' : ''}>${label}</option>`).join('');
-  return `<label>Expiry <select name="token_expiry">${options}</select></label><label id="token-expiry-custom-row"${custom ? '' : ' hidden'}>Custom expiry <input type="date" name="token_expiry_custom" value="${h(custom ? expiresAt.slice(0, 10) : '')}"></label>`;
+  // Hosted defaults new tokens to 30 days; "Never" stays available.
+  const choices = [['', 'Never'], ['30', '30 days'], ['90', '90 days'], ['365', '365 days'], ['custom', 'Custom date…']];
+  const selected = custom ? 'custom' : (runtimeMode === 'hosted' && !isEdit ? '30' : '');
+  const options = choices.map(([value, label]) => `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('');
+  return `<label>Expiry <select name="token_expiry">${options}</select></label><label id="token-expiry-custom-row"${custom ? '' : ' hidden'}>Custom expiry <input autocomplete="off" type="date" name="token_expiry_custom" value="${h(custom ? expiresAt.slice(0, 10) : '')}"></label>`;
 }
 
 function wireManagementExpiry(form) {
@@ -2846,7 +3082,7 @@ function openCreateApiToken() {
     eyebrow: 'NEW API TOKEN',
     title: 'Create API token',
     submit: 'Create token',
-    fields: `<label>Name <input name="token_name" maxlength="100" required placeholder="e.g. Hermes agent"></label><label>Description <textarea name="token_description" rows="2" maxlength="500" placeholder="Optional notes about what uses this token"></textarea></label>${managementExpiryField('')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid({})}</fieldset>`,
+    fields: `<label>Name <input autocomplete="off" name="token_name" maxlength="100" required placeholder="e.g. Hermes agent"></label><label>Description <textarea autocomplete="off" name="token_description" rows="2" maxlength="500" placeholder="Optional notes about what uses this token"></textarea></label>${managementExpiryField('')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid({})}</fieldset>`,
     onMount: form => { managementScopeReader = wireManagementScopeGrid(form, {}); wireManagementExpiry(form); },
     onSubmit: async form => {
       const name = String(form.elements.token_name.value || '').trim();
@@ -2867,7 +3103,7 @@ function openEditApiToken(token) {
     eyebrow: 'EDIT API TOKEN',
     title: `Edit ${token.name}`,
     submit: 'Save token',
-    fields: `<label>Name <input name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="toggle-label"><input class="switch" type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '')}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
+    fields: `<label>Name <input autocomplete="off" name="token_name" maxlength="100" required value="${h(token.name)}"></label><label>Description <textarea autocomplete="off" name="token_description" rows="2" maxlength="500">${h(token.description)}</textarea></label><label class="toggle-label"><input class="switch" type="checkbox" name="token_enabled"${token.enabled ? ' checked' : ''}> Enabled</label>${managementExpiryField(token.expires_at || '', true)}<fieldset class="scope-fieldset"><legend>Access</legend><p class="scope-help">Click a level to grant it and everything below: read ⊂ write ⊂ delete.</p>${managementScopeGrid(token.scopes)}</fieldset>`,
     onMount: form => { managementScopeReader = wireManagementScopeGrid(form, token.scopes); wireManagementExpiry(form); },
     onSubmit: async form => {
       const name = String(form.elements.token_name.value || '').trim();
@@ -2881,7 +3117,11 @@ function openEditApiToken(token) {
 
 async function rotateApiToken(token) {
   if (!await confirmAction({ title: `Rotate ${token.name}?`, copy: 'The current token stops working immediately. Access and settings are preserved and the new token is shown once.', action: 'Rotate token' })) return;
-  try { const result = await api(`/api/admin/api-tokens/${token.id}/rotate`, { method: 'POST' }); showSecret(result.token, { baseUrl: `${location.origin}/api/admin`, baseUrlLabel: 'Management API' }); await loadManagementTokens(); } catch (error) { flash(errorMessage(error), 'error'); }
+  try {
+    const result = await api(`/api/admin/api-tokens/${token.id}/rotate`, { method: 'POST' });
+    showSecret(result.token, { baseUrl: `${location.origin}/api/admin`, baseUrlLabel: 'Management API' });
+    await loadManagementTokens();
+  } catch (error) { flash(errorMessage(error), 'error'); }
 }
 
 async function deleteApiToken(token) {
@@ -2912,7 +3152,7 @@ function renderManagementTokens() {
     const status = !row.enabled ? 'Disabled' : row.expired ? 'Expired' : 'Active';
     const expires = !row.expires_at ? 'Never' : row.expired ? `Expired ${date(row.expires_at)}` : date(row.expires_at);
     const actions = row.environment_managed ? '<span class="meta-line">Environment-managed</span>' : `<div class="actions"><button class="btn btn-small btn-secondary" data-api-token-edit="${h(row.id)}">Edit</button><button class="btn btn-small btn-secondary" data-api-token-rotate="${h(row.id)}">Rotate</button><button class="btn btn-small btn-danger" data-api-token-delete="${h(row.id)}">Delete</button></div>`;
-    return `<tr><td><strong>${h(row.name)}</strong>${row.description ? `<span class="meta-line">${h(row.description)}</span>` : ''}</td><td>${managementScopeBadges(row.scopes)}</td><td><code class="secret-fingerprint">mt-tr-••••••••.${h(row.fingerprint)}</code></td><td><span class="meta-line">${date(row.created_at)}</span></td><td><span class="meta-line">${expires}</span></td><td><span class="meta-line">${row.last_used_at ? date(row.last_used_at) : 'Never'}</span></td><td><span class="meta-line">${status}</span></td><td>${actions}</td></tr>`;
+    return `<tr><td><strong class="token-name">${h(row.name)}</strong>${row.description ? `<span class="meta-line token-description">${h(row.description)}</span>` : ''}</td><td><div class="scope-chips">${managementScopeBadges(row.scopes)}</div></td><td><code class="secret-fingerprint">mt-tr-••••••••.${h(row.fingerprint)}</code></td><td><span class="meta-line">${date(row.created_at)}</span></td><td><span class="meta-line">${expires}</span></td><td><span class="meta-line">${row.last_used_at ? date(row.last_used_at) : 'Never'}</span></td><td><span class="token-status${status === 'Active' ? '' : ' token-status-off'}">${status}</span></td><td>${actions}</td></tr>`;
   }).join('');
 }
 
@@ -2934,12 +3174,12 @@ $('#api-tokens-body').addEventListener('click', event => {
 const SETTINGS_TABS = ['account', 'routing', 'logging', 'notifications', 'data', 'api'];
 let settingsTab = 'routing';
 function showSettingsTab(tab) {
-  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable()) || (tab === 'api' && runtimeMode === 'hosted')) tab = 'routing';
+  if (!SETTINGS_TABS.includes(tab) || (tab === 'account' && !accountTabAvailable()) || false) tab = 'routing';
   settingsTab = tab;
   $$('.settings-tab').forEach(btn => btn.classList.toggle('active', btn.dataset.settingsTab === tab));
   $$('.settings-panel').forEach(panel => { const active = panel.dataset.settingsPanel === tab; panel.classList.toggle('active', active); panel.hidden = !active; });
   $('#settings-tab-account').hidden = !accountTabAvailable();
-  $('#settings-tab-api').hidden = runtimeMode === 'hosted';
+  $('#settings-tab-api').hidden = false;
   // Account and Management API actions save themselves; the shared save bar
   // only applies to the config cards.
   $('.settings-savebar').hidden = tab === 'account' || tab === 'api' || tab === 'data';
@@ -2956,7 +3196,7 @@ $$('.settings-tab').forEach(btn => btn.addEventListener('click', () => { showSet
 // runs once /api/runtime has been parsed (see initialise()).
 function applyAccountTabVisibility() {
   $('#settings-tab-account').hidden = !accountTabAvailable();
-  $('#settings-tab-api').hidden = runtimeMode === 'hosted';
+  $('#settings-tab-api').hidden = false;
 }
 
 async function loadAccount() {
@@ -2981,6 +3221,9 @@ async function loadAccount() {
     const googleOnlyDelete = noPassword && googleLinked;
     const hasPasskey = (profile.passkeys || []).length > 0 && !!profile.passkeys_enabled;
     const passkeyOnly = noPassword && hasPasskey && !googleLinked;
+    // A previous successful change collapses the password card to its
+    // confirmation; reopening the tab restores the editable form.
+    resetPasswordCard();
     $('#account-password-card').hidden = googleLinked;
     $('#account-password-auth-hint').textContent = '';
     $('#account-current-password-row').hidden = passkeyOnly;
@@ -3005,7 +3248,7 @@ async function loadAccount() {
     const sum = windowKey => windows.reduce((total, w) => total + ((w?.[windowKey]?.tokens ?? w?.[windowKey] ?? 0) || 0), 0);
     const costWindows = usage.client_cost ? Object.values(usage.client_cost) : [];
     const sumCost = windowKey => costWindows.reduce((total, w) => total + ((w?.[windowKey] ?? 0) || 0), 0);
-    const metric = (label, value, usd = false) => `<div class="metric${usd ? ' metric-usd' : ''}"><strong>${Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
+    const metric = (label, value, usd = false) => `<div class="metric${usd ? ' metric-usd' : ''}"><strong>${usd ? '$' + value : Number(value || 0).toLocaleString()}</strong><span>${label}</span></div>`;
     $('#account-usage').innerHTML = [
       metric('1h tokens', sum('1h')),
       metric('24h tokens', sum('24h')),
@@ -3075,6 +3318,13 @@ function renderProviderUsage() {
 // further upstream requests: the server enforces a 60-second per-provider floor.
 let quotaStatusTimer = null;
 let quotaLoading = false;
+// Consecutive follow-up reads started while a provider had no usable poll yet
+// (refreshing, not connected, or failed with no earlier success). A provider
+// added or just connected can start on an unavailable snapshot; this bounds a
+// short burst so the card recovers within seconds instead of waiting for the
+// 60 s page tick, without polling forever against a genuinely broken endpoint.
+let quotaFollowUps = 0;
+const quotaFollowUpLimit = 3;
 async function loadQuota() {
   if (quotaLoading || state.view !== 'providers' || document.hidden) return;
   quotaLoading = true;
@@ -3091,9 +3341,14 @@ async function loadQuota() {
     quotaLoading = false;
     clearTimeout(quotaStatusTimer);
     quotaStatusTimer = null;
-    if (state.view === 'providers' && !document.hidden &&
-        Object.values(state.providerQuotaStatus || {}).some(status => status.refreshing)) {
+    const statuses = Object.values(state.providerQuotaStatus || {});
+    const waiting = statuses.some(status => status.refreshing || status.not_connected ||
+      (status.failed && !status.last_success_at));
+    if (state.view === 'providers' && !document.hidden && waiting && quotaFollowUps < quotaFollowUpLimit) {
+      quotaFollowUps += 1;
       quotaStatusTimer = setTimeout(loadQuota, 2000);
+    } else {
+      if (!waiting) quotaFollowUps = 0;
     }
   }
 }
@@ -3289,16 +3544,38 @@ $('#close-wizard').addEventListener('click', () => $('#wizard-dialog').close());
 $('#open-wizard').addEventListener('click', openWizard);
 $('#legal-back').addEventListener('click', () => { history.replaceState(null, '', '/login'); showLogin(); });
 
+// resetPasswordCard restores the editable change-password form. After a
+// successful change the card collapses to a green confirmation plus a
+// sign-in button, so the fields and the submit action have nothing left to do.
+function resetPasswordCard() {
+  const form = $('#account-password-form'); if (!form) return;
+  ['account-current-password-row', 'account-new-password-row'].forEach(id => { const el = $('#' + id); if (el) el.hidden = false; });
+  const submit = form.querySelector('button[type="submit"]'); if (submit) submit.hidden = false;
+  $('#account-password-signin').hidden = true;
+  const note = $('#account-password-error'); if (note) { note.textContent = ''; note.style.color = ''; }
+}
 $('#account-password-form').addEventListener('submit', async event => {
-  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); $('#account-password-error').textContent = '';
+  event.preventDefault(); const formElement = event.currentTarget; const form = new FormData(formElement); const note = $('#account-password-error'); note.textContent = ''; note.style.color = '';
   try {
     // A passkey-only account confirms with an assertion instead of a password;
     // the one-use grant is spent by the password endpoint server-side.
     const currentPassword = $('#account-current-password-row').hidden ? '' : form.get('current_password');
     if ($('#account-current-password-row').hidden) await window.__confirmWithPasskey();
-    await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: form.get('new_password') }) }); formElement.reset(); flash('Password updated. Other sessions were signed out.');
+    await api('/api/auth/account/password', { method: 'POST', body: JSON.stringify({ current_password: currentPassword, new_password: form.get('new_password') }) });
+    formElement.reset();
+    $('#account-current-password-row').hidden = true;
+    $('#account-passkey-reauth-row').hidden = true;
+    $('#account-new-password-row').hidden = true;
+    const submit = formElement.querySelector('button[type="submit"]'); if (submit) submit.hidden = true;
+    $('#account-password-signin').hidden = false;
+    note.style.color = 'var(--green)'; note.textContent = 'Password changed. You can sign in now.';
   }
-  catch (error) { $('#account-password-error').textContent = errorMessage(error, 'Could not update the password.'); }
+  catch (error) { note.textContent = errorMessage(error, 'Could not update the password.'); }
+});
+// Signing in again is the point of a password change (other sessions were
+// signed out), so the confirmation's action button returns to the login card.
+$('#account-password-signin').addEventListener('click', async () => {
+  try { await api(runtimeMode === 'hosted' ? '/api/auth/session' : '/api/admin/session', { method: 'DELETE' }); } catch { /* already signed out */ } finally { showLogin(); }
 });
 $('#account-google-unlink').addEventListener('click', async () => {
   $('#account-google-error').textContent = '';
@@ -3325,8 +3602,22 @@ $('#account-email-form').addEventListener('submit', async event => {
   catch (error) { sessionStorage.removeItem('googleReauthAction'); sessionStorage.removeItem('googleReauthEmail'); note.textContent = errorMessage(error, 'Could not start the email change.'); }
 });
 $('#account-revoke-sessions').addEventListener('click', async () => {
-  const button = $('#account-revoke-sessions'); button.disabled = true; $('#account-sessions-error').textContent = '';
-  try { await api('/api/auth/account/sessions/revoke-all', { method: 'POST', body: '{}' }); showLogin(); }
+  const button = $('#account-revoke-sessions'); $('#account-sessions-error').textContent = '';
+  const revoke = async revokeTokens => { await api('/api/auth/account/sessions/revoke-all', { method: 'POST', body: JSON.stringify({ revoke_tokens: revokeTokens }) }); showLogin(); };
+  button.disabled = true;
+  try {
+    // Tokens keep working across sign-out unless the user opts to revoke them.
+    const tokens = (await api('/api/admin/api-tokens').catch(() => ({ data: [] }))).data || [];
+    if (!tokens.length) { await revoke(false); return; }
+    button.disabled = false;
+    openEntity({
+      eyebrow: 'SIGN OUT EVERYWHERE',
+      title: 'Sign out all sessions?',
+      submit: 'Sign out everywhere',
+      fields: `<p>This signs out every browser session, including this one. Your ${tokens.length} API token${tokens.length === 1 ? '' : 's'} keep working unless you revoke them too.</p><label class="toggle-label"><input class="switch" type="checkbox" name="revoke_tokens"> Also revoke all API tokens <span class="meta-line">Recommended if you suspect a token or device is compromised.</span></label>`,
+      onSubmit: async form => { await revoke(form.elements.revoke_tokens.checked); },
+    });
+  }
   catch (error) { $('#account-sessions-error').textContent = errorMessage(error, 'Could not sign out sessions.'); button.disabled = false; }
 });
 $('#account-export').addEventListener('click', async event => {
@@ -3495,7 +3786,7 @@ async function ensureActivityGraph() {
   }
 }
 // Activity has two panels: Live (graph + live requests) and History (the
-// searchable request log). The tab lives in the hash (#activity/history) so
+// request log). The tab lives in the hash (#activity/history) so
 // deep links and the back button work like the Settings tabs.
 let activityTab = 'live';
 function showActivityTab(tab) {
@@ -3913,31 +4204,52 @@ function setStoredAnalyticsConsent(choice) {
   try { localStorage.setItem(ANALYTICS_CONSENT_KEY, choice); } catch { /* storage unavailable */ }
 }
 
-function loadAnalyticsScript(options) {
+// Third-party analytics runs in an isolated document, never in this one.
+//
+// The vendor script is mounted inside /analytics-frame.html as a sandboxed
+// iframe. The sandbox carries no `allow-same-origin`, so the frame gets an
+// opaque origin: it cannot read this document, cannot read cookies, and its
+// requests to /api/... are cross-origin and uncredentialed. The analytics
+// origin is also absent from this document's Content-Security-Policy, so even
+// a compromised vendor script has no reachable credential or API surface here.
+// See analyticsFrameCSP in internal/server/analytics.go.
+const ANALYTICS_FRAME_PATH = '/analytics-frame.html';
+
+function mountAnalyticsFrame(options) {
   if (!options || !options.script_url) return;
-  if (document.querySelector('script[data-tiller-analytics]')) return;
-  const script = document.createElement('script');
-  script.src = options.script_url;
-  script.async = true;
-  script.defer = true;
-  script.dataset.tillerAnalytics = '1';
-  const siteID = String(options.site_id || '').trim();
-  if (options.provider === 'umami' && siteID) script.setAttribute('data-website-id', siteID);
-  else if (options.provider === 'plausible' && siteID) script.setAttribute('data-domain', siteID);
-  document.head.appendChild(script);
+  if (document.querySelector('iframe[data-tiller-analytics]')) return;
+  const params = new URLSearchParams();
+  params.set('src', options.script_url);
+  if (options.provider) params.set('provider', options.provider);
+  if (options.site_id) params.set('site', options.site_id);
+  const frame = document.createElement('iframe');
+  // allow-scripts only: no allow-same-origin, no allow-popups, no
+  // allow-top-navigation, no allow-forms, no allow-modals.
+  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.setAttribute('referrerpolicy', 'no-referrer');
+  frame.setAttribute('aria-hidden', 'true');
+  frame.setAttribute('tabindex', '-1');
+  frame.dataset.tillerAnalytics = '1';
+  frame.hidden = true;
+  frame.src = `${ANALYTICS_FRAME_PATH}?${params.toString()}`;
+  document.body.appendChild(frame);
 }
 
 async function setupAnalyticsConsent() {
+  // The operator console has no consent banner and, when served on its own
+  // origin/port, no customer analytics endpoint — probing it only produced a
+  // 404 in the browser console.
+  if (location.pathname.startsWith('/platform')) return;
   let options;
   try { options = await api('/api/analytics/options'); } catch { return; }
   if (!options || !options.enabled) return;
   const decision = storedAnalyticsConsent();
-  if (decision === 'accepted') { loadAnalyticsScript(options); return; }
+  if (decision === 'accepted') { mountAnalyticsFrame(options); return; }
   if (decision === 'declined') return;
   const banner = $('#analytics-consent');
   if (!banner) return;
   banner.hidden = false;
-  $('#analytics-accept').onclick = () => { setStoredAnalyticsConsent('accepted'); banner.hidden = true; loadAnalyticsScript(options); };
+  $('#analytics-accept').onclick = () => { setStoredAnalyticsConsent('accepted'); banner.hidden = true; mountAnalyticsFrame(options); };
   $('#analytics-decline').onclick = () => { setStoredAnalyticsConsent('declined'); banner.hidden = true; };
 }
 
@@ -3949,13 +4261,24 @@ async function setupAnalyticsConsent() {
     if (runtimeMode === 'hosted') {
       $('#login-identity-label').firstChild.textContent = 'Email ';
       $('#login-submit').textContent = 'Sign in';
-      try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      // The platform console has its own sign-in form and its own session
+      // endpoint; /api/auth/options is a customer-app route and 404s here.
+      // runtimeProbeDone is set below, after the probe resolves: showLogin()
+      // must not re-probe on top of boot.
+      if (!location.pathname.startsWith('/platform')) {
+        try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
+      } else {
+        // The console's challenge settings come from its own probe; the session
+        // probe below only reports them on the 401 path.
+        await probePlatformLogin();
+      }
       await setupAnalyticsConsent();
     } else {
       runtimeSetupRequired = Boolean(runtime.setup_required);
       runtimeWizardEnabled = Boolean(runtime.wizard_enabled);
       runtimePasskeysEnabled = Boolean(runtime.passkeys_enabled);
     }
+    runtimeProbeDone = true;
     applyAccountTabVisibility();
     // A first-run local instance shows the credential page instead of login;
     // skip the session probe entirely so a stale cookie cannot bounce to login.
@@ -3971,13 +4294,19 @@ async function setupAnalyticsConsent() {
         hideBoot();
         $('#login-shell').hidden = true;
         $('#platform-shell').hidden = false;
+        showPlatformExposure(session);
         await selectPlatformTab(platformTabFromHash(), { push: false });
-      } catch { showLogin(); }
+      } catch (error) {
+        showLogin();
+        // The console cannot read /api/auth/options, so the 401 probe is where
+        // it learns whether this deployment challenges console logins.
+        if (error.data?.turnstile_enabled) mountOptionalAuthCaptcha('platform-login-form', error.data);
+      }
       return;
     }
     if (runtimeMode === 'hosted' && path === '/verify-email' && token) {
       authView('verify-panel');
-      $('#verify-message').textContent = 'Choose a passphrase to finish verifying your email.';
+      $('#verify-message').textContent = 'Choose a password to finish verifying your email.';
       const verifyForm = $('#verify-form'); verifyForm.hidden = false;
       verifyForm.onsubmit = async event => {
         event.preventDefault(); $('#verify-error').textContent = '';
@@ -4084,6 +4413,22 @@ function googleAuthErrorMessage(code) {
     signup_unavailable: 'Signup is currently unavailable.',
   };
   return messages[code] || 'Google sign-in could not be completed. Try again.';
+}
+
+// platformErrorElementID maps a platform tab to the element that renders its
+// load error. The ids are not uniform (overview/audit/mail differ from the tab
+// name), and a wrong guess silently swallows the failure, so keep them here.
+function platformErrorElementID(tab) {
+  const map = {
+    overview: '#platform-overview-error',
+    users: '#platform-users-error',
+    plans: '#platform-plans-error',
+    mail: '#platform-mail-settings-error',
+    logs: '#platform-audit-error',
+    legal: '#platform-legal-error',
+    settings: '#platform-settings-error',
+  };
+  return map[tab] || '';
 }
 
 async function loadPlatformDashboard(tab = state.platformTab) {
@@ -4214,11 +4559,24 @@ function applyAnalyticsProviderVisibility(provider) {
 }
 
 async function loadPlatformMail() {
-  const settings = await api('/api/platform/settings');
+  const errorEl = $('#platform-mail-settings-error');
   const form = $('#platform-mail-settings-form');
+  // Load the settings first and populate the form before touching anything
+  // cosmetic. If this throws, the caller reports it and the form keeps its
+  // existing values; never hide the From fields on a failed read.
+  const settings = await api('/api/platform/settings');
+  if (errorEl) { errorEl.textContent = ''; errorEl.style.color = ''; }
+  const locked = $('#platform-mail-secrets-locked');
+  if (locked) {
+    locked.hidden = !settings.mail?.secrets_locked;
+    locked.textContent = settings.mail?.secrets_locked
+      ? 'Mail secrets could not be decrypted. Check TILLER_MASTER_KEY or TILLER_MASTER_KEY_FILE. Sender fields below are unaffected.'
+      : '';
+  }
   form.elements.mail_provider.value = settings.mail?.provider || '';
   applyMailProviderVisibility(settings.mail?.provider || '');
   form.elements.mail_from.value = settings.mail?.from || '';
+  form.elements.mail_from_name.value = settings.mail?.from_name || '';
   form.elements.mail_smtp_host.value = settings.mail?.smtp_host || '';
   form.elements.mail_smtp_username.value = settings.mail?.smtp_username || '';
   form.elements.mail_smtp_port.value = settings.mail?.smtp_port || '';
@@ -4227,7 +4585,22 @@ async function loadPlatformMail() {
   form.elements.mail_brevo_api_key.value = '';
   form.elements.mail_smtp_password.value = '';
   $('#platform-mail-status').textContent = settings.mail?.configured ? `Mail configured (${settings.mail.provider}); secret ${settings.mail.secret_configured ? 'stored' : 'missing'}.` : 'Mail is not configured.';
-  const queue = await api('/api/platform/mail/queue');
+  // The queue card is independent of the settings form: a queue failure must
+  // not abort the field population above or hide it behind an error.
+  let queue;
+  try {
+    queue = await api('/api/platform/mail/queue');
+  } catch (queueError) {
+    $('#platform-mail-queued').textContent = '—';
+    $('#platform-mail-sent').textContent = '—';
+    $('#platform-mail-dead').textContent = '—';
+    $('#platform-mail-log').innerHTML = '';
+    const queueEl = $('#platform-mail-error');
+    if (queueEl) queueEl.textContent = errorMessage(queueError, 'Could not load the mail queue.');
+    return;
+  }
+  const queueEl = $('#platform-mail-error');
+  if (queueEl) queueEl.textContent = '';
   $('#platform-mail-queued').textContent = queue.queued;
   $('#platform-mail-sent').textContent = queue.sent_recent;
   $('#platform-mail-dead').textContent = queue.dead_recent;
@@ -4291,7 +4664,7 @@ function openPlanEditor(plan) {
   const editing = Boolean(plan);
   const nameRules = editing ? '' : ' pattern="[a-z0-9][a-z0-9_-]{0,63}" title="Lowercase letters, digits, dashes or underscores" required';
   const nameField = `<label>Name<input name="name" type="text" value="${editing ? h(plan.name) : ''}" placeholder="e.g. pro"${nameRules} autocomplete="off" spellcheck="false"></label>`;
-  const caps = PLAN_FIELDS.map(([key, label]) => `<label>${h(label)}<input type="number" min="-1" name="${key}" value="${editing ? h(plan[key]) : '-1'}"></label>`).join('');
+  const caps = PLAN_FIELDS.map(([key, label]) => `<label>${h(label)}<input autocomplete="off" type="number" min="-1" name="${key}" value="${editing ? h(plan[key]) : '-1'}"></label>`).join('');
   openEntity({
     eyebrow: editing ? 'EDIT PLAN' : 'NEW PLAN',
     title: editing ? `Edit ${plan.name}` : 'Add plan',
@@ -4320,6 +4693,9 @@ async function loadPlatformPlans() {
     const plans = result.data || [];
     state.platformPlans = plans.map(plan => plan.name);
     state.platformPlanData = plans;
+    const select = $('#platform-signup-plan');
+    select.innerHTML = plans.map(plan => `<option value="${h(plan.name)}">${h(plan.name)}</option>`).join('');
+    select.value = result.signup_default_plan;
     list.innerHTML = plans.map(plan => `<div class="platform-list-item platform-plan-row" data-plan="${h(plan.name)}" role="button" tabindex="0"><div><strong>${h(plan.name)}</strong><small>${planSummary(plan)}</small></div><div class="platform-list-actions"><button class="btn btn-small btn-secondary" type="button" data-plan-edit="${h(plan.name)}">Edit</button><button class="btn btn-small btn-danger" type="button" data-plan-delete="${h(plan.name)}">Delete</button></div></div>`).join('') || '<p class="meta-line">No plans.</p>';
     $('#platform-plans-error').textContent = '';
   } catch (error) {
@@ -4332,7 +4708,7 @@ async function loadPlatformLegal() {
   const list = $('#platform-legal-list'); if (!list) return;
   try {
     const result = await api('/api/platform/legal');
-    list.innerHTML = (result.data || []).map(doc => `<form class="platform-legal-form" data-slug="${h(doc.slug)}"><strong>${h(doc.title)}</strong><label>Title<input type="text" name="title" value="${h(doc.title)}"></label><label>Body<textarea name="body" rows="8">${h(doc.body)}</textarea></label><button class="btn btn-small btn-secondary" type="submit">Publish</button></form>`).join('') || '<p class="meta-line">No documents.</p>';
+    list.innerHTML = (result.data || []).map(doc => `<form class="platform-legal-form" data-slug="${h(doc.slug)}"><strong>${h(doc.title)}</strong><label>Title<input autocomplete="off" type="text" name="title" value="${h(doc.title)}"></label><label>Body<textarea autocomplete="off" name="body" rows="8">${h(doc.body)}</textarea></label><button class="btn btn-small btn-secondary" type="submit">Publish</button></form>`).join('') || '<p class="meta-line">No documents.</p>';
     $('#platform-legal-error').textContent = '';
   } catch (error) {
     $('#platform-legal-error').textContent = errorMessage(error, 'Could not load legal documents.');
@@ -4341,6 +4717,14 @@ async function loadPlatformLegal() {
 
 function planForRow(el) { return state.platformPlanData.find(plan => plan.name === el.dataset.plan) || null; }
 $('#platform-plan-add').addEventListener('click', () => openPlanEditor(null));
+$('#platform-signup-plan-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    await api('/api/platform/signup-plan', { method: 'PUT', body: JSON.stringify({ plan: $('#platform-signup-plan').value }) });
+    flash('Default signup plan saved.');
+    await loadPlatformPlans();
+  } catch (error) { $('#platform-plans-error').textContent = errorMessage(error, 'Could not save the default plan.'); }
+});
 $('#platform-plans-list').addEventListener('click', async event => {
   const edit = event.target.closest('[data-plan-edit]');
   const del = event.target.closest('[data-plan-delete]');
@@ -4360,12 +4744,27 @@ $('#platform-plans-list').addEventListener('keydown', event => {
 $('#platform-legal-list').addEventListener('submit', async event => {
   const form = event.target.closest('.platform-legal-form'); if (!form) return;
   event.preventDefault(); const data = new FormData(form);
-  try { await api(`/api/platform/legal/${encodeURIComponent(form.dataset.slug)}`, { method: 'PUT', body: JSON.stringify({ title: data.get('title'), body: data.get('body') }) }); $('#platform-legal-error').textContent = 'Published.'; $('#platform-legal-error').style.color = 'var(--green)'; }
+  try { await api(`/api/platform/legal/${encodeURIComponent(form.dataset.slug)}`, { method: 'PUT', body: JSON.stringify({ title: data.get('title'), body: data.get('body') }) }); flash('Legal document published.'); }
   catch (error) { $('#platform-legal-error').style.color = ''; $('#platform-legal-error').textContent = errorMessage(error, 'Could not publish the document.'); }
 });
+// applyMailProviderVisibility shows the fields that belong to the chosen mail
+// provider and disables the rest.
+//
+// Hidden is not enough. A merely hidden control still takes part in HTML5
+// constraint validation, so the SMTP port (type=number, min=1) kept the whole
+// form invalid while its branch was inactive: the browser refused to submit,
+// logged "An invalid form control with name='mail_smtp_port' is not
+// focusable", and the submit handler never ran — so nothing saved and no
+// message appeared. Disabling an inactive control removes it from both
+// validation and FormData, which is also the correct payload: an inactive
+// branch must not submit stale values.
 function applyMailProviderVisibility(provider) {
   document.querySelectorAll('#platform-mail-settings-form [data-mail-when]').forEach(el => {
-    el.hidden = provider === '' || (el.dataset.mailWhen !== 'any' && el.dataset.mailWhen !== provider);
+    const active = provider !== '' && (el.dataset.mailWhen === 'any' || el.dataset.mailWhen === provider);
+    el.hidden = !active;
+    el.querySelectorAll('input, select, textarea').forEach(control => {
+      control.disabled = !active;
+    });
   });
 }
 document.querySelector('#platform-mail-settings-form [name="mail_provider"]').addEventListener('change', event => applyMailProviderVisibility(event.target.value));
@@ -4389,12 +4788,13 @@ document.querySelector('#platform-settings-form').addEventListener('submit', asy
   if (turnstileSecret) payload.turnstile_secret = turnstileSecret;
   try {
     await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    $('#platform-settings-error').textContent = 'Saved.';
-    $('#platform-settings-error').style.color = 'var(--green)';
+    flash('Platform settings saved.');
     await loadPlatformSettings();
   } catch (error) {
+    const message = errorMessage(error, 'Could not save platform settings.');
     $('#platform-settings-error').style.color = '';
-    $('#platform-settings-error').textContent = errorMessage(error, 'Could not save platform settings.');
+    $('#platform-settings-error').textContent = message;
+    flash(message, 'error');
   }
 });
 $('#platform-mail-settings-form').addEventListener('submit', async event => {
@@ -4403,6 +4803,7 @@ $('#platform-mail-settings-form').addEventListener('submit', async event => {
   const payload = {
     mail_provider: form.get('mail_provider'),
     mail_from: form.get('mail_from'),
+    mail_from_name: form.get('mail_from_name'),
     mail_smtp_host: form.get('mail_smtp_host'),
     mail_smtp_port: Number(form.get('mail_smtp_port')) || 0,
     mail_smtp_mode: form.get('mail_smtp_mode'),
@@ -4414,12 +4815,13 @@ $('#platform-mail-settings-form').addEventListener('submit', async event => {
   }
   try {
     await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    $('#platform-mail-settings-error').textContent = 'Saved.';
-    $('#platform-mail-settings-error').style.color = 'var(--green)';
+    flash('Mail settings saved.');
     await loadPlatformMail();
   } catch (error) {
+    const message = errorMessage(error, 'Could not save mail settings.');
     $('#platform-mail-settings-error').style.color = '';
-    $('#platform-mail-settings-error').textContent = errorMessage(error, 'Could not save mail settings.');
+    $('#platform-mail-settings-error').textContent = message;
+    flash(message, 'error');
   }
 });
 $('#platform-analytics-form').addEventListener('change', event => {
@@ -4436,12 +4838,13 @@ $('#platform-analytics-form').addEventListener('submit', async event => {
   };
   try {
     await api('/api/platform/settings', { method: 'PUT', body: JSON.stringify(payload) });
-    $('#platform-analytics-error').textContent = 'Saved.';
-    $('#platform-analytics-error').style.color = 'var(--green)';
+    flash('Analytics settings saved.');
     await loadPlatformAnalytics();
   } catch (error) {
+    const message = errorMessage(error, 'Could not save analytics settings.');
     $('#platform-analytics-error').style.color = '';
-    $('#platform-analytics-error').textContent = errorMessage(error, 'Could not save analytics settings.');
+    $('#platform-analytics-error').textContent = message;
+    flash(message, 'error');
   }
 });
 $('#platform-account-search').addEventListener('input', event => {
@@ -4623,8 +5026,17 @@ $('#platform-users-list').addEventListener('click', async event => {
     }
     return true;
   };
+  // Reauth with the current password reads the field and clears it straight
+  // away: browsers and password managers otherwise autofill this box as a
+  // sign-in form and leave the password sitting in the page.
+  const takePasskeyReauthPassword = () => {
+    const input = $('#account-passkeys-password');
+    const value = input ? input.value : '';
+    if (input) input.value = '';
+    return value;
+  };
   const passkeyReauth = async () => {
-    if (lastAccountProfile?.password_enabled) return { current_password: $('#account-passkeys-password').value };
+    if (lastAccountProfile?.password_enabled) return { current_password: takePasskeyReauthPassword() };
     if (lastAccountProfile?.google_linked && googleReauthValid()) {
       // Presentation only: the backend enforces the one-use, session-bound grant.
       googleReauthConfirmedAt = 0;
@@ -4640,6 +5052,9 @@ $('#platform-users-list').addEventListener('click', async event => {
     if (!enabled) { lastAccountProfile = null; return; }
     lastAccountProfile = profile;
     $('#account-passkeys-password-row').hidden = !profile.password_enabled;
+    // Never carry a typed password across a re-render.
+    const pwInput = $('#account-passkeys-password');
+    if (pwInput) pwInput.value = '';
     // A browser without WebAuthn cannot run any ceremony: hide Add and the
     // re-enable toggle rather than leaving controls that would fail, and say
     // why. Existing passkeys can still be listed and removed (plain HTTP).
@@ -4653,8 +5068,8 @@ $('#platform-users-list').addEventListener('click', async event => {
     const passkeys = profile.passkeys || [];
     const list = $('#account-passkeys-list');
     list.innerHTML = passkeys.length
-      ? passkeys.map(p => `<div class="setting-row" data-passkey="${h(p.id)}"><span class="setting-label">${h(p.name)}<small class="meta-line">Added ${h(fmtPasskeyDate(p.created_at))} · Last used ${h(fmtPasskeyDate(p.last_used_at))}</small></span><div class="setting-control"><button class="btn btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button> <button class="btn btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
-      : '<p class="meta-line">No passkeys yet.</p>';
+      ? passkeys.map(p => `<div class="passkey-row" data-passkey="${h(p.id)}"><div class="passkey-row-main"><span class="passkey-row-name">${h(p.name)}</span><span class="passkey-row-meta">Added ${h(fmtPasskeyDate(p.created_at))} · Last used ${h(fmtPasskeyDate(p.last_used_at))}</span></div><div class="passkey-row-actions"><button class="btn btn-small btn-secondary" type="button" data-passkey-rename="${h(p.id)}" data-passkey-name="${h(p.name)}">Rename</button><button class="btn btn-small btn-secondary" type="button" data-passkey-remove="${h(p.id)}">Remove</button></div></div>`).join('')
+      : '<p class="passkey-empty">No passkeys yet.</p>';
     list.querySelectorAll('[data-passkey-rename]').forEach(btn => btn.addEventListener('click', async () => {
       const name = prompt('Name this passkey', btn.dataset.passkeyName || 'Passkey');
       if (name == null) return;

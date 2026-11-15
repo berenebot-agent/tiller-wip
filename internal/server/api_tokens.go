@@ -13,10 +13,12 @@ import (
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
 	"github.com/tiller-router/tiller-router/internal/id"
+	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
-// Management API tokens (local mode). A token authenticates the admin REST
+// Management API tokens (local and hosted; see api_tokens_hosted.go for the
+// hosted policy). A token authenticates the admin REST
 // surface with `Authorization: Bearer mt-tr-…` instead of the browser session.
 // Token lifecycle management itself is cookie-only: a token can never list,
 // create, re-scope, rotate, or revoke tokens — it may only introspect itself.
@@ -196,8 +198,8 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		Scopes      map[string]int `json:"scopes"`
 		ExpiresAt   string         `json:"expires_at"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	input.Name = strings.TrimSpace(input.Name)
@@ -222,6 +224,23 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		adminError(w, 400, "invalid_expiry", err.Error())
 		return
 	}
+	if s.hostedTokens() {
+		if msg := hostedTokenScopeError(input.Scopes); msg != "" {
+			adminError(w, 400, "invalid_scopes", msg)
+			return
+		}
+		// Cheap pre-check so a refused request does not generate key material;
+		// the insert enforces the same cap atomically.
+		count, err := s.scope(r).CountManagementTokens(r.Context())
+		if err != nil {
+			adminError(w, 500, "database_error", "Could not create API token.")
+			return
+		}
+		if count >= hostedMaxManagementTokens {
+			writeManagementTokenLimit(w)
+			return
+		}
+	}
 	generated, err := auth.GenerateManagementTokenWithHasher(s.secretHasher)
 	if err != nil {
 		adminError(w, 500, "internal_error", "Could not create API token.")
@@ -241,8 +260,13 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		Fingerprint: generated.Fingerprint,
 		Scopes:      scopesJSON,
 		ExpiresAt:   expiresAt,
+		Limit:       s.managementTokenLimit(),
 	})
 	if err != nil {
+		if errors.Is(err, store.ErrManagementTokenLimit) {
+			writeManagementTokenLimit(w)
+			return
+		}
 		if database.IsConstraint(err) {
 			adminError(w, 409, "name_conflict", "An API token with that name already exists.")
 			return
@@ -256,6 +280,11 @@ func (s *Server) createManagementToken(w http.ResponseWriter, r *http.Request) {
 		TargetID:   tokenID,
 		Metadata:   map[string]string{"name": input.Name},
 	})
+	if s.hostedTokens() {
+		if user, ok := r.Context().Value(userKey).(identity.User); ok {
+			s.notifyManagementTokenCreated(r.Context(), user, input.Name)
+		}
+	}
 	// The plaintext token is never recorded anywhere; this response is the
 	// only place it exists outside the operator's clipboard.
 	writeJSON(w, 201, map[string]any{
@@ -280,8 +309,8 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 		Enabled     *bool           `json:"enabled"`
 		ExpiresAt   *string         `json:"expires_at"`
 	}
-	if err := decodeJSON(w, r, &input); err != nil {
-		adminError(w, 400, "invalid_request", err.Error())
+	if err := s.decodeJSON(w, r, &input); err != nil {
+		respondDecodeError(w, err)
 		return
 	}
 	tokenID := r.PathValue("id")
@@ -338,6 +367,14 @@ func (s *Server) updateManagementToken(w http.ResponseWriter, r *http.Request) {
 		}
 		update.ExpiresAt = expiresAt
 	}
+	if s.hostedTokens() {
+		if input.Scopes != nil {
+			if msg := hostedTokenScopeError(*input.Scopes); msg != "" {
+				adminError(w, 400, "invalid_scopes", msg)
+				return
+			}
+		}
+	}
 	// The mutation and cache invalidation publish together so a token whose
 	// scopes were just narrowed cannot authorize from a stale cache entry.
 	err = s.tokens.InvalidateWith(tokenID, func() error {
@@ -373,6 +410,12 @@ func (s *Server) rotateManagementToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokenID := r.PathValue("id")
+	if s.hostedTokens() {
+		if _, err := s.scope(r).GetManagementToken(r.Context(), tokenID); errors.Is(err, store.ErrManagementTokenNotFound) {
+			adminError(w, 404, "not_found", "API token not found.")
+			return
+		}
+	}
 	generated, err := auth.GenerateManagementTokenWithHasher(s.secretHasher)
 	if err != nil {
 		adminError(w, 500, "internal_error", "Could not rotate API token.")
@@ -442,13 +485,17 @@ func (s *Server) deleteManagementToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revokeAllManagementTokens(w http.ResponseWriter, r *http.Request) {
+	accountID := s.scope(r).AccountID()
 	count, err := s.scope(r).RevokeAllManagementTokens(r.Context())
 	if err != nil {
 		adminError(w, 500, "database_error", "Could not revoke API tokens.")
 		return
 	}
-	s.tokens.InvalidateAll()
-	s.recordResourceAudit(r, s.scope(r).AccountID(), store.AuditEvent{
+	// Tenant-scoped: only this account's cached tokens are dropped. A global
+	// cache wipe here would evict every other tenant's verified tokens and could
+	// fail their concurrent verifications closed.
+	s.tokens.InvalidateAccount(accountID)
+	s.recordResourceAudit(r, accountID, store.AuditEvent{
 		Event:      "api_token.revoked_all",
 		TargetType: "api_token",
 		Metadata:   map[string]string{"count": strconv.FormatInt(count, 10)},

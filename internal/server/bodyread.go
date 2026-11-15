@@ -34,6 +34,20 @@ const (
 	// the inference gate, so an anonymous client can never consume the
 	// capacity inference depends on.
 	maxConcurrentPreAuthBodyReads = 8
+	// maxConcurrentAuthBodyReads bounds UNAUTHENTICATED auth-surface body reads
+	// (login, signup, password reset, platform login) in their own pool. It is
+	// sized above a realistic login burst because each of those bodies is
+	// capped at authRequestMaxBytes (8 KiB); its job is to keep anonymous
+	// bodies off the inference gate while still bounding how many may be
+	// mid-read at once. Authenticated auth-surface requests charge their
+	// account's share of the inference gate instead.
+	maxConcurrentAuthBodyReads = 32
+	// maxConcurrentPlatformBodyReads bounds body reads on the dedicated platform
+	// (operator) listener. It is its own pool because the operator is
+	// authenticated without a tenant account: without a separate bucket an
+	// anonymous flood on the public listener would refuse the console's writes,
+	// and a console write must never depend on tenant-facing traffic.
+	maxConcurrentPlatformBodyReads = 8
 )
 
 // bodyReadDeadline is an absolute deadline for reading one request body,
@@ -51,6 +65,10 @@ var preAuthBodyReadDeadline = 15 * time.Second
 // within the read deadline, so callers can distinguish a stalled upload from
 // malformed content.
 var errBodyReadTimeout = errors.New("request body was not received in time")
+
+// errBodyReadBusy reports that the admission gate refused a body read because
+// too many are already in progress. It is a capacity answer, not a bad request.
+var errBodyReadBusy = errors.New("too many request bodies in progress")
 
 // bodyReadGate bounds concurrent request-body reads, in aggregate and
 // optionally per key (account). A nil gate (constructed only in tests that
@@ -160,6 +178,11 @@ func isTimeoutError(err error) bool {
 func respondDecodeError(w http.ResponseWriter, err error) {
 	if errors.Is(err, errBodyReadTimeout) {
 		adminError(w, http.StatusRequestTimeout, "request_timeout", "The request body was not received in time.")
+		return
+	}
+	if errors.Is(err, errBodyReadBusy) {
+		w.Header().Set("Retry-After", "1")
+		adminError(w, http.StatusServiceUnavailable, "body_read_busy", "Too many requests are being received at once. Try again.")
 		return
 	}
 	adminError(w, http.StatusBadRequest, "invalid_request", err.Error())

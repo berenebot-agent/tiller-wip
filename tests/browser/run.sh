@@ -45,7 +45,7 @@ auto_workers() {
 }
 
 workers=${TILLER_BROWSER_WORKERS:-${PLAYWRIGHT_WORKERS:-$(auto_workers)}}
-specs=(admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js templates.spec.js)
+specs=(admin.spec.js live.spec.js capabilities.spec.js oauth-redirect.spec.js analytics.spec.js provider-usage.spec.js google-link.spec.js passkey.spec.js api-tokens.spec.js templates.spec.js turnstile-gate.spec.js)
 if [ -n "${TILLER_BROWSER_SPECS:-}" ]; then
     read -r -a specs <<< "$TILLER_BROWSER_SPECS"
     workers=1
@@ -195,6 +195,7 @@ for i in $(seq 0 $((workers - 1))); do
         -e TILLER_USERNAME=admin \
         -e TILLER_PASSWORD="$password" \
         -e TILLER_LOG_LEVEL=warn \
+        -e TILLER_CONSOLE_REQUESTS_PER_MINUTE=100000 \
         "$ROUTER_IMAGE" >/dev/null
 done
 
@@ -215,6 +216,7 @@ docker run --rm -d --name "$run_id-router-activity" --network host \
     -e TILLER_USERNAME=admin \
     -e TILLER_PASSWORD="$password" \
     -e TILLER_LOG_LEVEL=warn \
+    -e TILLER_CONSOLE_REQUESTS_PER_MINUTE=100000 \
     "$ROUTER_IMAGE" >/dev/null
 
 # First-run lane: a router started with NO admin credentials, exactly like a

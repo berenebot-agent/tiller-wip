@@ -36,7 +36,7 @@ func hostedAccountServer(t *testing.T) (*Server, *testAPI, string) {
 	app, err := New(config.Config{
 		Mode: config.ModeHosted, TillerUser: "owner@example.com", TillerUserPassword: "correct horse battery staple",
 		TillerPlatformAdminUser: "platform-admin", TillerPlatformAdminPassword: "platform-secret",
-		PublicURL: "https://tiller.example.com", TrustedProxy: netip.MustParsePrefix("127.0.0.1/32"), DataDir: t.TempDir(),
+		PublicURL: "https://tiller.example.com", TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.1/32")}, DataDir: t.TempDir(),
 	}, db, slog.New(slog.NewTextHandler(io.Discard, nil)), withSecretHasher(fastsecret.Hasher{}))
 	if err != nil {
 		t.Fatal(err)
@@ -119,6 +119,35 @@ func TestHostedEmailChangeFlow(t *testing.T) {
 	}
 	if _, confirm, _ := api.request("POST", "/api/auth/login", map[string]any{"email": "new@example.com", "password": "correct horse battery staple"}); confirm == nil {
 		t.Fatal("new email could not log in after confirmation")
+	}
+}
+
+func TestHostedEmailChangeRequestsAreLimitedPerAccount(t *testing.T) {
+	t.Parallel()
+	_, api, _ := hostedAccountServer(t)
+	for i := 0; i < 3; i++ {
+		status, payload, _ := api.request("POST", "/api/auth/account/email", map[string]any{
+			"new_email": fmt.Sprintf("new-%d@example.com", i),
+			"password":  "correct horse battery staple",
+		})
+		if status != http.StatusAccepted {
+			t.Fatalf("email change request %d: %d %v", i+1, status, payload)
+		}
+	}
+	status, payload, _ := api.request("POST", "/api/auth/account/email", map[string]any{
+		"new_email": "new-fourth@example.com",
+		"password":  "correct horse battery staple",
+	})
+	errorPayload, _ := payload["error"].(map[string]any)
+	if status != http.StatusTooManyRequests || errorPayload["code"] != "rate_limited" {
+		t.Fatalf("fourth email change request = %d %v, want 429 rate_limited", status, payload)
+	}
+	var queued int
+	if err := api.server.db.SQL.QueryRow(`SELECT count(*) FROM mail_outbox WHERE type IN ('email_change_confirm','email_change_warning')`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 6 {
+		t.Fatalf("email change messages queued = %d, want 6", queued)
 	}
 }
 
