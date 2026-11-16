@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 func TestBcryptHasherRoundTrip(t *testing.T) {
@@ -76,7 +77,7 @@ func TestVerifyEncodedAcceptsLegacyArgon2(t *testing.T) {
 // upgraded to bcrypt.
 func TestClientAuthenticatorLazyRehash(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestClientAuthenticatorLazyRehash(t *testing.T) {
 // upgrades the stored hash.
 func TestSessionStoreLegacyTokenMigration(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

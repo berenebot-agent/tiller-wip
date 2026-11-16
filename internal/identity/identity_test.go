@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
 func newTestStore(t *testing.T) (*Store, *sql.DB) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestBootstrapHostedStoreMigratesWhenInvokedDirectly(t *testing.T) {
 // which is why the server cannot rely on the Fresh outcome to detect it.
 func TestBootstrapHostedFreshHostedDatabaseCreatesNoCustomer(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), database.WithHostedMode(true))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"), database.WithHostedMode(true))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +331,7 @@ func TestBootstrapHostedFreshHostedDatabaseCreatesNoCustomer(t *testing.T) {
 // migrates, and only once.
 func TestBootstrapHostedExistingDatabaseMigratesOnce(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +481,7 @@ func (h countingHasher) Verify(secret, encoded string) bool {
 // reveal which addresses have accounts.
 func TestAuthenticatePasswordUnknownEmailCostsOneVerification(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

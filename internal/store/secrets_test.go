@@ -10,6 +10,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/crypto"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -24,7 +25,7 @@ func testCipher(t *testing.T, b byte) *crypto.Cipher {
 
 func openStoreWithCipher(t *testing.T, c store.SecretCipher) (*database.DB, *store.Store) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

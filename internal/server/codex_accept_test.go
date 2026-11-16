@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
 
@@ -71,7 +71,7 @@ func TestCodexUpstreamUsesExactSSEAccept(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,7 @@ import (
 
 	gateway "github.com/tiller-router/tiller-router/clients/go"
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 type gatewayClientFixture struct {
@@ -100,7 +100,7 @@ func newGatewayClientFixture(t *testing.T, capabilities bool) *gatewayClientFixt
 		}
 	}))
 	t.Cleanup(upstream.Close)
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

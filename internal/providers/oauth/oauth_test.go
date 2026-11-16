@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -226,7 +227,7 @@ func TestPollDeviceCode(t *testing.T) {
 
 func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +313,7 @@ func TestForceRefreshTransitionsAuthStateOnFailure(t *testing.T) {
 // (which would also change the token-refresh path), so it is left for a
 // deliberate change rather than folded into the test-speed work.
 func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,7 +372,7 @@ func TestRefreshManagerDeduplicatesConcurrentRefresh(t *testing.T) {
 // must stay retryable.
 func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +410,7 @@ func TestForceRefreshTransientOnContextCancellation(t *testing.T) {
 
 func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +476,7 @@ func TestOAuthWritersRemainDisconnectedAcrossRaces(t *testing.T) {
 // invalidated.
 func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -520,7 +521,7 @@ func TestPersistableRefreshErrorStoresRotatedCredentials(t *testing.T) {
 // refresh was in flight.
 func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +565,7 @@ func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 // the quota poller's credential hydration, the provider's in-flight state)
 // forever. Once the entry is older than callWaitTimeout it is replaced.
 func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

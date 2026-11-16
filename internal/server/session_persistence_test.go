@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/identity"
 )
 
@@ -22,7 +22,7 @@ func TestAdminSessionSurvivesRestart(t *testing.T) {
 	jar, _ := cookiejar.New(nil)
 
 	// First "boot".
-	db, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestAdminSessionSurvivesRestart(t *testing.T) {
 	db.Close()
 
 	// Second "boot" against the same data directory.
-	db2, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
+	db2, err := dbtest.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestLocalOperatorCredentialChangeOnRestart(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
 
-	db, err := database.Open(context.Background(), dbPath)
+	db, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestLocalOperatorCredentialChangeOnRestart(t *testing.T) {
 	db.Close()
 
 	// Second boot: same database, username and password both changed.
-	db2, err := database.Open(context.Background(), dbPath)
+	db2, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

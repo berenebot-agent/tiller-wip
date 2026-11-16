@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -105,7 +106,7 @@ func TestBuildAccountExportConfigOmitsSecrets(t *testing.T) {
 // handler can reject with 503 before emitting bytes.
 func TestExportAccountActivityUnavailable(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), t.TempDir()+"/router.db")
+	db, err := dbtest.Open(context.Background(), t.TempDir()+"/router.db")
 	if err != nil {
 		t.Fatal(err)
 	}

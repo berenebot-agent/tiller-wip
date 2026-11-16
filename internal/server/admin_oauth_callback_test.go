@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 // callbackTransport routes the Codex token exchange (auth.openai.com) to a mock
@@ -37,7 +38,7 @@ func (t *callbackTransport) RoundTrip(req *http.Request) (*http.Response, error)
 // hosted customer session.
 func newHostedCallbackHarness(t *testing.T) (*Server, *database.DB, string) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -20,7 +21,7 @@ import (
 // in. This is the standalone path that now shares the users table with hosted.
 func localPasskeyServer(t *testing.T) (*Server, *testAPI) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +132,7 @@ func TestLocalPasskeyRegisterAndLogin(t *testing.T) {
 // PublicURL) reports passkeys disabled and 501s the endpoints.
 func TestLocalPasskeyUnavailableWithoutPublicURL(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

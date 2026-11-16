@@ -14,6 +14,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 func TestClientIPTrustBoundary(t *testing.T) {
@@ -143,7 +144,7 @@ func TestPlatformStatsRequirePlatformAuthentication(t *testing.T) {
 
 func newSecurityTestServer(t *testing.T, cfg config.Config) (*Server, *database.DB) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
