@@ -831,3 +831,51 @@ func TestForcedRefreshNeverLengthensFailureRetry(t *testing.T) {
 		t.Fatal("a forced refresh must not lengthen FailureRetry to MinInterval")
 	}
 }
+
+// TestStaleInFlightStopsReportingRefreshing pins the leak guard: a check whose
+// goroutine never returns (for example a credential hydration stuck on a token
+// refresh) must stop being reported as refreshing once it has outlived its
+// budget, or the admin card animates "Refreshing" until the process restarts.
+// The provider is deliberately still counted as in flight, so a second check
+// cannot pile on top of the wedged one.
+func TestStaleInFlightStopsReportingRefreshing(t *testing.T) {
+	p := NewPoller(http.DefaultClient, func(context.Context, ProviderRef) (string, error) { return "tok", nil })
+	p.Register(ProviderRef{AccountID: "acct", ProviderID: "prov", Type: "codex-subscription"})
+	k := key("acct", "prov")
+	now := time.Now().UTC()
+
+	p.mu.Lock()
+	p.inflight[k] = true
+	p.started[k] = now
+	p.mu.Unlock()
+	if status := p.PollStatesForAccount("acct")["prov"]; !status.Refreshing {
+		t.Fatal("a freshly started check should report refreshing")
+	}
+	if !p.PollStatesForAccount("acct")["prov"].Refreshing {
+		t.Fatal("refreshing should persist while the check is inside its budget")
+	}
+
+	// Age the in-flight stamp past PollTimeout + slack: the check is abandoned.
+	p.mu.Lock()
+	p.started[k] = now.Add(-(PollTimeout + staleInFlightSlack + time.Second))
+	p.mu.Unlock()
+	if status := p.PollStatesForAccount("acct")["prov"]; status.Refreshing {
+		t.Fatal("an abandoned check must stop reporting refreshing")
+	}
+	if _, _, polled := p.beginRefresh("acct", "prov", true, now); polled {
+		t.Fatal("an abandoned check must still block a second poll")
+	}
+
+	// A finishing check clears the stamp, so the next attempt is not judged
+	// stale by the previous start time.
+	p.mu.Lock()
+	p.inflight[k] = false
+	delete(p.started, k)
+	p.mu.Unlock()
+	p.mu.Lock()
+	_, stale := p.started[k]
+	p.mu.Unlock()
+	if stale {
+		t.Fatal("finishing a check should clear its start stamp")
+	}
+}

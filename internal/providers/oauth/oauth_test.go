@@ -558,3 +558,56 @@ func TestPersistableRefreshErrorRespectsDisconnect(t *testing.T) {
 		t.Fatalf("disconnected provider row was recreated: err=%v", err)
 	}
 }
+
+// TestRefreshManagerAbandonsStuckCall pins the leak guard: a refresh whose
+// goroutine never publishes a result must not pin every later caller (and, via
+// the quota poller's credential hydration, the provider's in-flight state)
+// forever. Once the entry is older than callWaitTimeout it is replaced.
+func TestRefreshManagerAbandonsStuckCall(t *testing.T) {
+	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := database.Now()
+	if _, err := db.SQL.Exec(`INSERT INTO namespaces(name,kind,entity_id) VALUES('oauth-provider','real','provider-1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO providers(id,name,type,base_url,enabled,protocols,created_at,updated_at) VALUES('provider-1','oauth-provider','codex-subscription','https://provider.invalid',1,'["responses"]',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	st := newTestStore(t, db)
+	expired := time.Now().Add(-time.Minute)
+	if err := st.PutOAuthToken(context.Background(), TokenToStore(TokenRecord{ProviderID: "provider-1", AccessToken: "old", RefreshToken: "refresh", TokenType: "Bearer", ExpiresAt: &expired, AuthState: AuthConnected, CreatedAt: time.Now(), UpdatedAt: time.Now()})); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(store.New(db.SQL), time.Minute)
+
+	// A call entry older than the wait timeout is presumed abandoned.
+	k := database.LocalAccountID + "\x00" + "provider-1"
+	stuck := &refreshCall{done: make(chan struct{}), started: time.Now().Add(-callWaitTimeout - time.Second)}
+	manager.mu.Lock()
+	manager.calls[k] = stuck
+	manager.mu.Unlock()
+
+	var calls atomic.Int32
+	record, err := manager.Current(context.Background(), database.LocalAccountID, "provider-1", func(context.Context, TokenRecord) (TokenResponse, error) {
+		calls.Add(1)
+		return TokenResponse{AccessToken: "new", RefreshToken: "rotated", ExpiresIn: 3600}, nil
+	})
+	if err != nil {
+		t.Fatalf("Current: %v", err)
+	}
+	if record.AccessToken != "new" {
+		t.Fatalf("access token = %q, want the refreshed one", record.AccessToken)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("refresh calls = %d, want 1", calls.Load())
+	}
+	manager.mu.Lock()
+	leftover := manager.calls[k]
+	manager.mu.Unlock()
+	if leftover != nil {
+		t.Fatal("a completed refresh should clear its call entry")
+	}
+}

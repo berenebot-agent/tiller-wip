@@ -1126,7 +1126,9 @@ function providerQuotaHTML(provider) {
   const snapshot = state.providerQuota?.[provider.id];
   const lastSuccess = status.last_success_at || (snapshot?.available ? snapshot.fetched_at : null);
   const age = lastSuccess ? 'last updated ' + quotaAge(lastSuccess) : (status.last_attempt_at ? 'checked ' + quotaAge(status.last_attempt_at) : 'not checked yet');
-  const label = status.refreshing ? 'Refreshing · ' + age
+  // A first check that has not landed yet is "checking", not "refreshing" of
+  // a figure that does not exist — the latter reads as a stall that never ends.
+  const label = status.refreshing ? (lastSuccess || status.last_attempt_at ? 'Refreshing · ' + age : 'Checking quota…')
     : status.not_connected || snapshot?.reason === 'not connected' ? 'Waiting for connection'
     : status.failed ? 'Check failed · ' + age
     : lastSuccess ? 'Updated ' + quotaAge(lastSuccess) : 'Not checked yet';
@@ -3350,6 +3352,12 @@ let quotaLoading = false;
 // 60 s page tick, without polling forever against a genuinely broken endpoint.
 let quotaFollowUps = 0;
 const quotaFollowUpLimit = 3;
+// A live snapshot means the page state moved on, but quota is only fetched on
+// navigation and the minute tick. Without this, a card rendered while a check
+// was running keeps its "Refreshing" spinner until the next tick even though
+// the check finished seconds ago. Re-read at most this often.
+const QUOTA_LIVE_REFRESH_MS = 5000;
+let quotaFetchedAt = 0;
 async function loadQuota() {
   if (quotaLoading || state.view !== 'providers' || document.hidden) return;
   quotaLoading = true;
@@ -3357,6 +3365,7 @@ async function loadQuota() {
     const payload = await api('/api/admin/quota');
     state.providerQuota = payload?.providers || {};
     state.providerQuotaStatus = payload?.poll_status || {};
+    quotaFetchedAt = Date.now();
     renderProviderUsage();
   } catch {
     state.providerQuota = state.providerQuota || {};
@@ -3376,6 +3385,18 @@ async function loadQuota() {
       if (!waiting) quotaFollowUps = 0;
     }
   }
+}
+// refreshQuotaFromLive picks up quota changes the live stream cannot carry
+// itself (the SSE envelope has no quota section). It is throttled so a busy
+// stream cannot turn into a request per event, and it only fetches while a
+// provider is actually waiting on a check — otherwise the plain re-render from
+// reconcileLive is enough.
+async function refreshQuotaFromLive() {
+  if (state.view !== 'providers' || document.hidden) return;
+  const statuses = Object.values(state.providerQuotaStatus || {});
+  if (!statuses.some(status => status.refreshing)) return;
+  if (Date.now() - quotaFetchedAt < QUOTA_LIVE_REFRESH_MS) return;
+  await loadQuota();
 }
 // Refresh eligible providers while their page is visible.
 setInterval(() => {
@@ -4038,6 +4059,10 @@ function reconcileLive() {
     // quota snapshots and the usage envelope; re-render them whenever either
     // arrives so ordering never leaves a card blank.
     renderProviderUsage();
+    // The envelope carries no quota section, so a check that started or
+    // finished since the last quota read is invisible here. Pick it up
+    // (throttled) rather than leaving a card on a stale "Refreshing" spinner.
+    refreshQuotaFromLive();
     if ($('#provider-drawer').classList.contains('open')) {
       state.models.forEach(model => {
         const row = $(`tr[data-model-id="${CSS.escape(model.id)}"]`);
