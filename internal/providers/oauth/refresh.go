@@ -38,7 +38,18 @@ type refreshCall struct {
 	done   chan struct{}
 	record TokenRecord
 	err    error
+	// started bounds how long other callers will wait on this call. A refresh
+	// whose goroutine never finishes must not pin every later waiter: after
+	// this deadline the entry is treated as abandoned and a fresh refresh is
+	// started by the next caller.
+	started time.Time
 }
+
+// callWaitTimeout bounds how long a second caller waits on another caller's
+// in-flight token refresh before giving up on it. The refresh itself runs
+// under its caller's context, so this is deliberately several times longer
+// than a normal token round-trip: it is a leak guard, not a latency budget.
+var callWaitTimeout = 2 * time.Minute
 
 type Manager struct {
 	store *store.Store
@@ -102,15 +113,24 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 	key := accountID + "\x00" + providerID
 	m.mu.Lock()
 	if call := m.calls[key]; call != nil {
-		m.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return TokenRecord{}, ctx.Err()
-		case <-call.done:
-			return call.record, call.err
+		// An entry older than the wait timeout is presumed abandoned: its
+		// goroutine never published a result, so waiting on it (or refusing to
+		// start a fresh refresh because of it) would wedge every caller — and
+		// with it the quota poller's in-flight state. Replace it instead.
+		if time.Since(call.started) < callWaitTimeout {
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return TokenRecord{}, ctx.Err()
+			case <-call.done:
+				return call.record, call.err
+			case <-time.After(callWaitTimeout):
+				return TokenRecord{}, ErrAuthUnavailable
+			}
 		}
+		delete(m.calls, key)
 	}
-	call := &refreshCall{done: make(chan struct{})}
+	call := &refreshCall{done: make(chan struct{}), started: time.Now()}
 	m.calls[key] = call
 	m.mu.Unlock()
 
@@ -150,7 +170,11 @@ func (m *Manager) refresh(ctx context.Context, accountID, providerID string, ref
 
 	m.mu.Lock()
 	call.record, call.err = record, err
-	delete(m.calls, key)
+	// Only clear the slot if it is still this call: an abandoned entry may have
+	// been replaced by a newer refresh, whose waiters must not be woken early.
+	if m.calls[key] == call {
+		delete(m.calls, key)
+	}
 	close(call.done)
 	m.mu.Unlock()
 	return record, err
