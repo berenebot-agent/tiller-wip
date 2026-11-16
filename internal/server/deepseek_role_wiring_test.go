@@ -13,7 +13,7 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 // deepSeekRoleUpstream emulates the one DeepSeek behaviour under test: its Chat
@@ -99,7 +99,7 @@ func TestDeepSeekTargetRewritesDeveloperRole(t *testing.T) {
 	mock := httptest.NewServer(upstream.handler(t))
 	t.Cleanup(mock.Close)
 
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

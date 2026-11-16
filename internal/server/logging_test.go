@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -23,7 +24,7 @@ func loggingTestHarness(t *testing.T, upstream http.HandlerFunc) (*testAPI, *dat
 	t.Helper()
 	server := httptest.NewServer(upstream)
 	t.Cleanup(server.Close)
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +345,7 @@ func TestLoggingDisabledClientProducesNoRows(t *testing.T) {
 // instead: writeLog returns nothing and the request path is unaffected.
 func TestWriteLogBestEffort(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

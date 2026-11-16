@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 func singleKeyClientModels(t *testing.T, base, secret string) (int, map[string]any) {
@@ -79,7 +79,7 @@ func TestSingleModelKeyEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored, err := database.Open(context.Background(), backupPath)
+	restored, err := dbtest.Open(context.Background(), backupPath)
 	if err != nil {
 		t.Fatal(err)
 	}

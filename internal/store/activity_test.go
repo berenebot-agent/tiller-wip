@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -14,7 +15,7 @@ import (
 // Store wired to the shared Activity database.
 func openActivityStore(t *testing.T) (*database.DB, *store.Store) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +160,7 @@ func TestActivityCleanupRecoversAfterUnavailable(t *testing.T) {
 
 func TestActivityReadsReturnUnavailableWhenHandleMissing(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

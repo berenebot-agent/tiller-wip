@@ -17,7 +17,7 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
@@ -29,7 +29,7 @@ import (
 func hostedServerHarness(t *testing.T, dropActivity bool) (*Server, *testAPI, string) {
 	t.Helper()
 	ctx := context.Background()
-	db, err := database.Open(ctx, filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(ctx, filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

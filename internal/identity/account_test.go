@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/mailoutbox"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
@@ -28,7 +28,7 @@ func (q *recordingQueue) Nudge() { q.nudges++ }
 
 func newAccountStore(t *testing.T) (*Store, *sql.DB, *recordingQueue) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

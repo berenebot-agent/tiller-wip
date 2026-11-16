@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 type renewalTestHasher struct{}
@@ -18,7 +18,7 @@ func (renewalTestHasher) NeedsRehash(string) bool            { return false }
 
 func TestSessionRenewalCASConflictReloadsWinner(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 func TestRunProviderSeedsProviderAndModels(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
-	db, err := database.Open(context.Background(), dbPath)
+	db, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,7 +39,7 @@ func TestRunProviderSeedsProviderAndModels(t *testing.T) {
 		t.Fatalf("model pks = %v, want 2", out.ModelPKs)
 	}
 
-	reopen, err := database.Open(context.Background(), dbPath)
+	reopen, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestRunProviderIsIdempotent(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
-	db, err := database.Open(context.Background(), dbPath)
+	db, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestRunProviderIsIdempotent(t *testing.T) {
 		}
 	}
 
-	reopen, err := database.Open(context.Background(), dbPath)
+	reopen, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestRunProviderValidatesArgs(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
-	if _, err := database.Open(context.Background(), dbPath); err != nil {
+	if _, err := dbtest.Open(context.Background(), dbPath); err != nil {
 		t.Fatal(err)
 	}
 

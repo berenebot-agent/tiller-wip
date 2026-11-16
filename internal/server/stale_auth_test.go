@@ -14,6 +14,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 	"github.com/tiller-router/tiller-router/internal/store"
@@ -82,7 +83,7 @@ func mockOAuthAndUpstream(t *testing.T) (*testAPI, string, string, func()) {
 	}))
 	t.Cleanup(oauthServer.Close)
 
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +195,7 @@ func TestStaleAuthRecoveryPreservesTokenAfterRestart(t *testing.T) {
 // token is dead, auth_state transitions to reconnect_required.
 func TestForceRefreshTransitionsStateOnDeadToken(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
