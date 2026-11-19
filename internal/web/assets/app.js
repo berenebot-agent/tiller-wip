@@ -392,7 +392,8 @@ function hideBoot() { const boot = $('#boot-shell'); if (boot) boot.hidden = tru
 function showBootSkeleton() { const boot = $('#boot-shell'); if (boot) boot.hidden = false; }
 function setSessionHint(on) { try { if (on) localStorage.setItem(UI_SESSION_HINT, '1'); else localStorage.removeItem(UI_SESSION_HINT); } catch { /* storage unavailable */ } }
 function sessionHint() { try { return localStorage.getItem(UI_SESSION_HINT) === '1'; } catch { return false; } }
-function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && location.pathname.startsWith('/platform'); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); refreshAuthOptions(); }
+function isPlatformRoute(path = location.pathname) { return path === '/platform' || path === '/platform/'; }
+function showLogin() { hideBoot(); $('#app').hidden = true; $('#platform-shell').hidden = true; $('#legal-shell').hidden = true; $('#feedback-shell').hidden = true; $('#account-delete-shell').hidden = true; $('#account-google-link-shell').hidden = true; $('#login-shell').hidden = false; state.csrf = ''; setSessionHint(false); const platform = runtimeMode === 'hosted' && isPlatformRoute(); const setup = runtimeMode === 'local' && runtimeSetupRequired; authView(platform ? 'platform-login-form' : setup ? 'setup-form' : 'login-form'); const platformHash = platform ? location.hash : ''; history.replaceState(null, '', platform ? `/platform${platformHash}` : (runtimeMode === 'hosted' ? '/login' : '/')); liveStop(); refreshAuthOptions(); }
 // refreshAuthOptions re-reads what the login card greys in or out (passkey and
 // Google sign-in, signup, Turnstile) and repaints it. The flags it refreshes
 // come from /api/runtime and /api/auth/options, which used to be fetched once in
@@ -410,7 +411,7 @@ async function refreshAuthOptions() {
     if (runtimeMode === 'hosted') {
       // The platform console has its own sign-in form; /api/auth/options is a
       // customer-app route and 404s there.
-      if (location.pathname.startsWith('/platform')) return;
+      if (isPlatformRoute()) return;
       try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
     } else {
       let runtime;
@@ -957,7 +958,7 @@ $$('.platform-tab').forEach((button, index, buttons) => {
   });
 });
 window.addEventListener('popstate', () => {
-  if (location.pathname.startsWith('/platform') && !$('#platform-shell').hidden) selectPlatformTab(platformTabFromHash(), { push: false });
+  if (isPlatformRoute() && !$('#platform-shell').hidden) selectPlatformTab(platformTabFromHash(), { push: false });
 });
 $('#platform-stats-refresh').addEventListener('click', () => loadPlatformDashboard('overview').catch(error => setPlatformStatsUnavailable(errorMessage(error, 'Could not load platform statistics.'))));
 
@@ -986,7 +987,7 @@ $('#admin-name').addEventListener('click', () => {
   if (location.hash !== '#settings/account') history.pushState(null, '', '#settings/account');
   navigate('settings');
 });
-window.addEventListener('popstate', () => { if (!location.pathname.startsWith('/platform')) navigate(viewFromHash()); });
+window.addEventListener('popstate', () => { if (!isPlatformRoute()) navigate(viewFromHash()); });
 $$('[data-refresh-view]').forEach(button => button.addEventListener('click', () => navigate(button.dataset.refreshView)));
 $$('[data-filter-toggle]').forEach(button => button.addEventListener('click', () => {
   const bar = button.closest('[data-filter-bar]');
@@ -4271,7 +4272,7 @@ async function setupAnalyticsConsent() {
   // The operator console has no consent banner and, when served on its own
   // origin/port, no customer analytics endpoint — probing it only produced a
   // 404 in the browser console.
-  if (location.pathname.startsWith('/platform')) return;
+  if (isPlatformRoute()) return;
   let options;
   try { options = await api('/api/analytics/options'); } catch { return; }
   if (!options || !options.enabled) return;
@@ -4297,7 +4298,7 @@ async function setupAnalyticsConsent() {
       // endpoint; /api/auth/options is a customer-app route and 404s here.
       // runtimeProbeDone is set below, after the probe resolves: showLogin()
       // must not re-probe on top of boot.
-      if (!location.pathname.startsWith('/platform')) {
+      if (!isPlatformRoute()) {
         try { hostedAuthOptions = await api('/api/auth/options'); } catch { hostedAuthOptions = {}; }
       } else {
         // The console's challenge settings come from its own probe; the session
@@ -4318,7 +4319,7 @@ async function setupAnalyticsConsent() {
     const path = location.pathname;
     const query = new URLSearchParams(location.search);
     const token = query.get('token');
-    if (runtimeMode === 'hosted' && path.startsWith('/platform')) {
+    if (runtimeMode === 'hosted' && isPlatformRoute(path)) {
       try {
         const session = await api('/api/platform/session');
         state.csrf = session.csrf_token;
@@ -4466,6 +4467,8 @@ function platformErrorElementID(tab) {
 async function loadPlatformDashboard(tab = state.platformTab) {
   if (tab === 'overview') {
     $('#platform-overview-error').textContent = '';
+    $('#hosted-analytics-status').textContent = 'Loading hosted traffic…';
+    $('#hosted-analytics-details').hidden = true;
     $('#platform-overview-metrics').innerHTML = [
       metric('…', 'Accounts'), metric('…', 'Active accounts'), metric('…', 'Pending accounts'),
       metric('…', 'Suspended accounts'), metric('…', 'Users'), metric('…', 'Requests · 24h'),
@@ -4488,6 +4491,7 @@ async function loadPlatformDashboard(tab = state.platformTab) {
       metric(stats.usage_available === false ? 'Unavailable' : formatMetricTotal(usage.tokens_7d), 'Tokens · 7d'),
     ].join('');
     $('#platform-overview-error').textContent = stats.usage_available === false ? 'Request and token totals are unavailable because the Activity store could not be read.' : '';
+    renderHostedAnalytics(stats.hosted_analytics);
     return;
   }
   if (tab === 'users') {
@@ -4532,7 +4536,20 @@ async function loadPlatformDashboard(tab = state.platformTab) {
   if (tab === 'settings') { await Promise.all([loadPlatformSettings(), loadPlatformAnalytics()]); return; }
 }
 
+function renderHostedAnalytics(analytics) {
+  const days = analytics?.days ?? [];
+  let message = 'Hosted traffic totals are unavailable.';
+  if (analytics?.available) {
+    if (analytics.enabled) message = days.length ? 'Page loads can include bots and repeat loads.' : 'Counting is enabled. No totals yet.';
+    else message = days.length ? 'Counting is off. Showing retained totals.' : 'Counting is off. Enable it in Settings.';
+  }
+  $('#hosted-analytics-status').textContent = message;
+  $('#hosted-analytics-details').hidden = !days.length;
+  $('#hosted-analytics-days').innerHTML = days.map(day => `<tr><th scope="row">${h(day.day)}</th><td>${formatCount(day.app_loads)}</td><td>${formatCount(day.privacy_loads)}</td><td>${formatCount(day.terms_loads)}</td><td>${formatCount(day.signups)}</td></tr>`).join('');
+}
+
 function setPlatformStatsUnavailable(message) {
+  renderHostedAnalytics();
   $('#platform-overview-metrics').innerHTML = [
     metric('—', 'Accounts'), metric('—', 'Active accounts'), metric('—', 'Pending accounts'),
     metric('—', 'Suspended accounts'), metric('—', 'Users'), metric('Unavailable', 'Requests · 24h'),
@@ -4572,12 +4589,12 @@ async function loadPlatformSettings() {
 async function loadPlatformAnalytics() {
   const settings = await api('/api/platform/settings');
   const form = $('#platform-analytics-form');
+  form.elements.analytics_totals_enabled.checked = !!settings.analytics?.totals_enabled;
   form.elements.analytics_enabled.checked = !!settings.analytics?.enabled;
   form.elements.analytics_provider.value = settings.analytics?.provider || 'umami';
   form.elements.analytics_script_url.value = settings.analytics?.script_url || '';
   form.elements.analytics_site_id.value = settings.analytics?.site_id || '';
   applyAnalyticsProviderVisibility(form.elements.analytics_provider.value);
-  $('#platform-analytics-status').textContent = settings.analytics?.enabled ? 'Analytics is enabled and consent-gated on hosted pages.' : 'Analytics is disabled.';
   $('#platform-analytics-error').textContent = '';
 }
 
@@ -4863,6 +4880,7 @@ $('#platform-analytics-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
   const payload = {
+    analytics_totals_enabled: form.get('analytics_totals_enabled') === 'on',
     analytics_enabled: form.get('analytics_enabled') === 'on',
     analytics_provider: form.get('analytics_provider'),
     analytics_script_url: form.get('analytics_script_url'),

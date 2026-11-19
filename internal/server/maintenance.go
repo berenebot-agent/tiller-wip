@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
 )
 
@@ -60,6 +61,11 @@ func (s *Server) startAuditMaintenance(ctx context.Context) {
 	prune := func() {
 		if err := s.storeHandle().PruneAuditEvents(ctx, time.Now()); err != nil {
 			s.warnBackup("scheduled audit prune failed", err)
+		}
+		if s.config.Mode == config.ModeHosted {
+			if err := s.storeHandle().PruneHostedAnalytics(ctx, time.Now()); err != nil {
+				s.warnBackup("scheduled hosted analytics prune failed", err)
+			}
 		}
 		// Identity tokens and delivered mail are hash-only / payload-scrubbed,
 		// so this is size control for the core database and every snapshot.

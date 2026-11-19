@@ -140,19 +140,22 @@ func (s *Server) platformStats(w http.ResponseWriter, r *http.Request) {
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform statistics.")
 		return
 	}
-	usage, err := s.platformUsageTotals(r.Context(), time.Now())
-	if err != nil {
-		if errors.Is(err, store.ErrActivityUnavailable) {
-			writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts, "usage_available": false})
-			return
-		}
+	now := time.Now()
+	usage, err := s.platformUsageTotals(r.Context(), now)
+	if err != nil && !errors.Is(err, store.ErrActivityUnavailable) {
 		if s.logger != nil {
 			s.logger.Error("platform statistics query failed", "error_class", fmt.Sprintf("%T", err))
 		}
 		adminError(w, http.StatusInternalServerError, "database_error", "Could not load platform statistics.")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"accounts": accounts, "usage": usage, "usage_available": true})
+	result := map[string]any{"accounts": accounts, "usage_available": err == nil}
+	if err == nil {
+		result["usage"] = usage
+	}
+	days, err := s.storeHandle().HostedAnalyticsDays(r.Context(), now)
+	result["hosted_analytics"] = map[string]any{"enabled": s.hostedAnalyticsEnabled(), "available": err == nil, "days": days}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // platformUsageTotals returns the platform-wide usage windows in one query. The
@@ -266,7 +269,7 @@ func (s *Server) platformSettings(w http.ResponseWriter, r *http.Request) {
 		"mail":                    map[string]any{"provider": mail.Provider, "from": mail.From, "from_name": mail.FromName, "smtp_host": mail.SMTPHost, "smtp_port": mail.SMTPPort, "smtp_username": mail.SMTPUsername, "smtp_mode": mail.SMTPMode, "configured": status.Configured, "secret_configured": status.SecretConfigured, "secrets_locked": mailSecretsLocked},
 		"google":                  map[string]any{"enabled": authSettings.GoogleEnabled, "client_id": authSettings.GoogleClientID, "secret_configured": authSettings.GoogleClientSecret != "", "redirect_uri": strings.TrimRight(s.config.PublicURL, "/") + "/api/auth/google/callback"},
 		"turnstile":               map[string]any{"enabled": authSettings.TurnstileEnabled, "site_key": authSettings.TurnstileSiteKey, "secret_configured": authSettings.TurnstileSecret != "", "hostname": publicURL.Hostname()},
-		"analytics":               map[string]any{"enabled": analytics.Enabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
+		"analytics":               map[string]any{"enabled": analytics.Enabled, "totals_enabled": analytics.TotalsEnabled, "provider": analytics.Provider, "script_url": analytics.ScriptURL, "site_id": analytics.SiteID},
 	})
 }
 
@@ -293,6 +296,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		TurnstileSecret       *string `json:"turnstile_secret"`
 		ClearTurnstileSecret  bool    `json:"clear_turnstile_secret"`
 		AnalyticsEnabled      *bool   `json:"analytics_enabled"`
+		AnalyticsTotals       *bool   `json:"analytics_totals_enabled"`
 		AnalyticsProvider     *string `json:"analytics_provider"`
 		AnalyticsScriptURL    *string `json:"analytics_script_url"`
 		AnalyticsSiteID       *string `json:"analytics_site_id"`
@@ -309,7 +313,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		"mail_smtp_host": true, "mail_smtp_port": true, "mail_smtp_username": true, "mail_smtp_password": true, "mail_smtp_mode": true,
 		"google_signin_enabled": true, "google_client_id": true, "google_client_secret": true, "clear_google_client_secret": true,
 		"turnstile_enabled": true, "turnstile_site_key": true, "turnstile_secret": true, "clear_turnstile_secret": true,
-		"analytics_enabled": true, "analytics_provider": true, "analytics_script_url": true, "analytics_site_id": true,
+		"analytics_enabled": true, "analytics_totals_enabled": true, "analytics_provider": true, "analytics_script_url": true, "analytics_site_id": true,
 		"prevent_search_indexing": true,
 	}
 	for key := range fields {
@@ -341,6 +345,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	_, hasTurnstileSecret := fields["turnstile_secret"]
 	_, hasClearTurnstileSecret := fields["clear_turnstile_secret"]
 	_, hasAnalyticsEnabled := fields["analytics_enabled"]
+	_, hasAnalyticsTotals := fields["analytics_totals_enabled"]
 	_, hasAnalyticsProvider := fields["analytics_provider"]
 	_, hasAnalyticsScriptURL := fields["analytics_script_url"]
 	_, hasAnalyticsSiteID := fields["analytics_site_id"]
@@ -439,6 +444,9 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasAnalyticsEnabled && input.AnalyticsEnabled != nil {
 		analytics.Enabled = *input.AnalyticsEnabled
 	}
+	if input.AnalyticsTotals != nil {
+		analytics.TotalsEnabled = *input.AnalyticsTotals
+	}
 	if hasAnalyticsProvider && input.AnalyticsProvider != nil {
 		analytics.Provider = strings.ToLower(strings.TrimSpace(*input.AnalyticsProvider))
 	}
@@ -520,7 +528,7 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	proposal := store.PlatformSettingsProposal{HostedSignupEnabled: signup, AuditRetentionDays: retention, PreventSearchIndexing: preventSearchIndexing, Mail: currentMail, Auth: authSettings, Analytics: analytics}
-	if !hasSignup && input.AuditRetentionDays == nil && !hasAnyMailField && !hasGoogleEnabled && !hasGoogleClientID && !hasGoogleSecret && !hasClearGoogleSecret && !hasTurnstileEnabled && !hasTurnstileSiteKey && !hasTurnstileSecret && !hasClearTurnstileSecret && !hasAnalyticsEnabled && !hasAnalyticsProvider && !hasAnalyticsScriptURL && !hasAnalyticsSiteID && !hasPreventSearchIndexing {
+	if !hasSignup && input.AuditRetentionDays == nil && !hasAnyMailField && !hasGoogleEnabled && !hasGoogleClientID && !hasGoogleSecret && !hasClearGoogleSecret && !hasTurnstileEnabled && !hasTurnstileSiteKey && !hasTurnstileSecret && !hasClearTurnstileSecret && !hasAnalyticsEnabled && !hasAnalyticsTotals && !hasAnalyticsProvider && !hasAnalyticsScriptURL && !hasAnalyticsSiteID && !hasPreventSearchIndexing {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -554,6 +562,9 @@ func (s *Server) updatePlatformSettings(w http.ResponseWriter, r *http.Request) 
 	if hasAnalyticsEnabled || hasAnalyticsProvider || hasAnalyticsScriptURL || hasAnalyticsSiteID {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.analytics_settings_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(analytics.Enabled)}})
 	}
+	if input.AnalyticsTotals != nil {
+		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.analytics_totals_setting_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(analytics.TotalsEnabled)}})
+	}
 	if hasPreventSearchIndexing {
 		s.recordPlatformAudit(r.Context(), store.AuditEvent{Event: "platform.search_indexing_setting_changed", ActorType: "platform", Metadata: map[string]string{"enabled": strconv.FormatBool(preventSearchIndexing)}})
 	}
@@ -582,6 +593,7 @@ func hasMailUpdate(input struct {
 	TurnstileSecret       *string `json:"turnstile_secret"`
 	ClearTurnstileSecret  bool    `json:"clear_turnstile_secret"`
 	AnalyticsEnabled      *bool   `json:"analytics_enabled"`
+	AnalyticsTotals       *bool   `json:"analytics_totals_enabled"`
 	AnalyticsProvider     *string `json:"analytics_provider"`
 	AnalyticsScriptURL    *string `json:"analytics_script_url"`
 	AnalyticsSiteID       *string `json:"analytics_site_id"`
