@@ -2332,38 +2332,20 @@ async function rotateClient(id) { const client = state.clients.find(item => item
 async function deleteClient(id) { const client = state.clients.find(item => item.id === id); if (!await confirmAction({ title: `Delete ${client.name}?`, copy: 'The client secret will be invalidated immediately and all permissions will be removed.', action: 'Delete client key' })) return; try { await api(`/api/admin/client-keys/${id}`, { method: 'DELETE' }); flash('Client key deleted and invalidated.'); loadPlanSnapshot(true); await loadClients(); } catch (error) { flash(errorMessage(error), 'error'); } }
 
 let permissionsSavedHook = null;
-// Switch half-tap intent: in these surfaces clicking the left half of a switch
-// means "off" and the right half "on", independent of the current state.
-//
-// The intent is resolved once, on pointerdown, and applied directly. The old
-// approach vetoed the click with preventDefault whenever it disagreed with the
-// current `checked` and relied on the surrounding <label> re-dispatching a
-// second click at the label's centre to re-run this handler and let it through.
-// On a phone that second click still landed off the thumb's centre (label
-// padding, wrapping model IDs, a sheet that scrolls under the finger), so it
-// was vetoed as well and the toggle silently did nothing while a tap elsewhere
-// in the row toggled fine. Touch taps are not aimed at halves at all, so the
-// rule is mouse-only; keyboard activation never reaches this path.
+// A direct mouse click on the left half means off and the right half means on.
+// The browser has already flipped checked by the time click fires. Cancelling
+// restores its prior value without firing input or change for a no-op.
 const SWITCH_TAP_TARGETS = '.client-form-dialog input.switch, .permissions-dialog input.switch, .settings-card input.switch';
-document.addEventListener('pointerdown', event => {
-  if (event.pointerType !== 'mouse' || event.button !== 0) return;
+document.addEventListener('click', event => {
+  if (event.pointerType !== 'mouse' || !event.detail) return;
   const input = event.target.closest(SWITCH_TAP_TARGETS);
   if (!input || input.disabled) return;
   const bounds = input.getBoundingClientRect();
+  if (event.clientX < bounds.left || event.clientX >= bounds.right ||
+      event.clientY < bounds.top || event.clientY >= bounds.bottom) return;
   const position = event.clientX - bounds.left - bounds.width / 2;
   if (Math.abs(position) < 1) return;
-  input.checked = position > 0;
-  input.dataset.switchSettled = '1';
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-});
-// The click that follows a settled pointerdown belongs to the same tap, so the
-// browser's own toggle is dropped (capture phase, before any change fires).
-document.addEventListener('click', event => {
-  const input = event.target.closest(SWITCH_TAP_TARGETS);
-  if (!input || !input.dataset.switchSettled) return;
-  delete input.dataset.switchSettled;
-  event.preventDefault();
+  if (input.checked !== (position > 0)) event.preventDefault();
 }, true);
 // permissionTarget is whose matrix the permissions dialog shows: a client key
 // or a catalogue template. A client picks its source at the top of the
