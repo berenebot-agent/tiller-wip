@@ -8,6 +8,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/auth"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
 )
 
@@ -17,7 +18,7 @@ import (
 // session_test.go covers the real KDF path.
 func newFastStore(t *testing.T, username, password string, ttl time.Duration) (*auth.SessionStore, *database.DB) {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +62,7 @@ func TestFastSessionCreateGetDelete(t *testing.T) {
 func TestFastSessionSurvivesRestart(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	db, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestFastSessionSurvivesRestart(t *testing.T) {
 	}
 	db.Close()
 
-	db2, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
+	db2, err := dbtest.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestFastSessionExpiredRejected(t *testing.T) {
 func TestFastCredentialChangeInvalidatesSessions(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	db, err := database.Open(context.Background(), filepath.Join(dir, "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(dir, "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

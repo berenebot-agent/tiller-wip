@@ -9,14 +9,14 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/config"
-	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 // TestClientKeyGroup tests the organisational group on client keys: defaulting,
 // create/update, listing return, search, and filter.
 func TestClientKeyGroup(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

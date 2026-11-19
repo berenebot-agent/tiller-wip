@@ -15,6 +15,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/identity"
 	"github.com/tiller-router/tiller-router/internal/store"
 	"github.com/tiller-router/tiller-router/internal/testutil/fastsecret"
@@ -24,7 +25,7 @@ func openExistingLocalDatabase(t *testing.T) *database.DB {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "tiller-router.db")
-	db, err := database.Open(ctx, path)
+	db, err := dbtest.Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +46,7 @@ func openExistingLocalDatabase(t *testing.T) *database.DB {
 		t.Fatal(err)
 	}
 
-	upgraded, err := database.Open(ctx, path)
+	upgraded, err := dbtest.Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func hostedBootstrapConfig(adminUsername, adminPassword string) config.Config {
 
 func TestHostedStartupRequiresTrustedProxies(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func TestLocalToHostedConversionPreservesOperatorAndPasskeys(t *testing.T) {
 	dbPath := filepath.Join(dir, "router.db")
 
 	// --- First boot: local mode, env credential, register a passkey. ---
-	db, err := database.Open(ctx, dbPath)
+	db, err := dbtest.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +195,7 @@ func TestLocalToHostedConversionPreservesOperatorAndPasskeys(t *testing.T) {
 	db.Close()
 
 	// --- Second boot: same database, hosted mode, migration credentials. ---
-	db2, err := database.Open(ctx, dbPath)
+	db2, err := dbtest.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +257,7 @@ func TestLocalToHostedConversionPreservesOperatorAndPasskeys(t *testing.T) {
 	// A repeat hosted restart is a no-op (marker guarded), not a collision.
 	hostedRouter.Close()
 	db2.Close()
-	db3, err := database.Open(ctx, dbPath)
+	db3, err := dbtest.Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}

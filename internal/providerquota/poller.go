@@ -27,6 +27,15 @@ var (
 	// ActiveWindow is how recently a provider must have served traffic to be
 	// considered active.
 	ActiveWindow = time.Minute
+	// PollTimeout bounds one complete quota check: credential hydration
+	// (including an OAuth token refresh) plus the upstream quota request.
+	// Hydration performs network I/O of its own, so a check that hangs there
+	// must not pin the provider in the in-flight state indefinitely.
+	PollTimeout = 45 * time.Second
+	// staleInFlightSlack is how far past PollTimeout a check may run before it
+	// is treated as abandoned. It covers the small amount of work after the
+	// bounded context returns (snapshot bookkeeping under the poller lock).
+	staleInFlightSlack = 15 * time.Second
 )
 
 // ErrNotConnected reports that a provider has no credential to poll with yet:
@@ -72,6 +81,11 @@ type Poller struct {
 	gen map[string]uint64
 	// inflight prevents two concurrent polls of the same provider.
 	inflight map[string]bool
+	// started records when each in-flight poll began, so a check that never
+	// returns (a stuck credential hydration, a wedged upstream connection) is
+	// eventually reported as no longer refreshing instead of leaving the admin
+	// UI spinning forever. See staleInFlightLocked.
+	started map[string]time.Time
 	// active records the last time a provider served a request, so the cadence
 	// can tighten to ActiveInterval while it is in use. It is in-memory only and
 	// resets on restart, matching the live/telemetry posture.
@@ -94,6 +108,7 @@ func NewPoller(client *http.Client, hydrate Hydrate) *Poller {
 		refs:     map[string]ProviderRef{},
 		gen:      map[string]uint64{},
 		inflight: map[string]bool{},
+		started:  map[string]time.Time{},
 		active:   map[string]time.Time{},
 		failed:   map[string]bool{},
 		attempts: map[string]int64{},
@@ -182,6 +197,7 @@ func (p *Poller) Reconcile(refs []ProviderRef) {
 		delete(p.snap, k)
 		delete(p.last, k)
 		delete(p.inflight, k)
+		delete(p.started, k)
 		delete(p.failed, k)
 		delete(p.attempts, k)
 		p.gen[k]++
@@ -213,6 +229,7 @@ func (p *Poller) ReconcileAccount(accountID string, refs []ProviderRef) {
 		delete(p.last, k)
 		delete(p.failed, k)
 		delete(p.inflight, k)
+		delete(p.started, k)
 		delete(p.active, k)
 		delete(p.attempts, k)
 	}
@@ -225,6 +242,7 @@ func (p *Poller) ReconcileAccount(accountID string, refs []ProviderRef) {
 				delete(p.last, k)
 				delete(p.failed, k)
 				delete(p.inflight, k)
+				delete(p.started, k)
 				delete(p.active, k)
 				delete(p.attempts, k)
 				p.gen[k]++
@@ -241,6 +259,7 @@ func (p *Poller) Unregister(accountID, providerID string) {
 	delete(p.snap, k)
 	delete(p.last, k)
 	delete(p.inflight, k)
+	delete(p.started, k)
 	delete(p.failed, k)
 	delete(p.attempts, k)
 	p.gen[k]++
@@ -295,7 +314,7 @@ func (p *Poller) PollStatesForAccount(accountID string) map[string]PollStatus {
 		if len(k) < len(prefix) || k[:len(prefix)] != prefix {
 			continue
 		}
-		status := PollStatus{Refreshing: p.inflight[k], Failed: p.failed[k], NotConnected: p.notConnectedLocked(k), Attempts: p.attempts[k]}
+		status := PollStatus{Refreshing: p.inflight[k] && !p.staleInFlightLocked(k), Failed: p.failed[k], NotConnected: p.notConnectedLocked(k), Attempts: p.attempts[k]}
 		if last := p.last[k]; !last.IsZero() {
 			value := last.UTC()
 			status.LastAttemptAt = &value
@@ -336,9 +355,25 @@ func (p *Poller) beginRefresh(accountID, providerID string, force bool, now time
 		return ProviderRef{}, 0, false
 	}
 	p.inflight[k] = true
+	p.started[k] = now
 	p.last[k] = now
 	p.attempts[k]++
 	return ref, p.gen[k], true
+}
+
+// staleInFlightLocked reports whether an in-flight poll has outlived its budget
+// by a wide margin and must therefore be treated as abandoned: it is still
+// counted for concurrency (so a second check cannot pile on) but is no longer
+// reported as refreshing. A genuinely running check is always bounded by
+// PollTimeout, so this only fires for a wedged one — the alternative is an admin
+// card that animates "Refreshing" until the process restarts. It assumes p.mu is
+// held.
+func (p *Poller) staleInFlightLocked(k string) bool {
+	start, ok := p.started[k]
+	if !ok {
+		return false
+	}
+	return time.Since(start) > PollTimeout+staleInFlightSlack
 }
 
 // notConnected reports whether the last attempt found no credential to poll
@@ -356,6 +391,7 @@ func (p *Poller) finishRefresh(ctx context.Context, ref ProviderRef, generation 
 	defer p.mu.Unlock()
 	if p.gen[k] == generation {
 		p.inflight[k] = false
+		delete(p.started, k)
 		if snap.notConnected {
 			// No credential yet: nothing was checked, so this is neither a
 			// failure nor an attempt that should gate the next check. Drop the
@@ -445,7 +481,10 @@ func (p *Poller) TriggerIfDue(accountID, providerID string, now time.Time) bool 
 	}
 	go func() {
 		defer func() { <-quotaRefreshGate }()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// The budget covers credential hydration (which may itself refresh an
+		// OAuth token over the network) as well as the quota request, so an
+		// unresponsive provider cannot leave this check in flight indefinitely.
+		ctx, cancel := context.WithTimeout(context.Background(), PollTimeout)
 		defer cancel()
 		p.finishRefresh(ctx, ref, generation, now)
 	}()

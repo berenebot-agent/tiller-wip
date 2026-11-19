@@ -10,13 +10,14 @@ import (
 	"testing"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 func TestRunClientCreatesCatalogueFixture(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
-	db, err := database.Open(context.Background(), dbPath)
+	db, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestRunClientCreatesSingleFixture(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
-	db, err := database.Open(context.Background(), dbPath)
+	db, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestRunClientCreatesSingleFixture(t *testing.T) {
 	}
 
 	// Verify the binding row exists.
-	reopen, err := database.Open(context.Background(), dbPath)
+	reopen, err := dbtest.Open(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +122,7 @@ func TestRunClientValidatesArgs(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "router.db")
-	if _, err := database.Open(context.Background(), dbPath); err != nil {
+	if _, err := dbtest.Open(context.Background(), dbPath); err != nil {
 		t.Fatal(err)
 	}
 

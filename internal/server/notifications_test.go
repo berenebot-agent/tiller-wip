@@ -18,6 +18,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/store"
 )
 
@@ -33,7 +34,7 @@ func notificationTestHarness(t *testing.T, failUpstream, okUpstream http.Handler
 	okServer := httptest.NewServer(okUpstream)
 	t.Cleanup(okServer.Close)
 
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +791,7 @@ func testNotificationCfg(t *testing.T, app *Server) store.NotificationSettings {
 func notificationDeliveryHarness(t *testing.T, handler http.Handler) (*Server, *database.DB, *httptest.Server) {
 	t.Helper()
 	webhook := httptest.NewServer(handler)
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		webhook.Close()
 		t.Fatal(err)
@@ -1103,7 +1104,7 @@ func TestNotificationBudgetIsPerAccount(t *testing.T) {
 // Server but not the full HTTP harness.
 func openTestDB(t *testing.T) *database.DB {
 	t.Helper()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,6 +13,7 @@ import (
 
 	"github.com/tiller-router/tiller-router/internal/config"
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 	"github.com/tiller-router/tiller-router/internal/providers"
 	"github.com/tiller-router/tiller-router/internal/providers/oauth"
 )
@@ -66,7 +67,7 @@ func oauthVirtualHarness(t *testing.T, failures int) (*testAPI, string, string, 
 	}))
 	t.Cleanup(oauthServer.Close)
 
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

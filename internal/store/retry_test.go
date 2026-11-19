@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/tiller-router/tiller-router/internal/database"
+	"github.com/tiller-router/tiller-router/internal/database/dbtest"
 )
 
 // TestRunTxRetriesBusySnapshot forces the exact failure the retry exists for: a
@@ -16,7 +17,7 @@ import (
 // does not retry). The whole transaction must be retried and commit.
 func TestRunTxRetriesBusySnapshot(t *testing.T) {
 	t.Parallel()
-	db, err := database.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
+	db, err := dbtest.Open(context.Background(), filepath.Join(t.TempDir(), "router.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
